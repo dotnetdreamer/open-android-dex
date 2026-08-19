@@ -1,7 +1,7 @@
 {
   "name": "open-android-dex-tauri",
   "private": true,
-  "version": "0.3.10",
+  "version": "0.3.11",
   "description": "A real Android desktop on Windows and macOS - taskbar, freeform windows, widgets, plus Linux and Docker on the phone.",
   "author": "Idrees Khan",
   "license": "GPL-3.0-or-later",
