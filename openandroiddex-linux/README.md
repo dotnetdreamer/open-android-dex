@@ -26,8 +26,11 @@ desktop, terminal, input, VncAuth. Not yet re-verified on the arm64 phone.
 2. `linux-setup.sh` phases: extract rootfs → configure → `apt-get update` →
    install XFCE4 + TigerVNC + noVNC → `vncpass` + xstartup → **git** →
    **browsers** → VS Code → shared folder → dock → ready. Each phase drops a `.stamp-*` file, so re-runs resume; `setup.pid`
-   guards against double-runs. `dpkg --configure -a` runs before the install so
-   an interrupted unpack never wedges the rootfs permanently.
+   guards against double-runs. `repair_dpkg` runs before the install so an
+   interrupted unpack never wedges the rootfs permanently — `dpkg --configure -a`
+   alone, which is all this used to do, does not, and the missing rungs are what
+   turned one killed run into a permanent **Retry loop**. See **A wedged desktop
+   phase** below.
 3. The Linux tile launches `LinuxActivity`, which polls `Linux.readStatus`
    (plain files, no daemon) and, once ready, has `LinuxService.start` write
    `geometry` and spawn `linux-rt.sh`.
@@ -250,6 +253,61 @@ folds `logcat -s OpenDeX` into its session trace, while `setup.log` lives in
 private storage a non-debuggable build cannot read — so without this, "VS Code
 did not install" was unanswerable from the outside. `LinuxService` also logs
 `firefox=… chromium=… code=…` after every setup run.
+
+The desktop install is the one phase `guest_or_note` cannot wrap — capturing a
+300-package transcript into a shell variable would also take the live stream out
+of `setup.log`, which is what anyone watching an install is tailing. It streams,
+and `apt_note` lifts apt's own `E:` / `dpkg: error` lines back out of the log
+into logcat when it fails. Before that, the biggest and most interruption-prone
+phase was the only one that explained nothing.
+
+`share_log` **chmods its copy 0644**. `setup.log` is created by `LinuxService`'s
+`ProcessBuilder` redirect under an app umask of 077, so it is 0600 and `cp`
+carries that straight over: `adb pull` answered *"Permission denied"*, and the
+one escape hatch that exists so diagnosis does not need a debuggable build did
+not actually work.
+
+## A wedged desktop phase
+
+Measured on an S25 (Android 16, arm64, 2026-08-19). The symptom is **"Linux
+setup failed / installing desktop"** that returns within ~3.5 s of every Retry —
+far too fast to be the ~1.5 GB the phase actually downloads, which is the tell
+that apt refused at the dependency check *before* fetching anything.
+
+What it is **not**: the same package set, the same `libproot.so`, the same
+pinned rootfs image and the same `sources.list` installed all 311 packages
+cleanly into a scratch guest on the same phone at the same moment
+(`REAL_INSTALL_RC=0`). Network, mirror, disk, package set, seccomp mode and
+arm64 itself are all exonerated by that.
+
+What it is: `runSetup` spawns the script as a plain `ProcessBuilder` child of
+the `:linux` process and blocks in `waitFor`, so when Android replaces that
+process the in-flight install dies with it. The observed casualty was
+**`perl-base`, left half-installed** (`iH`):
+
+    dpkg: error processing package perl-base (--configure):
+     package is in a very bad inconsistent state; you should
+     reinstall it before attempting configuration
+
+`Need to get 0 B/158 MB of archives` in the same transcript places the kill
+precisely: every `.deb` had already been fetched, so it landed during **unpack**,
+not download. That is why the retries were so fast — apt had nothing to fetch
+and refused at the dependency check.
+
+Neither `dpkg --configure -a` nor `apt-get --fix-broken install` clears it: both
+only ever CONFIGURE, and this package's *unpack* is what never finished. Only
+re-unpacking does, which is `repair_dpkg`'s third rung — plain install first,
+`--reinstall` behind it. Both branches are verified on device; see the function's
+comment for why that order is the load-bearing part.
+
+A guest already wedged this way heals on the next run, because a guest in
+`error` never takes the "already provisioned" early-out and so always re-copies
+the script.
+
+Worth knowing: the setup child is **not** `setsid`'d, unlike `linux-rt.sh`. That
+is what makes an install killable by an app restart at all, and it is a
+lifecycle decision, not an accident — recovery is handled above rather than by
+making the install outlive its process.
 
 ## Script rules
 

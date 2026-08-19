@@ -60,13 +60,19 @@ note() {
 
 # Copy a log somewhere a human can reach it. $ROOT is the app's private storage,
 # which nothing can read without a debuggable build; LINUX_STORAGE is the app's
-# EXTERNAL files dir, which plain `adb shell` and `adb pull` can read (verified
-# on device). Failure diagnosis should not require rebuilding the app.
+# EXTERNAL files dir, which plain `adb shell` and `adb pull` can read — but only
+# once the copy is world-readable. setup.log is created by the app's own
+# ProcessBuilder redirect under an app umask of 077, so it lands 0600, and `cp`
+# carries that mode straight over: `adb pull` answered "Permission denied" and
+# the escape hatch this function exists to provide did not actually work.
+# Failure diagnosis should not require rebuilding the app.
 share_log() { # file
   [ -n "$LINUX_STORAGE" ] || return 0
   [ -f "$1" ] || return 0
   mkdir -p "$LINUX_STORAGE" 2>/dev/null
-  cp -f "$1" "$LINUX_STORAGE/$(basename "$1")" 2>/dev/null
+  _dst=$LINUX_STORAGE/$(basename "$1")
+  cp -f "$1" "$_dst" 2>/dev/null
+  chmod 0644 "$_dst" 2>/dev/null
 }
 
 # Run something in the guest and, if it fails, put the tail of its output where
@@ -75,6 +81,55 @@ guest_or_note() { # label command
   _out=$(run_guest "$2" 2>&1) && return 0
   note "$1 FAILED: $(echo "$_out" | tail -3 | tr '\n' ' ' | cut -c1-400)"
   return 1
+}
+
+# The desktop install is the one phase guest_or_note cannot wrap: capturing it
+# would put a 300-package apt transcript in a shell variable and, worse, take
+# the live stream out of setup.log, which is the only thing a human tailing the
+# install has to watch. So it keeps streaming — and when it fails, this lifts
+# apt's own error lines back OUT of the log into logcat. Without it the biggest,
+# most interruption-prone phase was also the only one that explained nothing:
+# "FAILED: installing-desktop" was the entire record, and the transcript behind
+# it sat in private storage that a non-debuggable build cannot read.
+apt_note() { # label
+  [ -f "$ROOT/setup.log" ] || return 0
+  _e=$(grep -E '^(E: |dpkg: error)' "$ROOT/setup.log" 2>/dev/null \
+       | tail -3 | tr '\n' ' ' | cut -c1-400)
+  [ -n "$_e" ] || _e=$(tail -3 "$ROOT/setup.log" 2>/dev/null | tr '\n' ' ' | cut -c1-400)
+  [ -n "$_e" ] && note "$1: $_e"
+  return 0
+}
+
+# Undo whatever an interrupted install left behind. A run killed mid-unpack —
+# and the app's :linux process being replaced is enough to do it, since the
+# setup script is a plain child of it — leaves dpkg mid-transaction, which every
+# later apt-get then refuses to work around. The repair is a LADDER, and the
+# rungs are NOT interchangeable:
+#
+#   dpkg --configure -a     finishes packages left merely unconfigured
+#   apt-get --fix-broken    resolves dependencies left unmet by a partial unpack
+#   apt-get install <pkg>   re-UNPACKS a package dpkg will not touch at all
+#
+# That last rung is the one this went without for too long. "package is in a
+# very bad inconsistent state; you should reinstall it before attempting
+# configuration" is dpkg saying the UNPACK never finished — and neither rung
+# above it ever repeats an unpack, so both fail on it identically, on every
+# retry, forever. Measured on an S25 (2026-08-19): perl-base half-installed,
+# four consecutive Retries each dying 3.5 s in, while the same package set
+# installed all 311 packages cleanly into a scratch guest on the same phone.
+#
+# Plain install BEFORE --reinstall, which is the non-obvious half: --reinstall
+# can only fetch the exact installed version, and the base image ships versions
+# the archive has already superseded. perl-base 5.38.2-3.2ubuntu0.2 is in no
+# pocket, so --reinstall dies with "Can't find a source to download version"
+# while a plain install unpacks 0.3 over it and clears the state — verified both
+# ways on device. --reinstall stays as the fallback for when the installed
+# version IS the candidate, where a plain install is a no-op.
+#
+# All of it is best-effort and none of it is fatal: the phase that follows is
+# the real verdict, and a guest that needed no repair passes straight through.
+repair_dpkg() {
+  run_guest "dpkg --configure -a; apt-get -y --fix-broken install; b=\$(dpkg -l | awk '\$1 ~ /^i[FHU]/ { print \$2 }'); [ -n \"\$b\" ] || exit 0; apt-get install -y \$b || apt-get install -y --reinstall \$b; true" || true
 }
 
 TICKER=
@@ -293,11 +348,13 @@ if [ ! -f .stamp-desktop ]; then
     done
   ) &
   TICKER=$!
-  # `dpkg --configure -a` first: a previous install interrupted mid-unpack
-  # (reboot, abort) leaves dpkg's journal dirty and every later apt-get
-  # hard-fails until someone repairs it — nothing else ever would.
-  run_guest "dpkg --configure -a; apt-get install -y --no-install-recommends xfce4 xfce4-terminal dbus-x11 x11-xserver-utils xfonts-base tigervnc-standalone-server tigervnc-tools novnc websockify sudo ca-certificates librsvg2-common" \
-    || fail installing-desktop
+  # Repair before installing: this phase is the long pole, so it is the one an
+  # interruption lands in, and it must be able to pick itself up. See
+  # repair_dpkg — `dpkg --configure -a` alone, which is all this used to do,
+  # cannot.
+  repair_dpkg
+  run_guest "apt-get install -y --no-install-recommends xfce4 xfce4-terminal dbus-x11 x11-xserver-utils xfonts-base tigervnc-standalone-server tigervnc-tools novnc websockify sudo ca-certificates librsvg2-common" \
+    || { apt_note installing-desktop; fail installing-desktop; }
   kill "$TICKER" 2>/dev/null
   TICKER=
   touch .stamp-desktop
