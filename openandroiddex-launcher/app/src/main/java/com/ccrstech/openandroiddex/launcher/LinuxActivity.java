@@ -313,6 +313,14 @@ public class LinuxActivity extends Activity {
         // none / pushing / extracting / configuring / apt-update /
         // installing-desktop — and "error" right after Retry, while the PC
         // has yet to overwrite state.env
+        // The container can be uninstalled out from under this window, from the
+        // tile's own menu. Nothing below could make progress if it were —
+        // provision() is deliberately inert while uninstalled — so the window
+        // would sit on "waiting" for as long as it stayed open. Close instead.
+        if (Linux.isUninstalled(this)) {
+            finish();
+            return;
+        }
         trackNone(st);
         showInstalling(st);
     }

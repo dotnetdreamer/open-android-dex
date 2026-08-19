@@ -9,7 +9,9 @@ import android.graphics.Paint;
 import android.graphics.Rect;
 import android.graphics.RectF;
 import android.os.Build;
+import android.os.Bundle;
 import android.os.SystemClock;
+import android.util.SizeF;
 import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.MotionEvent;
@@ -24,6 +26,7 @@ import android.widget.PopupWindow;
 import android.widget.TextView;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -92,8 +95,16 @@ class DesktopGrid extends ViewGroup {
         int baseSpanW, baseSpanH;
         AppWidgetProviderInfo info;
         AppWidgetHostView view;
-        /** Last size (px) pushed through updateAppWidgetSize — a binder call,
-         *  so it is only repeated when the size actually changed. */
+        /**
+         * Last size (DP) pushed through updateAppWidgetSize — a binder call, so
+         * it is only repeated when the size actually changed.
+         *
+         * Dp and not px, which is what the provider is actually told: a
+         * `wm density` change moves the dp while the span's pixel size stands
+         * perfectly still, and a px-keyed cache swallows exactly that update —
+         * leaving the provider laying out for the old scale with nothing to
+         * correct it.
+         */
         int sizedW, sizedH;
 
         WidgetItem(int appWidgetId, int col, int row, int spanW, int spanH) {
@@ -663,15 +674,59 @@ class DesktopGrid extends ViewGroup {
     private void pushWidgetSize(WidgetItem w) {
         int wPx = w.spanW * cellW;
         int hPx = w.spanH * cellH;
-        if (wPx <= 0 || hPx <= 0 || (w.sizedW == wPx && w.sizedH == hPx)) return;
-        w.sizedW = wPx;
-        w.sizedH = hPx;
-        int wDp = Math.round(wPx * 160f / Math.max(1, host.uiDensity()));
-        int hDp = Math.round(hPx * 160f / Math.max(1, host.uiDensity()));
+        if (wPx <= 0 || hPx <= 0) return;
+        int density = Math.max(1, host.uiDensity());
+        float wDp = wPx * 160f / density;
+        float hDp = hPx * 160f / density;
+        // Whole dp is a fine cache key — a sub-dp wobble is not worth a binder
+        // call — but the size itself is handed over UNROUNDED below, because
+        // the provider's size buckets are compared against it.
+        if (w.sizedW == Math.round(wDp) && w.sizedH == Math.round(hDp)) return;
+        w.sizedW = Math.round(wDp);
+        w.sizedH = Math.round(hDp);
         try {
-            w.view.updateAppWidgetSize(null, wDp, hDp, wDp, hDp);
+            applyWidgetSize(w.view, wDp, hDp);
         } catch (Exception ignored) {
         }
+    }
+
+    /**
+     * Hand the provider its size the way a modern widget expects to be told.
+     *
+     * The deprecated four-int overload sets only OPTION_APPWIDGET_MIN/MAX_*
+     * and leaves OPTION_APPWIDGET_SIZES **empty** — and a responsive widget
+     * chooses its layout from that list. Glance-based providers (every One UI
+     * "Integrated" widget is one) read it, find nothing, log
+     * `mode=unknown from options`, and throw NoSuchElementException out of
+     * recomposition; the provider then answers the host with null RemoteViews,
+     * which is what the desktop drew as **"Can't show content"**.
+     *
+     * Measured on an S25 against One UI Home hosting the very same provider —
+     * the two hosts side by side are the whole argument:
+     *
+     *   ours  w=273.0     h=188.0       → "mode=unknown from options" → throws
+     *   home  w=124.05286 h=178.32599   → "mode=medium from options"  → draws
+     *
+     * Note which one is bigger. 273×188 dp is ample, so size was never what
+     * this was about; the fractions are the tell, because they can only have
+     * come from a SizeF list. Ours were whole numbers because they were being
+     * read back off the integer MIN/MAX options, the only ones we set.
+     *
+     * Passed UNROUNDED for the same reason: the provider compares the value
+     * against its own size buckets, so rounding a cell across a bucket edge
+     * would pick the wrong layout. One size and not several — a desktop cell
+     * is a single exact rect, unlike a phone home screen, which has to offer
+     * both portrait and landscape.
+     */
+    private static void applyWidgetSize(AppWidgetHostView view, float wDp, float hDp) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            view.updateAppWidgetSize(new Bundle(),
+                    Collections.singletonList(new SizeF(wDp, hDp)));
+            return;
+        }
+        int w = Math.round(wDp);
+        int h = Math.round(hDp);
+        view.updateAppWidgetSize(null, w, h, w, h);
     }
 
     // ── tiles ──

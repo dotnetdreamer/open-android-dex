@@ -396,6 +396,10 @@
     <string name="ln_reinstall_body">This deletes the Ubuntu container completely — every app you installed and every file inside it — and installs a fresh one. The download is about 1 GB. Nothing outside Linux is affected.</string>
     <string name="ln_reinstall_go">Delete and reinstall</string>
     <string name="ln_reinstall_started">Reinstalling Linux. Open the Linux window to watch it.</string>
+    <string name="ln_uninstall">Uninstall Linux…</string>
+    <string name="ln_uninstall_body">This deletes the Ubuntu container and frees the storage it was using — every app you installed and every file inside it. Linux will not reinstall itself; opening Linux again downloads it fresh. Your shared folder is kept, and nothing outside Linux is affected.</string>
+    <string name="ln_uninstall_go">Uninstall</string>
+    <string name="ln_uninstall_done">Linux uninstalled. The storage it was using is free.</string>
     <string name="ln_session_failed">The Linux session ended unexpectedly</string>
     <string name="ln_session_failed_sub">Something inside the container stopped it. Starting again gives you a fresh session.</string>
     <string name="ln_session_ended">You logged out of Linux</string>

@@ -264,6 +264,55 @@ final class Linux {
         return new File(ctx.getFilesDir(), "linux");
     }
 
+    /**
+     * Set while the user has explicitly uninstalled Linux.
+     *
+     * A SIBLING of the container, never a file inside it: uninstall deletes
+     * that whole tree, so a marker kept in there would be deleted along with
+     * the thing it exists to record.
+     *
+     * It has to exist at all because the desktop provisions on every launch
+     * ({@link LauncherActivity} kicks it three seconds in). Without a
+     * remembered "the user asked for this storage back", an uninstall would be
+     * silently undone — and the ~1.5 GB it just freed downloaded again — by the
+     * next time the launcher started. Opening Linux clears it, which is the
+     * way back in; see LauncherActivity.launchLinux.
+     */
+    private static File uninstalledMarker(Context ctx) {
+        return new File(ctx.getFilesDir(), "linux-uninstalled");
+    }
+
+    static boolean isUninstalled(Context ctx) {
+        return uninstalledMarker(ctx).exists();
+    }
+
+    static void setUninstalled(Context ctx, boolean on) {
+        File f = uninstalledMarker(ctx);
+        if (!on) {
+            f.delete();
+            return;
+        }
+        try {
+            f.createNewFile();
+        } catch (Exception e) {
+            // Losing the marker means Linux quietly reinstalls itself later,
+            // which is confusing rather than harmful — but say so, because the
+            // storage coming back is exactly the symptom someone would report.
+            DexLog.warn("linux", "uninstall marker: " + e);
+        }
+    }
+
+    /**
+     * Is there a container to remove? What the Uninstall offer keys off.
+     *
+     * The directory is the honest test rather than {@code state.env}: a wiped
+     * container has no state file, and a half-finished one has a state file
+     * saying anything at all.
+     */
+    static boolean isInstalled(Context ctx) {
+        return !isUninstalled(ctx) && root(ctx).exists();
+    }
+
     /** The extracted native libraries — the one dir an app may exec from. */
     static String nativeDir(Context ctx) {
         return ctx.getApplicationInfo().nativeLibraryDir;
@@ -394,6 +443,10 @@ final class Linux {
      * features.
      */
     static boolean needsProvision(Context ctx) {
+        // An explicit uninstall outranks every test below. The user asked for
+        // the storage back; provision-on-launch would otherwise hand them the
+        // download again three seconds after the next desktop start.
+        if (isUninstalled(ctx)) return false;
         Status st = readStatus(ctx);
         if (st.version != PAYLOAD_VERSION
                 || !"ready".equals(st.phase)

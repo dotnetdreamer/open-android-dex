@@ -367,6 +367,10 @@
     <string name="ln_reinstall_body">Isto apaga por completo o contentor Ubuntu — todas as aplicações que instalou e todos os ficheiros lá dentro — e instala um novo. A transferência é de cerca de 1 GB. Nada fora do Linux é afetado.</string>
     <string name="ln_reinstall_go">Apagar e reinstalar</string>
     <string name="ln_reinstall_started">A reinstalar o Linux. Abra a janela do Linux para acompanhar.</string>
+    <string name="ln_uninstall">Desinstalar o Linux…</string>
+    <string name="ln_uninstall_body">Isto apaga o contentor Ubuntu e liberta o armazenamento que ocupava — todas as aplicações que instalou e todos os ficheiros lá dentro. O Linux não se reinstala sozinho; ao abrir o Linux novamente, será transferido de novo. A pasta partilhada é mantida e nada fora do Linux é afetado.</string>
+    <string name="ln_uninstall_go">Desinstalar</string>
+    <string name="ln_uninstall_done">Linux desinstalado. O armazenamento que ocupava está livre.</string>
     <string name="ln_session_failed">A sessão do Linux terminou inesperadamente</string>
     <string name="ln_session_failed_sub">Algo dentro do contentor a parou. Começar de novo dá-lhe uma sessão limpa.</string>
     <string name="ln_session_ended">Terminou a sessão do Linux</string>

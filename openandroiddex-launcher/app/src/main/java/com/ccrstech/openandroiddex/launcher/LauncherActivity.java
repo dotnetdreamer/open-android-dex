@@ -1920,6 +1920,12 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
             menu.getMenu().add(0, 3, 2, getString(R.string.ln_shared_grant));
         }
         menu.getMenu().add(0, 4, 3, getString(R.string.ln_reinstall));
+        // Only while there is something to remove. Offering "Uninstall" over a
+        // container that is already gone is an action that would do nothing,
+        // and it is the entry that reads most like it should.
+        if (Linux.isInstalled(this)) {
+            menu.getMenu().add(0, 5, 4, getString(R.string.ln_uninstall));
+        }
         // One explicit id per branch and NO trailing else. The else used to be
         // the reinstall, so any item added after it would have dropped the user
         // straight into a container wipe.
@@ -1933,6 +1939,8 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
                 requestAllFilesAccess();
             } else if (id == 4) {
                 confirmLinuxReinstall();
+            } else if (id == 5) {
+                confirmLinuxUninstall();
             }
             return true;
         });
@@ -2078,9 +2086,38 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
                 .show();
     }
 
+    /**
+     * Remove the container and leave it removed.
+     *
+     * Deliberately NOT a variant of Reinstall. That one wipes and immediately
+     * downloads again, which is the right answer for a broken container and
+     * the wrong one for someone who wants the ~1.5 GB back. Because the
+     * desktop provisions on every launch, "removed" has to be a state we
+     * remember (Linux's uninstall marker) or the next start would quietly
+     * undo it — opening Linux is what deliberately reverses it.
+     */
+    private void confirmLinuxUninstall() {
+        dismissPopups();
+        new android.app.AlertDialog.Builder(this)
+                .setTitle(getString(R.string.ln_uninstall))
+                .setMessage(getString(R.string.ln_uninstall_body))
+                .setNegativeButton(getString(R.string.st_cancel), null)
+                .setPositiveButton(getString(R.string.ln_uninstall_go), (d, w) -> {
+                    LinuxService.uninstall(this);
+                    Toast.makeText(this, getString(R.string.ln_uninstall_done),
+                            Toast.LENGTH_LONG).show();
+                })
+                .show();
+    }
+
     private void launchLinux() {
         hideDrawer();
         dismissPopups();
+        // Opening Linux is the way back from an uninstall, and the only one:
+        // clearing the marker here — on an explicit request for Linux, never
+        // on the desktop's own provision-on-launch — is what keeps "uninstall"
+        // meaning uninstalled while still leaving the tile working.
+        Linux.setUninstalled(this, false);
         // Same restore dance as Settings above: our own package has no
         // taskbar icon, so a minimised window can only come back through
         // CaptionService — and it must name THIS activity, or a minimised

@@ -38,6 +38,32 @@ desktop, terminal, input, VncAuth. Not yet re-verified on the arm64 phone.
    `rt.pid`, and runs proot as a child. Stopping is one
    `/system/bin/kill -9 -<rt.pid>` — see **Process-group teardown**.
 
+## Reinstall vs Uninstall
+
+Both live on the Linux tile's right-click menu, and they are not variants of
+each other. **Reinstall** wipes and provisions again — the repair for a
+container that is broken. **Uninstall** wipes and stops there, for someone who
+wants the ~1.5 GB back.
+
+The difference is entirely in what does *not* follow the wipe, and one thing
+has to be remembered for it to survive at all: `LinuxService.provision` runs on
+every launcher start, so an uninstall would be undone — and everything it freed
+downloaded again — about three seconds into the next desktop session. So
+uninstall writes `files/linux-uninstalled`, a **sibling** of the container
+rather than a file in it (the wipe would take it with the tree otherwise), and
+`Linux.needsProvision` returns false while it exists. `LinuxService.provision`
+re-checks it on the service side too, because the caller decides on its own
+thread and then sends an intent — an uninstall landing in that gap would be
+reversed by a decision taken before it.
+
+Opening Linux clears the marker, and that is deliberately the *only* thing that
+does: an explicit request for Linux is the way back in, while the desktop's own
+provision-on-launch must never count as one. An open Linux window closes itself
+when it sees the marker, since nothing it polls for could arrive.
+
+The **shared folder is never touched** by either. It sits at the top of external
+storage precisely so it belongs to the user rather than to the container.
+
 ## Two version numbers
 
 `Linux.PAYLOAD_VERSION` and `Linux.FEATURE_LEVEL` (both passed to

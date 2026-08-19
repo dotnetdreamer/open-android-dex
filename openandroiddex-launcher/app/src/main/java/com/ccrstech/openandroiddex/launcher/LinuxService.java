@@ -43,6 +43,8 @@ public class LinuxService extends Service {
     static final String ACTION_STOP = "com.ccrstech.openandroiddex.launcher.linux.STOP";
     /** Wipe the container and build it again from nothing. */
     static final String ACTION_RESET = "com.ccrstech.openandroiddex.launcher.linux.RESET";
+    /** Wipe the container and leave it gone, with the storage free. */
+    static final String ACTION_UNINSTALL = "com.ccrstech.openandroiddex.launcher.linux.UNINSTALL";
     static final String EXTRA_W = "w";
     static final String EXTRA_H = "h";
 
@@ -102,6 +104,11 @@ public class LinuxService extends Service {
     /** Throw the container away and install a clean one. Not reversible. */
     static void reset(Context ctx) {
         send(ctx, ACTION_RESET, 0, 0);
+    }
+
+    /** Throw the container away and leave the storage free. Not reversible. */
+    static void uninstall(Context ctx) {
+        send(ctx, ACTION_UNINSTALL, 0, 0);
     }
 
     private static void send(Context ctx, String action, int w, int h) {
@@ -166,6 +173,11 @@ public class LinuxService extends Service {
                 reset();
                 provision();
             });
+        } else if (ACTION_UNINSTALL.equals(action)) {
+            io.execute(() -> {
+                uninstall();
+                stopSelf(); // nothing left to be foreground for
+            });
         } else { // PROVISION (default)
             io.execute(this::provision);
         }
@@ -181,6 +193,16 @@ public class LinuxService extends Service {
     // ── provisioning ──
 
     private void provision() {
+        // Re-checked HERE and not only in the static provision(): that one
+        // decides on its own thread and then sends an intent, so an uninstall
+        // landing in between would be undone by a decision taken before it.
+        // The window is small and the cost of losing it is a 1.5 GB download
+        // the user just asked to be rid of.
+        if (Linux.isUninstalled(this)) {
+            DexLog.step("linux", "uninstalled — not provisioning");
+            idleStop();
+            return;
+        }
         Linux.Status st = Linux.readStatus(this);
         // Provisioned means BOTH: built from this payload, and carrying this
         // build's features. The second half is what lets a new feature (the
@@ -226,14 +248,48 @@ public class LinuxService extends Service {
      * Delete the container outright: the rootfs, every phase stamp, the state
      * file and the downloaded tarball. The caller follows this with a
      * provision, so the next thing the user sees is a fresh install running.
+     */
+    private void reset() {
+        DexLog.step("linux", "reset — wiping the container");
+        wipe();
+        Linux.root(this).mkdirs();
+        writeState("pushing", 0, "resetting");
+        DexLog.step("linux", "reset — container removed");
+    }
+
+    /**
+     * The same wipe, and then nothing.
+     *
+     * Everything that separates this from {@link #reset} is what does NOT
+     * happen after it: no mkdirs, no state file, no provision behind it. That
+     * is the whole point — reset is for a container that is broken, uninstall
+     * is for someone who wants the storage back, and finishing an uninstall by
+     * downloading 1.5 GB again would answer the wrong one.
+     *
+     * With no state.env, readStatus reports phase "none", which the UI already
+     * renders as "nothing here" — so the tile needs no new state of its own.
+     * The marker is what stops provision-on-launch putting it all back.
+     *
+     * The shared folder is deliberately untouched. It sits at the top of
+     * external storage precisely so it belongs to the user rather than to the
+     * container; deleting someone's documents is not what "uninstall" means.
+     */
+    private void uninstall() {
+        DexLog.step("linux", "uninstall — wiping the container");
+        wipe();
+        Linux.setUninstalled(this, true);
+        DexLog.step("linux", "uninstall — container removed, provisioning off");
+    }
+
+    /**
+     * Stop the runtime and delete the container tree.
      *
      * The runtime is stopped FIRST and the directory is renamed out of the way
      * before it is walked: a live guest writing into a tree being deleted
      * underneath it leaves a half-rootfs behind, and a half-rootfs looks
      * provisioned to the setup script's stamps.
      */
-    private void reset() {
-        DexLog.step("linux", "reset — wiping the container");
+    private void wipe() {
         stopRuntime();
         File dir = Linux.root(this);
         File doomed = new File(dir.getParentFile(), "linux-deleting");
@@ -242,9 +298,6 @@ public class LinuxService extends Service {
             doomed = dir; // rename refused; delete in place rather than not at all
         }
         deleteTree(doomed);
-        dir.mkdirs();
-        writeState("pushing", 0, "resetting");
-        DexLog.step("linux", "reset — container removed");
     }
 
     private static void deleteTree(File f) {

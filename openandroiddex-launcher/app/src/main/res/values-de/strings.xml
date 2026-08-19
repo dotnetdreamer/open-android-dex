@@ -367,6 +367,10 @@
     <string name="ln_reinstall_body">Damit wird der Ubuntu-Container vollständig gelöscht — jede installierte App und jede Datei darin — und ein frischer installiert. Der Download beträgt etwa 1 GB. Alles außerhalb von Linux bleibt unberührt.</string>
     <string name="ln_reinstall_go">Löschen und neu installieren</string>
     <string name="ln_reinstall_started">Linux wird neu installiert. Öffne das Linux-Fenster, um zuzusehen.</string>
+    <string name="ln_uninstall">Linux deinstallieren…</string>
+    <string name="ln_uninstall_body">Damit wird der Ubuntu-Container gelöscht und der belegte Speicher freigegeben — jede installierte App und jede Datei darin. Linux installiert sich nicht von selbst neu; beim erneuten Öffnen wird es frisch heruntergeladen. Der gemeinsame Ordner bleibt erhalten, und alles außerhalb von Linux bleibt unberührt.</string>
+    <string name="ln_uninstall_go">Deinstallieren</string>
+    <string name="ln_uninstall_done">Linux wurde deinstalliert. Der belegte Speicher ist frei.</string>
     <string name="ln_session_failed">Die Linux-Sitzung wurde unerwartet beendet</string>
     <string name="ln_session_failed_sub">Etwas im Container hat sie gestoppt. Ein Neustart gibt dir eine frische Sitzung.</string>
     <string name="ln_session_ended">Du hast dich von Linux abgemeldet</string>
