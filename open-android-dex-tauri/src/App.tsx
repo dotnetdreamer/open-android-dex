@@ -524,31 +524,8 @@ export default function App() {
         // that overflows loses its top edge off the window.
         <div className="fade-in min-h-0 flex-1 overflow-y-auto p-6">
           <div className="glass mx-auto flex w-[520px] max-w-full flex-col overflow-hidden">
-            <div className="flex items-center gap-3 border-b border-white/10 px-5 py-4">
-              <span
-                className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl text-lg"
-                style={{ background: "rgba(77,159,255,0.16)" }}
-              >
-                🖥️
-              </span>
-              <div className="min-w-0">
-                <h1 className="text-[14.5px] font-semibold text-slate-100">Open Android DeX — connect a device</h1>
-                <p className="text-[12px] text-slate-400">
-                  The desktop launches automatically the moment a phone is ready
-                </p>
-              </div>
-            </div>
-
             <div className="px-5 py-5">
-              {pendingDevices.length === 0 ? (
-                <div className="flex flex-col items-center gap-1.5 rounded-xl border border-dashed border-white/12 py-7">
-                  <span className="text-3xl opacity-60">📵</span>
-                  <p className="mt-1 text-[13.5px] font-medium text-slate-300">No ADB devices found</p>
-                  <p className="text-[12px] text-slate-500">
-                    Plug in via USB (with USB debugging on) or connect over Wi-Fi below
-                  </p>
-                </div>
-              ) : (
+              {pendingDevices.length > 0 && (
                 <div className="flex flex-col gap-2">
                   {pendingDevices.map((d) => (
                     <div key={d.serial} className="flex items-center gap-3 rounded-xl bg-white/[0.04] px-4 py-3">
