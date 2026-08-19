@@ -1,0 +1,29 @@
+Skip memory-backend-shm where the C library has no POSIX shared memory.
+
+bionic has neither shm_open nor shm_unlink — and could not usefully have them,
+because Android has no /dev/shm for them to open files in. QEMU 9.1 added
+backends/hostmem-shm.c unconditionally for every non-Windows host, so an
+Android build stops there with "call to undeclared function 'shm_open'".
+
+The object only registers the `memory-backend-shm` QOM type, which exists for
+sharing guest RAM with a vhost-user process. Nothing we run has one: the VM's
+only backend is the default anonymous mapping. Dropping the file costs the
+build nothing and is preferable to shimming shm_open onto a directory Android
+does not have.
+
+Probed through the compiler rather than switched on host_os, because QEMU
+reports an NDK target as plain 'linux' and would take this branch anyway.
+
+--- a/backends/meson.build
++++ b/backends/meson.build
+@@ -13,7 +13,9 @@
+ if host_os != 'windows'
+   system_ss.add(files('rng-random.c'))
+   system_ss.add(files('hostmem-file.c'))
+-  system_ss.add([files('hostmem-shm.c'), rt])
++  if cc.has_function('shm_open')
++    system_ss.add([files('hostmem-shm.c'), rt])
++  endif
+ endif
+ if host_os == 'linux'
+   system_ss.add(files('hostmem-memfd.c'))

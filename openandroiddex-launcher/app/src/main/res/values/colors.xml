@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Desktop chrome navy: the same family as the taskbar (0xF5121722) and the
+         caption bar (0xFF0a0c10), and the darker end of the icon's background
+         gradient — so the splash the icon sits on is the same surface. -->
+    <color name="dex_chrome">#FF0B1320</color>
+</resources>

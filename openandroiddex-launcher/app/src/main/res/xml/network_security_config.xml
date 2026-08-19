@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- targetSdk 35 blocks cleartext http everywhere by default — including the
+     loopback noVNC page LinuxActivity loads (http://127.0.0.1:6080), which
+     never leaves the phone. Cleartext is permitted for that one address and
+     nothing else; every other host keeps the platform default. -->
+<network-security-config>
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="false">127.0.0.1</domain>
+    </domain-config>
+</network-security-config>

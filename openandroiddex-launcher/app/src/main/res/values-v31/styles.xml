@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+      The starting window Android puts up before the desktop's first frame. Left
+      alone it is a white sheet with the stock robot on it, because a launcher
+      that declares no icon gets the system's default — which is what shows on
+      every cold start of the desktop and every Settings window.
+    -->
+    <style name="Theme.OpenAndroidDeX" parent="Base.Theme.OpenAndroidDeX">
+        <item name="android:windowSplashScreenBackground">@color/dex_chrome</item>
+        <item name="android:windowSplashScreenAnimatedIcon">@mipmap/ic_launcher</item>
+    </style>
+
+    <!--
+      Same attributes, opposite goal: windowDisablePreview does not reliably
+      suppress the S+ splash for the root activity of a task, and this task
+      must show nothing at all before the system dialog attaches to it.
+    -->
+    <style name="Theme.OpenAndroidDeX.Detour" parent="Base.Theme.OpenAndroidDeX.Detour">
+        <item name="android:windowSplashScreenBackground">@android:color/transparent</item>
+        <item name="android:windowSplashScreenAnimatedIcon">@null</item>
+    </style>
+</resources>

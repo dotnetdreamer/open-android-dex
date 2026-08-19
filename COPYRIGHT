@@ -1,0 +1,33 @@
+Open Android DeX
+Copyright (C) 2026 Idrees
+
+This program is free software: you can redistribute it and/or modify it under
+the terms of the GNU General Public License as published by the Free Software
+Foundation, either version 3 of the License, or (at your option) any later
+version.
+
+This program is distributed in the hope that it will be useful, but WITHOUT ANY
+WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
+PARTICULAR PURPOSE.  See the GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License along with
+this program.  If not, see <https://www.gnu.org/licenses/>.
+
+
+Third-party components
+----------------------
+
+This program is distributed together with, but is not derived from, several
+independent works that keep their own licences. See
+open-android-dex-tauri/src-tauri/resources/THIRD_PARTY_LICENSES.md for the
+authoritative list shipped with each release. In summary:
+
+  adb, scrcpy                Apache-2.0   (Android Open Source Project; Genymobile)
+  FFmpeg libraries, libusb   LGPL-2.1+    (bundled by scrcpy)
+  SDL2                       Zlib         (bundled by scrcpy)
+  QEMU                       GPL-2.0-only (openandroiddex-docker guest VM)
+  proot                      GPL-2.0+     (openandroiddex-linux guest)
+  Alpine Linux, Ubuntu       various      (guest images, downloaded at runtime)
+
+The Android SDK, Gradle and the npm/crates dependency trees are build-time
+tools and are not redistributed in the release artifacts.

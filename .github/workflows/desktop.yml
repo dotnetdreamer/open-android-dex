@@ -1,0 +1,548 @@
+name: Build Desktop
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: "Version bump type"
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+        default: patch
+      version:
+        description: "Exact version override (e.g. 0.2.0) — leave blank to use bump"
+        type: string
+        default: ""
+      dry_run:
+        description: "Dry run — build artifacts only, skip release"
+        type: boolean
+        default: false
+
+concurrency:
+  group: desktop-build
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+env:
+  # Every scrcpy release bundles adb alongside it, on both platforms, which is
+  # why this one pin covers both of the binaries the app spawns. Keep in sync
+  # with open-android-dex-tauri/src-tauri/resources/THIRD_PARTY_LICENSES.md —
+  # the "Verify bundled binaries" steps below enforce that.
+  #
+  # One version, three assets, three checksums: the Windows zip here, and the
+  # two macOS tarballs on the build-macos matrix (a matrix leg cannot read a
+  # workflow-level env key that varies by leg). All three are the values from
+  # the release's own SHA256SUMS.txt.
+  SCRCPY_VERSION: "3.3.4"
+  SCRCPY_SHA256_WIN64: "d8a155b7c180b7ca4cdadd40712b8750b63f3aab48cb5b8a2a39ac2d0d4c5d38"
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.calc.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Calculate version
+        id: calc
+        run: |
+          CURRENT=$(jq -r .version open-android-dex-tauri/package.json)
+          if [ -n "${{ inputs.version }}" ]; then
+            VERSION="${{ inputs.version }}"
+          else
+            IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT"
+            case "${{ inputs.bump }}" in
+              major) MAJOR=$((MAJOR + 1)); MINOR=0; PATCH=0 ;;
+              minor) MINOR=$((MINOR + 1)); PATCH=0 ;;
+              patch) PATCH=$((PATCH + 1)) ;;
+            esac
+            VERSION="$MAJOR.$MINOR.$PATCH"
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Version: $VERSION"
+
+      - name: Update version in project files
+        if: ${{ !inputs.dry_run }}
+        run: |
+          VERSION="${{ steps.calc.outputs.version }}"
+          # package.json
+          jq --arg v "$VERSION" '.version = $v' open-android-dex-tauri/package.json > tmp.json && mv tmp.json open-android-dex-tauri/package.json
+          # tauri.conf.json
+          jq --arg v "$VERSION" '.version = $v' open-android-dex-tauri/src-tauri/tauri.conf.json > tmp.json && mv tmp.json open-android-dex-tauri/src-tauri/tauri.conf.json
+          # Cargo.toml
+          sed -i "s/^version = \".*\"/version = \"$VERSION\"/" open-android-dex-tauri/src-tauri/Cargo.toml
+
+      - name: Commit and tag
+        if: ${{ !inputs.dry_run }}
+        run: |
+          VERSION="${{ steps.calc.outputs.version }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "release: v$VERSION"
+          git tag "v$VERSION"
+          git push origin HEAD --tags
+
+  # The phone-side payloads ship inside the desktop app: the launcher APK
+  # (installed onto the phone by adb_start_launcher) and the wmd daemon dex
+  # (pushed and started by start_wmd — without it there is no window chrome:
+  # no custom titlebars, One UI's default caption shows instead). Both are
+  # gitignored under src-tauri/resources/bin, so CI has to build them rather
+  # than check them out.
+  launcher:
+    needs: version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.dry_run && github.ref || format('refs/tags/v{0}', needs.version.outputs.version) }}
+
+      - name: Setup JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          # android-35 for the launcher APK, android-36 for the wmd dex (its
+          # sources compile against the android-36 platform jar — see
+          # openandroiddex-wmd/build.cmd).
+          packages: "platforms;android-35 platforms;android-36 build-tools;35.0.0"
+
+      - name: Setup Gradle
+        # Version comes from the committed wrapper (openandroiddex-launcher/
+        # gradle/wrapper/gradle-wrapper.properties), so CI and local dev build
+        # with the same Gradle. This step is here for its dependency cache.
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Build launcher APK
+        working-directory: openandroiddex-launcher
+        # Debug, not release: the release build type has no signingConfig, so
+        # assembleRelease would emit an unsigned APK that `adb install` rejects.
+        #
+        # The debug build signs with the keystore committed at
+        # openandroiddex-launcher/app/debug.keystore, NOT with the per-machine
+        # ~/.android/debug.keystore the Android Gradle Plugin generates by
+        # default. That default made this runner — a fresh machine every run —
+        # emit a differently-signed launcher for every release, which phones
+        # then refused to install over the previous one
+        # (INSTALL_FAILED_UPDATE_INCOMPATIBLE). Keep the signingConfig in
+        # app/build.gradle intact or releases stop being upgradable again.
+        run: ./gradlew --no-daemon assembleDebug
+
+      - name: Build wmd daemon dex
+        # openandroiddex-wmd is not an Android project — javac + d8 straight to
+        # a single dex, loaded by app_process at uid 2000, so it has its own
+        # build script rather than Gradle.
+        #
+        # The same script a developer runs (`npm run apk` invokes it on macOS
+        # and Linux; build.cmd is its Windows twin). This step used to be a
+        # third, inlined copy of the same three commands, which meant CI could
+        # drift from local builds silently — now a break in the recipe fails
+        # both at once. It picks up ANDROID_HOME and JAVA_HOME from the two
+        # setup steps above.
+        working-directory: openandroiddex-wmd
+        run: ./build.sh
+
+      - name: Stage payloads under their shipped names
+        # cp fails the job loudly if either build silently produced nothing.
+        run: |
+          mkdir -p payloads
+          cp openandroiddex-launcher/app/build/outputs/apk/debug/app-debug.apk \
+             payloads/openandroiddex-launcher.apk
+          cp openandroiddex-wmd/openandroiddex-wmd.dex \
+             payloads/openandroiddex-wmd.dex
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: phone-payloads
+          path: payloads/*
+          if-no-files-found: error
+          retention-days: 1
+
+  build-windows:
+    needs: [version, launcher]
+    runs-on: windows-latest
+    env:
+      # tauri.conf.json's beforeBuildCommand rebuilds the launcher APK and the
+      # wmd daemon dex from source, so a local `tauri build` can never ship a
+      # stale one. Here both would fail: this runner has no JDK and no Android
+      # SDK. Both are already built by the `launcher` job above and downloaded
+      # below — skip both halves of the script. (The "Verify bundled binaries"
+      # step guarantees neither can silently go missing.)
+      SKIP_LAUNCHER_APK: "1"
+      SKIP_WMD_DEX: "1"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.dry_run && github.ref || format('refs/tags/v{0}', needs.version.outputs.version) }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: open-android-dex-tauri/package-lock.json
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: open-android-dex-tauri/src-tauri
+
+      - name: Install frontend dependencies
+        working-directory: open-android-dex-tauri
+        run: npm ci
+
+      # ---- populate src-tauri/resources/bin (gitignored, so absent on a fresh
+      # checkout). tauri.conf.json declares it in bundle.resources and the build
+      # script hard-fails on a missing resource path, so this must precede the
+      # Tauri build.
+      - name: Fetch scrcpy + adb
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ver = $env:SCRCPY_VERSION
+          $bin = "open-android-dex-tauri/src-tauri/resources/bin"
+          $zip = Join-Path $env:RUNNER_TEMP "scrcpy-win64-v$ver.zip"
+          $out = Join-Path $env:RUNNER_TEMP "scrcpy"
+
+          New-Item -ItemType Directory -Path $bin -Force | Out-Null
+
+          $url = "https://github.com/Genymobile/scrcpy/releases/download/v$ver/scrcpy-win64-v$ver.zip"
+          Write-Host "Downloading $url"
+          Invoke-WebRequest -Uri $url -OutFile $zip
+
+          $actual = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
+          if ($actual -ne $env:SCRCPY_SHA256_WIN64.ToLower()) {
+            throw "scrcpy checksum mismatch`n  expected $($env:SCRCPY_SHA256_WIN64)`n  actual   $actual"
+          }
+          Write-Host "Checksum OK"
+
+          Expand-Archive -Path $zip -DestinationPath $out -Force
+          # the zip nests everything under scrcpy-win64-v<ver>/ — flatten it
+          Copy-Item (Join-Path (Join-Path $out "scrcpy-win64-v$ver") '*') $bin -Recurse -Force
+
+          # Launcher shims we do not ship — the app spawns scrcpy.exe directly.
+          foreach ($shim in @('open_a_terminal_here.bat', 'scrcpy-console.bat', 'scrcpy-noconsole.vbs')) {
+            $p = Join-Path $bin $shim
+            if (Test-Path $p) { Remove-Item -LiteralPath $p -Force }
+          }
+
+      - name: Download phone payloads (launcher APK + wmd dex)
+        uses: actions/download-artifact@v4
+        with:
+          name: phone-payloads
+          path: open-android-dex-tauri/src-tauri/resources/bin
+
+      - name: Verify bundled binaries
+        shell: pwsh
+        run: |
+          $bin = "open-android-dex-tauri/src-tauri/resources/bin"
+          $required = @(
+            'adb.exe', 'AdbWinApi.dll', 'AdbWinUsbApi.dll',
+            'scrcpy.exe', 'scrcpy-server', 'SDL2.dll',
+            'avcodec-61.dll', 'avformat-61.dll', 'avutil-59.dll',
+            'swresample-5.dll', 'libusb-1.0.dll', 'icon.png',
+            'openandroiddex-launcher.apk', 'openandroiddex-wmd.dex'
+          )
+          $missing = $required | Where-Object { -not (Test-Path (Join-Path $bin $_)) }
+          if ($missing) {
+            throw "missing from ${bin}: $($missing -join ', ')"
+          }
+
+          # Keep the shipped licence notice honest about what is actually bundled.
+          $lic = "open-android-dex-tauri/src-tauri/resources/THIRD_PARTY_LICENSES.md"
+          if (-not (Select-String -Path $lic -Pattern "scrcpy $env:SCRCPY_VERSION" -SimpleMatch -Quiet)) {
+            throw "THIRD_PARTY_LICENSES.md does not mention scrcpy $env:SCRCPY_VERSION — update it alongside SCRCPY_VERSION"
+          }
+
+          Get-ChildItem $bin | Select-Object Name, Length | Format-Table -AutoSize
+
+      - name: Build Tauri app
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Static link MSVC C runtime for portability
+          RUSTFLAGS: "-C target-feature=+crt-static"
+        with:
+          projectPath: open-android-dex-tauri
+          tauriScript: npx tauri
+
+      - name: Create portable zip
+        shell: pwsh
+        run: |
+          $version = "${{ needs.version.outputs.version }}"
+          $exe_path = "open-android-dex-tauri/src-tauri/target/release/open-android-dex-tauri.exe"
+          $zip_name = "Open.Android.DeX_${version}_x64_portable.zip"
+
+          New-Item -ItemType Directory -Path portable -Force
+          Copy-Item $exe_path portable/
+          # Include resources if present
+          $res = "open-android-dex-tauri/src-tauri/target/release/resources"
+          if (Test-Path $res) { Copy-Item $res portable/resources -Recurse }
+          Compress-Archive -Path portable/* -DestinationPath $zip_name
+
+      # Uploaded, never published: the release is cut once, by the `release`
+      # job, after every platform has finished. Publishing from here is what
+      # this used to do, and it meant the release appeared — and watchers were
+      # emailed — the moment Windows was done, with the Mac builds still
+      # running and nothing to attach.
+      - name: Stage release assets
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Path dist -Force | Out-Null
+          Copy-Item open-android-dex-tauri/src-tauri/target/release/bundle/nsis/*.exe dist/
+          Copy-Item Open.Android.DeX_*.zip dist/
+          Get-ChildItem dist | Select-Object Name, Length | Format-Table -AutoSize
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-windows
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 1
+
+  build-macos:
+    needs: [version, launcher]
+    # One image, two Rust targets. macos-latest is Apple Silicon and
+    # cross-compiles the Intel leg happily; building Intel natively would mean
+    # macos-15-intel, the last x86_64 image, which GitHub retires in 2027.
+    runs-on: macos-latest
+    strategy:
+      # Both arches are shipped, so a failure in one should still let the other
+      # be inspected rather than cancelling it.
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            label: aarch64
+            scrcpy_arch: aarch64
+            # `lipo -archs` spells the same architecture differently from the
+            # scrcpy asset name. Both are needed, so both are written down.
+            lipo_arch: arm64
+            scrcpy_sha256: "8fef43520405dd523c74e1530ac68febcc5a405ea89712c874936675da8513dd"
+          - target: x86_64-apple-darwin
+            label: x64
+            scrcpy_arch: x86_64
+            lipo_arch: x86_64
+            scrcpy_sha256: "cf9b3453a33279b6009dfb256b1a84c374bd4c30a71edd74bacab28d72a5d929"
+    env:
+      # Same reasoning as the Windows job: this runner has no JDK and no
+      # Android SDK, and both payloads arrive from the `launcher` job below.
+      SKIP_LAUNCHER_APK: "1"
+      SKIP_WMD_DEX: "1"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.dry_run && github.ref || format('refs/tags/v{0}', needs.version.outputs.version) }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: open-android-dex-tauri/package-lock.json
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          # `--target` is only honoured once that target's std is installed,
+          # and x86_64 is not the host here.
+          targets: ${{ matrix.target }}
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: open-android-dex-tauri/src-tauri
+          # Keyed per target, or the two legs thrash one shared cache entry.
+          key: ${{ matrix.target }}
+
+      - name: Install frontend dependencies
+        working-directory: open-android-dex-tauri
+        run: npm ci
+
+      # ---- populate src-tauri/resources/bin, exactly as the Windows job does.
+      # The macOS payload is far smaller: the shipped scrcpy links only against
+      # system frameworks (verified with otool -L), so there are no SDL/FFmpeg/
+      # libusb libraries to place beside it.
+      - name: Fetch scrcpy + adb
+        shell: bash
+        env:
+          ARCH: ${{ matrix.scrcpy_arch }}
+          EXPECTED_SHA: ${{ matrix.scrcpy_sha256 }}
+        run: |
+          # GitHub's default is `bash -e`, which is neither -u nor pipefail —
+          # and without pipefail the `shasum | cut` below would swallow a
+          # failing shasum and pass the checksum gate on an empty string.
+          set -euo pipefail
+
+          ver="$SCRCPY_VERSION"
+          bin="open-android-dex-tauri/src-tauri/resources/bin"
+          tgz="$RUNNER_TEMP/scrcpy-macos-$ARCH-v$ver.tar.gz"
+          out="$RUNNER_TEMP/scrcpy"
+          mkdir -p "$bin" "$out"
+
+          url="https://github.com/Genymobile/scrcpy/releases/download/v$ver/scrcpy-macos-$ARCH-v$ver.tar.gz"
+          echo "Downloading $url"
+          # --fail, or a 404 writes its HTML body to the file and the checksum
+          # then reports a mismatch instead of a missing download.
+          curl --fail --location --show-error --silent \
+               --retry 3 --retry-all-errors \
+               --output "$tgz" "$url"
+
+          actual="$(shasum -a 256 "$tgz" | cut -d' ' -f1)"
+          if [ "$actual" != "$EXPECTED_SHA" ]; then
+            echo "::error title=scrcpy checksum mismatch::macos-$ARCH v$ver"
+            echo "  expected $EXPECTED_SHA"
+            echo "  actual   $actual"
+            exit 1
+          fi
+          echo "Checksum OK"
+
+          tar xzf "$tgz" -C "$out"
+          # the tarball nests everything under scrcpy-macos-<arch>-v<ver>/ —
+          # flatten it. `cp -a` and not `cp -R`: only -a keeps the mode bits.
+          cp -a "$out/scrcpy-macos-$ARCH-v$ver/." "$bin/"
+
+          # The man page is not something a .app has anywhere to put, and
+          # shipping it would mean listing it in THIRD_PARTY_LICENSES.md. (The
+          # Windows job drops its .bat/.vbs launcher shims at the same point.)
+          rm -f "$bin/scrcpy.1"
+
+          chmod +x "$bin/adb" "$bin/scrcpy"
+          ls -l "$bin"
+
+      - name: Download phone payloads (launcher APK + wmd dex)
+        uses: actions/download-artifact@v4
+        with:
+          name: phone-payloads
+          path: open-android-dex-tauri/src-tauri/resources/bin
+
+      - name: Verify bundled binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          bin="open-android-dex-tauri/src-tauri/resources/bin"
+
+          missing=()
+          for f in adb scrcpy scrcpy-server icon.png \
+                   openandroiddex-launcher.apk openandroiddex-wmd.dex; do
+            [ -f "$bin/$f" ] || missing+=("$f")
+          done
+          if [ ${#missing[@]} -gt 0 ]; then
+            echo "::error::missing from $bin: ${missing[*]}"
+            exit 1
+          fi
+
+          # Two checks the Windows list has no need of. A cleared execute bit
+          # is invisible until the first adb call fails at runtime with a
+          # permission error that names no cause…
+          for f in adb scrcpy; do
+            [ -x "$bin/$f" ] || { echo "::error::$bin/$f is not executable"; exit 1; }
+          done
+          # …and pairing the wrong tarball with this build is invisible until
+          # the app runs on a Mac that cannot execute it. (adb is a universal
+          # binary in both tarballs, so only scrcpy is worth asserting.)
+          archs="$(lipo -archs "$bin/scrcpy")"
+          case " $archs " in
+            *" ${{ matrix.lipo_arch }} "*) ;;
+            *) echo "::error::scrcpy is $archs, expected ${{ matrix.lipo_arch }}"; exit 1 ;;
+          esac
+
+          # Keep the shipped licence notice honest about what is actually bundled.
+          lic="open-android-dex-tauri/src-tauri/resources/THIRD_PARTY_LICENSES.md"
+          grep -qF "scrcpy $SCRCPY_VERSION" "$lic" || {
+            echo "::error::THIRD_PARTY_LICENSES.md does not mention scrcpy $SCRCPY_VERSION — update it alongside SCRCPY_VERSION"
+            exit 1
+          }
+
+          ls -l "$bin"
+
+      - name: Build Tauri app
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # No RUSTFLAGS here. The Windows job's `+crt-static` statically links
+          # the MSVC runtime; on Apple targets the flag is silently ignored
+          # (there is no static libSystem), and setting it anyway would both
+          # state something untrue and partition the Rust cache.
+        with:
+          projectPath: open-android-dex-tauri
+          tauriScript: npx tauri
+          # `--bundles` overrides tauri.conf.json's Windows-only ["nsis"].
+          # tauri.macos.conf.json sets the same pair, so this is belt and
+          # braces — and it is what documents the intent at the call site.
+          args: --target ${{ matrix.target }} --bundles app,dmg
+
+      - name: Stage release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          V="${{ needs.version.outputs.version }}"
+          # `--target` moves the whole tree under the triple.
+          B="open-android-dex-tauri/src-tauri/target/${{ matrix.target }}/release/bundle"
+          mkdir -p dist
+          cp "$B"/dmg/*.dmg dist/
+          # ditto, never `zip -r`: it is the only archiver that round-trips a
+          # .app with its symlinks, resource forks and code signature intact.
+          # (The .dmg needs no such care — it is an opaque filesystem image.)
+          ditto -c -k --keepParent --sequesterRsrc \
+            "$B/macos/Open Android DeX.app" \
+            "dist/Open.Android.DeX_${V}_${{ matrix.label }}.app.zip"
+          ls -l dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-macos-${{ matrix.label }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 1
+
+  # One release, cut once, with every platform's artifacts already in hand.
+  # Naming both build jobs in `needs` waits for the macOS matrix in full.
+  release:
+    needs: [version, build-windows, build-macos]
+    if: ${{ !inputs.dry_run }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: refs/tags/v${{ needs.version.outputs.version }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          # release-windows, release-macos-aarch64, release-macos-x64.
+          # merge-multiple flattens them into dist/ rather than one directory
+          # each; the file names do not collide.
+          pattern: release-*
+          merge-multiple: true
+
+      - name: Publish release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          VERSION="${{ needs.version.outputs.version }}"
+          ls -l dist
+
+          # --notes-file AND --generate-notes: GitHub appends the generated
+          # changelog after the body, which puts the macOS first-launch
+          # instructions where someone will actually read them.
+          gh release create "v$VERSION" \
+            --title "Open Android DeX v$VERSION" \
+            --notes-file .github/release-notes.md \
+            --generate-notes \
+            dist/*

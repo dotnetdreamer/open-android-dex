@@ -1,0 +1,342 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- Taskbar floats above app windows as a TYPE_APPLICATION_OVERLAY.
+         Must be DECLARED here or `appops set SYSTEM_ALERT_WINDOW allow`
+         silently stays "default" and canDrawOverlays() returns false. -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+
+    <!-- Home button: bring the desktop task back over app windows -->
+    <uses-permission android:name="android.permission.REORDER_TASKS" />
+
+    <!-- INTERNET: the loopback socket to the wmd daemon (127.0.0.1:7191) AND the
+         Linux feature — downloading the Ubuntu rootfs, and every guest socket
+         (apt, the noVNC loopback). Without it an app cannot create ANY socket. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+
+    <!-- The Linux runtime (proot → Xvnc + websockify) is a long-running native
+         process tree the app owns; it lives in a foreground service so Android
+         does not reap it while the desktop window is backgrounded. specialUse:
+         a self-hosted Linux container is none of the predefined FGS types. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <!-- The Web viewer streams the phone's display to a browser, which means a
+         MediaProjection — and from Android 14 a projection may only be turned
+         into a virtual display while a foreground service of THIS type is
+         already running. Declared here or startForeground throws. The consent
+         itself is the system's own dialog and is never granted by us. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+
+    <!-- REQUIRED by libwebrtc, not by our own code. When the first peer
+         connection starts gathering, NetworkMonitorAutoDetect is built ON THE
+         NETWORK THREAD and immediately asks ConnectivityManager for the
+         network state — a SecurityException there comes back through JNI glue
+         that turns any pending Java exception into RTC_CHECK → abort(). So
+         missing this is not a degraded viewer, it is SIGABRT in
+         libjingle_peerconnection_so the moment a browser joins. Install-time
+         grant; no dialog. (ACCESS_WIFI_STATE is NOT needed: the SSID lookup
+         reads the STATE_CHANGE broadcast's extra, not getConnectionInfo.) -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+    <!-- REQUIRED by the LinuxOnDeX shared folder, which sits at the top of
+         internal storage (/sdcard/LinuxOnDeX) so the user can actually find
+         it. MediaProvider gates TOP-LEVEL names on shared storage, so without
+         this the folder cannot even be CREATED — a subdirectory of a default
+         folder like Documents/ would not have needed it, and that was the
+         first design; being findable was worth the grant.
+
+         It also buys the inbound direction. Ungranted, scoped storage denies
+         our uid open() on any file another app (or an adb push, or MTP) put
+         there — EACCES on the file itself, not a listing quirk — so Linux
+         could not read a file you copied in even if the folder existed.
+
+         DECLARED here or the app-op cannot stick: PermissionPolicyService
+         resets an app-op-backed permission the package never requested. Same
+         mechanism SYSTEM_ALERT_WINDOW above depends on.
+
+         NEVER granted by us. The user grants it on the OS screen, so this
+         works with a PC and without one — and revoking it kills this whole
+         uid (StorageManagerService.killAppForOpChange), which would take a
+         running container and the desktop shell down with it. That is the
+         user's call to make, not ours, and the UI says so before sending them.
+
+         Distribution note: declaring this makes the APK ineligible for Play
+         without a declaration form. Moot while the shipped APK is
+         debug-signed, which Play rejects outright anyway. -->
+    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
+
+    <!-- Android 11+ package visibility: we enumerate launchable apps, and —
+         as a widget host — every app that ships an AppWidget provider,
+         including the ones with no launcher activity of their own. -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.LAUNCHER" />
+        </intent>
+        <intent>
+            <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+        </intent>
+        <!-- The file manager a dropped file's "Open" button hands off to
+             (TransferHud). Without this the query comes back empty on a
+             device whose Downloads UI has no launcher icon of its own. -->
+        <intent>
+            <action android:name="android.intent.action.VIEW_DOWNLOADS" />
+        </intent>
+    </queries>
+
+    <!-- An app with no android:icon gets the platform's default one — the green
+         robot — and that is what the phone's app list, our own app drawer and,
+         most visibly, the starting window of every desktop cold start showed. -->
+    <!-- networkSecurityConfig: targetSdk 35 blocks cleartext http, which
+         includes the loopback noVNC page LinuxActivity loads. The config
+         permits cleartext for 127.0.0.1 and nothing else. -->
+    <!-- extractNativeLibs=true: proot must be a real file in nativeLibraryDir to
+         be exec'd (see build.gradle useLegacyPackaging). -->
+    <application
+        android:label="@string/app_name"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:extractNativeLibs="true"
+        android:networkSecurityConfig="@xml/network_security_config"
+        android:theme="@style/Theme.OpenAndroidDeX">
+        <provider
+            android:name=".RequestProvider"
+            android:authorities="com.ccrstech.openandroiddex.launcher.requests"
+            android:exported="true" />
+        <!-- `density` IS handled here (see onConfigurationChanged): while the
+             desktop sits paused behind an app window the system defers an
+             activity relaunch indefinitely, which would leave the overlay
+             taskbar at the old scale after a display-size change. Handling
+             the config change ourselves lets the launcher rebuild its UI
+             in place the moment `wm density` lands.
+
+             This activity has the package's default (implicit) taskAffinity
+             and is the HOME task of the desktop display, so anything started
+             from it WITHOUT FLAG_ACTIVITY_NEW_TASK joins the desktop's own
+             task — and launch bounds are a property of the task. See
+             WidgetDetourActivity for what that cost once. -->
+        <activity
+            android:name=".LauncherActivity"
+            android:exported="true"
+            android:launchMode="singleTask"
+            android:resizeableActivity="true"
+            android:stateNotNeeded="true"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|density|keyboard|keyboardHidden|navigation|uiMode">
+            <!-- openable like a normal app (e.g. via am start from the PC) -->
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <!-- eligible as a home on secondary displays -->
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.HOME" />
+                <category android:name="android.intent.category.SECONDARY_HOME" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </activity>
+        <!-- In-desktop Settings window (Display size). singleTask so
+             re-opening it refocuses the existing window instead of stacking
+             duplicates. taskAffinity MUST differ from the launcher's:
+             singleTask joins any task with a matching affinity, and with the
+             default (shared) affinity Settings lands INSIDE the launcher's
+             task — dragging the whole desktop into the small freeform window
+             and leaving a black display behind ("dark screen" on close). -->
+        <activity
+            android:name=".SettingsActivity"
+            android:exported="false"
+            android:label="@string/settings_label"
+            android:launchMode="singleTask"
+            android:taskAffinity="com.ccrstech.openandroiddex.launcher.settings"
+            android:resizeableActivity="true"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|navigation|uiMode" />
+
+        <!-- In-desktop Linux window (noVNC WebView over the proot container).
+             Same task rules as Settings, for the same reasons: singleTask so
+             the tile refocuses the open session instead of stacking a second
+             viewer, and its own taskAffinity so it never joins — and never
+             drags — the launcher's task. -->
+        <activity
+            android:name=".LinuxActivity"
+            android:exported="false"
+            android:label="@string/ln_label"
+            android:launchMode="singleTask"
+            android:taskAffinity="com.ccrstech.openandroiddex.launcher.linux"
+            android:resizeableActivity="true"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|navigation|uiMode" />
+
+        <!-- In-desktop Docker window (the container list, the image list and
+             the VM's serial console). Same task rules as Settings and Linux,
+             for the same reasons: singleTask so the tile refocuses the open
+             window instead of stacking a second one, and its own taskAffinity
+             so it never joins — and never drags — the launcher's task. -->
+        <activity
+            android:name=".DockerActivity"
+            android:exported="false"
+            android:label="@string/dk_label"
+            android:launchMode="singleTask"
+            android:taskAffinity="com.ccrstech.openandroiddex.launcher.docker"
+            android:resizeableActivity="true"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|navigation|uiMode" />
+
+        <!-- In-desktop Web viewer window: the address, the access code and
+             every switch that decides what a browser on the other end may do.
+             Same task rules as Settings, Linux and Docker, for the same
+             reasons. -->
+        <activity
+            android:name=".WebActivity"
+            android:exported="false"
+            android:label="@string/wb_label"
+            android:launchMode="singleTask"
+            android:taskAffinity="com.ccrstech.openandroiddex.launcher.web"
+            android:resizeableActivity="true"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|navigation|uiMode" />
+
+        <!-- Asks for screen capture and does nothing else. It owns a TASK for
+             the reason WidgetDetourActivity spells out: an activity started
+             FOR A RESULT lands in the caller's task, and a system dialog
+             joining the desktop's (or the Web window's) task takes that task's
+             freeform bounds with it. Its own taskAffinity keeps the consent
+             out of the shell entirely. -->
+        <activity
+            android:name=".WebConsentActivity"
+            android:exported="false"
+            android:launchMode="singleTask"
+            android:taskAffinity="com.ccrstech.openandroiddex.launcher.webconsent"
+            android:theme="@style/Theme.OpenAndroidDeX.Detour"
+            android:excludeFromRecents="true"
+            android:autoRemoveFromRecents="true"
+            android:resizeableActivity="true"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|density|keyboard|keyboardHidden|navigation|uiMode|locale|layoutDirection|fontScale" />
+
+        <!-- The tray's performance gauge opens this. Same task rules as
+             Settings and Linux, for the same reasons. -->
+        <activity
+            android:name=".TaskManagerActivity"
+            android:exported="false"
+            android:label="@string/tm_title"
+            android:launchMode="singleTask"
+            android:taskAffinity="com.ccrstech.openandroiddex.launcher.taskmanager"
+            android:resizeableActivity="true"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|navigation|uiMode" />
+
+        <!-- Trampoline for the widget flow's two system detours (the bind
+             confirmation, the provider's configure screen). It exists only to
+             own a TASK: an activity started FOR A RESULT lands in the CALLER's
+             task, and ActivityOptions launch bounds are applied to that task —
+             so calling startActivityForResult from the desktop resized the
+             desktop, drawing the whole shell inside the dialog's 520dp window
+             with the display black around it. FLAG_ACTIVITY_NEW_TASK is not
+             the way out: it severs resultTo, which cancels our result AND
+             leaves the bind dialog's getCallingPackage() null, so it finishes
+             before it draws.
+
+             taskAffinity for the same reason spelled out on SettingsActivity
+             above: with the launcher's (default) affinity a singleTask
+             activity joins the desktop's task and reproduces the exact bug
+             this class exists to fix. NOT singleInstance — the whole point is
+             that another activity may join THIS task. NOT noHistory and NOT
+             finishOnTaskLaunch: this activity sits BEHIND the dialog it is
+             waiting on, and either one would finish it there and lose the
+             result. -->
+        <activity
+            android:name=".WidgetDetourActivity"
+            android:exported="false"
+            android:launchMode="singleTask"
+            android:taskAffinity="com.ccrstech.openandroiddex.launcher.detour"
+            android:theme="@style/Theme.OpenAndroidDeX.Detour"
+            android:excludeFromRecents="true"
+            android:autoRemoveFromRecents="true"
+            android:resizeableActivity="true"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|density|keyboard|keyboardHidden|navigation|uiMode|locale|layoutDirection|fontScale" />
+
+        <!-- Per-window title bars. This is an AccessibilityService only because
+             attachAccessibilityOverlayToWindow() is the one API that reparents our
+             surface INTO the target app's own window surface — which is what makes the
+             caption impossible to separate from its window. See CaptionService. -->
+        <service
+            android:name=".CaptionService"
+            android:exported="false"
+            android:label="@string/app_name"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/caption_service" />
+        </service>
+
+        <!-- Owns the whole Linux stack under the app's own uid: downloads +
+             extracts the rootfs, runs the apt provisioning, and hosts the
+             proot/Xvnc/websockify runtime. No PC, no shell uid — this is what
+             makes a standalone Linux app a repackage rather than a rewrite.
+
+             android:process — ITS OWN PROCESS, and this is not an optimisation.
+             A foreground service that misses the platform's five-second
+             startForeground deadline is killed with an uncaught
+             ForegroundServiceDidNotStartInTimeException, and while this lived
+             in the launcher's process that took the DESKTOP down with it:
+             taskbar gone, display black, session needing a relaunch (measured
+             on device — LauncherActivity force-finished alongside
+             LinuxActivity). The service holds no shared state, only files, so
+             the split costs nothing and contains every future fault in here to
+             the Linux feature. -->
+        <service
+            android:name=".LinuxService"
+            android:exported="false"
+            android:process=":linux"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Runs a user-launched Linux (Ubuntu/XFCE) container under proot" />
+        </service>
+
+        <!-- Owns the Web viewer while it is serving: the screen capture, the
+             HTTP server and the WebSocket its viewers hang off.
+
+             android:process — deliberately NONE, unlike LinuxService and
+             DockerService above. Those were split out because a foreground
+             service that misses the five-second startForeground deadline used
+             to take the desktop down with it; this one has to stay in the
+             launcher's process because the only way it can deliver a click is
+             CaptionService, which lives here. It answers the deadline by
+             entering the foreground before it touches a socket. See
+             WebService.
+
+             mediaProjection is a REQUIRED foreground service type from
+             Android 14: a projection cannot become a virtual display unless a
+             service of this type is already running. -->
+        <service
+            android:name=".WebService"
+            android:exported="false"
+            android:foregroundServiceType="mediaProjection" />
+
+        <!-- Owns the Docker machine: downloads and verifies Alpine's kernel,
+             initramfs, modloop and minirootfs, builds the boot image, creates
+             the virtual disk and hosts QEMU — all under the app's own uid.
+
+             A VM rather than a container because this kernel cannot make one:
+             /proc/config.gz has neither CONFIG_PID_NS nor CONFIG_USER_NS, so
+             runc fails on it even with root, and AVF here admits protected
+             microdroid VMs only. See Docker.java.
+
+             android:process — its own, for exactly the reason spelled out on
+             LinuxService above: a foreground service that misses the
+             five-second startForeground deadline dies with an uncaught
+             exception, and in the launcher's process that took the desktop
+             down with it. QEMU is also the heaviest thing this app ever runs,
+             so keeping it out of the shell's process is worth it on its own. -->
+        <service
+            android:name=".DockerService"
+            android:exported="false"
+            android:process=":docker"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Runs a user-launched Docker engine inside a local QEMU virtual machine" />
+        </service>
+    </application>
+</manifest>

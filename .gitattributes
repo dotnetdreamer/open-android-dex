@@ -1,0 +1,7 @@
+# Shell scripts must keep LF endings whatever the checkout platform: a CRLF
+# shebang fails with "bad interpreter", and openandroiddex-wmd/build.sh is run
+# by `npm run apk` on every macOS and Linux build.
+#
+# (openandroiddex-launcher/.gitattributes says the same for its Gradle wrapper,
+# for exactly this reason.)
+*.sh text eol=lf

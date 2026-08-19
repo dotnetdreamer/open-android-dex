@@ -1,0 +1,6 @@
+# The release workflow runs ./gradlew on an Ubuntu runner, so the wrapper
+# script must keep LF endings — a CRLF shebang fails with "bad interpreter" —
+# and the wrapper jar must not be touched by text normalisation.
+gradlew text eol=lf
+gradlew.bat text eol=crlf
+*.jar binary

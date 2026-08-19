@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Config for CaptionService.
+
+     canRetrieveWindowContent + FLAG_RETRIEVE_INTERACTIVE_WINDOWS are what make
+     getWindows() return the freeform app windows on the desktop display; without them
+     there is nothing to attach a caption to.
+
+     No packageNames filter: the whole point is decorating third-party windows.
+
+     canPerformGestures is for the WEB VIEWER, not for the captions:
+     dispatchGesture is the only way an app on this phone can put a touch into
+     another app's window, so it is what a click in the browser becomes (see
+     WebInput). INJECT_EVENTS is signature-only and uid 2000 does not help —
+     injected input never lands on the desktop's virtual display. Without this
+     attribute the whole control half of the viewer is impossible. -->
+<accessibility-service
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    android:accessibilityEventTypes="typeWindowsChanged|typeWindowStateChanged"
+    android:accessibilityFeedbackType="feedbackGeneric"
+    android:accessibilityFlags="flagRetrieveInteractiveWindows|flagIncludeNotImportantViews"
+    android:canRetrieveWindowContent="true"
+    android:canPerformGestures="true"
+    android:notificationTimeout="0"
+    android:description="@string/caption_service_description" />

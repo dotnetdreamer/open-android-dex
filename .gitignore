@@ -1,0 +1,50 @@
+.gradle/
+openandroiddex-launcher/app/build/
+openandroiddex-launcher/build/
+
+# IDE, per-machine
+.idea/
+.vscode/
+
+# Reverse-engineering scratch, local only. jadx/apktool output from a third-party
+# closed-source product, plus our written analysis of it, kept as reference for the
+# window-management and daemon work. It is someone else's compiled code decompiled
+# and notes about someone else's product — neither is committed or redistributed.
+# Nothing in this project is derived from it.
+doc/decompiled-commercial-dex/
+doc/decompiled-commercial-dex-v1.0/
+doc/commercial-android-dex-architecture.md
+
+# Android Studio writes this per machine and pins an absolute sdk.dir. It was
+# committed once with a Windows path in it, which broke `npm run apk` on every
+# other OS: Gradle prefers local.properties over ANDROID_HOME, so the build
+# went looking for a C:\ drive. Set ANDROID_HOME instead.
+local.properties
+
+# Local research scratch: AOSP sources (adb, wifi, init) and saved
+# android.googlesource.com pages kept while working out wireless ADB and the
+# uid-2000 daemon. Someone else's Apache-2.0 code, read-only reference, and
+# nothing in this project imports it — so it stays out of the repo.
+/ADM.java
+/AdbService.java
+/wsc.java
+/adb_mdns.h
+/adb_utils.cpp
+/commandline.cpp
+/transport.h
+/pm.cpp
+/ss.cpp
+/daemon_*.cpp
+/init.rc
+/adbd.rc
+/adbd.te
+/pc.txt
+/shellmanifest.xml
+/adbd.html
+/adbdir.html
+/apex.html
+/rd.html
+/root.html
+
+# One-off machine setup with a hardcoded per-user path; not portable.
+/_install_buildtools.cmd

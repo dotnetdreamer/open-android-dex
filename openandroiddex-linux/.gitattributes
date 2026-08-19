@@ -1,0 +1,5 @@
+# Everything in here is pushed to the phone and run by toybox /system/bin/sh:
+# a CRLF ending turns every line into "command not found" on-device. Force LF
+# whatever the checkout platform (the repo root .gitattributes covers *.sh,
+# this covers the rest of the payload dir too).
+* text eol=lf

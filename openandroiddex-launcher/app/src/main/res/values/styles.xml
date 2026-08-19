@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Base.Theme.OpenAndroidDeX" parent="android:Theme.DeviceDefault.NoActionBar">
+        <item name="android:windowBackground">@android:color/black</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowLayoutInDisplayCutoutMode">shortEdges</item>
+    </style>
+
+    <!-- Split so values-v31 can add the splash-screen attributes without
+         duplicating the theme or tripping the NewApi lint on older devices. -->
+    <style name="Theme.OpenAndroidDeX" parent="Base.Theme.OpenAndroidDeX" />
+
+    <!-- The widget detour trampoline: a task-shaped hole. It never sets a
+         content view, so every attribute here exists to keep the freeform
+         window it owns from drawing or animating anything of its own while
+         the system dialog above it is what the user is actually looking at.
+         Deliberately NOT windowIsFloating: a floating window is not laid out
+         to the task bounds, and those bounds are the whole point of the task. -->
+    <style name="Base.Theme.OpenAndroidDeX.Detour"
+        parent="android:Theme.DeviceDefault.NoActionBar">
+        <item name="android:windowIsTranslucent">true</item>
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:windowContentOverlay">@null</item>
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:backgroundDimEnabled">false</item>
+        <item name="android:windowAnimationStyle">@null</item>
+        <item name="android:windowDisablePreview">true</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+    </style>
+
+    <style name="Theme.OpenAndroidDeX.Detour" parent="Base.Theme.OpenAndroidDeX.Detour" />
+</resources>

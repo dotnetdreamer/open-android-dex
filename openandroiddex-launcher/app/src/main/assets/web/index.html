@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1">
+<meta name="color-scheme" content="dark">
+<meta name="theme-color" content="#0a0b0d">
+<title>Open Android DeX</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+<!-- ─────────────────────────────────────────────────────────────────────────
+     Gate. Shown until the access code buys a session token. The whole panel is
+     one <form> so Enter submits and password managers stay out of the way.
+     ───────────────────────────────────────────────────────────────────────── -->
+<section id="gate" class="gate">
+  <div class="gate-glow" aria-hidden="true"></div>
+  <form id="gate-form" class="gate-card" autocomplete="off" novalidate>
+    <div class="gate-mark" aria-hidden="true">
+      <svg viewBox="0 0 32 32" width="30" height="30" fill="none">
+        <path d="M16 3 27 9.5v13L16 29 5 22.5v-13L16 3Z" stroke="currentColor"
+              stroke-width="1.6" stroke-linejoin="round"/>
+        <path d="M16 10.5 21.5 14v6L16 23.5 10.5 20v-6L16 10.5Z" fill="currentColor"
+              opacity=".9"/>
+      </svg>
+    </div>
+    <h1 class="gate-title">Open Android DeX</h1>
+    <p id="gate-sub" class="gate-sub">Enter the access code shown on the phone.</p>
+
+    <div class="pin-field">
+      <input id="pin" class="pin" inputmode="numeric" pattern="[0-9]*" maxlength="6"
+             autocomplete="one-time-code" aria-label="Six-digit access code"
+             aria-describedby="gate-sub">
+      <div class="pin-cells" id="pin-cells" aria-hidden="true">
+        <span></span><span></span><span></span><span></span><span></span><span></span>
+      </div>
+    </div>
+
+    <button id="gate-go" class="btn btn-primary" type="submit">
+      <span class="btn-label">Connect</span>
+      <span class="btn-spinner" aria-hidden="true"></span>
+    </button>
+    <p id="gate-error" class="gate-error" role="alert" hidden></p>
+  </form>
+  <p class="gate-foot">A private, end-to-end connection over WebRTC.</p>
+</section>
+
+<!-- ─────────────────────────────────────────────────────────────────────────
+     Viewer.
+     ───────────────────────────────────────────────────────────────────────── -->
+<main id="app" class="app" hidden>
+  <header class="toolbar">
+    <div class="tb-group tb-left">
+      <span class="brand" aria-hidden="true">
+        <svg viewBox="0 0 32 32" width="18" height="18" fill="none">
+          <path d="M16 3 27 9.5v13L16 29 5 22.5v-13L16 3Z" stroke="currentColor"
+                stroke-width="1.7" stroke-linejoin="round"/>
+        </svg>
+      </span>
+      <span class="status-pill" id="status-pill">
+        <span id="status-dot" class="dot" aria-hidden="true"></span>
+        <span id="status" class="status">Connecting…</span>
+      </span>
+    </div>
+
+    <div class="tb-group tb-mid" id="nav-keys" role="group" aria-label="Device navigation">
+      <button class="key nav" data-vk="back" title="Back" aria-label="Back">
+        <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M15 5 8 12l7 7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </button>
+      <button class="key nav" data-vk="home" title="Home" aria-label="Home">
+        <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><circle cx="12" cy="12" r="8" fill="none" stroke="currentColor" stroke-width="2"/></svg>
+      </button>
+      <button class="key nav" data-vk="recents" title="Recent apps" aria-label="Recent apps">
+        <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><rect x="4" y="4" width="16" height="16" rx="2.5" fill="none" stroke="currentColor" stroke-width="2"/></svg>
+      </button>
+      <button class="key nav" data-vk="notifications" title="Notifications" aria-label="Notifications">
+        <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M6 10l6 6 6-6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </button>
+    </div>
+
+    <div class="tb-group tb-right">
+      <button id="kb-toggle" class="key" title="Keyboard" aria-label="Keyboard">
+        <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><rect x="2.5" y="6" width="19" height="12" rx="2.2" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M6 9.5h.01M9 9.5h.01M12 9.5h.01M15 9.5h.01M18 9.5h.01M6 12.5h.01M9 12.5h.01M12 12.5h.01M15 12.5h.01M18 12.5h.01M8 15.3h8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+      </button>
+      <button id="files-toggle" class="key" title="Files" aria-label="Files">
+        <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>
+      </button>
+      <button id="fs-toggle" class="key" title="Full screen" aria-label="Toggle full screen">
+        <svg viewBox="0 0 24 24" width="19" height="19" aria-hidden="true" class="ic-expand"><path d="M4 9V5a1 1 0 0 1 1-1h4M20 9V5a1 1 0 0 0-1-1h-4M4 15v4a1 1 0 0 0 1 1h4M20 15v4a1 1 0 0 1-1 1h-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <svg viewBox="0 0 24 24" width="19" height="19" aria-hidden="true" class="ic-collapse"><path d="M9 4v4a1 1 0 0 1-1 1H4M15 4v4a1 1 0 0 0 1 1h4M9 20v-4a1 1 0 0 0-1-1H4M15 20v-4a1 1 0 0 1 1-1h4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </button>
+      <button id="menu-toggle" class="key" title="Settings" aria-label="Settings">
+        <svg viewBox="0 0 24 24" width="19" height="19" aria-hidden="true"><path d="M5 7h14M5 12h14M5 17h14" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/><circle cx="9" cy="7" r="2.1" fill="currentColor"/><circle cx="15" cy="12" r="2.1" fill="currentColor"/><circle cx="8" cy="17" r="2.1" fill="currentColor"/></svg>
+      </button>
+    </div>
+  </header>
+
+  <div class="stage" id="stage">
+    <div class="screen-wrap" id="screen-wrap">
+      <video id="video" playsinline muted autoplay></video>
+    </div>
+    <div id="stage-note" class="stage-note">
+      <span class="stage-spinner" aria-hidden="true"></span>
+      <span class="stage-note-text">Waiting for the first frame…</span>
+    </div>
+    <div id="dropzone" class="dropzone" hidden>
+      <div class="dropzone-inner">
+        <svg viewBox="0 0 24 24" width="34" height="34" aria-hidden="true"><path d="M12 16V4m0 0L7 9m5-5 5 5M4 17v2a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-2" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <span>Drop files to send them to the phone</span>
+      </div>
+    </div>
+
+    <!-- Shown only when the desktop is on a display connected to a computer, so
+         this capture (always the phone's own display) is necessarily the phone. -->
+    <div id="viewer-hint" class="viewer-hint" hidden>
+      <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M12 11v5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><circle cx="12" cy="8" r="1.1" fill="currentColor"/></svg>
+      <span>You're viewing the phone. The DeX desktop is on the display connected to your computer.</span>
+      <button id="hint-dismiss" class="hint-x" title="Dismiss" aria-label="Dismiss">
+        <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+      </button>
+    </div>
+  </div>
+
+  <!-- Off-screen input: focusing it is what makes a phone keyboard appear,
+       and what gives us keystrokes on a desktop without stealing shortcuts. -->
+  <textarea id="sink" class="sink" autocomplete="off" autocorrect="off"
+            autocapitalize="off" spellcheck="false" aria-hidden="true"></textarea>
+
+  <!-- Slide-in drawer for Files / Settings. -->
+  <div id="scrim" class="scrim" hidden></div>
+  <aside id="panel" class="panel" aria-hidden="true">
+    <div class="panel-head">
+      <strong id="panel-title" class="panel-title">Files</strong>
+      <button id="panel-close" class="key" title="Close" aria-label="Close panel">
+        <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+      </button>
+    </div>
+
+    <div id="files-view" class="panel-body">
+      <div class="path" id="path"></div>
+      <label class="upload-btn">
+        <input type="file" id="file-input" multiple hidden>
+        <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M12 16V5m0 0L8 9m4-4 4 4M5 19h14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <span>Send files to the phone</span>
+      </label>
+      <div class="uploads" id="uploads"></div>
+      <ul class="listing" id="listing"></ul>
+    </div>
+
+    <div id="settings-view" class="panel-body" hidden>
+      <div class="field">
+        <label class="field-label" for="fit-select">Picture fit</label>
+        <div class="select-wrap">
+          <select id="fit-select">
+            <option value="contain">Fit the window</option>
+            <option value="actual">Actual size</option>
+          </select>
+          <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" class="select-caret"><path d="M6 9l6 6 6-6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </div>
+      </div>
+
+      <div class="field">
+        <span class="field-label">Quick actions</span>
+        <div class="keys-grid">
+          <button class="chip" data-vk="quicksettings">Quick settings</button>
+          <button class="chip" data-vk="screenshot">Screenshot</button>
+          <button class="chip" data-vk="lock">Lock phone</button>
+          <button class="chip" data-vk="power">Power menu</button>
+        </div>
+      </div>
+
+      <p class="hint" id="control-note"></p>
+      <button id="sign-out" class="btn btn-ghost-danger">
+        <svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true"><path d="M15 12H5m0 0 4-4m-4 4 4 4M14 5h4a1 1 0 0 1 1 1v12a1 1 0 0 1-1 1h-4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <span>Sign out</span>
+      </button>
+    </div>
+  </aside>
+</main>
+
+<script src="/app.js"></script>
+</body>
+</html>
