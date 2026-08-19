@@ -519,11 +519,14 @@ export default function App() {
       </header>
 
       {phase.kind === "connect" ? (
-        // Scrolls rather than centres: the Wi-Fi panel grows with a QR code, a
-        // list of saved phones and an error block, and a centred flex child
-        // that overflows loses its top edge off the window.
-        <div className="fade-in min-h-0 flex-1 overflow-y-auto p-6">
-          <div className="glass mx-auto flex w-[520px] max-w-full flex-col overflow-hidden">
+        // Centred by auto margins, not by `justify-center`: the Wi-Fi panel
+        // grows with a QR code, a list of saved phones and an error block, and
+        // centring a flex child the usual way pushes its top edge off the top
+        // of the scroll box once it outgrows the window. Auto margins collapse
+        // to zero at that point, so the card sits in the middle while it fits
+        // and scrolls from its top once it doesn't.
+        <div className="fade-in flex min-h-0 flex-1 flex-col overflow-y-auto p-6">
+          <div className="glass m-auto flex w-[620px] max-w-full shrink-0 flex-col overflow-hidden">
             <div className="px-5 py-5">
               {pendingDevices.length > 0 && (
                 <div className="flex flex-col gap-2">

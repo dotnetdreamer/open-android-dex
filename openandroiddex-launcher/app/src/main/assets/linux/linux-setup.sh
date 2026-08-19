@@ -18,6 +18,8 @@
 # LINUXSTATUS verb never read a torn file:
 #
 #   VERSION=<int>  FEATURES=<int>  PHASE=<phase>  PCT=<0-100>  MSG=<no-whitespace>
+#
+# MSG may also be <verb>:<name> — see apt_msg.
 #   phases: pushing (written by the caller) extracting configuring apt-update
 #           installing-desktop ready error
 #
@@ -130,6 +132,45 @@ apt_note() { # label
 # the real verdict, and a guest that needed no repair passes straight through.
 repair_dpkg() {
   run_guest "dpkg --configure -a; apt-get -y --fix-broken install; b=\$(dpkg -l | awk '\$1 ~ /^i[FHU]/ { print \$2 }'); [ -n \"\$b\" ] || exit 0; apt-get install -y \$b || apt-get install -y --reinstall \$b; true" || true
+}
+
+# What the desktop install is doing RIGHT NOW, as one state.env-safe token.
+# apt is a firehose and MSG holds a single whitespace-free word, so this reduces
+# the log tail to the last thing worth naming: which package is downloading,
+# unpacking or being configured. Before it, the ~1.5 GB phase published one
+# unchanging word ("apt-install") for its entire duration — a progress line that
+# never moves reads as a hang, which is exactly what it is not.
+#
+# The package name is handed over after a COLON. LinuxActivity de-dashes only
+# the verb and leaves the name alone, because a package's own dashes are part of
+# its name: blanket dash→space rendered "setting-up-libgtk-3-0t64" as "setting
+# up libgtk 3 0t64", four things instead of one.
+#
+# $1 is the line count setup.log had when the phase began, so the tail can never
+# surface a leftover from `apt-get update` and announce "downloading Packages"
+# over an install. No awk: toybox only grew one in 0.8.10, and this has to run
+# on the phones that shipped before it. Parameter expansion instead of `set --`
+# keeps apt's "[1779 kB]" from being read as a glob.
+apt_msg() { # log-offset
+  [ -f "$ROOT/setup.log" ] || { echo apt-install; return 0; }
+  _l=$(tail -n "+$(($1 + 1))" "$ROOT/setup.log" 2>/dev/null \
+       | grep -E '^(Get:[0-9]|Unpacking |Setting up |Processing triggers for |Reading package lists|Building dependency)' \
+       | tail -1)
+  case "$_l" in
+    "Reading package lists"*) echo reading-package-lists; return 0 ;;
+    "Building dependency"*)   echo resolving-dependencies; return 0 ;;
+    "Unpacking "*)            _v=unpacking;   _p=${_l#Unpacking } ;;
+    "Setting up "*)           _v=setting-up;  _p=${_l#Setting up } ;;
+    "Processing triggers for "*) _v=finishing; _p=${_l#Processing triggers for } ;;
+    Get:*)  # Get:<n> <uri> <suite>/<component> <arch> <package> …
+      _v=downloading
+      _p=${_l#* }; _p=${_p#* }; _p=${_p#* }; _p=${_p#* } ;;
+    *) echo apt-install; return 0 ;;
+  esac
+  _p=${_p%% *}    # first word only
+  _p=${_p%%:*}    # drop dpkg's :arch qualifier
+  [ -n "$_p" ] || { echo apt-install; return 0; }
+  echo "$_v:$_p"
 }
 
 TICKER=
@@ -324,13 +365,19 @@ if [ ! -f .stamp-apt-update ]; then
 fi
 
 # ── phase: install the desktop ────────────────────────────────────────────
-# The long pole (~1.5GB unpacked over the network). apt prints nothing worth
-# parsing, so progress is the rootfs growing: a background ticker maps
-# `du -sm rootfs` growth of 0→1500MB onto PCT 35→95.
+# The long pole (~1.5GB unpacked over the network). The BAR is the rootfs
+# growing: a background ticker maps `du -sm rootfs` growth of 0→1500MB onto PCT
+# 35→95. The TEXT is apt's own transcript, read back out of setup.log by
+# apt_msg — this phase runs for many minutes and naming the package it is on is
+# the difference between "installing desktop" for ten minutes and something a
+# person can watch.
 if [ ! -f .stamp-desktop ]; then
   state installing-desktop 35 apt-install
   base=$(du -sm rootfs 2>/dev/null | cut -f1)
   [ -n "$base" ] || base=0
+  # Where the phase's own output starts, so apt_msg never quotes an older one.
+  logoff=$(wc -l < "$ROOT/setup.log" 2>/dev/null)
+  [ -n "$logoff" ] || logoff=0
   MAIN=$$
   (
     while :; do
@@ -343,7 +390,7 @@ if [ ! -f .stamp-desktop ]; then
       pct=$((35 + (now - base) * 60 / 1500))
       [ "$pct" -lt 35 ] && pct=35
       [ "$pct" -gt 95 ] && pct=95
-      state installing-desktop "$pct" apt-install
+      state installing-desktop "$pct" "$(apt_msg "$logoff")"
       sleep 5
     done
   ) &

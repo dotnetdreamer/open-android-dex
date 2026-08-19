@@ -782,10 +782,21 @@ public class LinuxActivity extends Activity {
         return msgWords(st);
     }
 
-    /** state.env's MSG is dash-separated-no-whitespace; undo that for people. */
+    /**
+     * state.env's MSG is dash-separated-no-whitespace; undo that for people.
+     *
+     * A colon, when the script sends one, separates the verb from a name the
+     * script did not invent — "setting-up:libgtk-3-0t64". Only the verb is
+     * de-dashed: a package name's dashes are part of it, and replacing those
+     * too rendered it "setting up libgtk 3 0t64", which reads as four things
+     * instead of one. No colon means the whole token is ours, and the old
+     * blanket rule is still right for it.
+     */
     private static String msgWords(Linux.Status st) {
         String m = "-".equals(st.msg) ? st.phase : st.msg;
-        return m.replace('-', ' ');
+        int c = m.indexOf(':');
+        if (c < 0) return m.replace('-', ' ');
+        return (m.substring(0, c).replace('-', ' ') + " " + m.substring(c + 1)).trim();
     }
 
     // ── measurements ──

@@ -236,6 +236,12 @@ or `update-alternatives`, so a helper of our own is installed and selected in
 atomically (`state.env.tmp` + `mv`):
 
     VERSION=<int>  PHASE=<phase>  PCT=<0-100>  MSG=<no-whitespace, dash-separated>
+
+`MSG` may also carry `<verb>:<name>` — `setting-up:libgtk-3-0t64` — when the
+tail half is a name the script did not invent. `LinuxActivity.msgWords`
+de-dashes only the verb, so the package keeps the dashes that belong to it. The
+desktop phase publishes this every 5 s from apt's own transcript (`apt_msg`);
+every other phase sends a plain dash-separated token and reads unchanged.
     phases: pushing extracting configuring apt-update installing-desktop ready error
 
 ## Ports (guest, loopback only)
