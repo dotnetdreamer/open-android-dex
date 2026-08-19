@@ -162,9 +162,6 @@ class DesktopGrid extends ViewGroup {
     /** The open right-click menu, or null. One at a time. */
     private PopupWindow menu;
 
-    /** True once this grid instance has told the host its geometry is known. */
-    private boolean readyNotified;
-
     DesktopGrid(LauncherActivity host) {
         super(host);
         this.host = host;
@@ -1460,16 +1457,6 @@ class DesktopGrid extends ViewGroup {
         cellW = availW / cols;
         cellH = availH / rows;
         reflow();
-
-        // The first moment placement math is possible — the default-clock
-        // seeding waits for it. Posted: adding a widget from inside a measure
-        // pass would re-enter layout. The grid passes ITSELF so the host can
-        // drop a post that outlived a shell rebuild — seeding into whichever
-        // grid happens to be current can hit one that has not measured yet.
-        if (!readyNotified && cellW > 0 && cellH > 0) {
-            readyNotified = true;
-            post(() -> host.maybeSeedClockWidget(DesktopGrid.this));
-        }
 
         int cellWSpec = MeasureSpec.makeMeasureSpec(cellW, MeasureSpec.EXACTLY);
         int cellHSpec = MeasureSpec.makeMeasureSpec(cellH, MeasureSpec.EXACTLY);

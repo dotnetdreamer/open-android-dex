@@ -2558,10 +2558,8 @@ public class SettingsActivity extends Activity {
             // releases the widget ids AND drops their records — leaving the
             // ids allocated would keep every provider updating a ghost
             DexWidgetHost.wipe(this);
-            // a reset desktop is "first launch" again: the default clock comes back
             getSharedPreferences(LauncherActivity.PREFS, MODE_PRIVATE).edit()
                     .remove(DesktopGrid.KEY_ITEMS)
-                    .remove(LauncherActivity.KEY_CLOCK_SEEDED)
                     .apply();
             DexPrefs.broadcast(this, DesktopGrid.KEY_ITEMS);
             Toast.makeText(this, s(R.string.st_reset_home_done), Toast.LENGTH_SHORT).show();
@@ -2584,8 +2582,7 @@ public class SettingsActivity extends Activity {
     private void showFactoryReset() {
         List<ResetScope> scopes = new ArrayList<>();
         scopes.add(new ResetScope(R.string.st_scope_desktop,
-                DesktopGrid.KEY_ITEMS, DesktopGrid.KEY_WIDGETS,
-                LauncherActivity.KEY_CLOCK_SEEDED));
+                DesktopGrid.KEY_ITEMS, DesktopGrid.KEY_WIDGETS));
         scopes.add(new ResetScope(R.string.st_scope_recents, LauncherActivity.KEY_RECENTS));
         scopes.add(new ResetScope(R.string.st_scope_theme, DexPrefs.KEY_THEME, DexPrefs.KEY_DARK,
                 DexPrefs.KEY_PAPER_TEXTURE, DexPrefs.KEY_GRAIN, DexPrefs.KEY_GLASS,

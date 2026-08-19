@@ -270,15 +270,6 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
      * forever; onCreate reconciles this key instead (see releaseOrphanedAdd).
      */
     private static final String KEY_PENDING_WIDGET = "widget_pending_id";
-    /**
-     * Set the moment the default clock widget is PLACED — never on a failed
-     * attempt, so a launch where the bind grant had not landed yet (or the
-     * clock app was disabled) tries again next time. Once set it never seeds
-     * again: removing the clock is a choice, not a bug to fix. Package-visible
-     * because the reset flows clear it — a desktop reset to "fresh" gets its
-     * default clock back.
-     */
-    static final String KEY_CLOCK_SEEDED = "widget_clock_seeded";
     /** Tray battery pill ("⚡ 87%") — refreshed by batteryReceiver. */
     private TextView batteryPill;
     /** Tray fullscreen toggle — glyph mirrors the PC window's state. */
@@ -3855,92 +3846,6 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
             if (record.startsWith(id + ":")) return true;
         }
         return false;
-    }
-
-    /**
-     * First-launch default: a clock widget in the top-right corner, the same
-     * first sight the commercial DeX desktop gives. Called by the grid once
-     * its geometry exists (and again after every shell rebuild — the persisted
-     * flag makes those calls no-ops). Entirely silent: only providers that can
-     * bind without a dialog and need no configure screen qualify, so a phone
-     * where seeding cannot happen quietly simply starts with an empty desktop.
-     */
-    void maybeSeedClockWidget(DesktopGrid from) {
-        // A post can outlive its world: a shell rebuild swaps the grid out
-        // under it (the replacement seeds on its own once measured), and
-        // recreate() destroys this instance with isFinishing() still false —
-        // seeding a detached tree would save a record the live instance never
-        // loaded. `measured()` and not columns(): cols starts at 1, so it
-        // cannot tell a real grid from one that has never seen onMeasure.
-        if (from != desktopGrid || !from.measured() || isFinishing() || isDestroyed()) return;
-        if (DexPrefs.prefs(this).getBoolean(KEY_CLOCK_SEEDED, false)) return;
-        // A manual add owns KEY_PENDING_WIDGET while its detour is open, and
-        // that marker is the only thing that can release its id if the process
-        // dies mid-dialog. Seeding borrows the same key, so it waits — a reset
-        // that re-arms seeding while a dialog is up would otherwise erase the
-        // add's death insurance. The next shell rebuild posts this again.
-        if (pendingWidgetId >= 0) return;
-        AppWidgetProviderInfo clock = findClockProvider();
-        if (clock == null) return;
-        int id;
-        try {
-            id = widgetHost.allocateAppWidgetId();
-        } catch (Exception e) {
-            return;
-        }
-        // same death-mid-add insurance as the manual flow: until the record
-        // exists, this marker is the only thing that can release the id
-        DexPrefs.prefs(this).edit().putInt(KEY_PENDING_WIDGET, id).apply();
-        boolean bound = false;
-        try {
-            bound = widgetManager.bindAppWidgetIdIfAllowed(
-                    id, clock.getProfile(), clock.provider, null);
-        } catch (Exception ignored) {
-        }
-        // top-right: addWidget clamps the preferred column by the span itself
-        if (bound && desktopGrid.addWidget(id, clock, desktopGrid.columns() - 1, 0)) {
-            DexPrefs.prefs(this).edit().putBoolean(KEY_CLOCK_SEEDED, true).apply();
-            DexLog.step("widgets", "seeded default clock "
-                    + clock.provider.flattenToShortString() + " top-right");
-        } else {
-            try {
-                widgetHost.deleteAppWidgetId(id);
-            } catch (Exception ignored) {
-            }
-        }
-        DexPrefs.prefs(this).edit().remove(KEY_PENDING_WIDGET).apply();
-    }
-
-    /**
-     * The clock widget this phone most plausibly means by "the clock": prefer
-     * the actual Clock app (Samsung's clockpackage, AOSP/Google deskclock)
-     * over anything else with "clock" in its name, and an analog face — the
-     * look the commercial DeX desktop seeds — over a digital one.
-     */
-    private AppWidgetProviderInfo findClockProvider() {
-        List<AppWidgetProviderInfo> providers;
-        try {
-            providers = widgetManager.getInstalledProviders();
-        } catch (Exception e) {
-            return null;
-        }
-        AppWidgetProviderInfo best = null;
-        int bestScore = 0;
-        for (AppWidgetProviderInfo info : providers) {
-            String pkg = info.provider.getPackageName().toLowerCase(Locale.ROOT);
-            String cls = info.provider.getClassName().toLowerCase(Locale.ROOT);
-            if (!pkg.contains("clock") && !cls.contains("clock")) continue;
-            // seeding is silent — no setup screens
-            if (DexWidgetHost.needsConfigure(info)) continue;
-            int score = 1;
-            if (pkg.contains("clockpackage") || pkg.contains("deskclock")) score += 4;
-            if (cls.contains("analog")) score += 2;
-            if (score > bestScore) {
-                bestScore = score;
-                best = info;
-            }
-        }
-        return best;
     }
 
     /** Centered rect for a desktop window of this size, clamped to the display. */
