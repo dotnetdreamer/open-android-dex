@@ -77,6 +77,35 @@ jobs:
           # Cargo.toml
           sed -i "s/^version = \".*\"/version = \"$VERSION\"/" open-android-dex-tauri/src-tauri/Cargo.toml
 
+          # The launcher APK. versionName is what the phone reports for the
+          # on-device half of the product, and versionCode is the number Android
+          # itself compares when deciding whether an install is an update. Both
+          # were hardcoded at 0.2.0/2 and never touched, so every launcher ever
+          # shipped claimed the same version and a phone running a stale one was
+          # indistinguishable from a phone running the current release — the
+          # only way to tell was to pull base.apk off the device and read its
+          # manifest. Derived here from the one version that cuts the release,
+          # so the two halves can never disagree again.
+          #
+          # MAJOR*10000 + MINOR*100 + PATCH stays monotonic for any MINOR/PATCH
+          # under 100 (0.3.12 -> 312, 0.4.0 -> 400, 1.0.0 -> 10000). A version
+          # that is not three plain numbers has no such mapping, and quietly
+          # writing a broken build.gradle would fail much later inside Gradle —
+          # so refuse it here, where the message says what is wrong.
+          if [[ ! "$VERSION" =~ ^[0-9]+[.][0-9]+[.][0-9]+$ ]]; then
+            echo "::error::version '$VERSION' is not MAJOR.MINOR.PATCH — the launcher versionCode cannot be derived from it"
+            exit 1
+          fi
+          IFS='.' read -r VMAJ VMIN VPAT <<< "$VERSION"
+          VCODE=$((VMAJ * 10000 + VMIN * 100 + VPAT))
+          GRADLE=openandroiddex-launcher/app/build.gradle
+          # Whole-line rewrites with the indentation spelled out rather than
+          # a captured-group backreference: defaultConfig is 8 spaces deep, and
+          # saying so survives the shell/YAML escaping a backreference does not.
+          sed -i "s/^ *versionCode .*/        versionCode $VCODE/" "$GRADLE"
+          sed -i "s/^ *versionName \".*\"/        versionName \"$VERSION\"/" "$GRADLE"
+          grep -E '^ *version(Code|Name) ' "$GRADLE"
+
       - name: Commit and tag
         if: ${{ !inputs.dry_run }}
         run: |

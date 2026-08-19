@@ -15,39 +15,6 @@ Unplug it, and the phone is a plain phone again.
 
 ---
 
-## What it actually is
-
-The desktop is not drawn on your PC. It is a **real Android desktop running on
-the phone**, on a secondary display that [scrcpy](https://github.com/Genymobile/scrcpy)
-streams to a window. The windows you drag are genuine Android freeform tasks,
-moved by a privileged daemon on the device — not pictures of apps composited
-host-side.
-
-That choice is what makes cross-app drag-and-drop, a single shared clipboard,
-and one GPU encoder for the whole session possible.
-
-```mermaid
-%%{init: {'theme':'base','themeVariables':{'primaryColor':'#0b6bcb','primaryTextColor':'#fff','primaryBorderColor':'#0b6bcb','lineColor':'#8a8a8a','secondaryColor':'#1a1a1a','tertiaryColor':'#222'}}}%%
-flowchart LR
-    subgraph PC["💻 Windows / macOS"]
-        T["<b>Open Android DeX</b><br/>Tauri v2 + React<br/><i>boot, connect, session control</i>"]
-        S["scrcpy window<br/><i>the display you look at</i>"]
-    end
-    subgraph PH["📱 Android phone"]
-        L["<b>Launcher APK</b><br/>com.ccrstech.openandroiddex.launcher<br/><i>taskbar · drawer · widgets · captions<br/>settings · Linux · Docker · web viewer</i>"]
-        D["<b>wmd daemon</b> — uid 2000<br/><i>task bounds, z-order,<br/>caption insets, close</i>"]
-        A["Your apps<br/><i>real freeform tasks</i>"]
-    end
-    T -- "adb: profile, install, push" --> L
-    T -- "TCP 7191 (forwarded)" --> D
-    T -- spawns --> S
-    S -. "H.264 of the virtual display" .-> L
-    D -- "hidden WindowManager APIs" --> A
-    L -- draws chrome over --> A
-```
-
----
-
 ## Features
 
 ### The desktop
@@ -112,14 +79,6 @@ flowchart LR
 - **Docker** — a real Docker engine inside a QEMU-TCG Alpine VM. Container and
   image lists over the Engine API, plus a root serial console. `docker pull`,
   `docker run` and `docker compose` all work.
-
-### Leaving no trace
-
-Starting a session writes a desktop profile to the phone (freeform support,
-resizable activities, external-display desktop mode, untrusted-touch handling).
-Every one of those values is **snapshotted before it is changed** and restored
-when the session ends — from the taskbar's Exit button, from the PC, or by the
-daemon's own dead-man switch if the cable is pulled.
 
 ---
 

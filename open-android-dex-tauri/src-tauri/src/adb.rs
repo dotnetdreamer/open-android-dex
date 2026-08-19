@@ -1176,7 +1176,27 @@ fn is_signature_conflict(err: &str) -> bool {
         || e.contains("SIGNATURES DO NOT MATCH")
 }
 
-/// `adb install -r`, normalising the two ways adb reports a rejected install.
+/// True when an `adb install` failure is the device refusing to go backwards:
+/// the copy on the phone has a higher versionCode than the APK being pushed.
+///
+/// Reachable only since the launcher's versionCode started tracking the
+/// release version (openandroiddex-launcher/app/build.gradle). It was pinned
+/// at 2 for every build ever made, so no install could be a downgrade and
+/// every one was accepted. Now a developer on an older checkout -- or anyone
+/// rolling back to a previous release -- is pushing a lower number at a phone
+/// that already has a higher one.
+fn is_version_downgrade(err: &str) -> bool {
+    err.to_uppercase().contains("INSTALL_FAILED_VERSION_DOWNGRADE")
+}
+
+/// `adb install -r -d`, normalising the two ways adb reports a rejected install.
+///
+/// `-d` is INSTALL_ALLOW_DOWNGRADE. The desktop always deploys the launcher it
+/// ships with (see the "always reinstall" note at the call site), so a phone
+/// holding a newer launcher than this build has to yield to it -- otherwise
+/// running an older release after a newer one fails with nothing but a pm
+/// error code to go on. Not every framework honours the flag, which is what
+/// is_version_downgrade above is for.
 ///
 /// Modern adb exits non-zero ("adb: failed to install …"), but it also has a
 /// long history of printing `Failure [INSTALL_FAILED_…]` on *stdout* with exit
@@ -1184,7 +1204,7 @@ fn is_signature_conflict(err: &str) -> bool {
 /// like a success, and the real error then surfaces much later as a missing
 /// launcher, so check the text as well.
 fn install_apk(app: &tauri::AppHandle, serial: &str, apk: &str) -> Result<(), String> {
-    match run_adb_timeout(app, &["-s", serial, "install", "-r", apk], INSTALL_TIMEOUT) {
+    match run_adb_timeout(app, &["-s", serial, "install", "-r", "-d", apk], INSTALL_TIMEOUT) {
         Err(e) => Err(e),
         Ok(out) if out.contains("Failure [") || out.contains("failed to install") => Err(out),
         Ok(_) => Ok(()),
@@ -1211,11 +1231,17 @@ fn install_launcher(app: &tauri::AppHandle, serial: &str, apk: &str) -> Result<(
         Ok(()) => return Ok(()),
         Err(e) => e,
     };
-    if !is_signature_conflict(&err) {
+    let reason = if is_signature_conflict(&err) {
+        "signed with a different key"
+    } else if is_version_downgrade(&err) {
+        // `-d` above should already have covered this; a framework that
+        // ignores the flag leaves removal as the only way through.
+        "newer than the one this build ships"
+    } else {
         return Err(err);
-    }
+    };
     log::warn!(
-        "{LAUNCHER_PACKAGE}: installed copy is signed with a different key — \
+        "{LAUNCHER_PACKAGE}: installed copy is {reason} — \
          uninstalling it so the bundled launcher can take its place \
          (its settings are lost). Original error: {err}"
     );
@@ -1777,6 +1803,26 @@ mod tests {
         ));
         // Some framework builds phrase it without any INSTALL_ code.
         assert!(is_signature_conflict("signatures do not match"));
+    }
+
+    /// The launcher's versionCode tracks the release version now, so this is
+    /// a real failure mode rather than a theoretical one: an older desktop
+    /// build pushing its bundled launcher at a phone a newer release already
+    /// updated. Same recovery as a key mismatch, different cause and a
+    /// different message, so the two detectors must not overlap.
+    #[test]
+    fn detects_version_downgrades() {
+        let real = "adb: failed to install openandroiddex-launcher.apk: Failure [INSTALL_FAILED_VERSION_DOWNGRADE]";
+        assert!(is_version_downgrade(real));
+        assert!(!is_signature_conflict(real));
+        assert!(!is_version_downgrade(REAL_FAILURE));
+        for other in [
+            "Failure [INSTALL_FAILED_INSUFFICIENT_STORAGE]",
+            "Failure [INSTALL_PARSE_FAILED_NO_CERTIFICATES]",
+            "adb: device offline",
+        ] {
+            assert!(!is_version_downgrade(other), "not a downgrade: {other}");
+        }
     }
 
     /// A false positive here uninstalls the launcher and takes its settings

@@ -10,8 +10,19 @@ android {
         applicationId "com.ccrstech.openandroiddex.launcher"
         minSdk 26
         targetSdk 35
-        versionCode 2
-        versionName "0.2.0"
+        // Rewritten by .github/workflows/desktop.yml on every release, from the
+        // single version that cut it: versionName is that string verbatim, and
+        // versionCode is MAJOR*10000 + MINOR*100 + PATCH (0.3.11 -> 311), which
+        // stays monotonic for any MINOR/PATCH under 100.
+        //
+        // Both used to be pinned here and never touched, so every launcher ever
+        // built — the first prototype and the current release alike — reported
+        // 0.2.0/2. A phone therefore could not say which launcher it had, and
+        // finding a stale one meant pulling base.apk off the device and reading
+        // its manifest. Keep these in step with open-android-dex-tauri/
+        // package.json when changing them by hand.
+        versionCode 311
+        versionName "0.3.11"
 
         // The jniLibs this APK ships by hand (proot, QEMU) exist for these two
         // only, so a third ABI would produce a build that installs and then
