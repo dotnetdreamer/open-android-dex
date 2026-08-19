@@ -1,0 +1,120 @@
+[package]
+name = "open-android-dex-tauri"
+version = "0.3.9"
+description = "Samsung-DeX-style desktop for Android phones"
+authors = ["Idrees Khan"]
+license = "GPL-3.0-or-later"
+repository = "https://github.com/dotnetdreamer/Android-Dex"
+edition = "2021"
+
+[lib]
+name = "open_android_dex_tauri_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+tauri-plugin-store = "2"
+tauri-plugin-log = "2"
+tauri-plugin-single-instance = "2"
+tauri-plugin-clipboard-manager = "2"
+log = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# local-clock timestamps in the trace log, so its lines line up with the
+# phone's `logcat -v time` output and with the user's own clock
+time = { version = "0.3", features = ["formatting", "macros", "local-offset"] }
+# QR pairing (wireless.rs). default-features off drops the `image`/`svg`
+# renderers with their own dependency trees — we only ever need the module
+# matrix, which the connect screen draws as an SVG itself.
+qrcode = { version = "0.14", default-features = false }
+# Lets the frontend ask which host it is on, synchronously and before first
+# paint — the titlebar is laid out differently on macOS (traffic lights on the
+# left, drawn by the system) and the Miracast tab does not exist there at all.
+tauri-plugin-os = "2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.60", features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_Graphics_Gdi",
+    # BCryptGenRandom — the QR pairing password is a live credential for the
+    # phone, so it comes from the system CSPRNG rather than a seeded hasher.
+    "Win32_Security_Cryptography",
+    # Touchpad gestures (gestures/windows.rs). Raw input subscribes to the
+    # Precision Touchpad's HID collection; HidP_* turns its reports into
+    # contacts; the registry is where Windows keeps what ITS own three-finger
+    # gestures do, which has to be stood down while ours are live.
+    "Win32_UI_Input",
+    "Win32_Devices_HumanInterfaceDevice",
+    "Win32_System_Registry",
+    # GetCurrentThreadId — the Escape hook has no window, so its quit message
+    # is addressed to the thread (hotkeys/windows.rs). Declared rather than
+    # leaned on: tao enables it today, and a build that depends on someone
+    # else's feature list breaks the day they trim it.
+    "Win32_System_Threading",
+    # GetAsyncKeyState and the VK_* codes, so the Escape hook can tell a bare
+    # Escape from Ctrl+Escape — which is the Start menu, and not ours to eat.
+    "Win32_UI_Input_KeyboardAndMouse",
+] }
+
+# Native window control for the spawned scrcpy windows (embed/macos.rs).
+# Both crates are already in the tree — tao and wry build on them — so this
+# adds resolution, not compilation. The Accessibility API needs no crate: it is
+# six C entry points in ApplicationServices, declared in that module.
+#
+# There is no macOS counterpart to the CSPRNG entry above: `fill_random` reads
+# /dev/urandom on every non-Windows host (wireless.rs).
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-core-foundation = { version = "0.3", features = [
+    "CFBase",
+    "CFString",
+    "CFDictionary",
+    # The trackpad tap is a Mach port pumped on a run loop of its own
+    # (gestures/macos.rs), which is the only way to receive one off the main
+    # thread.
+    "CFMachPort",
+    "CFRunLoop",
+] }
+# `NSEnumerator` is what puts `iter()` on the NSSet of touches an event
+# carries; without it the set can be counted but not walked.
+objc2-foundation = { version = "0.3", default-features = false, features = [
+    "std",
+    "NSSet",
+    "NSEnumerator",
+] }
+# Quartz Event Services, for the trackpad tap. Already in the tree via
+# objc2-app-kit, so this adds resolution rather than compilation — and unlike
+# the Accessibility API in embed/macos.rs, the tap is enough C surface
+# (callback types, four enums, a Mach port) that hand-declaring it would be
+# a liability rather than six lines.
+objc2-core-graphics = { version = "0.3", default-features = false, features = [
+    "std",
+    "objc2",
+    "CGEvent",
+    "CGEventTypes",
+] }
+objc2-app-kit = { version = "0.3", default-features = false, features = [
+    "std",
+    # runningApplicationWithProcessIdentifier: takes a pid_t, which this
+    # feature is what supplies.
+    "libc",
+    "NSRunningApplication",
+    # Trackpad gestures (gestures/macos.rs). A CGEvent carries no public touch
+    # data; NSEvent does, and NSTouch is where a finger's normalised position
+    # comes from. NSWorkspace answers which application is in front, which is
+    # what stops a swipe in another app from reaching the phone.
+    "NSEvent",
+    "NSTouch",
+    # touchesMatchingPhase:inView: is declared on NSEvent but gated behind
+    # both of these, because its argument is an NSView.
+    "NSResponder",
+    "NSView",
+    "NSWorkspace",
+    # …and eventWithCGEvent: is gated behind the CoreGraphics bridge.
+    "objc2-core-graphics",
+] }

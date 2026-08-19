@@ -1,0 +1,363 @@
+@import "tailwindcss";
+
+:root {
+  --accent: #4d9fff;
+  --bg: #090b10;
+  --item-radius: 14px;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+  /* Each host's own UI face first, then the other's, then the generic. A stack
+     that named only Segoe fell through to system-ui on macOS, which is right by
+     accident — spelling it out keeps it right on purpose. */
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI Variable Text", "Segoe UI",
+    system-ui, sans-serif;
+  background: var(--bg);
+  color: #e7ecf3;
+  -webkit-user-select: none;
+  user-select: none;
+  cursor: default;
+}
+
+/* …but never in a field the user has to type into. The rule above is inherited,
+   and WebKit — the engine on macOS — honours it inside inputs too, so the
+   pairing code could be typed but not selected, corrected or copied. */
+input,
+textarea {
+  -webkit-user-select: text;
+  user-select: text;
+  cursor: text;
+}
+
+/* ── Boot backdrop: near-black with a faint cool vignette ── */
+.boot-backdrop {
+  background:
+    radial-gradient(900px 560px at 50% 28%, rgba(38, 60, 110, 0.28), transparent 70%),
+    radial-gradient(700px 500px at 85% 110%, rgba(13, 148, 136, 0.1), transparent 60%),
+    #090b10;
+}
+
+.glass {
+  background: rgba(255, 255, 255, 0.05);
+  backdrop-filter: blur(24px);
+  -webkit-backdrop-filter: blur(24px);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: var(--item-radius);
+}
+
+.titlebar-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 34px;
+  color: #aeb6c2;
+  transition: background 100ms ease, color 100ms ease;
+}
+.titlebar-btn:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: #ffffff;
+}
+.titlebar-btn.close:hover {
+  background: #e81123;
+  color: #ffffff;
+}
+
+/* ── Wordmark ── */
+.wordmark {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+}
+.wordmark-light {
+  font-size: 17px;
+  font-weight: 600;
+  letter-spacing: 0.38em;
+  color: #b9c3d2;
+}
+.wordmark-bold {
+  font-size: 38px;
+  font-weight: 800;
+  letter-spacing: 0.01em;
+  color: #ffffff;
+  text-shadow: 0 0 34px rgba(77, 159, 255, 0.35);
+}
+
+/* ── Boot stage rows ── */
+.stage-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 320px;
+}
+.stage-tag {
+  width: 34px;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: #dbe2ec;
+}
+.stage-row.idle .stage-tag {
+  color: #64748b;
+}
+.stage-sep {
+  color: #475569;
+  font-size: 12px;
+}
+.stage-text {
+  font-size: 13px;
+  color: #94a3b8;
+}
+.stage-row.error .stage-text {
+  color: #fca5a5;
+}
+.stage-row.done .stage-text {
+  color: #7dd3c0;
+}
+
+.stage-ring {
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  border: 2px solid rgba(255, 255, 255, 0.12);
+}
+.stage-ring.busy {
+  border-color: rgba(45, 212, 191, 0.18);
+  border-top-color: #2dd4bf;
+  animation: ring-spin 0.9s linear infinite;
+}
+.stage-ring.done {
+  border-color: #2dd4bf;
+  box-shadow: 0 0 12px rgba(45, 212, 191, 0.35);
+}
+.stage-ring.error {
+  border-color: #f87171;
+}
+@keyframes ring-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.fade-in {
+  animation: fade-in 320ms ease both;
+}
+@keyframes fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* ── Controls ── */
+
+/* Every button here is "glyph, then label". Laying that out as flex with a gap
+   is what keeps the two on ONE line: as plain inline text the label wraps under
+   its own icon as soon as the row is tight, which is how the footer ended up
+   two rows tall and overlapping the status line beside it. */
+.btn-accent,
+.btn-danger,
+.btn-ghost {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  white-space: nowrap;
+}
+
+.btn-accent {
+  padding: 9px 18px;
+  border-radius: var(--item-radius);
+  font-size: 13.5px;
+  font-weight: 600;
+  color: #ffffff;
+  background: linear-gradient(135deg, #2f7fe0, #4d9fff);
+  box-shadow: 0 4px 18px rgba(77, 159, 255, 0.35);
+  transition: filter 120ms ease, box-shadow 120ms ease;
+}
+.btn-accent:hover:not(:disabled) {
+  filter: brightness(1.1);
+  box-shadow: 0 4px 24px rgba(77, 159, 255, 0.5);
+}
+.btn-accent:disabled {
+  opacity: 0.4;
+  box-shadow: none;
+}
+
+.btn-danger {
+  padding: 9px 18px;
+  border-radius: var(--item-radius);
+  font-size: 13.5px;
+  font-weight: 600;
+  color: #ffb4b4;
+  background: rgba(232, 17, 35, 0.18);
+  border: 1px solid rgba(232, 17, 35, 0.35);
+  transition: background 120ms ease;
+}
+.btn-danger:hover:not(:disabled) {
+  background: rgba(232, 17, 35, 0.32);
+  color: #ffffff;
+}
+
+.btn-ghost {
+  padding: 9px 16px;
+  border-radius: var(--item-radius);
+  font-size: 13px;
+  font-weight: 600;
+  color: #d7dee8;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  transition: background 120ms ease;
+}
+.btn-ghost:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.16);
+}
+
+.info-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  color: #64748b;
+  transition: color 120ms ease, background 120ms ease;
+}
+.info-btn:hover {
+  color: #dbe2ec;
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 9px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: #aeb6c2;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+.badge-warn {
+  color: #fcd34d;
+  background: rgba(245, 158, 11, 0.14);
+  border-color: rgba(245, 158, 11, 0.3);
+}
+
+.field {
+  appearance: none;
+  padding: 9px 12px;
+  border-radius: calc(var(--item-radius) - 4px);
+  font-size: 13px;
+  color: #e7ecf3;
+  background: rgba(255, 255, 255, 0.07);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  outline: none;
+}
+.field:focus {
+  border-color: rgba(77, 159, 255, 0.6);
+}
+.field::placeholder {
+  color: #5b6675;
+}
+
+/* ── Wireless panel ── */
+
+/* The ways onto Wi-Fi. Equal widths so no one route reads as the fallback,
+   and the active tab merges into the body below it.
+
+   Auto-columns rather than a fixed `repeat(4, …)`: macOS has no Miracast
+   receiver, so it gets three tabs, and a hard count would have left a quarter
+   of the row empty there. */
+.tabs {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: 1fr;
+  gap: 0;
+}
+.tab {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  padding: 8px 4px;
+  font-size: 11.5px;
+  font-weight: 600;
+  white-space: nowrap;
+  color: #8b95a5;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-bottom: none;
+  transition: background 120ms ease, color 120ms ease;
+}
+.tab:first-child {
+  border-radius: var(--item-radius) 0 0 0;
+}
+.tab:last-child {
+  border-radius: 0 var(--item-radius) 0 0;
+}
+.tab:not(:first-child) {
+  border-left: none;
+}
+.tab:hover:not(.active) {
+  background: rgba(255, 255, 255, 0.07);
+  color: #d7dee8;
+}
+.tab.active {
+  color: #ffffff;
+  background: rgba(77, 159, 255, 0.14);
+  box-shadow: inset 0 2px 0 var(--accent);
+}
+
+/* Six digits read off a phone screen — spaced out so they can be checked
+   against it a character at a time. */
+.code-input {
+  font-family: ui-monospace, "SF Mono", Menlo, "Cascadia Mono", Consolas, monospace;
+  font-size: 17px;
+  letter-spacing: 0.36em;
+  text-align: center;
+  text-indent: 0.36em;
+}
+
+.link-btn {
+  padding: 2px 4px;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--accent);
+  transition: color 120ms ease;
+}
+.link-btn:hover:not(:disabled) {
+  color: #8fc2ff;
+  text-decoration: underline;
+}
+.link-btn:disabled {
+  opacity: 0.4;
+}
+.link-btn.muted {
+  color: #64748b;
+}
+.link-btn.muted:hover {
+  color: #aeb6c2;
+}
+
+pre.console {
+  user-select: text;
+  cursor: text;
+  font-family: ui-monospace, "SF Mono", Menlo, "Cascadia Mono", Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-all;
+}

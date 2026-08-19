@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Merged into the Info.plist the Tauri bundler generates for the macOS app
+  (declared as bundle.macOS.infoPlist in tauri.macos.conf.json). macOS-only:
+  nothing here reaches the Windows installer.
+
+  Everything below exists for ONE feature — finding a phone over Wi-Fi. The
+  three ADB routes in the connect panel (pair by QR, pair by code, reconnect to
+  a saved phone) all rest on mDNS, which adb performs on our behalf as a child
+  process. From macOS 15 on, the first multicast send raises the Local Network
+  prompt, and an app with no usage string is simply denied without one being
+  shown — so discovery comes back empty with nothing anywhere saying why. That
+  is the failure this file prevents.
+-->
+<plist version="1.0">
+<dict>
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>Open Android DeX looks for phones offering wireless debugging on your local network, so you can connect without a cable.</string>
+
+    <!--
+      The service types adb browses and advertises. macOS only permits the
+      ones listed here, and an unlisted type fails silently rather than
+      prompting: `_adb-tls-pairing` is the pairing handshake, `_adb-tls-connect`
+      is the paired phone announcing itself afterwards, and plain `_adb` is what
+      pre-Android-11 devices use.
+    -->
+    <key>NSBonjourServices</key>
+    <array>
+        <string>_adb-tls-pairing._tcp</string>
+        <string>_adb-tls-connect._tcp</string>
+        <string>_adb._tcp</string>
+    </array>
+
+    <key>LSApplicationCategoryType</key>
+    <string>public.app-category.utilities</string>
+</dict>
+</plist>

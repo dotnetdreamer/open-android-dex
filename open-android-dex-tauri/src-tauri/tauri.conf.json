@@ -1,0 +1,54 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Open Android DeX",
+  "version": "0.3.9",
+  "identifier": "com.ccrstech.openandroiddex",
+  "build": {
+    "beforeDevCommand": "npm run apk && npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run apk && npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Open Android DeX",
+        "width": 720,
+        "height": 640,
+        "minWidth": 600,
+        "minHeight": 460,
+        "center": true,
+        "decorations": false,
+        "backgroundColor": "#090b10"
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": [
+      "nsis"
+    ],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "resources": [
+      "resources/bin",
+      "resources/icon",
+      "resources/THIRD_PARTY_LICENSES.md"
+    ],
+    "publisher": "Idrees Khan",
+    "copyright": "Copyright (C) 2026 Idrees Khan",
+    "license": "GPL-3.0-or-later",
+    "licenseFile": "../../LICENSE",
+    "homepage": "https://github.com/dotnetdreamer/Android-Dex",
+    "shortDescription": "A real Android desktop for Windows and macOS",
+    "longDescription": "A real Android desktop on Windows and macOS - taskbar, freeform windows, widgets, plus Linux and Docker on the phone."
+  }
+}

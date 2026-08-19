@@ -1,0 +1,29 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "app": {
+    "windows": [
+      {
+        "title": "Open Android DeX",
+        "width": 720,
+        "height": 640,
+        "minWidth": 600,
+        "minHeight": 460,
+        "center": true,
+        "decorations": true,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true,
+        "trafficLightPosition": { "x": 14, "y": 18 },
+        "backgroundColor": "#090b10"
+      }
+    ]
+  },
+  "bundle": {
+    "targets": ["app", "dmg"],
+    "macOS": {
+      "minimumSystemVersion": "11.0",
+      "infoPlist": "Info.plist",
+      "signingIdentity": "-",
+      "hardenedRuntime": false
+    }
+  }
+}

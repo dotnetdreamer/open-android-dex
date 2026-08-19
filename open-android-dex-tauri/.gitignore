@@ -1,0 +1,24 @@
+node_modules
+dist
+*.local
+*.log
+
+# Rust build output
+src-tauri/target
+
+# Download cache for the pinned Linux device payloads (proot + Ubuntu base
+# rootfs) — scripts/build-launcher-apk.mjs refills it, checksum-gated.
+.cache/
+
+# Bundled third-party binaries (adb / scrcpy) — restore by unpacking a scrcpy
+# release for this platform into src-tauri/resources/bin. Every release bundles
+# adb alongside scrcpy, so one download covers both:
+#   Windows  scrcpy-win64-v<ver>.zip
+#   macOS    scrcpy-macos-aarch64-v<ver>.tar.gz  (Apple Silicon)
+#            scrcpy-macos-x86_64-v<ver>.tar.gz   (Intel)
+# Flatten the archive's top-level directory — the files go directly in bin/.
+# The directory itself is kept tracked via .gitkeep: tauri.conf.json lists
+# resources/bin under bundle.resources and the build script hard-fails with
+# `resource path "resources\bin" doesn't exist` when it is missing.
+src-tauri/resources/bin/*
+!src-tauri/resources/bin/.gitkeep
