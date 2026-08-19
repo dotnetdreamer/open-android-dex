@@ -21,8 +21,8 @@ android {
         // finding a stale one meant pulling base.apk off the device and reading
         // its manifest. Keep these in step with open-android-dex-tauri/
         // package.json when changing them by hand.
-        versionCode 313
-        versionName "0.3.13"
+        versionCode 314
+        versionName "0.3.14"
 
         // The jniLibs this APK ships by hand (proot, QEMU) exist for these two
         // only, so a third ABI would produce a build that installs and then
