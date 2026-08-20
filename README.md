@@ -86,7 +86,7 @@ Unplug it, and the phone is a plain phone again.
 
 ## Install
 
-Grab the latest [release](https://github.com/dotnetdreamer/Android-Dex/releases/latest).
+Grab the latest [release](https://github.com/dotnetdreamer/open-android-dex/releases/latest).
 `adb`, `scrcpy`, the launcher APK and the window daemon are all inside the
 download — nothing to install separately.
 

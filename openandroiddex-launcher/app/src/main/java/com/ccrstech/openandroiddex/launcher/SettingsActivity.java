@@ -81,7 +81,7 @@ public class SettingsActivity extends Activity {
     /** Below this the window cannot hold sidebar and content side by side. */
     private static final int NARROW_DP = 660;
 
-    private static final String REPO_URL = "https://github.com/dotnetdreamer/Android-Dex";
+    private static final String REPO_URL = "https://github.com/dotnetdreamer/open-android-dex";
     private static final String RELEASES_URL = REPO_URL + "/releases/latest";
     private static final String WMD_URL = REPO_URL + "/tree/main/openandroiddex-wmd";
 

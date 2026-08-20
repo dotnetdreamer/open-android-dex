@@ -47,7 +47,7 @@
     "copyright": "Copyright (C) 2026 Idrees Khan",
     "license": "GPL-3.0-or-later",
     "licenseFile": "../../LICENSE",
-    "homepage": "https://github.com/dotnetdreamer/Android-Dex",
+    "homepage": "https://github.com/dotnetdreamer/open-android-dex",
     "shortDescription": "A real Android desktop for Windows and macOS",
     "longDescription": "A real Android desktop on Windows and macOS - taskbar, freeform windows, widgets, plus Linux and Docker on the phone."
   }

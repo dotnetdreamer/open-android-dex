@@ -4,7 +4,7 @@ version = "0.3.14"
 description = "Samsung-DeX-style desktop for Android phones"
 authors = ["Idrees Khan"]
 license = "GPL-3.0-or-later"
-repository = "https://github.com/dotnetdreamer/Android-Dex"
+repository = "https://github.com/dotnetdreamer/open-android-dex"
 edition = "2021"
 
 [lib]

@@ -7,11 +7,11 @@
   "license": "GPL-3.0-or-later",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/dotnetdreamer/Android-Dex.git"
+    "url": "git+https://github.com/dotnetdreamer/open-android-dex.git"
   },
-  "homepage": "https://github.com/dotnetdreamer/Android-Dex",
+  "homepage": "https://github.com/dotnetdreamer/open-android-dex",
   "bugs": {
-    "url": "https://github.com/dotnetdreamer/Android-Dex/issues"
+    "url": "https://github.com/dotnetdreamer/open-android-dex/issues"
   },
   "type": "module",
   "scripts": {
