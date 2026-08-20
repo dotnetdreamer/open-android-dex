@@ -24,6 +24,7 @@ import android.view.KeyEvent;
 import android.view.ViewGroup;
 import android.webkit.WebResourceError;
 import android.webkit.WebResourceRequest;
+import android.webkit.WebResourceResponse;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
@@ -196,6 +197,7 @@ public class LinuxActivity extends Activity {
         };
         root.setBackground(theme.surface(theme.windowBg(), 0f));
         setContentView(root);
+        applyInsets();
         DexCursors.decorate(root);
         // Kick provisioning ourselves — the app owns it now, no PC push. Safe
         // and idempotent: the service no-ops if the distro is already installed
@@ -339,13 +341,84 @@ public class LinuxActivity extends Activity {
         }
     }
 
-    /** Ask the service to boot the container at (at least) our content size. */
+    /**
+     * Keep the window's content out from under the system bars.
+     *
+     * On the desktop display this does nothing at all — a scrcpy virtual
+     * display has no status bar and no gesture strip, so every inset is zero.
+     * It is the phone-only case this exists for: targetSdk 35 draws every
+     * activity edge-to-edge by default, so without it the viewer's control bar
+     * sits UNDER the status bar and the key row under the gesture strip.
+     *
+     * It has to be done here rather than in the page. `env(safe-area-inset-*)`
+     * is the obvious answer and is the wrong one: in a WebView those report the
+     * DISPLAY CUTOUT and never the system bars, so on a phone without a notch
+     * they are all zero while the status bar is very much there. The page has
+     * no safe-area handling of its own at all, deliberately: with the viewport
+     * already moved, a device where env() is NOT zero would be padded for the
+     * same cutout twice.
+     *
+     * Padding the root rather than letting the picture bleed under the bars is
+     * deliberate: this window is someone's desktop, and a status bar sitting on
+     * top of it would put XFCE's own panel and menus underneath.
+     */
+    private void applyInsets() {
+        root.setOnApplyWindowInsetsListener((v, insets) -> {
+            int left, top, right, bottom;
+            if (android.os.Build.VERSION.SDK_INT >= 30) {
+                android.graphics.Insets i = insets.getInsets(
+                        android.view.WindowInsets.Type.systemBars()
+                                | android.view.WindowInsets.Type.displayCutout());
+                left = i.left; top = i.top; right = i.right; bottom = i.bottom;
+            } else {
+                left = insets.getSystemWindowInsetLeft();
+                top = insets.getSystemWindowInsetTop();
+                right = insets.getSystemWindowInsetRight();
+                bottom = insets.getSystemWindowInsetBottom();
+            }
+            v.setPadding(left, top, right, bottom);
+            // Consume nothing: the WebView is a child of this view and the
+            // start card is its sibling, and both want to sit inside the
+            // padding just set rather than to see the insets themselves.
+            return insets;
+        });
+        root.requestApplyInsets();
+    }
+
+    /**
+     * Ask the service to boot the container at a sensible desktop size.
+     *
+     * The window's own pixels are the right answer on the desktop display: the
+     * viewer scales the framebuffer to the stage in CSS px, so a framebuffer
+     * sized in device pixels lands 1:1 whatever dpi the display-size preset
+     * picked. They are the wrong answer on the phone's own panel: at density
+     * ~2.75 this window is ~972x2062 PIXELS, so Xvnc would be told to make a
+     * desktop that shape and the viewer would squeeze it back into ~354 CSS px
+     * of width. XFCE's 10 pt menus end up under a millimetre tall, and no
+     * amount of chrome design rescues that. The phone gets a fixed landscape
+     * desktop it pans and zooms around instead — which also means rotating the
+     * phone does not reflow XFCE.
+     *
+     * The two are told apart by DISPLAY, not by density. Density looks like it
+     * would work and does not: the desktop display's density is whatever
+     * SettingsActivity's resolution and size presets computed, 1.0 only at the
+     * 1080p preset (the same trap CaptionService documents), so a 1440p desktop
+     * would have taken the phone branch and booted a 1280x800 guest into a
+     * 2560-wide window.
+     */
     private void requestStart() {
         long now = SystemClock.uptimeMillis();
         if (now - startSentAt < START_RETRY_MS) return;
         startSentAt = now;
-        final int w = Math.max(root.getWidth(), 800);
-        final int h = Math.max(root.getHeight(), 600);
+        final int w, h;
+        android.view.Display display = getDisplay();
+        if (display != null && display.getDisplayId() != android.view.Display.DEFAULT_DISPLAY) {
+            w = Math.max(root.getWidth(), 800);
+            h = Math.max(root.getHeight(), 600);
+        } else {
+            w = 1280;
+            h = 800;
+        }
         LinuxService.start(this, w, h);
         DexLog.step("linux", "START " + w + "x" + h);
     }
@@ -567,6 +640,11 @@ public class LinuxActivity extends Activity {
         root.removeView(startCard);
         startCard = null;
         startMsg = null;
+        // The WebView went in at index 0, under an opaque card, and nothing
+        // ever focused it. The viewer's keyboard button raises the IME by
+        // focusing a field inside the page, which cannot happen in a view that
+        // has never held window focus.
+        if (webView != null) webView.requestFocus();
     }
 
     /** Build the WebView (once, or on a runtime swap) underneath the card. */
@@ -579,21 +657,31 @@ public class LinuxActivity extends Activity {
         dropWebView();
         webView = new WebView(this);
         webView.setBackgroundColor(theme.windowBg());
+        // WebView's own selection handles and magnifier have nothing to grab
+        // over a canvas, and a long press is the guest's right-click.
+        webView.setLongClickable(false);
+        webView.setOnLongClickListener(v -> true);
         WebSettings settings = webView.getSettings();
         // noVNC is all JavaScript (canvas + websocket), and keeps its input
         // preferences in localStorage
         settings.setJavaScriptEnabled(true);
         settings.setDomStorageEnabled(true);
+        // Text zoom otherwise follows the system font scale, and a phone at
+        // 130% inflates the viewer's whole control bar.
+        settings.setTextZoom(100);
+        // dex.html is ours (assets/linux/novnc/, staged into the guest beside
+        // Ubuntu's own pages by LinuxService.stageViewer). It owns its own
+        // scaling, so no &scale; and `v` is the runtime pid, which is exactly
+        // the version of the staged files — websockify sends no Cache-Control,
+        // and without a changing query the WebView happily serves yesterday's
+        // page out of its heuristic cache.
         final String url = "http://127.0.0.1:" + st.port
-                + "/vnc_lite.html?password=" + st.pass + "&scale=true";
+                + "/dex.html?password=" + st.pass + "&v=" + st.rtPid;
         webView.setWebViewClient(new WebViewClient() {
-            @Override
-            public void onReceivedError(WebView view, WebResourceRequest request,
-                                        WebResourceError error) {
-                if (!request.isForMainFrame()) return;
-                // RUNNING=1 means the session leader is alive, not that
-                // websockify is accepting yet — the first load usually races
-                // it. Keep knocking; a port that never opens is an error.
+            /** RUNNING=1 means the session leader is alive, not that websockify
+             *  is accepting yet — the first load usually races it. Keep
+             *  knocking; a port that never opens is an error. */
+            private void fail(WebView view) {
                 if (++loadTries > MAX_LOAD_TRIES) {
                     connectFailed = true;
                     showError(s(R.string.ln_connect_failed), null);
@@ -602,6 +690,22 @@ public class LinuxActivity extends Activity {
                 main.postDelayed(() -> {
                     if (!destroyed && UI_VNC.equals(uiState)) view.loadUrl(url);
                 }, 1000);
+            }
+
+            @Override
+            public void onReceivedError(WebView view, WebResourceRequest request,
+                                        WebResourceError error) {
+                if (request.isForMainFrame()) fail(view);
+            }
+
+            // onReceivedError does NOT fire for HTTP status codes, and a page
+            // that 404s still "loads": without this a mis-staged viewer would
+            // sit on "Connecting to the desktop… (n)" forever and never reach
+            // the error screen with its Retry.
+            @Override
+            public void onReceivedHttpError(WebView view, WebResourceRequest request,
+                                            WebResourceResponse response) {
+                if (request.isForMainFrame()) fail(view);
             }
         });
         // Index 0: always BELOW the starting/connecting card if one is up.
@@ -630,8 +734,14 @@ public class LinuxActivity extends Activity {
         webView.evaluateJavascript(
                 // Two facts in one round-trip: is noVNC actually painting (its
                 // canvas has a real framebuffer size) and what does its status
-                // line say. Returns "<0|1>|<status text>". vnc_lite names its
-                // status element 'status'; full vnc.html uses 'noVNC_status'.
+                // line say. Returns "<0|1>|<status text>".
+                //
+                // This is a CONTRACT with the page, not an inspection of it:
+                // dex.html keeps a hidden #status carrying frozen English
+                // literals for exactly these three tokens, and keeps its only
+                // canvas inside #screen. See doc/linux-viewer.md. The
+                // 'noVNC_status' fallback is Ubuntu's own vnc.html, which is
+                // still on disk and can still be loaded by hand.
                 "(function(){"
                         + "var s=document.getElementById('status')"
                         + "||document.getElementById('noVNC_status');"

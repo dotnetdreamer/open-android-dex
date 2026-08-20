@@ -422,6 +422,20 @@ public class LinuxService extends Service {
             // them cleanly. Safe: it only touches this app's own processes.
             stopRuntime();
             File dir = Linux.root(this);
+            // Our viewer page, refreshed into the guest on every real spawn.
+            // Here rather than in provision(), which early-returns for a guest
+            // that is already set up: staging there would mean bumping
+            // FEATURE_LEVEL — and re-running the whole setup script — every
+            // time a line of the page changed.
+            try {
+                stageViewer();
+            } catch (Exception e) {
+                // The stock noVNC pages are still on disk and still work. A
+                // page that failed to copy is a viewer that 404s, which the
+                // window turns into its normal error-with-Retry; it is never a
+                // reason to abandon the container.
+                DexLog.step("linux", "viewer stage failed: " + e);
+            }
             writeFile(new File(dir, "geometry"), Math.max(w, 800) + "x" + Math.max(h, 600));
             ProcessBuilder pb = new ProcessBuilder(
                     "/system/bin/sh", Linux.rtScript(this).getAbsolutePath());
@@ -559,6 +573,30 @@ public class LinuxService extends Service {
             return;
         }
         tmp.renameTo(f);
+    }
+
+    /**
+     * Put the viewer page into the guest's noVNC web root, beside Ubuntu's own
+     * pages rather than over them.
+     *
+     * It has to be served from in there: the page imports noVNC's ES modules
+     * from /core/, websockify sends no CORS headers, and same origin is the
+     * only way that resolves. websockify's --web is a plain static root, so a
+     * file appearing in the directory is served with no configuration at all.
+     *
+     * Copied on every spawn, so an APK update ships a new page without
+     * reprovisioning — and the runtime pid the window puts in the URL is then
+     * exactly the version of what is on disk.
+     */
+    private void stageViewer() throws Exception {
+        File rootfs = new File(Linux.root(this), "rootfs");
+        if (!rootfs.isDirectory()) return;            // nothing provisioned yet
+        File dst = new File(rootfs, "usr/share/novnc");
+        dst.mkdirs();                                 // copyAsset does not
+        String[] names = getAssets().list("linux/novnc");
+        if (names == null) return;
+        for (String n : names) copyAsset("linux/novnc/" + n, new File(dst, n));
+        DexLog.step("linux", "viewer staged (" + names.length + " files)");
     }
 
     private void copyAsset(String name, File dest) throws Exception {

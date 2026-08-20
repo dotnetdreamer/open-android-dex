@@ -275,7 +275,7 @@ every other phase sends a plain dash-separated token and reads unchanged.
 | port | what |
 |---|---|
 | 5901 | Xvnc `:1` (VncAuth, password in `$ROOT/vncpass`) |
-| 6080 | websockify + noVNC http — `http://127.0.0.1:6080/vnc_lite.html?password=<vncpass>&scale=true` |
+| 6080 | websockify + noVNC http — `http://127.0.0.1:6080/dex.html?password=<vncpass>&v=<rtpid>`, our viewer page (`doc/linux-viewer.md`), staged into the web root beside Ubuntu's own `vnc.html` and `vnc_lite.html` |
 
 ## Diagnosing a failed phase
 

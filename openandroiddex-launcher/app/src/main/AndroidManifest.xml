@@ -157,7 +157,14 @@
              Same task rules as Settings, for the same reasons: singleTask so
              the tile refocuses the open session instead of stacking a second
              viewer, and its own taskAffinity so it never joins — and never
-             drags — the launcher's task. -->
+             drags — the launcher's task.
+
+             adjustResize, spelled out because the default is not it: an
+             unspecified soft-input mode usually resolves to PAN, which slides
+             the whole window up when the keyboard opens and takes the viewer's
+             control bar off the top of the screen with it. Resizing instead
+             lets the page see the space it has left (visualViewport) and put
+             its key row above the keyboard. -->
         <activity
             android:name=".LinuxActivity"
             android:exported="false"
@@ -165,6 +172,7 @@
             android:launchMode="singleTask"
             android:taskAffinity="com.ccrstech.openandroiddex.launcher.linux"
             android:resizeableActivity="true"
+            android:windowSoftInputMode="adjustResize"
             android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|navigation|uiMode" />
 
         <!-- In-desktop Docker window (the container list, the image list and

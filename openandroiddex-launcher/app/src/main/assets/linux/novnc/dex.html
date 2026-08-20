@@ -1,0 +1,236 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1">
+<meta name="color-scheme" content="dark">
+<meta name="theme-color" content="#0a0c10">
+<title>Linux</title>
+<link rel="stylesheet" href="dex.css">
+</head>
+<!--
+  The Linux window's viewer.
+
+  Ubuntu's own noVNC pages are the alternative and they were what this window
+  loaded until now: vnc_lite.html puts a blue strip across the top carrying a
+  status line and one button, "Send CtrlAltDel". On the desktop display that is
+  a second title bar under the one CaptionService already draws; on a phone,
+  where this window is the whole screen and the only pointer is a finger, it is
+  a strip that costs 30 px and answers none of the questions a finger asks —
+  how to right-click, how to reach a keyboard, how to see a 1280 px desktop
+  through a 360 px window.
+
+  So the page is ours. It is served from inside the guest, beside the stock
+  pages, because noVNC's ES modules under /core/ must be importable and
+  websockify sends no CORS headers — same origin is the only way in.
+
+  Three elements here are a contract with LinuxActivity.probeVncHealth(), which
+  reads this document every 1500 ms to decide whether the desktop is up:
+  #status (its textContent, hidden but always present), #screen, and the single
+  <canvas> that RFB creates inside it. See doc/linux-viewer.md.
+-->
+<body data-chrome="docked" data-mode="direct">
+
+<!-- The picture. #stage clips; #screen is SIZED and TRANSLATED, never scaled —
+     a scale anywhere between the canvas and the viewport moves the box that
+     noVNC measures clicks against without moving its idea of the scale, and
+     every click lands somewhere else with nothing in the console. -->
+<div id="stage">
+  <div id="screen"></div>
+  <div id="vcur" hidden aria-hidden="true"></div>
+  <div id="armed" hidden aria-hidden="true"></div>
+</div>
+
+<!-- Read by the Activity every poll. Frozen English literals, written from one
+     table in dex.js, never interpolated and never localised: the Java side
+     decides "this session is dead" by searching this text for "closed",
+     "Failed" and "went wrong". "Loading" is in the markup because the probe can
+     fire while the module is still being fetched. -->
+<div id="status" hidden aria-hidden="true">Loading</div>
+
+<!-- Chrome. pointer-events:none, so hover, the guest's X cursor and every real
+     mouse event reach the canvas underneath exactly as they did before this
+     page existed. Only the controls opt back in. -->
+<div id="chrome">
+
+  <header id="bar">
+    <div class="tb-group tb-left">
+      <span class="status-pill">
+        <i id="dot" class="dot" aria-hidden="true"></i>
+        <span id="label" class="status">Connecting…</span>
+      </span>
+    </div>
+
+    <div class="tb-group tb-mid" role="group" aria-label="Controls">
+      <button id="mode" class="key" type="button" tabindex="-1"
+              title="Interaction method" aria-label="Interaction method: Direct">
+        <svg class="ic-direct" viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M5 3.2 18.5 11l-5.6 1.6L10 19 5 3.2Z" fill="currentColor"/></svg>
+        <svg class="ic-touch" viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M9 11V6.5a1.6 1.6 0 0 1 3.2 0V11m0-1.2a1.5 1.5 0 0 1 3 0V11m0-.6a1.5 1.5 0 0 1 3 0V15a5 5 0 0 1-5 5h-1.6a5 5 0 0 1-4-2l-2.7-3.6a1.5 1.5 0 0 1 2.3-1.9L9 14.2" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <svg class="ic-mouse" viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2.5" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M10 8.8 15.6 12.4l-2.5.6-1.1 2.4-2-6.6Z" fill="currentColor"/></svg>
+      </button>
+      <button id="kb" class="key" type="button" tabindex="-1"
+              title="Keyboard" aria-label="Show keyboard">
+        <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><rect x="2.5" y="6" width="19" height="12" rx="2.2" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M6 9.5h.01M9 9.5h.01M12 9.5h.01M15 9.5h.01M18 9.5h.01M6 12.5h.01M9 12.5h.01M12 12.5h.01M15 12.5h.01M18 12.5h.01M8 15.3h8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+      </button>
+      <button id="keys" class="key" type="button" tabindex="-1"
+              title="Keys" aria-label="Keys">
+        <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><rect x="3" y="4" width="8" height="7" rx="1.8" fill="none" stroke="currentColor" stroke-width="1.7"/><rect x="13" y="4" width="8" height="7" rx="1.8" fill="none" stroke="currentColor" stroke-width="1.7"/><rect x="3" y="13" width="18" height="7" rx="1.8" fill="none" stroke="currentColor" stroke-width="1.7"/></svg>
+      </button>
+      <button id="zoom" class="key" type="button" tabindex="-1"
+              title="Zoom" aria-label="Zoom">
+        <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M15.4 15.4 21 21M7.6 10.5h5.8M10.5 7.6v5.8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+      </button>
+    </div>
+
+    <div class="tb-group tb-right">
+      <button id="collapse" class="key" type="button" tabindex="-1"
+              title="Hide the bar" aria-label="Hide the bar">
+        <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M6 14.5 12 8.5l6 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </button>
+    </div>
+  </header>
+
+  <!-- Zoom is one bar button that opens this, rather than three buttons in the
+       bar: four controls plus a status pill plus the collapse chevron is
+       already 312 px of the 360 a portrait phone has. -->
+  <div id="zoom-strip" hidden role="group" aria-label="Zoom">
+    <button id="zoom-out" class="key" type="button" tabindex="-1" title="Zoom out" aria-label="Zoom out">
+      <svg viewBox="0 0 24 24" width="19" height="19" aria-hidden="true"><path d="M6 12h12" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+    </button>
+    <button id="zoom-value" class="zval" type="button" tabindex="-1" aria-label="Zoom level">Fit</button>
+    <button id="zoom-in" class="key" type="button" tabindex="-1" title="Zoom in" aria-label="Zoom in">
+      <svg viewBox="0 0 24 24" width="19" height="19" aria-hidden="true"><path d="M6 12h12M12 6v12" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+    </button>
+  </div>
+
+  <!-- The collapsed control. Draggable, snaps to a side, and tucks itself half
+       off that side once it has been left alone. -->
+  <button id="bubble" class="bubble" type="button" tabindex="-1"
+          title="Show the controls" aria-label="Show the controls">
+    <svg class="ic-open" viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path d="M14.5 6 8.5 12l6 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    <svg class="ic-close" viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+  </button>
+
+  <!-- The same four actions as the bar, stacked, plus a way back to the bar. -->
+  <div id="panel" hidden role="group" aria-label="Controls">
+    <button id="p-mode" class="pkey" type="button" tabindex="-1" title="Interaction method" aria-label="Interaction method">
+      <svg class="ic-direct" viewBox="0 0 24 24" width="21" height="21" aria-hidden="true"><path d="M5 3.2 18.5 11l-5.6 1.6L10 19 5 3.2Z" fill="currentColor"/></svg>
+      <svg class="ic-touch" viewBox="0 0 24 24" width="21" height="21" aria-hidden="true"><path d="M9 11V6.5a1.6 1.6 0 0 1 3.2 0V11m0-1.2a1.5 1.5 0 0 1 3 0V11m0-.6a1.5 1.5 0 0 1 3 0V15a5 5 0 0 1-5 5h-1.6a5 5 0 0 1-4-2l-2.7-3.6a1.5 1.5 0 0 1 2.3-1.9L9 14.2" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      <svg class="ic-mouse" viewBox="0 0 24 24" width="21" height="21" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2.5" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M10 8.8 15.6 12.4l-2.5.6-1.1 2.4-2-6.6Z" fill="currentColor"/></svg>
+    </button>
+    <button id="p-kb" class="pkey" type="button" tabindex="-1" title="Keyboard" aria-label="Show keyboard">
+      <svg viewBox="0 0 24 24" width="21" height="21" aria-hidden="true"><rect x="2.5" y="6" width="19" height="12" rx="2.2" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M6 9.5h.01M9 9.5h.01M12 9.5h.01M15 9.5h.01M18 9.5h.01M6 12.5h.01M9 12.5h.01M12 12.5h.01M15 12.5h.01M18 12.5h.01M8 15.3h8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+    </button>
+    <button id="p-keys" class="pkey" type="button" tabindex="-1" title="Keys" aria-label="Keys">
+      <svg viewBox="0 0 24 24" width="21" height="21" aria-hidden="true"><rect x="3" y="4" width="8" height="7" rx="1.8" fill="none" stroke="currentColor" stroke-width="1.7"/><rect x="13" y="4" width="8" height="7" rx="1.8" fill="none" stroke="currentColor" stroke-width="1.7"/><rect x="3" y="13" width="18" height="7" rx="1.8" fill="none" stroke="currentColor" stroke-width="1.7"/></svg>
+    </button>
+    <button id="p-zoom" class="pkey" type="button" tabindex="-1" title="Zoom" aria-label="Zoom">
+      <svg viewBox="0 0 24 24" width="21" height="21" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M15.4 15.4 21 21M7.6 10.5h5.8M10.5 7.6v5.8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+    </button>
+    <span class="pkey-sep" aria-hidden="true"></span>
+    <button id="dock" class="pkey" type="button" tabindex="-1" title="Dock to the top" aria-label="Dock to the top">
+      <svg viewBox="0 0 24 24" width="21" height="21" aria-hidden="true"><path d="M4 5h16" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="M12 20v-9m0 0-4 4m4-4 4 4" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" transform="rotate(180 12 15.5)"/></svg>
+    </button>
+  </div>
+
+  <!-- Everything a desktop needs and a phone keyboard does not have. Esc is
+       here for a reason that has nothing to do with phones: while the DeX
+       desktop is fullscreen the host's low-level hook swallows a bare Escape
+       in both directions, so this row is the only way to send one to the
+       guest. See doc/escape-leaves-fullscreen.md. -->
+  <div id="keys-row" hidden role="group" aria-label="Keys"></div>
+
+  <div id="coach" class="coach" hidden></div>
+  <div id="toast" class="toast" hidden aria-live="polite"></div>
+</div>
+
+<!-- Focusing a real, on-screen-but-invisible field is the only thing a phone
+     browser raises its keyboard for, and the only way an IME's composed text
+     (accents, CJK, autocorrect) is ever seen. Never display:none — that would
+     make it unfocusable. -->
+<textarea id="sink" class="sink" autocomplete="off" autocorrect="off"
+          autocapitalize="off" spellcheck="false" aria-hidden="true"></textarea>
+
+<div id="scrim" hidden></div>
+
+<section id="sheet" hidden aria-labelledby="sheet-title" role="dialog" aria-modal="true">
+  <div class="sheet-head">
+    <strong id="sheet-title" class="panel-title">Interaction method</strong>
+    <button id="sheet-close" class="key" type="button" tabindex="-1" title="Close" aria-label="Close">
+      <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+    </button>
+  </div>
+
+  <div class="sheet-body">
+    <button class="opt" id="opt-direct" type="button" tabindex="-1" role="radio" aria-checked="true">
+      <span class="opt-ic" aria-hidden="true"><svg viewBox="0 0 24 24" width="22" height="22"><path d="M5 3.2 18.5 11l-5.6 1.6L10 19 5 3.2Z" fill="currentColor"/></svg></span>
+      <span class="opt-text">
+        <span class="opt-name">Direct</span>
+        <span class="hint">The pointer goes where you point. Best with a mouse.</span>
+        <span class="opt-list">
+          <span><b>Mouse</b> Works as usual</span><span><b>Tap</b> Click</span>
+          <span><b>Two-finger tap</b> Right-click</span><span><b>Drag</b> Drag</span>
+          <span><b>Two fingers</b> Scroll</span><span><b>Wheel</b> Scroll</span>
+        </span>
+      </span>
+      <span class="opt-tick" aria-hidden="true"><svg viewBox="0 0 24 24" width="18" height="18"><path d="m5 12.5 4.5 4.5L19 7" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
+    </button>
+
+    <button class="opt" id="opt-touch" type="button" tabindex="-1" role="radio" aria-checked="false">
+      <span class="opt-ic" aria-hidden="true"><svg viewBox="0 0 24 24" width="22" height="22"><path d="M9 11V6.5a1.6 1.6 0 0 1 3.2 0V11m0-1.2a1.5 1.5 0 0 1 3 0V11m0-.6a1.5 1.5 0 0 1 3 0V15a5 5 0 0 1-5 5h-1.6a5 5 0 0 1-4-2l-2.7-3.6a1.5 1.5 0 0 1 2.3-1.9L9 14.2" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
+      <span class="opt-text">
+        <span class="opt-name">Touch</span>
+        <span class="hint">Use your device as a remote touchscreen.</span>
+        <span class="opt-list">
+          <span><b>Tap</b> Click</span><span><b>Long tap</b> Right-click</span>
+          <span><b>One finger</b> Scroll</span><span><b>Two fingers</b> Pan the view</span>
+          <span><b>Pinch</b> Zoom</span><span><b>Long press and drag</b> Select</span>
+        </span>
+      </span>
+      <span class="opt-tick" aria-hidden="true"><svg viewBox="0 0 24 24" width="18" height="18"><path d="m5 12.5 4.5 4.5L19 7" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
+    </button>
+
+    <button class="opt" id="opt-mouse" type="button" tabindex="-1" role="radio" aria-checked="false">
+      <span class="opt-ic" aria-hidden="true"><svg viewBox="0 0 24 24" width="22" height="22"><rect x="3" y="5" width="18" height="14" rx="2.5" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M10 8.8 15.6 12.4l-2.5.6-1.1 2.4-2-6.6Z" fill="currentColor"/></svg></span>
+      <span class="opt-text">
+        <span class="opt-name">Mouse</span>
+        <span class="hint">Use your device as a touchpad to control the mouse.</span>
+        <span class="opt-list">
+          <span><b>Tap</b> Click</span><span><b>Long tap</b> Right-click</span>
+          <span><b>Drag</b> Move the mouse</span><span><b>Two fingers</b> Scroll</span>
+          <span><b>Pinch</b> Zoom</span><span><b>Double-tap and drag</b> Select</span>
+        </span>
+      </span>
+      <span class="opt-tick" aria-hidden="true"><svg viewBox="0 0 24 24" width="18" height="18"><path d="m5 12.5 4.5 4.5L19 7" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
+    </button>
+
+    <div class="field" id="field-sens">
+      <label class="field-label" for="sens">Pointer speed</label>
+      <input id="sens" type="range" min="1" max="5" step="1" value="3" tabindex="-1">
+      <p class="hint">Slower on the left, faster on the right. Mouse only.</p>
+    </div>
+
+    <div class="field">
+      <span class="field-label">Scrolling</span>
+      <div class="chips" role="radiogroup" aria-label="Scrolling">
+        <button class="chip" id="scroll-natural" type="button" tabindex="-1" role="radio" aria-checked="true">Natural</button>
+        <button class="chip" id="scroll-reverse" type="button" tabindex="-1" role="radio" aria-checked="false">Reverse</button>
+      </div>
+    </div>
+
+    <div class="field" id="field-arm">
+      <span class="field-label">Next tap</span>
+      <div class="chips">
+        <button class="chip" id="arm-middle" type="button" tabindex="-1">Middle click</button>
+        <button class="chip" id="arm-right" type="button" tabindex="-1">Right click</button>
+      </div>
+      <p class="hint">Arms one tap, then goes back to normal.</p>
+    </div>
+
+    <p class="hint" id="sheet-foot">A keyboard or mouse plugged into the desktop always works as it normally does.</p>
+  </div>
+</section>
+
+<script type="module" src="dex.js"></script>
+</body>
+</html>

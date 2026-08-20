@@ -1,0 +1,619 @@
+/*
+ * The Linux viewer's skin.
+ *
+ * The desktop is the only thing here that should carry colour, so every
+ * control is near-black, translucent and quiet, and the picture's edges stay
+ * the brightest thing on screen. The tokens are the web viewer's
+ * (assets/web/style.css) with three colours retuned: --bg and --bg-2 to the
+ * caption strip and window fill DexTheme paints directly above and behind this
+ * page, and --accent to the house blue, so the bar reads as continuous with
+ * the title bar rather than as a second window.
+ *
+ * Two rules that are correctness, not taste:
+ *   Nothing between the canvas and the viewport ever carries a scale. noVNC
+ *   measures clicks against getBoundingClientRect(), which a transform changes
+ *   and its own idea of the scale does not.
+ *   Nothing that spans the picture carries a backdrop-filter. A blur over a
+ *   continuously repainting canvas forces a full readback every frame.
+ */
+
+:root {
+  /* ground + surfaces */
+  --bg: #0a0c10;
+  --bg-2: #0d1117;
+  --surface: #14161b;
+  --surface-2: #1a1d23;
+  --surface-3: #22262e;
+  --line: #282c34;
+  --line-soft: #1f232a;
+
+  /* ink */
+  --text: #eef1f5;
+  --dim: #a6adba;
+  --faint: #6b7280;
+
+  /* accent */
+  --accent: #4d9fff;
+  --accent-2: #6f7bff;
+  --accent-ink: #ffffff;
+  --accent-soft: rgba(77, 159, 255, .15);
+  --accent-line: rgba(77, 159, 255, .45);
+  --accent-glow: rgba(77, 159, 255, .28);
+
+  /* semantic */
+  --ok: #37d39b;
+  --warn: #ffb454;
+  --danger: #ff6b63;
+  --danger-soft: rgba(255, 107, 99, .14);
+
+  /* shape + motion */
+  --r-sm: 9px;
+  --r-md: 12px;
+  --r-lg: 16px;
+  --r-xl: 22px;
+  --bar: 56px;
+  --shadow: 0 18px 50px -12px rgba(0, 0, 0, .6);
+  --ease: cubic-bezier(.22, .61, .36, 1);
+  --fast: 140ms var(--ease);
+  --slow: 320ms var(--ease);
+
+  /* this page */
+  --key: 44px;        /* a bar button. Over a live desktop a mis-tap goes THROUGH */
+  --bubble: 56px;
+  --pkey: 48px;       /* Android's 48dp minimum, for the floating panel */
+  --keyrow: 44px;
+  --kb-h: 0px;        /* IME height, written by JS from visualViewport */
+  --vv-top: 0px;      /* visualViewport.offsetTop, for the pan case */
+  --z-chrome: 10100;  /* above noVNC's #noVNC_mouse_capture_elem, which is 10000 */
+  --z-scrim: 10200;
+  --z-sheet: 10300;
+}
+
+/* A real mouse is driving: shrink the chrome to desktop proportions. Set once,
+   never cleared — a device with both grammars keeps the smaller one. */
+body.is-desktop { --bar: 44px; --key: 38px; }
+
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+
+html, body {
+  position: fixed;
+  inset: 0;
+  margin: 0;
+  overflow: hidden;
+  background: var(--bg-2);
+  color: var(--text);
+  font: 14px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, Ubuntu, Cantarell, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  overscroll-behavior: none;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+button, select, input, textarea { font: inherit; color: inherit; }
+button { background: none; border: 0; padding: 0; cursor: pointer; }
+:focus-visible { outline: 2px solid var(--accent-line); outline-offset: 2px; }
+svg { pointer-events: none; -webkit-user-drag: none; }
+
+/*
+ * No env(safe-area-inset-*) anywhere in this file, deliberately. LinuxActivity
+ * pads its root view with the real window insets, so this page is only ever
+ * given a viewport that is already clear of the status bar, the gesture strip
+ * and any cutout. env() would be the obvious way to do it here and is the
+ * wrong one twice over: in a WebView it reports the DISPLAY CUTOUT and never
+ * the system bars, so it is zero on a notchless phone whose status bar is
+ * covering the bar anyway — and now that Android has moved the viewport, a
+ * device where it is NOT zero would be padded for the same cutout twice.
+ */
+
+/* The compositor must not consume a touch over the picture: a preventDefault()
+   in a handler decides too late for a fling the scroller has already taken. */
+#stage, #screen, #screen * { touch-action: none; }
+.key, .pkey, .kk, .chip, .bubble, .zval, .opt { touch-action: manipulation; }
+.sheet-body { touch-action: pan-y; overscroll-behavior: contain; }
+#panel { touch-action: pan-y; overscroll-behavior: contain; }
+#keys-row { touch-action: pan-x; overscroll-behavior: contain; }
+
+/* ══ the picture ═══════════════════════════════════════════════════════════ */
+
+#stage {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  display: grid;
+  place-items: center;
+  background: var(--bg-2);
+}
+
+#screen {
+  position: relative;
+  will-change: transform;
+}
+
+/* RFB writes inline overflow on its own screen div from _fixScrollbars(); a
+   1 px scrollbar in there jitters the whole picture. */
+#screen > div { overflow: hidden !important; }
+
+/* The mouse-mode pointer: a ring around wherever the guest's own cursor is,
+   never a second arrow. Its centre is the hotspot. */
+#vcur {
+  position: absolute;
+  left: 0; top: 0;
+  width: 26px; height: 26px;
+  margin: -13px 0 0 -13px;
+  border: 2px solid var(--accent-line);
+  border-radius: 50%;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, .5), 0 0 12px var(--accent-glow);
+  pointer-events: none;
+  transition: opacity var(--slow);
+  will-change: transform;
+}
+#vcur.idle { opacity: .3; }
+
+/* Shown while a long press is deciding between a right-click and a drag. */
+#armed {
+  position: absolute;
+  left: 0; top: 0;
+  width: 36px; height: 36px;
+  margin: -18px 0 0 -18px;
+  border: 2px solid var(--accent-line);
+  border-radius: 50%;
+  background: var(--accent-soft);
+  pointer-events: none;
+  animation: fade-in var(--fast) var(--ease) forwards;
+}
+
+/* ══ chrome ════════════════════════════════════════════════════════════════ */
+
+#chrome {
+  position: absolute;
+  inset: 0;
+  z-index: var(--z-chrome);
+  pointer-events: none;
+  transform: translateZ(0);
+}
+#chrome > * { pointer-events: auto; }
+
+#bar {
+  position: absolute;
+  top: var(--vv-top);
+  left: 0; right: 0;
+  height: var(--bar);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 12px;
+  background: linear-gradient(180deg, var(--surface), var(--bg-2));
+  border-bottom: 1px solid var(--line);
+  transition: transform var(--slow), opacity var(--fast);
+}
+body:not([data-chrome="docked"]) #bar {
+  transform: translateY(-100%);
+  opacity: 0;
+  pointer-events: none;
+}
+
+.tb-group { display: flex; align-items: center; gap: 6px; }
+.tb-left { flex: 1 1 0; min-width: 0; }
+.tb-mid {
+  flex: 0 0 auto;
+  gap: 4px;
+  padding: 3px;
+  background: var(--bg-2);
+  border: 1px solid var(--line-soft);
+  border-radius: var(--r-md);
+}
+.tb-right { flex: 1 1 0; justify-content: flex-end; }
+
+.status-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 6px 11px 6px 10px;
+  background: var(--bg-2);
+  border: 1px solid var(--line-soft);
+  border-radius: 999px;
+}
+
+.status {
+  color: var(--dim);
+  font-size: 12.5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  transition: opacity var(--slow);
+}
+.status.quiet { opacity: 0; width: 0; }
+
+.dot {
+  width: 8px; height: 8px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: var(--faint);
+  transition: background var(--fast), box-shadow var(--fast);
+}
+.dot.live { background: var(--ok); box-shadow: 0 0 0 4px rgba(55, 211, 155, .16); animation: pulse 2.4s var(--ease) infinite; }
+.dot.bad { background: var(--danger); box-shadow: 0 0 0 4px var(--danger-soft); }
+
+.key {
+  display: inline-grid;
+  place-items: center;
+  min-width: var(--key);
+  height: var(--key);
+  padding: 0 9px;
+  color: var(--dim);
+  border: 1px solid transparent;
+  border-radius: 10px;
+  transition: background var(--fast), color var(--fast), border-color var(--fast);
+}
+.key:hover { background: var(--surface-2); color: var(--text); }
+.key:active { background: var(--surface-3); }
+.key.on { background: var(--accent-soft); color: var(--accent); border-color: var(--accent-line); }
+
+/* One button, three icons: whichever method is live is the one on the face. */
+.ic-direct, .ic-touch, .ic-mouse { display: none; }
+body[data-mode="direct"] .ic-direct,
+body[data-mode="touch"] .ic-touch,
+body[data-mode="mouse"] .ic-mouse { display: block; }
+
+/* Pointer speed and the arm-a-tap chips only mean anything to the two methods
+   that read touches. Direct never sees one, so they go rather than grey out —
+   a dimmed control that still takes a tap and does nothing is worse than an
+   absent one. */
+body[data-mode="direct"] #field-sens,
+body[data-mode="direct"] #field-arm { display: none; }
+
+/* A connection that has gone means nothing on the bar can do anything. */
+body.is-down .key, body.is-down .pkey, body.is-down .kk { color: var(--faint); }
+
+/* ══ zoom strip ════════════════════════════════════════════════════════════ */
+
+#zoom-strip {
+  position: absolute;
+  top: calc(var(--vv-top) + var(--bar) + 10px);
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 4px;
+  background: rgba(16, 18, 22, .82);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  box-shadow: var(--shadow);
+  backdrop-filter: blur(8px);
+  animation: fade-in var(--fast) var(--ease) forwards;
+}
+/* Collapsed: the strip follows the panel instead of the bar. JS writes top/left
+   and clears the centring transform. */
+body:not([data-chrome="docked"]) #zoom-strip { top: auto; left: auto; transform: none; }
+
+.zval {
+  min-width: 58px;
+  height: calc(var(--key) - 8px);
+  padding: 0 8px;
+  color: var(--text);
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+  border-radius: 999px;
+  background: var(--surface-2);
+}
+.zval:active { background: var(--surface-3); }
+
+/* ══ the bubble and the panel ══════════════════════════════════════════════ */
+
+.bubble {
+  position: absolute;
+  width: var(--bubble);
+  height: var(--bubble);
+  display: grid;
+  place-items: center;
+  color: var(--text);
+  background: rgba(16, 18, 22, .82);
+  border: 1px solid var(--accent-line);
+  border-radius: 999px;
+  box-shadow: var(--shadow);
+  backdrop-filter: blur(8px);
+  transition: opacity var(--slow), translate var(--slow), transform var(--fast);
+}
+body[data-chrome="docked"] .bubble { display: none; }
+.bubble:active { transform: scale(.94); }
+.bubble .ic-close { display: none; }
+body[data-chrome="panel"] .bubble .ic-open { display: none; }
+body[data-chrome="panel"] .bubble .ic-close { display: block; }
+
+/* Left-edge parking mirrors the chevron, so it always points away from the
+   edge it is tucked against — "pull the controls out of there". */
+.bubble.at-left .ic-open { transform: rotate(180deg); }
+
+/* Left alone, it gets out of the way without leaving: the hit rect stays
+   56×56, so the tap that wakes it is the tap that opens it. */
+.bubble.tuck { opacity: .45; }
+.bubble.tuck.at-right { translate: 40% 0; }
+.bubble.tuck.at-left { translate: -40% 0; }
+.bubble.drag { transition: none; opacity: 1; }
+.bubble.wiggle { animation: wiggle 600ms var(--ease) 1; }
+
+#panel {
+  position: absolute;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 6px;
+  width: calc(var(--pkey) + 12px);
+  max-height: calc(100% - var(--kb-h) - 16px);
+  overflow-y: auto;
+  scrollbar-width: none;
+  background: rgba(16, 18, 22, .82);
+  border: 1px solid var(--line);
+  border-radius: var(--r-xl);
+  box-shadow: var(--shadow);
+  backdrop-filter: blur(8px);
+  animation: grow 180ms var(--ease) forwards;
+}
+#panel::-webkit-scrollbar { display: none; }
+
+.pkey {
+  display: grid;
+  place-items: center;
+  width: var(--pkey);
+  height: var(--pkey);
+  flex: 0 0 auto;
+  color: var(--dim);
+  border: 1px solid transparent;
+  border-radius: var(--r-md);
+  transition: background var(--fast), color var(--fast), border-color var(--fast);
+}
+.pkey:hover { background: var(--surface-2); color: var(--text); }
+.pkey:active { background: var(--surface-3); }
+.pkey.on { background: var(--accent-soft); color: var(--accent); border-color: var(--accent-line); }
+
+.pkey-sep {
+  width: 26px;
+  height: 1px;
+  flex: 0 0 auto;
+  background: var(--line);
+  margin: 2px 0;
+}
+
+/* ══ the keys row ══════════════════════════════════════════════════════════ */
+
+#keys-row {
+  position: absolute;
+  left: 0; right: 0;
+  bottom: var(--kb-h);
+  height: var(--keyrow);
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0 10px;
+  overflow-x: auto;
+  scrollbar-width: none;
+  background: linear-gradient(0deg, var(--surface), var(--bg-2));
+  border-top: 1px solid var(--line);
+  transition: transform var(--slow);
+}
+#keys-row::-webkit-scrollbar { display: none; }
+
+.kk {
+  min-width: 44px;
+  height: 34px;
+  flex: 0 0 auto;
+  padding: 0 10px;
+  color: var(--dim);
+  font-size: 12.5px;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  transition: background var(--fast), color var(--fast), border-color var(--fast);
+}
+.kk:active { background: var(--surface-3); color: var(--text); }
+.kk.latched { background: var(--accent-soft); color: var(--accent); border-color: var(--accent-line); }
+.kk.locked { box-shadow: 0 0 0 1px var(--accent-line) inset; }
+.kk.wide { min-width: 96px; }
+
+/* ══ coach mark and toast ══════════════════════════════════════════════════ */
+
+.coach, .toast {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  max-width: min(340px, calc(100% - 32px));
+  padding: 9px 14px;
+  color: var(--dim);
+  font-size: 12.5px;
+  text-align: center;
+  background: rgba(16, 18, 22, .7);
+  border: 1px solid var(--line-soft);
+  border-radius: 999px;
+  backdrop-filter: blur(6px);
+  pointer-events: none;
+  animation: fade-in var(--fast) var(--ease) forwards;
+}
+.coach { bottom: 28px; }
+.toast { bottom: 28px; }
+body.keys .coach, body.keys .toast { bottom: calc(var(--keyrow) + var(--kb-h) + 18px); }
+
+/* #chrome > * opts every child back into hit-testing so the controls work.
+   These two are decoration laid over someone's desktop and have to stay
+   transparent to it — and an id-qualified selector is what beats it. */
+#chrome > .coach, #chrome > .toast { pointer-events: none; }
+
+/* ══ the keyboard sink ═════════════════════════════════════════════════════ */
+
+/* Off-screen, never display:none — a hidden field cannot take focus, and focus
+   is the only thing that raises the IME. */
+.sink {
+  position: fixed;
+  left: -9999px;
+  top: 0;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  border: 0;
+  resize: none;
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+/* ══ the interaction sheet ═════════════════════════════════════════════════ */
+
+#scrim {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-scrim);
+  background: rgba(4, 5, 7, .5);
+  animation: fade-in var(--fast) var(--ease) forwards;
+}
+
+#sheet {
+  position: fixed;
+  left: 0; right: 0; bottom: 0;
+  z-index: var(--z-sheet);
+  display: flex;
+  flex-direction: column;
+  max-height: 76%;
+  background: var(--surface);
+  border-top: 1px solid var(--line);
+  border-radius: var(--r-xl) var(--r-xl) 0 0;
+  box-shadow: var(--shadow);
+  transform: translateY(100%);
+  transition: transform var(--slow), opacity var(--slow);
+}
+#sheet.open { transform: translateY(0); }
+
+.sheet-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 14px 12px 10px 18px;
+  flex: 0 0 auto;
+}
+.panel-title { font-size: 14.5px; font-weight: 600; }
+
+.sheet-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 4px 16px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.opt {
+  display: grid;
+  grid-template-columns: 28px 1fr 20px;
+  align-items: start;
+  gap: 12px;
+  width: 100%;
+  padding: 13px 14px;
+  text-align: left;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  transition: background var(--fast), border-color var(--fast);
+}
+.opt[aria-checked="true"] { background: var(--accent-soft); border-color: var(--accent-line); }
+.opt-ic { color: var(--dim); padding-top: 1px; }
+.opt[aria-checked="true"] .opt-ic { color: var(--accent); }
+.opt-text { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.opt-name { font-size: 14.5px; font-weight: 600; color: var(--text); }
+.opt-tick { color: var(--accent); opacity: 0; padding-top: 2px; }
+.opt[aria-checked="true"] .opt-tick { opacity: 1; }
+
+.opt-list {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 3px 12px;
+  margin-top: 4px;
+  font-size: 11.5px;
+  color: var(--faint);
+}
+.opt-list span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.opt-list b { color: var(--dim); font-weight: 500; }
+@media (max-width: 380px) { .opt-list { grid-template-columns: 1fr; } }
+
+.field { display: flex; flex-direction: column; gap: 8px; }
+.field-label { font-size: 12.5px; color: var(--dim); }
+.hint { margin: 0; font-size: 11.5px; color: var(--faint); }
+
+.chips { display: flex; flex-wrap: wrap; gap: 8px; }
+.chip {
+  min-height: 38px;
+  padding: 0 14px;
+  color: var(--dim);
+  font-size: 12.5px;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+}
+.chip:active { background: var(--surface-3); }
+.chip[aria-checked="true"], .chip.on { background: var(--accent-soft); color: var(--accent); border-color: var(--accent-line); }
+
+#sens {
+  width: 100%;
+  height: 34px;
+  accent-color: var(--accent);
+  background: transparent;
+}
+
+/* ══ responsive ════════════════════════════════════════════════════════════ */
+
+@media (max-width: 560px) {
+  :root { --bar: 52px; }
+  #label { display: none; }             /* the dot carries the state */
+  .status-pill { padding: 7px; }
+  .tb-left, .tb-right { flex: 0 0 auto; }
+  .tb-mid { flex: 1 1 auto; justify-content: space-between; }
+}
+
+@media (max-height: 420px) {
+  :root { --pkey: 42px; --keyrow: 40px; }
+}
+
+@media (min-width: 561px) {
+  /* Wider than a phone: the sheet becomes a centred card rather than a
+     right-hand drawer — on the DeX display that edge is where XFCE keeps its
+     own window buttons. */
+  #sheet {
+    left: 50%; right: auto; bottom: auto; top: 50%;
+    width: min(440px, calc(100% - 48px));
+    max-height: calc(100% - 48px);
+    border: 1px solid var(--line);
+    border-radius: var(--r-xl);
+    transform: translate(-50%, -46%) scale(.96);
+    opacity: 0;
+  }
+  #sheet.open { transform: translate(-50%, -50%) scale(1); opacity: 1; }
+}
+
+/* ══ motion ════════════════════════════════════════════════════════════════ */
+
+@keyframes fade-in { from { opacity: 0 } to { opacity: 1 } }
+@keyframes pulse {
+  0%, 100% { box-shadow: 0 0 0 4px rgba(55, 211, 155, .16) }
+  50% { box-shadow: 0 0 0 5px rgba(55, 211, 155, .05) }
+}
+@keyframes wiggle {
+  0%, 100% { translate: 0 0 }
+  30% { translate: -10px 0 }
+  60% { translate: 4px 0 }
+}
+@keyframes grow {
+  from { opacity: 0; transform: scale(.7) }
+  to { opacity: 1; transform: scale(1) }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: .001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .001ms !important;
+  }
+}

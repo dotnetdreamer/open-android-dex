@@ -18,8 +18,11 @@
 #
 # Inside the guest (loopback only, no root anywhere):
 #   Xvnc :1     tcp 5901 — VncAuth against /root/.vnc/passwd
-#   websockify  tcp 6080 — serves noVNC; the launcher's WebView loads
-#               http://127.0.0.1:6080/vnc_lite.html?password=<vncpass>&scale=true
+#   websockify  tcp 6080 — serves the noVNC web root; the launcher's WebView
+#               loads OUR page from it, staged in there by LinuxService:
+#               http://127.0.0.1:6080/dex.html?password=<vncpass>&v=<rtpid>
+#               Ubuntu's own vnc.html and vnc_lite.html are untouched
+#               beside it.
 # The XFCE SESSION is what the runtime waits on: when it ends — the user logs
 # out, or xfce4-session dies — Xvnc and websockify are taken down with it and
 # proot exits. Without that the X server outlived the desktop and reconnecting
