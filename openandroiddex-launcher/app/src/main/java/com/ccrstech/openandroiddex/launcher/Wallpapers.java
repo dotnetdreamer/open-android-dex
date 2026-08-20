@@ -108,6 +108,25 @@ final class Wallpapers {
                             {0x44ffd6c2, 80, 74, 56},
                             {0x33d9c9ff, 62, 6, 44},
                     }, true),
+            // The pair the Windows 11 shell opens on: a lit bloom over deep
+            // blue for its dark mode, and the same shape washed out for its
+            // light one. Painted like every other backdrop here — the point is
+            // a desktop that reads as Windows at a glance, not a copy of
+            // Microsoft's photograph.
+            new Spec("bloom", "Bloom", new int[]{0xFF06224e, 0xFF091a3d, 0xFF040c22},
+                    new int[][]{
+                            {0x9932a4ff, 50, 47, 44},   // the lit heart of the flower
+                            {0x6600cfff, 29, 68, 52},   // cool petal, lower left
+                            {0x559a6cff, 73, 29, 50},   // violet petal, upper right
+                            {0x33ff9ad5, 63, 76, 34},   // warm rim where the two meet
+                    }, false, 0x66040a18),
+            new Spec("bloomlight", "Bloom Light", new int[]{0xFFdfeafb, 0xFFc9dcf7, 0xFFedf3fc},
+                    new int[][]{
+                            {0x88ffffff, 50, 45, 42},
+                            {0x557fb8ff, 27, 70, 54},
+                            {0x44c4b0ff, 75, 26, 50},
+                            {0x33ffd0e8, 65, 79, 34},
+                    }, true),
             // the two that pair with Paper mode: its own olive, and the
             // parchment it is named after
             new Spec("moss", "Moss", new int[]{0xFF2f3519, 0xFF3c4322, 0xFF262b14},

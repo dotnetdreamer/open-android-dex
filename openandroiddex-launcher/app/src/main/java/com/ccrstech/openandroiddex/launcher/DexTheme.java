@@ -30,6 +30,15 @@ final class DexTheme {
     /** Paper mode: surfaces carry a grain, see {@link PaperTexture}. */
     final boolean paper;
     /**
+     * The Windows 11 shell is selected — see {@link DexPrefs#KEY_SHELL}.
+     *
+     * Read here as well as by the launcher because it is a palette as much as
+     * a layout: Windows has its own greys, its own accent and much tighter
+     * corners than this design's, and every surface in the shell already asks
+     * this class for all three.
+     */
+    final boolean win11;
+    /**
      * "Reduce quality" is on — see {@link DexPrefs#KEY_PERF}. Everything that
      * costs a frame for looks alone asks here before spending it.
      */
@@ -74,6 +83,7 @@ final class DexTheme {
         mode = DexPrefs.theme(ctx);
         paper = DexPrefs.THEME_PAPER.equals(mode);
         dark = paper || !DexPrefs.THEME_LIGHT.equals(mode);
+        win11 = DexPrefs.win11(ctx);
         paperTexture = DexPrefs.getString(ctx, DexPrefs.KEY_PAPER_TEXTURE,
                 DexPrefs.DEF_PAPER_TEXTURE);
         perf = DexPrefs.getBool(ctx, DexPrefs.KEY_PERF, DexPrefs.DEF_PERF);
@@ -104,6 +114,11 @@ final class DexTheme {
         // 50% is the design's own radii; 0 squares everything off, 100 doubles it.
         roundFactor = rounding / 50f;
 
+        // Paper first, and it wins under either shell: it is a FINISH, not a
+        // colour scheme, and a Windows palette with grain over it would be
+        // neither of the two things the user asked for. Windows 11 then takes
+        // the dark/light fork, because it has both and the user's choice
+        // between them has to survive picking the shell.
         if (paper) {
             // Warm olive under cream ink — the palette a matte, low-contrast
             // surface wants. Nothing here is pure white or pure black: paper
@@ -126,6 +141,49 @@ final class DexTheme {
             danger = 0xFFe08363;
             positive = 0xFFb6c98f;
             deskText = 0xFFf2ecd8;
+        } else if (win11 && dark) {
+            // Windows 11's own dark values: the Mica base at #202020, cards a
+            // step above it, and the light-blue accent the platform switches
+            // to on dark so an accent on a dark surface stays legible.
+            backdrop = 0xFF1c1c1c;
+            window = 0xFF202020;
+            cardSolid = 0xFF2b2b2b;
+            panelSolid = 0xFF2a2a2a;
+            barSolid = 0xFF1f1f1f;
+            caption = 0xFF1f1f1f;
+            text = 0xFFffffff;
+            textDim = 0xFFdcdcdc;
+            textFaint = 0xFF9a9a9a;
+            accent = 0xFF4cc2ff;
+            accentSoft = 0x2a4cc2ff;
+            divider = 0x17ffffff;
+            hover = 0x14ffffff;
+            ripple = 0x4dffffff;
+            field = 0x0fffffff;
+            danger = 0xFFff99a4;
+            positive = 0xFF6ccb5f;
+            deskText = 0xFFffffff;
+        } else if (win11) {
+            // And its light values: #F3F3F3 everywhere the system paints Mica,
+            // near-white cards over it, ink at #1A1A1A rather than black.
+            backdrop = 0xFFf3f3f3;
+            window = 0xFFf3f3f3;
+            cardSolid = 0xFFfbfbfb;
+            panelSolid = 0xFFf6f6f6;
+            barSolid = 0xFFf3f3f3;
+            caption = 0xFFf3f3f3;
+            text = 0xFF1a1a1a;
+            textDim = 0xFF444444;
+            textFaint = 0xFF6b6b6b;
+            accent = 0xFF0067c0;
+            accentSoft = 0x1f0067c0;
+            divider = 0x14000000;
+            hover = 0x0d000000;
+            ripple = 0x26000000;
+            field = 0x0b000000;
+            danger = 0xFFc42b1c;
+            positive = 0xFF0f7b0f;
+            deskText = 0xFF1a1a1a;
         } else if (dark) {
             backdrop = 0xFF0b0d10;
             window = 0xFF0d1117;
@@ -226,9 +284,17 @@ final class DexTheme {
         return d;
     }
 
-    /** Radius in dp, after the rounding slider. */
+    /**
+     * Radius in dp, after the rounding slider.
+     *
+     * Windows 11's geometry is tighter than this design's: 8dp on a menu or a
+     * card, 4dp on a control, and nothing anywhere near the 14–22dp the DeX
+     * shell uses on its pills. Capped rather than rescaled, so the small radii
+     * the design already asks for come through untouched and only the big ones
+     * are pulled in — and the user's rounding slider still moves all of them.
+     */
     float radius(float baseDp) {
-        return baseDp * roundFactor;
+        return (win11 ? Math.min(baseDp, 8f) : baseDp) * roundFactor;
     }
 
     /** Blur-behind radius in px for a window, or 0 when blur is off. */

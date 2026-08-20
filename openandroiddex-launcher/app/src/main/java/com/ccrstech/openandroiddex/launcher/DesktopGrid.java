@@ -245,6 +245,23 @@ class DesktopGrid extends ViewGroup {
 
     // ── model ──
 
+    /**
+     * The apps placed on this desktop, in reading order.
+     *
+     * Read by the Windows 11 Start menu, whose Pinned area is exactly this
+     * list: dragging an icon here is the only pinning this shell has, and the
+     * menu showing something else would make it a second list to keep.
+     */
+    List<LauncherActivity.AppEntry> pinnedApps() {
+        List<Item> ordered = new ArrayList<>(items);
+        ordered.sort((a, b) -> a.row != b.row ? a.row - b.row : a.col - b.col);
+        List<LauncherActivity.AppEntry> out = new ArrayList<>();
+        for (Item it : ordered) {
+            out.add(it.app);
+        }
+        return out;
+    }
+
     private Item itemAt(int col, int row) {
         for (Item it : items) {
             if (it.col == col && it.row == row) return it;

@@ -30,6 +30,23 @@ final class DexPrefs {
 
     // ── Display & UI ──
     /**
+     * "dex" | "win11" — which desktop the shell dresses as.
+     *
+     * A LAYOUT and PALETTE switch, and deliberately not a theme: it decides
+     * whether the taskbar carries nav keys with a left-anchored Apps button
+     * and opens a full-screen drawer, or carries a centred Start cluster and
+     * opens a floating Start menu — and, through {@link DexTheme}, which set
+     * of surface colours and corner radii the whole shell paints in.
+     *
+     * Orthogonal to {@link #KEY_THEME} on purpose. Windows 11 has a dark mode
+     * and a light one, so choosing it must not take the user's dark/light
+     * choice away; Paper keeps its own palette under either shell, since its
+     * whole point is a finish rather than a colour scheme.
+     */
+    static final String KEY_SHELL = "ui_shell";
+    static final String SHELL_DEX = "dex";
+    static final String SHELL_WIN11 = "win11";
+    /**
      * "dark" | "light" | "paper". Newer than {@link #KEY_DARK}, which is still
      * read as the fallback so an upgrade keeps the theme the user was on.
      */
@@ -167,6 +184,8 @@ final class DexPrefs {
     static final String KEY_CLIP_HISTORY = "clipboard_history";
 
     // ── Defaults ──
+    /** This is Open Android DeX; the DeX shell is what it opens on. */
+    static final String DEF_SHELL = SHELL_DEX;
     static final boolean DEF_DARK = true;
     static final String DEF_PAPER_TEXTURE = PaperTexture.MATTE;
     /** Paperman dials 15–30%; ours is a wider range with a similar middle. */
@@ -178,6 +197,9 @@ final class DexPrefs {
     static final String DEF_WALLPAPER = "midnight";
     /** What Paper mode opens on — see {@link #wallpaper}. */
     static final String DEF_PAPER_WALLPAPER = "deckle";
+    /** What the Windows 11 shell opens on, dark and light — see {@link #wallpaper}. */
+    static final String DEF_WIN11_WALLPAPER = "bloom";
+    static final String DEF_WIN11_LIGHT_WALLPAPER = "bloomlight";
     static final int DEF_WALL_DIM = 0;
     static final String DEF_LAUNCH_MODE = "cascade";
     static final String DEF_WINDOW_SIZE = "standard";
@@ -293,6 +315,15 @@ final class DexPrefs {
         return Math.max(0, Math.min(100, v));
     }
 
+    /** The selected shell, "dex" or "win11". */
+    static String shell(Context ctx) {
+        return getString(ctx, KEY_SHELL, DEF_SHELL);
+    }
+
+    static boolean win11(Context ctx) {
+        return SHELL_WIN11.equals(shell(ctx));
+    }
+
     /**
      * The selected theme, migrating the old boolean when this device has never
      * seen the three-way setting. Reading the old key rather than rewriting it
@@ -314,7 +345,17 @@ final class DexPrefs {
      * if a theme change assigns a wallpaper behind their back.
      */
     static String wallpaper(Context ctx) {
-        return getString(ctx, KEY_WALLPAPER,
-                THEME_PAPER.equals(theme(ctx)) ? DEF_PAPER_WALLPAPER : DEF_WALLPAPER);
+        String theme = theme(ctx);
+        String def;
+        if (THEME_PAPER.equals(theme)) {
+            def = DEF_PAPER_WALLPAPER;
+        } else if (win11(ctx)) {
+            // Bloom is the backdrop the Windows 11 shell was drawn against, and
+            // it comes in the two values that theme does.
+            def = THEME_LIGHT.equals(theme) ? DEF_WIN11_LIGHT_WALLPAPER : DEF_WIN11_WALLPAPER;
+        } else {
+            def = DEF_WALLPAPER;
+        }
+        return getString(ctx, KEY_WALLPAPER, def);
     }
 }

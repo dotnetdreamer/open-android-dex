@@ -136,7 +136,7 @@ public class SettingsActivity extends Activity {
      * in the list for no visible gain.
      */
     private static final List<String> SELF_AFFECTING = java.util.Arrays.asList(
-            DexPrefs.KEY_THEME, DexPrefs.KEY_DARK, DexPrefs.KEY_PAPER_TEXTURE,
+            DexPrefs.KEY_SHELL, DexPrefs.KEY_THEME, DexPrefs.KEY_DARK, DexPrefs.KEY_PAPER_TEXTURE,
             DexPrefs.KEY_GRAIN, DexPrefs.KEY_GLASS, DexPrefs.KEY_TRANSPARENCY,
             DexPrefs.KEY_ROUNDING, DexPrefs.KEY_LANGUAGE, DexPrefs.KEY_FONT,
             DexPrefs.KEY_CURSOR_STYLE, DexPrefs.KEY_CURSOR_SIZE, DexPrefs.KEY_CURSOR_COLOR,
@@ -254,7 +254,8 @@ public class SettingsActivity extends Activity {
     private void buildNavs() {
         navs.clear();
         navs.add(new Nav(SEC_DISPLAY, R.string.st_nav_display, R.string.st_nav_display_sub,
-                "🎨", 0xFFa78bfa, new int[]{R.string.st_theme, R.string.st_theme_paper,
+                "🎨", 0xFFa78bfa, new int[]{R.string.st_shell, R.string.st_shell_win11,
+                R.string.st_theme, R.string.st_theme_paper,
                 R.string.st_paper_texture, R.string.st_grain, R.string.st_glass,
                 R.string.st_blur, R.string.st_transparency, R.string.st_rounding,
                 R.string.st_display_size}));
@@ -900,6 +901,23 @@ public class SettingsActivity extends Activity {
     // ── section: Display & UI ──
 
     private void buildDisplaySection(LinearLayout body) {
+        // First card in the window, because it is the widest-reaching choice
+        // in it: everything below — theme, glass, rounding — is applied ON TOP
+        // of whichever shell is picked here.
+        LinearLayout shellCard = card(body);
+        cardHeader(shellCard, s(R.string.st_shell));
+        String shell = DexPrefs.shell(this);
+        String[][] shells = {
+                {DexPrefs.SHELL_DEX, s(R.string.st_shell_dex), s(R.string.st_shell_dex_sub), "▦"},
+                {DexPrefs.SHELL_WIN11, s(R.string.st_shell_win11), s(R.string.st_shell_win11_sub),
+                        "⊞"},
+        };
+        for (String[] entry : shells) {
+            choiceRow(shellCard, entry[3], entry[1], entry[2], entry[0].equals(shell),
+                    () -> DexPrefs.put(this, DexPrefs.KEY_SHELL, entry[0]));
+        }
+        note(shellCard, s(R.string.st_shell_note));
+
         LinearLayout themeCard = card(body);
         cardHeader(themeCard, s(R.string.st_theme));
         String[][] themes = {

@@ -5,8 +5,11 @@ import android.accessibilityservice.AccessibilityServiceInfo;
 
 import android.content.ComponentName;
 import android.content.pm.PackageManager;
+import android.content.res.ColorStateList;
 import android.graphics.PixelFormat;
+import android.graphics.drawable.ColorDrawable;
 import android.graphics.drawable.GradientDrawable;
+import android.graphics.drawable.StateListDrawable;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.SystemClock;
@@ -245,10 +248,15 @@ public final class CaptionService extends AccessibilityService {
     }
 
     /**
-     * A theme change repaints the captions. There is no way to re-colour a
-     * surface that is already attached inside another app's window, so the
-     * bars are dropped and the reconcile pass — which rebuilds any task
-     * without one — puts them back in the new colours on its next tick.
+     * A theme or shell change repaints the captions. There is no way to
+     * re-colour or re-measure a surface that is already attached inside
+     * another app's window, so the bars are dropped and the reconcile pass —
+     * which rebuilds any task without one — puts them back in the new look on
+     * its next tick.
+     *
+     * The allowlist below is the whole contract: a setting that is NOT in it
+     * leaves every open window wearing the old chrome until it is closed and
+     * opened again. Anything that reaches {@link #build} has to be here.
      */
     private final android.content.BroadcastReceiver themeReceiver =
             new android.content.BroadcastReceiver() {
@@ -256,6 +264,11 @@ public final class CaptionService extends AccessibilityService {
                 public void onReceive(android.content.Context ctx, android.content.Intent intent) {
                     String key = intent.getStringExtra(DexPrefs.EXTRA_KEY);
                     if (!DexPrefs.KEY_THEME.equals(key) && !DexPrefs.KEY_DARK.equals(key)
+                            // The shell decides the bar's palette AND its
+                            // geometry — Windows 11 captions carry wider
+                            // buttons and a red close. Neither can be changed
+                            // on a bar that is already attached.
+                            && !DexPrefs.KEY_SHELL.equals(key)
                             && !DexPrefs.KEY_PAPER_TEXTURE.equals(key)
                             && !DexPrefs.KEY_GRAIN.equals(key)
                             // suppresses the grain, so the captions carry the
@@ -268,7 +281,7 @@ public final class CaptionService extends AccessibilityService {
                     }
                     for (int i = 0; i < captions.size(); i++) release(captions.valueAt(i));
                     captions.clear();
-                    trace("theme or cursor changed — captions dropped for rebuild");
+                    trace("theme, shell or cursor changed — captions dropped for rebuild");
                 }
             };
 
@@ -922,12 +935,12 @@ public final class CaptionService extends AccessibilityService {
         // because ours is a real close (wmd removeTask, not One UI's hide), which the detour
         // turns into a clean cancel.
         if (!WidgetDetourActivity.isDetourTask(task.taskId)) {
-            bar.addView(button(ui, "◧", v -> onSnapLeft(task)), buttonParams(height));
-            bar.addView(button(ui, "◨", v -> onSnapRight(task)), buttonParams(height));
-            bar.addView(button(ui, "—", v -> onMinimise(task)), buttonParams(height));
-            bar.addView(button(ui, "▢", v -> onMaximise(task)), buttonParams(height));
+            bar.addView(button(ui, "◧", false, v -> onSnapLeft(task)), buttonParams(height));
+            bar.addView(button(ui, "◨", false, v -> onSnapRight(task)), buttonParams(height));
+            bar.addView(button(ui, "—", false, v -> onMinimise(task)), buttonParams(height));
+            bar.addView(button(ui, "▢", false, v -> onMaximise(task)), buttonParams(height));
         }
-        bar.addView(button(ui, "✕", v -> onClose(task)), buttonParams(height));
+        bar.addView(button(ui, "✕", true, v -> onClose(task)), buttonParams(height));
         bar.setOnTouchListener(dragHandler(c, task));
 
         setView(c.host, bar, width, height);
@@ -1091,17 +1104,50 @@ public final class CaptionService extends AccessibilityService {
     }
 
     private LinearLayout.LayoutParams buttonParams(int height) {
-        return new LinearLayout.LayoutParams(px(38), height);
+        // 46px under the Windows 11 shell, which is the width its own caption
+        // buttons are; ours is narrower because the DeX strip carries five.
+        return new LinearLayout.LayoutParams(px(DexTheme.of(this).win11 ? 46 : 38), height);
     }
 
-    private TextView button(android.content.Context ui, String glyph,
+    /**
+     * One caption control.
+     *
+     * {@code close} marks the ✕, and only matters under the Windows 11 shell:
+     * a red close button is the one piece of that title bar everybody can name,
+     * and it is also a real affordance — the destructive control being the one
+     * you cannot hit by accident without seeing it go red first.
+     *
+     * The fills are a StateListDrawable rather than a ripple: this view lives
+     * in a SurfaceControlViewHost reparented into the app's own window surface,
+     * where whether hover crosses the boundary at all is the open question of
+     * this file (see build). Pressed does cross it, so the button is never
+     * silent even where hover turns out not to resolve.
+     */
+    private TextView button(android.content.Context ui, String glyph, boolean close,
                             View.OnClickListener onClick) {
+        DexTheme theme = DexTheme.of(this);
         TextView b = new TextView(ui);
         b.setText(glyph);
-        b.setTextColor(DexTheme.of(this).textDim);
         b.setTextSize(TypedValue.COMPLEX_UNIT_PX, px(12));
         b.setGravity(Gravity.CENTER);
         b.setOnClickListener(onClick);
+
+        boolean hot = close && theme.win11;
+        int lit = hot ? 0xFFc42b1c : theme.hover;
+        StateListDrawable bg = new StateListDrawable();
+        bg.addState(new int[]{android.R.attr.state_pressed}, new ColorDrawable(lit));
+        bg.addState(new int[]{android.R.attr.state_hovered}, new ColorDrawable(lit));
+        bg.addState(new int[0], new ColorDrawable(0x00000000));
+        b.setBackground(bg);
+        b.setTextColor(hot
+                // white on the red, in both themes — the fill is the same red
+                // either way, so the ink over it cannot follow the palette
+                ? new ColorStateList(
+                        new int[][]{{android.R.attr.state_pressed},
+                                {android.R.attr.state_hovered}, {}},
+                        new int[]{0xFFffffff, 0xFFffffff, theme.textDim})
+                : ColorStateList.valueOf(theme.textDim));
+
         DexCursors.apply(b, DexCursors.ROLE_HAND);
         return b;
     }

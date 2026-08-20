@@ -79,15 +79,34 @@ import java.util.function.Consumer;
 
 /**
  * Desktop shell for the Open Android DeX virtual display: an icon grid
- * ({@link DesktopGrid}), an app drawer and a DeX-style taskbar. Taskbar
- * layout: nav cluster (back · home · open apps) on the left, apps toggle +
- * OPEN apps in the center, clock/date with a calendar popup on the right. The
- * open-apps row mirrors what is actually running on this display — the PC side
- * broadcasts the task list (ACTION_RUNNING) on every poll, and launches/closes
- * done from here update the row optimistically so there is no visible lag.
+ * ({@link DesktopGrid}), an app launcher surface and a taskbar.
  *
- * Holding an icon in the drawer closes the drawer and hands the gesture to the
- * drag layer, which drops the app onto the desktop grid (see startDesktopDrag).
+ * It wears one of two shells, chosen in Settings and read from
+ * {@link DexPrefs#KEY_SHELL}:
+ *
+ * - DeX (the default). Nav cluster (back · home · open apps) on the left, apps
+ *   toggle + OPEN apps in the center, clock/date with a calendar popup on the
+ *   right; the apps button opens a full-surface drawer.
+ * - Windows 11. Back alone on the left (Android needs a Back key and Windows
+ *   has nowhere to put one), a centred Start · Search · Task view · Desktop
+ *   cluster with the open apps beside it, the same tray on the right; Start
+ *   opens a floating Start menu — pinned tiles, Recommended, an account strip
+ *   and a power button — instead of a drawer.
+ *
+ * The two share everything below the layout: the same app list, the same
+ * open-apps strip, the same tray flyouts, the same drag onto the desktop grid.
+ * What differs is where the controls sit and, through {@link DexTheme}, what
+ * they are painted in — so a shell is a switch here rather than a second
+ * launcher to keep in step.
+ *
+ * The open-apps row mirrors what is actually running on this display — the PC
+ * side broadcasts the task list (ACTION_RUNNING) on every poll, and
+ * launches/closes done from here update the row optimistically so there is no
+ * visible lag.
+ *
+ * Holding an icon in the drawer (or in the Start menu) closes it and hands the
+ * gesture to the drag layer, which drops the app onto the desktop grid — see
+ * startDesktopDrag.
  */
 public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
 
@@ -225,7 +244,26 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
     private DrawerRoot drawer;
     /** The drawer's visible chrome — hidden for the duration of a drag. */
     private LinearLayout drawerPanel;
+    /** The full app list, shared by the DeX drawer and the Start menu's "All apps". */
+    private GridView appGrid;
     private DragLayer dragLayer;
+
+    // ── Windows 11 Start menu (null under the DeX shell) ──
+    /** Holds the pinned/recommended page and the app list, one visible at a time. */
+    private FrameLayout startContent;
+    private ScrollView startPinnedScroll;
+    private LinearLayout startPinnedGrid;
+    private LinearLayout startRecommended;
+    private TextView startHeader;
+    private TextView startAllAppsButton;
+    /**
+     * The menu is showing its app list rather than its pinned tiles.
+     *
+     * Reset by {@link #hideDrawer}, so Start always opens on Pinned the way
+     * Windows does — a menu that reopens two pages deep is a menu people stop
+     * trusting to be where they left it.
+     */
+    private boolean startAllApps;
     private boolean drawerShown = false;
     /** true while the drawer is attached as its own always-on-top window. */
     private boolean drawerOverlay = false;
@@ -1288,6 +1326,7 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
             }
         };
         grid.setAdapter(adapter);
+        appGrid = grid;
         return grid;
     }
 
@@ -1302,9 +1341,67 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
         return dp(compact ? 14 : 24);
     }
 
+    /**
+     * The launcher surface, in whichever shape this shell wants it, inside the
+     * window root that hosts the drag onto the desktop.
+     *
+     * Both shells go through here so the drag layer, the Back/Esc handling and
+     * the overlay window they all live in are written once — the DeX drawer and
+     * the Start menu differ only in the panel and in how much of the window it
+     * covers.
+     */
     private void buildDrawer() {
-        LinearLayout panel = new LinearLayout(this);
+        LinearLayout panel = theme.win11 ? buildStartPanel() : buildDexDrawerPanel();
         drawerPanel = panel;
+
+        // The window root is a frame so the drag layer can sit over the panel:
+        // once a drag starts the panel is hidden and only the layer paints,
+        // leaving the desktop grid visible straight through this window.
+        drawer = new DrawerRoot(this);
+        drawer.addView(panel, theme.win11
+                ? startPanelParams()
+                : new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.MATCH_PARENT));
+        if (theme.win11) {
+            // The Start menu leaves most of its window empty, and a click in
+            // that emptiness is a click on the desktop — which in Windows
+            // dismisses the menu. Only reached when the panel did not take the
+            // touch itself, since it is clickable.
+            drawer.setOnClickListener(v -> hideDrawer());
+        }
+        dragLayer = new DragLayer(this);
+        dragLayer.setVisibility(View.GONE);
+        drawer.addView(dragLayer, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        // Third window of the shell, and the one whose pointer changes mid
+        // gesture — see DragLayer.onResolvePointerIcon.
+        DexCursors.decorate(drawer);
+        // Same trap as the desktop grid: the panel is clickable only to swallow
+        // taps that would otherwise fall through, and every AbsListView is
+        // clickable straight from its own constructor. Neither is something to
+        // click, so the hand is taken back — and it has to be taken back AFTER
+        // decorate's walk, which would otherwise put it straight back. The
+        // cells inside keep theirs.
+        DexCursors.apply(panel, DexCursors.ROLE_ARROW);
+        DexCursors.apply(appGrid, DexCursors.ROLE_ARROW);
+        // Its own window, so buildUi's pass over the activity's tree never
+        // reaches it — the drawer asks for the chosen font itself.
+        DexFonts.applyTo(this, drawer);
+    }
+
+    /** The DeX shell's drawer: one full-surface panel of apps. */
+    private LinearLayout buildDexDrawerPanel() {
+        // Dropped rather than left dangling: switching shell rebuilds the whole
+        // view tree, and a stale startContent would let updateStartMode hide
+        // the drawer's own app grid — the two shells share that one view.
+        startContent = null;
+        startPinnedScroll = null;
+        startPinnedGrid = null;
+        startRecommended = null;
+        startHeader = null;
+        startAllAppsButton = null;
+
+        LinearLayout panel = new LinearLayout(this);
         panel.setOrientation(LinearLayout.VERTICAL);
         // the drawer is the largest surface we own — in Paper mode it is where
         // the grain reads most, so it goes through surface() like the rest
@@ -1319,15 +1416,35 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
         panel.addView(buildPinnedRow(), new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
+        EditText search = newSearchField(getString(R.string.lx_search_apps));
+        search.setBackground(roundedFill(theme.field, 22));
+        search.setPadding(dp(20), dp(11), dp(20), dp(11));
+        panel.addView(search, new LinearLayout.LayoutParams(
+                compact ? ViewGroup.LayoutParams.MATCH_PARENT : dp(360),
+                ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        LinearLayout.LayoutParams gridLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f);
+        gridLp.topMargin = dp(16);
+        panel.addView(buildAppGrid(), gridLp);
+
+        return panel;
+    }
+
+    /**
+     * The app-filtering field, which both shells have and neither draws the
+     * same: the drawer's is a wide pill of its own, the Start menu's sits in a
+     * search row at the top of the menu. Only the chrome differs, so only the
+     * chrome is left to the caller.
+     */
+    private EditText newSearchField(String hint) {
         EditText search = new EditText(this);
         searchField = search;
-        search.setHint(getString(R.string.lx_search_apps));
+        search.setHint(hint);
         search.setHintTextColor(theme.textFaint);
         search.setTextColor(theme.text);
         search.setTextSize(TypedValue.COMPLEX_UNIT_PX, sp(15));
         search.setSingleLine(true);
-        search.setBackground(roundedFill(theme.field, 22));
-        search.setPadding(dp(20), dp(11), dp(20), dp(11));
         // blinking caret so it is obvious typing goes here
         search.setCursorVisible(true);
         search.setOnClickListener(v -> search.requestFocus());
@@ -1336,35 +1453,441 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
             @Override public void onTextChanged(CharSequence s, int a, int b, int c) {}
             @Override public void afterTextChanged(Editable s) { filter(s.toString()); }
         });
-        panel.addView(search, new LinearLayout.LayoutParams(
-                compact ? ViewGroup.LayoutParams.MATCH_PARENT : dp(360),
-                ViewGroup.LayoutParams.WRAP_CONTENT));
+        return search;
+    }
 
-        GridView grid = buildAppGrid();
-        LinearLayout.LayoutParams gridLp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f);
-        gridLp.topMargin = dp(16);
-        panel.addView(grid, gridLp);
+    // ── Windows 11: the Start menu ──
 
-        // The window root is a frame so the drag layer can sit over the panel:
-        // once a drag starts the panel is hidden and only the layer paints,
-        // leaving the desktop grid visible straight through this window.
-        drawer = new DrawerRoot(this);
-        drawer.addView(panel, new FrameLayout.LayoutParams(
+    /**
+     * Tiles per row of the pinned grid. Windows 11 pins six across; a
+     * phone-width display cannot show six icons and their labels, so compact
+     * drops to four.
+     */
+    private static final int START_COLS = 6;
+    private static final int START_COLS_COMPACT = 4;
+    /** Rows of pinned tiles, as Windows 11 lays them out. */
+    private static final int START_ROWS = 2;
+
+    /**
+     * The Start menu: a search row, a page of pinned tiles with Recommended
+     * under it, and an account strip carrying the power button.
+     *
+     * A panel rather than a window of its own, so it lives in the same overlay
+     * the DeX drawer does and inherits everything that window already knows how
+     * to do — Esc to close, and a hold on any tile turning into a drag onto the
+     * desktop grid.
+     */
+    private LinearLayout buildStartPanel() {
+        LinearLayout panel = new LinearLayout(this);
+        panel.setOrientation(LinearLayout.VERTICAL);
+        panel.setBackground(theme.surface(theme.panel(), dp(theme.radius(12))));
+        int pad = dp(compact ? 14 : 22);
+        panel.setPadding(pad, dp(compact ? 12 : 18), pad, 0);
+        // Swallows the taps the window root would otherwise read as "clicked
+        // the desktop, close the menu".
+        panel.setClickable(true);
+        // Windows floats the menu over the wallpaper; with no shadow under it
+        // the panel reads as a hole cut in the desktop rather than a sheet
+        // over it. Reduce quality drops it with the rest of the finish.
+        if (!theme.perf) panel.setElevation(dp(20));
+
+        panel.addView(buildStartSearch(), new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        LinearLayout head = new LinearLayout(this);
+        head.setOrientation(LinearLayout.HORIZONTAL);
+        head.setGravity(Gravity.CENTER_VERTICAL);
+        head.setPadding(dp(4), dp(16), dp(2), dp(8));
+
+        startHeader = new TextView(this);
+        startHeader.setTextColor(theme.text);
+        startHeader.setTextSize(TypedValue.COMPLEX_UNIT_PX, sp(13.5f));
+        startHeader.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        head.addView(startHeader, new LinearLayout.LayoutParams(0,
+                ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+        startAllAppsButton = new TextView(this);
+        startAllAppsButton.setTextColor(theme.text);
+        startAllAppsButton.setTextSize(TypedValue.COMPLEX_UNIT_PX, sp(11.5f));
+        startAllAppsButton.setPadding(dp(12), dp(7), dp(12), dp(7));
+        startAllAppsButton.setBackground(tapBackground(theme.field, theme.hover, 8));
+        startAllAppsButton.setOnClickListener(v -> {
+            if (startListMode()) {
+                // Back out of the list AND of whatever was typed to reach it,
+                // or the pinned page would come back filtered by a query with
+                // nowhere left to show itself.
+                startAllApps = false;
+                searchField.setText("");
+            } else {
+                startAllApps = true;
+            }
+            updateStartMode();
+        });
+        DexCursors.apply(startAllAppsButton, DexCursors.ROLE_HAND);
+        head.addView(startAllAppsButton);
+        panel.addView(head, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        View pinnedPage = buildStartPinnedPage();
+        startContent = new FrameLayout(this);
+        startContent.addView(pinnedPage, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
-        dragLayer = new DragLayer(this);
-        dragLayer.setVisibility(View.GONE);
-        drawer.addView(dragLayer, new FrameLayout.LayoutParams(
+        startContent.addView(buildAppGrid(), new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
-        // Third window of the shell, and the one whose pointer changes mid
-        // gesture — see DragLayer.onResolvePointerIcon.
-        DexCursors.decorate(drawer);
-        // Same trap as the desktop grid: the panel is clickable only to swallow
-        // taps that would otherwise fall through, and every AbsListView is
-        // clickable straight from its own constructor. Neither is something to
-        // click, so the hand is taken back; the cells keep theirs.
-        DexCursors.apply(panel, DexCursors.ROLE_ARROW);
-        DexCursors.apply(grid, DexCursors.ROLE_ARROW);
+        panel.addView(startContent, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
+
+        panel.addView(buildStartFooter(), new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        fillStartPinned();
+        updateStartMode();
+        return panel;
+    }
+
+    /** The menu's search row: a magnifier and the field that filters the apps. */
+    private View buildStartSearch() {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setBackground(roundedFill(theme.field, 8));
+        row.setPadding(dp(14), 0, dp(14), 0);
+
+        TextView magnifier = new TextView(this);
+        magnifier.setText("🔍");
+        magnifier.setTextColor(theme.textFaint);
+        magnifier.setTextSize(TypedValue.COMPLEX_UNIT_PX, sp(13));
+        LinearLayout.LayoutParams magLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        magLp.rightMargin = dp(10);
+        row.addView(magnifier, magLp);
+
+        EditText search = newSearchField(getString(R.string.w11_search_hint));
+        search.setBackground(null);
+        search.setPadding(0, dp(11), 0, dp(11));
+        row.addView(search, new LinearLayout.LayoutParams(0,
+                ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        return row;
+    }
+
+    /** The pinned tiles and Recommended, scrolling together as one page. */
+    private View buildStartPinnedPage() {
+        LinearLayout page = new LinearLayout(this);
+        page.setOrientation(LinearLayout.VERTICAL);
+
+        startPinnedGrid = new LinearLayout(this);
+        startPinnedGrid.setOrientation(LinearLayout.VERTICAL);
+        page.addView(startPinnedGrid, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        startRecommended = new LinearLayout(this);
+        startRecommended.setOrientation(LinearLayout.VERTICAL);
+        page.addView(startRecommended, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        startPinnedScroll = new ScrollView(this);
+        startPinnedScroll.setVerticalScrollBarEnabled(false);
+        startPinnedScroll.addView(page, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        return startPinnedScroll;
+    }
+
+    /**
+     * (Re)fill the pinned grid and the Recommended list.
+     *
+     * Run twice on a cold start, and it has to be: buildUi builds this menu
+     * before loadApps has read the app list, so the first pass has only our own
+     * tiles to place and the second — from loadApps — is what fills the rest of
+     * the grid in. Cheap enough to repeat; ~16 views.
+     */
+    private void fillStartPinned() {
+        if (!theme.win11 || startPinnedGrid == null) return;
+        int cols = compact ? START_COLS_COMPACT : START_COLS;
+
+        startPinnedGrid.removeAllViews();
+        List<View> tiles = new ArrayList<>(systemTiles());
+        for (AppEntry app : startPinnedApps(cols * START_ROWS - tiles.size())) {
+            tiles.add(startAppTile(app));
+        }
+        LinearLayout row = null;
+        for (int i = 0; i < tiles.size(); i++) {
+            if (i % cols == 0) {
+                row = new LinearLayout(this);
+                row.setOrientation(LinearLayout.HORIZONTAL);
+                startPinnedGrid.addView(row, new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT));
+            }
+            row.addView(tiles.get(i), new LinearLayout.LayoutParams(0,
+                    ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        }
+        // Pad the last row out to the full column count: without it a half-full
+        // row spreads its tiles across the whole width and they stop lining up
+        // with the ones above.
+        int spare = tiles.size() % cols;
+        if (row != null && spare != 0) {
+            for (int i = spare; i < cols; i++) {
+                row.addView(new View(this), new LinearLayout.LayoutParams(0, 1, 1f));
+            }
+        }
+
+        startRecommended.removeAllViews();
+        List<AppEntry> recent = startRecommendedApps(compact ? 3 : 6);
+        // Nothing launched from this desktop yet — a heading over an empty
+        // block reads as something that failed to load.
+        if (recent.isEmpty()) return;
+        startRecommended.addView(sectionLabel(getString(R.string.w11_recommended)));
+        int recCols = compact ? 1 : 2;
+        LinearLayout recRow = null;
+        for (int i = 0; i < recent.size(); i++) {
+            if (i % recCols == 0) {
+                recRow = new LinearLayout(this);
+                recRow.setOrientation(LinearLayout.HORIZONTAL);
+                startRecommended.addView(recRow, new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT));
+            }
+            recRow.addView(recommendedRow(recent.get(i)), new LinearLayout.LayoutParams(
+                    0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        }
+        int recSpare = recent.size() % recCols;
+        if (recRow != null && recSpare != 0) {
+            for (int i = recSpare; i < recCols; i++) {
+                recRow.addView(new View(this), new LinearLayout.LayoutParams(0, 1, 1f));
+            }
+        }
+        // Built after the drawer's own font pass (and again on every refill),
+        // so this block asks for the chosen face itself.
+        DexFonts.applyTo(this, startPinnedScroll);
+    }
+
+    /**
+     * What fills the pinned grid after our own tiles: the apps on the desktop,
+     * then the app list from the top to make the rows up.
+     *
+     * Dragging an icon onto the desktop grid is the only pinning gesture this
+     * shell has, so it is what "Pinned" means here — a pinned area that ignored
+     * it would be a second, invisible list to curate. Deliberately NOT the
+     * recents: those are what Recommended below is made of, and a menu whose
+     * two halves show the same four apps has one half.
+     */
+    private List<AppEntry> startPinnedApps(int max) {
+        List<AppEntry> out = new ArrayList<>();
+        LinkedHashSet<String> seen = new LinkedHashSet<>();
+        if (desktopGrid != null) {
+            for (AppEntry app : desktopGrid.pinnedApps()) {
+                if (out.size() >= max) return out;
+                if (seen.add(app.component.flattenToString())) out.add(app);
+            }
+        }
+        // A desktop with nothing on it yet, or room left over after it: the app
+        // list from the top, so the grid is never a half-empty box.
+        for (AppEntry app : allApps) {
+            if (out.size() >= max) break;
+            if (seen.add(app.component.flattenToString())) out.add(app);
+        }
+        return out;
+    }
+
+    /** Recommended: what was actually launched from here, most recent first. */
+    private List<AppEntry> startRecommendedApps(int max) {
+        List<AppEntry> out = new ArrayList<>();
+        LinkedHashSet<String> seen = new LinkedHashSet<>();
+        for (String flat : recents) {
+            if (out.size() >= max) break;
+            ComponentName cn = ComponentName.unflattenFromString(flat);
+            if (cn == null) continue;
+            AppEntry app = findByComponent(cn);
+            // findByComponent falls back to the package, so two stored records
+            // of a renamed launcher activity can resolve to one app.
+            if (app == null || !seen.add(app.component.flattenToString())) continue;
+            out.add(app);
+        }
+        return out;
+    }
+
+    /** A pinned app: the same tile the drawer and the desktop grid draw. */
+    private LinearLayout startAppTile(AppEntry app) {
+        LinearLayout tile = newIconTile(iconDp());
+        ((ImageView) tile.getChildAt(0)).setImageDrawable(app.icon);
+        ((TextView) tile.getChildAt(1)).setText(app.label);
+        tile.setOnClickListener(v -> launch(app));
+        tile.setOnLongClickListener(v -> {
+            startDesktopDrag(app);
+            return true;
+        });
+        return tile;
+    }
+
+    /** The heading over a block of the Start menu. */
+    private TextView sectionLabel(String text) {
+        TextView label = new TextView(this);
+        label.setText(text);
+        label.setTextColor(theme.text);
+        label.setTextSize(TypedValue.COMPLEX_UNIT_PX, sp(13.5f));
+        label.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        label.setPadding(dp(4), dp(16), dp(4), dp(8));
+        return label;
+    }
+
+    /** One Recommended entry: icon, name, and why it is here. */
+    private View recommendedRow(AppEntry app) {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(dp(8), dp(7), dp(8), dp(7));
+        row.setBackground(tapBackground(0x00000000, theme.hover, 8));
+        row.setOnClickListener(v -> launch(app));
+        row.setOnLongClickListener(v -> {
+            startDesktopDrag(app);
+            return true;
+        });
+        DexCursors.apply(row, DexCursors.ROLE_HAND);
+
+        ImageView icon = new ImageView(this);
+        icon.setImageDrawable(app.icon);
+        LinearLayout.LayoutParams iconLp = new LinearLayout.LayoutParams(dp(30), dp(30));
+        iconLp.rightMargin = dp(10);
+        row.addView(icon, iconLp);
+
+        LinearLayout texts = new LinearLayout(this);
+        texts.setOrientation(LinearLayout.VERTICAL);
+        TextView name = new TextView(this);
+        name.setText(app.label);
+        name.setTextColor(theme.text);
+        name.setTextSize(TypedValue.COMPLEX_UNIT_PX, sp(12.5f));
+        name.setSingleLine(true);
+        name.setEllipsize(TextUtils.TruncateAt.END);
+        texts.addView(name);
+        TextView sub = new TextView(this);
+        sub.setText(getString(R.string.w11_recent));
+        sub.setTextColor(theme.textFaint);
+        sub.setTextSize(TypedValue.COMPLEX_UNIT_PX, sp(10.5f));
+        texts.addView(sub);
+        row.addView(texts, new LinearLayout.LayoutParams(0,
+                ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        return row;
+    }
+
+    /**
+     * The strip Windows keeps at the foot of the menu: who you are on the left,
+     * the power button on the right.
+     */
+    private View buildStartFooter() {
+        LinearLayout wrap = new LinearLayout(this);
+        wrap.setOrientation(LinearLayout.VERTICAL);
+
+        View line = new View(this);
+        line.setBackgroundColor(theme.divider);
+        wrap.addView(line, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(1)));
+
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(0, dp(8), 0, dp(8));
+
+        LinearLayout account = new LinearLayout(this);
+        account.setOrientation(LinearLayout.HORIZONTAL);
+        account.setGravity(Gravity.CENTER_VERTICAL);
+        account.setPadding(dp(8), dp(6), dp(14), dp(6));
+        account.setBackground(tapBackground(0x00000000, theme.hover, 8));
+        account.setOnClickListener(v -> launchSettings());
+        DexCursors.apply(account, DexCursors.ROLE_HAND);
+
+        TextView avatar = new TextView(this);
+        avatar.setText("👤");
+        avatar.setGravity(Gravity.CENTER);
+        avatar.setTextSize(TypedValue.COMPLEX_UNIT_PX, sp(13));
+        // A circle, which is the one shape an account picture has in Windows.
+        avatar.setBackground(theme.surface(theme.accentSoft, dp(14)));
+        LinearLayout.LayoutParams avatarLp = new LinearLayout.LayoutParams(dp(28), dp(28));
+        avatarLp.rightMargin = dp(10);
+        account.addView(avatar, avatarLp);
+
+        TextView who = new TextView(this);
+        // The phone IS the account here — there is no user to name — and the
+        // model is what tells two of these desktops apart.
+        who.setText(TextUtils.isEmpty(Build.MODEL)
+                ? getString(R.string.app_name) : Build.MODEL);
+        who.setTextColor(theme.text);
+        who.setTextSize(TypedValue.COMPLEX_UNIT_PX, sp(12.5f));
+        who.setSingleLine(true);
+        who.setEllipsize(TextUtils.TruncateAt.END);
+        account.addView(who);
+        row.addView(account);
+
+        row.addView(new View(this), new LinearLayout.LayoutParams(0, 1, 1f));
+
+        ImageView power = new ImageView(this);
+        power.setImageResource(android.R.drawable.ic_lock_power_off);
+        power.setColorFilter(theme.textDim);
+        int powerPad = dp(8);
+        power.setPadding(powerPad, powerPad, powerPad, powerPad);
+        power.setBackground(tapBackground(0x00000000, theme.hover, 8));
+        power.setContentDescription(getString(R.string.w11_power));
+        power.setOnClickListener(v -> {
+            // The exit flyout hangs off the taskbar, which this menu covers —
+            // so the menu closes first, exactly as Start does in Windows.
+            hideDrawer();
+            toggleExitPopup();
+        });
+        DexCursors.apply(power, DexCursors.ROLE_HAND);
+        row.addView(power, new LinearLayout.LayoutParams(dp(34), dp(34)));
+
+        wrap.addView(row, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        return wrap;
+    }
+
+    /** True when the menu is showing its app list rather than its pinned page. */
+    private boolean startListMode() {
+        return startAllApps || (searchField != null && searchField.getText().length() > 0);
+    }
+
+    /**
+     * Put the menu on the right page, and label its header and its one button
+     * for the page it is on.
+     *
+     * Typing switches to the list without going through the button: a query
+     * that left the menu on its pinned page would be filtering a grid the user
+     * cannot see.
+     */
+    private void updateStartMode() {
+        if (!theme.win11 || startContent == null || appGrid == null) return;
+        boolean searching = searchField != null && searchField.getText().length() > 0;
+        boolean list = startAllApps || searching;
+        startPinnedScroll.setVisibility(list ? View.GONE : View.VISIBLE);
+        appGrid.setVisibility(list ? View.VISIBLE : View.GONE);
+        startHeader.setText(getString(searching ? R.string.w11_results
+                : list ? R.string.w11_all_apps : R.string.w11_pinned));
+        startAllAppsButton.setText(list
+                ? "‹  " + getString(R.string.w11_back)
+                : getString(R.string.w11_all_apps) + "  ›");
+    }
+
+    /**
+     * Where the Start menu sits in its window: bottom centre, clear of the
+     * taskbar, and never wider than Windows 11 draws it.
+     *
+     * The WINDOW still covers the whole desktop. That is what makes a click
+     * beside the menu a click on the wallpaper (which closes it), and what lets
+     * a drag out of the menu paint cell guides across the grid it is being
+     * dropped onto — a window cropped to the menu could do neither.
+     */
+    private FrameLayout.LayoutParams startPanelParams() {
+        Point size = new Point();
+        getWindowManager().getDefaultDisplay().getRealSize(size);
+        int available = Math.max(dp(240),
+                size.y - topSystemInset() - bottomSystemInset() - dp(TASKBAR_DP));
+        int width = compact
+                ? Math.max(dp(260), size.x - dp(20))
+                : Math.min(dp(620), Math.round(size.x * 0.92f));
+        FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(width,
+                Math.min(dp(compact ? 540 : 700), Math.round(available * 0.94f)),
+                Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
+        lp.bottomMargin = dp(8);
+        return lp;
     }
 
     /**
@@ -1603,10 +2126,86 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
     }
 
     /**
-     * Pinned system row at the top of the drawer — DeX-style. Holds our own
-     * in-desktop tools (Settings and Linux), which loadApps skips because
-     * they live in this package.
+     * The desktop's own tiles: Settings, Linux, Docker where the ABI can run
+     * it, and the Web viewer.
+     *
+     * These are the in-desktop tools, and they exist as tiles precisely because
+     * nothing else will list them: loadApps skips our own package, so an app
+     * grid built from the launcher intent never contains them.
+     *
+     * A list rather than a row, because both shells show these four and neither
+     * shows them the same way — the DeX drawer puts them in a labelled row
+     * above the app list, the Windows 11 Start menu pins them into its grid.
+     *
+     * Docker sits beside Linux rather than inside it, because it is not a guest
+     * of the Ubuntu container and could never be one: it is a whole virtual
+     * machine of its own (Docker.java has the kernel measurements that force
+     * that). Hidden outright where the APK has no QEMU for the ABI — an offer
+     * that cannot be honoured is worse than no offer. The Web viewer is never
+     * hidden on a device basis: MediaProjection is on every Android this APK
+     * runs on, and the one thing that can be missing (the accessibility
+     * service, for control) is something the window itself says how to fix.
      */
+    private List<LinearLayout> systemTiles() {
+        List<LinearLayout> tiles = new ArrayList<>();
+
+        LinearLayout settings = newIconTile(iconDp());
+        settings.setOnClickListener(v -> launchSettings());
+        ImageView gear = (ImageView) settings.getChildAt(0);
+        gear.setImageResource(android.R.drawable.ic_menu_preferences);
+        gear.setColorFilter(theme.accent);
+        gear.setBackground(roundedFill(theme.accentSoft, 12));
+        int gearPad = dp(9);
+        gear.setPadding(gearPad, gearPad, gearPad, gearPad);
+        ((TextView) settings.getChildAt(1)).setText(getString(R.string.settings_label));
+        tiles.add(settings);
+
+        tiles.add(glyphTile("🐧", getString(R.string.ln_label),
+                v -> launchLinux(), this::showLinuxMenu));
+        if (Docker.abiSupported()) {
+            tiles.add(glyphTile("🐳", getString(R.string.dk_label),
+                    v -> launchDocker(), this::showDockerMenu));
+        }
+        tiles.add(glyphTile("🌐", getString(R.string.wb_label),
+                v -> launchWeb(), this::showWebMenu));
+        return tiles;
+    }
+
+    /**
+     * A system tile whose icon is a font glyph: nothing in the framework draws
+     * a penguin, a whale or a globe, and the emoji is the one icon every device
+     * already ships. Swapped in at index 0 so the tile keeps newIconTile's
+     * child layout.
+     *
+     * Right-click (forwarded by scrcpy) and long-press both reach the tile's
+     * menu — the one place you can do what a broken container will not let you
+     * do from inside it: throw it away.
+     */
+    private LinearLayout glyphTile(String glyph, String label,
+                                   View.OnClickListener onClick, Consumer<View> onMenu) {
+        LinearLayout tile = newIconTile(iconDp());
+        tile.setOnClickListener(onClick);
+        tile.setOnContextClickListener(v -> {
+            onMenu.accept(v);
+            return true;
+        });
+        tile.setOnLongClickListener(v -> {
+            onMenu.accept(v);
+            return true;
+        });
+
+        TextView icon = new TextView(this);
+        icon.setText(glyph);
+        icon.setTextSize(TypedValue.COMPLEX_UNIT_PX, dp(iconDp()) * 0.52f);
+        icon.setGravity(Gravity.CENTER);
+        icon.setBackground(roundedFill(theme.accentSoft, 12));
+        tile.removeViewAt(0);
+        tile.addView(icon, 0, new LinearLayout.LayoutParams(dp(iconDp()), dp(iconDp())));
+        ((TextView) tile.getChildAt(1)).setText(label);
+        return tile;
+    }
+
+    /** The DeX drawer's header row of system tiles, over a rule. */
     private View buildPinnedRow() {
         LinearLayout wrap = new LinearLayout(this);
         wrap.setOrientation(LinearLayout.VERTICAL);
@@ -1621,114 +2220,11 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
 
         LinearLayout row = new LinearLayout(this);
         row.setOrientation(LinearLayout.HORIZONTAL);
-
-        LinearLayout tile = newIconTile(iconDp());
-        tile.setOnClickListener(v -> launchSettings());
-
-        ImageView icon = (ImageView) tile.getChildAt(0);
-        icon.setImageResource(android.R.drawable.ic_menu_preferences);
-        icon.setColorFilter(theme.accent);
-        icon.setBackground(roundedFill(theme.accentSoft, 12));
-        int iconPad = dp(9);
-        icon.setPadding(iconPad, iconPad, iconPad, iconPad);
-
-        ((TextView) tile.getChildAt(1)).setText(getString(R.string.settings_label));
-
-        row.addView(tile, new LinearLayout.LayoutParams(dp(iconDp() + (compact ? 20 : 58)),
-                ViewGroup.LayoutParams.WRAP_CONTENT));
-
-        LinearLayout linuxTile = newIconTile(iconDp());
-        linuxTile.setOnClickListener(v -> launchLinux());
-        // Right-click (forwarded by scrcpy) and long-press both reach the one
-        // thing you cannot do from inside a broken container: throw it away.
-        linuxTile.setOnContextClickListener(v -> {
-            showLinuxMenu(v);
-            return true;
-        });
-        linuxTile.setOnLongClickListener(v -> {
-            showLinuxMenu(v);
-            return true;
-        });
-
-        // A font glyph rather than a drawable: nothing in the framework draws
-        // a penguin, and the emoji is the one icon every device already ships.
-        // Swapped in at index 0 so the tile keeps newIconTile's child layout.
-        TextView penguin = new TextView(this);
-        penguin.setText("🐧");
-        penguin.setTextSize(TypedValue.COMPLEX_UNIT_PX, dp(iconDp()) * 0.52f);
-        penguin.setGravity(Gravity.CENTER);
-        penguin.setBackground(roundedFill(theme.accentSoft, 12));
-        linuxTile.removeViewAt(0);
-        linuxTile.addView(penguin, 0, new LinearLayout.LayoutParams(dp(iconDp()), dp(iconDp())));
-
-        ((TextView) linuxTile.getChildAt(1)).setText(getString(R.string.ln_label));
-
-        row.addView(linuxTile, new LinearLayout.LayoutParams(dp(iconDp() + (compact ? 20 : 58)),
-                ViewGroup.LayoutParams.WRAP_CONTENT));
-
-        // Docker sits beside Linux rather than inside it, because it is not a
-        // guest of the Ubuntu container and could never be one: it is a whole
-        // virtual machine of its own (Docker.java has the kernel measurements
-        // that force that). Hidden outright where the APK has no QEMU for the
-        // ABI — an offer that cannot be honoured is worse than no offer.
-        if (Docker.abiSupported()) {
-            LinearLayout dockerTile = newIconTile(iconDp());
-            dockerTile.setOnClickListener(v -> launchDocker());
-            dockerTile.setOnContextClickListener(v -> {
-                showDockerMenu(v);
-                return true;
-            });
-            dockerTile.setOnLongClickListener(v -> {
-                showDockerMenu(v);
-                return true;
-            });
-
-            // Same reasoning as the penguin above: a font glyph, because the
-            // framework draws no whale and the emoji ships on every device.
-            TextView whale = new TextView(this);
-            whale.setText("🐳");
-            whale.setTextSize(TypedValue.COMPLEX_UNIT_PX, dp(iconDp()) * 0.52f);
-            whale.setGravity(Gravity.CENTER);
-            whale.setBackground(roundedFill(theme.accentSoft, 12));
-            dockerTile.removeViewAt(0);
-            dockerTile.addView(whale, 0,
-                    new LinearLayout.LayoutParams(dp(iconDp()), dp(iconDp())));
-
-            ((TextView) dockerTile.getChildAt(1)).setText(getString(R.string.dk_label));
-            row.addView(dockerTile, new LinearLayout.LayoutParams(dp(iconDp() + (compact ? 20 : 58)),
+        for (LinearLayout tile : systemTiles()) {
+            row.addView(tile, new LinearLayout.LayoutParams(
+                    dp(iconDp() + (compact ? 20 : 58)),
                     ViewGroup.LayoutParams.WRAP_CONTENT));
         }
-
-        // The Web viewer sits with the other in-desktop tools because it is
-        // one: it hands this phone's screen to a browser somewhere else. Never
-        // hidden on a device basis — MediaProjection is on every Android this
-        // APK runs on, and the one thing that can be missing (the
-        // accessibility service, for control) is something the window itself
-        // says how to fix.
-        LinearLayout webTile = newIconTile(iconDp());
-        webTile.setOnClickListener(v -> launchWeb());
-        webTile.setOnContextClickListener(v -> {
-            showWebMenu(v);
-            return true;
-        });
-        webTile.setOnLongClickListener(v -> {
-            showWebMenu(v);
-            return true;
-        });
-
-        // Same reasoning as the penguin and the whale above: a font glyph,
-        // because the framework draws no globe and the emoji ships everywhere.
-        TextView globe = new TextView(this);
-        globe.setText("🌐");
-        globe.setTextSize(TypedValue.COMPLEX_UNIT_PX, dp(iconDp()) * 0.52f);
-        globe.setGravity(Gravity.CENTER);
-        globe.setBackground(roundedFill(theme.accentSoft, 12));
-        webTile.removeViewAt(0);
-        webTile.addView(globe, 0, new LinearLayout.LayoutParams(dp(iconDp()), dp(iconDp())));
-
-        ((TextView) webTile.getChildAt(1)).setText(getString(R.string.wb_label));
-        row.addView(webTile, new LinearLayout.LayoutParams(dp(iconDp() + (compact ? 20 : 58)),
-                ViewGroup.LayoutParams.WRAP_CONTENT));
 
         if (compact) {
             // Four system tiles still overrun a phone's width once "Desktop
@@ -2289,8 +2785,8 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
      * strip is what shrinks and scrolls, and the tray keeps its full width.
      */
     private View buildTaskbar() {
-        View nav = buildNavCluster();
-        View apps = buildAppsCluster();
+        View nav = theme.win11 ? buildWin11NavCluster() : buildNavCluster();
+        View apps = theme.win11 ? buildWin11Cluster() : buildAppsCluster();
         View tray = buildTrayCluster();
 
         ViewGroup bar;
@@ -2399,6 +2895,115 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
         if (compact) scrollLp.leftMargin = dp(4);
         center.addView(scroll, scrollLp);
         return center;
+    }
+
+    /**
+     * Taskbar's left cluster in the Windows 11 shell: the Back key, alone.
+     *
+     * Windows puts nothing at that end of the bar, and its centred cluster is
+     * the whole point of the layout — but this desktop is Android underneath
+     * and Back is not a convenience, it is how half the apps on it are
+     * dismissed. Anchored where it cannot push the centred cluster off centre.
+     */
+    private View buildWin11NavCluster() {
+        LinearLayout left = new LinearLayout(this);
+        left.setOrientation(LinearLayout.HORIZONTAL);
+        left.setGravity(Gravity.CENTER_VERTICAL);
+        left.setPadding(dp(compact ? 4 : 8), 0, 0, 0);
+        // executed by the PC (adb key inject) via the request queue
+        left.addView(win11BarButton(barGlyph("◁"), getString(R.string.lx_back),
+                v -> RequestProvider.enqueue("key", "back")));
+        return left;
+    }
+
+    /**
+     * Taskbar's centre in the Windows 11 shell: Start · Search · Task view ·
+     * Desktop, then the open apps.
+     *
+     * The four buttons are Windows 11's own centred group, mapped onto what
+     * this desktop actually has: Start opens the Start menu, Search opens it
+     * straight into its app list, Task view is the open-apps flyout the DeX
+     * shell reaches through its ▢ key, and Desktop — where Windows keeps its
+     * Widgets button — brings the wallpaper forward.
+     */
+    private View buildWin11Cluster() {
+        LinearLayout center = new LinearLayout(this);
+        center.setOrientation(LinearLayout.HORIZONTAL);
+        center.setGravity(Gravity.CENTER_VERTICAL);
+
+        ImageView start = new ImageView(this);
+        start.setImageDrawable(Win11.logo(theme.accent));
+        center.addView(win11BarButton(start, getString(R.string.w11_start),
+                v -> toggleDrawer()));
+        center.addView(win11BarButton(barGlyph("🔍"), getString(R.string.w11_search),
+                v -> showStartSearching()));
+        center.addView(win11BarButton(barGlyph("▢"), getString(R.string.w11_task_view),
+                v -> toggleRecentsPopup()));
+        center.addView(win11BarButton(barGlyph("▭"), getString(R.string.w11_desktop),
+                v -> goHome()));
+
+        // The divider separates two clusters that compact has already pushed
+        // apart with the row's own spacing — it would only cost width.
+        if (!compact) {
+            View divider = new View(this);
+            divider.setBackgroundColor(theme.divider);
+            LinearLayout.LayoutParams divLp = new LinearLayout.LayoutParams(dp(1), dp(22));
+            divLp.setMargins(dp(8), 0, dp(8), 0);
+            center.addView(divider, divLp);
+        }
+
+        HorizontalScrollView scroll = new HorizontalScrollView(this);
+        scroll.setHorizontalScrollBarEnabled(false);
+        openAppsRow = new LinearLayout(this);
+        openAppsRow.setOrientation(LinearLayout.HORIZONTAL);
+        openAppsRow.setGravity(Gravity.CENTER_VERTICAL);
+        scroll.addView(openAppsRow);
+        // Compact: the strip takes whatever the other two clusters leave and
+        // scrolls inside it, so a tenth open app pushes nothing off the bar.
+        LinearLayout.LayoutParams scrollLp = compact
+                ? new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f)
+                : new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT,
+                        ViewGroup.LayoutParams.MATCH_PARENT);
+        if (compact) scrollLp.leftMargin = dp(4);
+        center.addView(scroll, scrollLp);
+        return center;
+    }
+
+    /** A glyph sized for a Windows 11 taskbar button. */
+    private TextView barGlyph(String glyph) {
+        TextView glyphView = new TextView(this);
+        glyphView.setText(glyph);
+        glyphView.setTextColor(theme.textDim);
+        glyphView.setTextSize(TypedValue.COMPLEX_UNIT_PX, sp(compact ? 13 : 15));
+        glyphView.setGravity(Gravity.CENTER);
+        return glyphView;
+    }
+
+    /**
+     * A square taskbar button, Windows 11 shaped: the icon centred in a hover
+     * fill that is a good deal smaller than the bar, so the row reads as
+     * separate buttons rather than one continuous strip.
+     *
+     * Carries its own LayoutParams — every caller adds it to the same
+     * horizontal row, and the size is the button's business, not theirs.
+     */
+    private View win11BarButton(View content, String description,
+                                View.OnClickListener onClick) {
+        FrameLayout button = new FrameLayout(this);
+        button.setBackground(tapBackground(0x00000000, theme.hover, 6));
+        button.setContentDescription(description);
+        button.setOnClickListener(onClick);
+        int icon = dp(compact ? 17 : 20);
+        boolean drawn = content instanceof ImageView;
+        button.addView(content, new FrameLayout.LayoutParams(
+                drawn ? icon : ViewGroup.LayoutParams.WRAP_CONTENT,
+                drawn ? icon : ViewGroup.LayoutParams.WRAP_CONTENT,
+                Gravity.CENTER));
+        int side = dp(compact ? 34 : 40);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(side, side);
+        lp.setMargins(dp(1), 0, dp(1), 0);
+        button.setLayoutParams(lp);
+        return button;
     }
 
     /**
@@ -2542,6 +3147,9 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
      */
     private void showDrawer() {
         if (drawerShown) return;
+        // Pinned is a view of the desktop, which the user can have rearranged
+        // since the last open. ~16 views; cheaper than watching the grid.
+        fillStartPinned();
         int pad = dp(compact ? 14 : 48);
         if (android.provider.Settings.canDrawOverlays(this)) {
             Point size = new Point();
@@ -2557,11 +3165,22 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
                     WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
                     PixelFormat.TRANSLUCENT);
             lp.gravity = Gravity.TOP;
-            // the drawer is the biggest translucent surface we own — blur is
-            // what makes it read as glass rather than as a dimmed screenshot
-            Glass.apply(this, lp, uiDensity);
+            // The drawer is the biggest translucent surface we own — blur is
+            // what makes it read as glass rather than as a dimmed screenshot.
+            //
+            // NOT for the Start menu, which covers the same window but paints
+            // in only a corner of it: FLAG_BLUR_BEHIND applies to the whole
+            // window, so it would blur the entire desktop to frost a panel
+            // that is a fifth of it. The panel is translucent either way.
+            if (!theme.win11) Glass.apply(this, lp, uiDensity);
             try {
-                drawerPanel.setPadding(pad, drawerTopPad(), pad, dp(12));
+                // The Start menu carries its own padding and sits where its
+                // LayoutParams put it; only the full-surface drawer is
+                // re-inset for the window it landed in. The overlay window
+                // already stops short of the taskbar, so the menu owes it
+                // nothing but the gap Windows leaves under the panel.
+                if (theme.win11) startPanelBottomMargin(dp(8));
+                else drawerPanel.setPadding(pad, drawerTopPad(), pad, dp(12));
                 drawer.setVisibility(View.VISIBLE);
                 getWindowManager().addView(drawer, lp);
                 drawerOverlay = true;
@@ -2575,9 +3194,14 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
             // desktop task has to come forward for it to be seen
             bringDesktopForward();
             // Inside the activity nothing insets us: this one pays for both
-            // system bars as well as the taskbar strip.
-            drawerPanel.setPadding(pad, topSystemInset() + drawerTopPad(), pad,
-                    bottomSystemInset() + dp(TASKBAR_DP + 12));
+            // system bars as well as the taskbar strip. The Start menu pays it
+            // as a margin instead, since its panel does not fill the window.
+            if (theme.win11) {
+                startPanelBottomMargin(bottomSystemInset() + dp(TASKBAR_DP + 8));
+            } else {
+                drawerPanel.setPadding(pad, topSystemInset() + drawerTopPad(), pad,
+                        bottomSystemInset() + dp(TASKBAR_DP + 12));
+            }
             if (drawer.getParent() == null) {
                 rootFrame.addView(drawer, new FrameLayout.LayoutParams(
                         ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
@@ -2588,6 +3212,26 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
         }
         searchField.setText("");
         searchField.requestFocus();
+    }
+
+    /**
+     * Lift the Start menu off the bottom of its window.
+     *
+     * Set on every open rather than once at build: the drawer's window is an
+     * overlay when the app-op has been granted and the activity's own root
+     * when it has not, and only one of those two is already laid out above the
+     * taskbar. Getting it wrong either floats the menu a taskbar clear of the
+     * bar or slides it underneath.
+     */
+    private void startPanelBottomMargin(int px) {
+        if (drawerPanel == null
+                || !(drawerPanel.getLayoutParams() instanceof FrameLayout.LayoutParams)) {
+            return;
+        }
+        FrameLayout.LayoutParams lp = (FrameLayout.LayoutParams) drawerPanel.getLayoutParams();
+        if (lp.bottomMargin == px) return;
+        lp.bottomMargin = px;
+        drawerPanel.setLayoutParams(lp);
     }
 
     private void hideDrawer() {
@@ -2611,6 +3255,24 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
         }
         // put back the chrome a drag hid, so the next open is a clean drawer
         if (drawerPanel != null) drawerPanel.setVisibility(View.VISIBLE);
+        // and Start opens on Pinned again, the way Windows does
+        startAllApps = false;
+    }
+
+    /**
+     * The taskbar's Search button: the Start menu, opened straight into its app
+     * list with the caret in the search field.
+     *
+     * Windows opens a search surface of its own here; ours is the same menu on
+     * its other page, because that page IS the search — everything this desktop
+     * can find is an app.
+     */
+    private void showStartSearching() {
+        dismissPopups();
+        if (!drawerShown) showDrawer();
+        startAllApps = true;
+        updateStartMode();
+        if (searchField != null) searchField.requestFocus();
     }
 
     private void dismissPopups() {
@@ -3355,25 +4017,10 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
             if (entry == null) continue;
             final AppEntry app = entry;
 
-            LinearLayout item = new LinearLayout(this);
-            item.setOrientation(LinearLayout.VERTICAL);
-            item.setGravity(Gravity.CENTER_HORIZONTAL);
-            item.setPadding(dp(compact ? 3 : 5), dp(4), dp(compact ? 3 : 5), dp(3));
-            item.setBackground(tapBackground(0x00000000, theme.hover, 10));
-
             ImageView icon = new ImageView(this);
             icon.setImageDrawable(app.icon);
             icon.setContentDescription(app.label);
-            item.addView(icon, new LinearLayout.LayoutParams(
-                    dp(compact ? 27 : 34), dp(compact ? 27 : 34)));
-
-            // running indicator
-            View dot = new View(this);
-            dot.setBackground(roundedFill(theme.accent, 2));
-            LinearLayout.LayoutParams dotLp =
-                    new LinearLayout.LayoutParams(dp(compact ? 10 : 12), dp(3));
-            dotLp.topMargin = dp(3);
-            item.addView(dot, dotLp);
+            LinearLayout item = taskbarTile(icon);
 
             item.setOnClickListener(v -> launch(app)); // relaunch = refocus
             // right-click (forwarded by scrcpy) or long-press → app menu
@@ -3385,12 +4032,43 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
                 showTaskbarAppMenu(v, app);
                 return true;
             });
-            // Built on every app launch, long after the taskbar's tree pass —
-            // so, like the drawer's cells, this one asks for its own hand.
-            DexCursors.apply(item, DexCursors.ROLE_HAND);
             openAppsRow.addView(item, new LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         }
+    }
+
+    /**
+     * One tile in the open-apps strip: an icon, and the line under it that says
+     * the app is running.
+     *
+     * Shared by the two things that can be open on this display — an app, whose
+     * icon is a Drawable, and one of our own windows, whose icon is an emoji —
+     * and by both shells: Windows 11 draws a smaller icon over a longer
+     * indicator and tucks it into a tighter corner radius, which is the whole
+     * of the difference between them.
+     *
+     * Built on every app launch, long after the taskbar's own tree pass, so it
+     * asks for its pointer here rather than relying on that walk.
+     */
+    private LinearLayout taskbarTile(View icon) {
+        LinearLayout item = new LinearLayout(this);
+        item.setOrientation(LinearLayout.VERTICAL);
+        item.setGravity(Gravity.CENTER_HORIZONTAL);
+        item.setPadding(dp(compact ? 3 : 5), dp(4), dp(compact ? 3 : 5), dp(3));
+        item.setBackground(tapBackground(0x00000000, theme.hover, theme.win11 ? 6 : 10));
+
+        int side = theme.win11 ? dp(compact ? 22 : 26) : dp(compact ? 27 : 34);
+        item.addView(icon, new LinearLayout.LayoutParams(side, side));
+
+        View dot = new View(this);
+        dot.setBackground(roundedFill(theme.accent, 2));
+        LinearLayout.LayoutParams dotLp = new LinearLayout.LayoutParams(
+                theme.win11 ? dp(compact ? 12 : 16) : dp(compact ? 10 : 12), dp(3));
+        dotLp.topMargin = dp(theme.win11 ? 5 : 3);
+        item.addView(dot, dotLp);
+
+        DexCursors.apply(item, DexCursors.ROLE_HAND);
+        return item;
     }
 
     /**
@@ -3431,26 +4109,13 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
                 continue;
             }
 
-            LinearLayout item = new LinearLayout(this);
-            item.setOrientation(LinearLayout.VERTICAL);
-            item.setGravity(Gravity.CENTER_HORIZONTAL);
-            item.setPadding(dp(compact ? 3 : 5), dp(4), dp(compact ? 3 : 5), dp(3));
-            item.setBackground(tapBackground(0x00000000, theme.hover, 10));
-
             TextView icon = new TextView(this);
             icon.setText(glyph);
             icon.setGravity(Gravity.CENTER);
-            icon.setTextSize(TypedValue.COMPLEX_UNIT_PX, sp(compact ? 18 : 22));
+            icon.setTextSize(TypedValue.COMPLEX_UNIT_PX,
+                    theme.win11 ? sp(compact ? 15 : 18) : sp(compact ? 18 : 22));
             icon.setContentDescription(label);
-            item.addView(icon, new LinearLayout.LayoutParams(
-                    dp(compact ? 27 : 34), dp(compact ? 27 : 34)));
-
-            View dot = new View(this);
-            dot.setBackground(roundedFill(theme.accent, 2));
-            LinearLayout.LayoutParams dotLp =
-                    new LinearLayout.LayoutParams(dp(compact ? 10 : 12), dp(3));
-            dotLp.topMargin = dp(3);
-            item.addView(dot, dotLp);
+            LinearLayout item = taskbarTile(icon);
 
             // Every launcher already starts with the "is it minimised?" check,
             // so one click handler covers restore and raise.
@@ -3466,9 +4131,6 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
                     launchSettings();
                 }
             });
-            // Built on every app launch, long after the taskbar's tree pass —
-            // so, like the drawer's cells, this one asks for its own hand.
-            DexCursors.apply(item, DexCursors.ROLE_HAND);
             openAppsRow.addView(item, new LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         }
@@ -3971,6 +4633,10 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
         // desktop shortcuts are stored as components and resolved against this
         // list, so they can only be built once it exists
         if (desktopGrid != null) desktopGrid.reload();
+        // AFTER the grid: the Start menu pins what is on the desktop, and the
+        // menu itself was built by buildUi before either list existed. A no-op
+        // under the DeX shell.
+        fillStartPinned();
     }
 
     private void filter(String query) {
@@ -3984,6 +4650,9 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
             }
         }
         if (adapter != null) adapter.notifyDataSetChanged();
+        // Typing is what puts the Start menu on its list page — see
+        // updateStartMode. A no-op under the DeX shell.
+        updateStartMode();
     }
 
     private void loadRecents() {

@@ -37,7 +37,7 @@
     <string name="st_reset">Reset</string>
 
     <string name="st_nav_display">Display &amp; UI</string>
-    <string name="st_nav_display_sub">Theme · Glass · Display size</string>
+    <string name="st_nav_display_sub">Desktop style · Theme · Glass · Display size</string>
     <string name="st_nav_perf">Performance</string>
     <string name="st_nav_perf_sub">Reduce quality · Faster app launches</string>
     <string name="st_nav_language">Language &amp; Font</string>
@@ -56,6 +56,13 @@
     <string name="st_nav_clipboard_sub">Sync · Current clip · History</string>
     <string name="st_nav_about">About &amp; Updates</string>
     <string name="st_nav_about_sub">Version · Maintenance · Reset</string>
+
+    <string name="st_shell">Desktop style</string>
+    <string name="st_shell_dex">DeX</string>
+    <string name="st_shell_dex_sub">Nav keys, an app drawer and a DeX taskbar</string>
+    <string name="st_shell_win11">Windows 11</string>
+    <string name="st_shell_win11_sub">Centred taskbar, a Start menu, and Windows colours and corners</string>
+    <string name="st_shell_note">The style changes this desktop only. Your theme, wallpaper and glass settings all still apply — Windows 11 has a dark mode and a light one, and follows the theme you pick below.</string>
 
     <string name="st_theme">Theme</string>
     <string name="st_theme_dark">Dark</string>
@@ -81,6 +88,19 @@
     <string name="st_transparency">Surface transparency</string>
     <string name="st_rounding">Item rounding</string>
     <string name="st_blur_unsupported">This device does not render window blur — transparency still applies.</string>
+
+    <string name="w11_start">Start</string>
+    <string name="w11_search">Search</string>
+    <string name="w11_search_hint">Type here to search</string>
+    <string name="w11_task_view">Task view</string>
+    <string name="w11_desktop">Show desktop</string>
+    <string name="w11_pinned">Pinned</string>
+    <string name="w11_all_apps">All apps</string>
+    <string name="w11_back">Back</string>
+    <string name="w11_recommended">Recommended</string>
+    <string name="w11_results">Results</string>
+    <string name="w11_recent">Recently used</string>
+    <string name="w11_power">Power</string>
 
     <string name="st_display_size">Display size</string>
     <string name="st_display_size_note">Applies to this desktop display only and takes effect immediately.</string>

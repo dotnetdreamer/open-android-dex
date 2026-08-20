@@ -134,55 +134,6 @@ repair_dpkg() {
   run_guest "dpkg --configure -a; apt-get -y --fix-broken install; b=\$(dpkg -l | awk '\$1 ~ /^i[FHU]/ { print \$2 }'); [ -n \"\$b\" ] || exit 0; apt-get install -y \$b || apt-get install -y --reinstall \$b; true" || true
 }
 
-# Install packages, treating an unpack that DIED as something to do again rather
-# than as a verdict.
-#
-# Measured on an S25 (2026-08-20), on the first run of every install:
-#
-#   Unpacking firefox (154.0~build1) ...
-#   double free or corruption (out)
-#   dpkg-deb: error: <decompress> subprocess was killed by signal (Aborted)
-#   dpkg: error processing archive .../firefox_154.0~build1_arm64.deb (--unpack)
-#
-# That is glibc's heap check firing inside a subprocess proot is
-# ptrace-emulating, and it is none of the things an installer is supposed to
-# fail on: not the network (apt had already fetched everything — "Need to get
-# 0 B/77.7 MB"), not the archive, not the package set. The SAME cached .deb
-# unpacks cleanly seconds later, which is the whole reason the setup screen said
-# "Linux setup failed" once per install and then worked on Retry. The retry is
-# the fix; doing it by hand was never part of the design.
-#
-# repair_dpkg between attempts is not optional. A killed unpack leaves the
-# package half-installed, and that is precisely the state dpkg will not
-# configure and only a re-UNPACK clears — see the ladder above.
-#
-# The attempt is NARRATED, because this phase can now take three times as long
-# as it used to and a progress line that stops moving reads as a hang. MSG uses
-# the verb:name shape apt_msg established, so LinuxActivity renders it
-# "retrying firefox" without knowing anything new.
-apt_install_tries() { # pct tries package...
-  _pct=$1
-  _tries=$2
-  shift 2
-  _n=0
-  while :; do
-    _n=$((_n + 1))
-    if [ "$_n" -eq 1 ]; then
-      state installing-desktop "$_pct" "installing:$1"
-    else
-      state installing-desktop "$_pct" "retrying:$1"
-    fi
-    if run_guest "apt-get install -y --no-install-recommends $*"; then
-      [ "$_n" -eq 1 ] || note "$1: installed on attempt $_n"
-      return 0
-    fi
-    apt_note "$1 attempt $_n"
-    [ "$_n" -ge "$_tries" ] && return 1
-    note "$1: attempt $_n died — repairing and trying again"
-    repair_dpkg
-  done
-}
-
 # What the desktop install is doing RIGHT NOW, as one state.env-safe token.
 # apt is a firehose and MSG holds a single whitespace-free word, so this reduces
 # the log tail to the last thing worth naming: which package is downloading,
@@ -524,12 +475,8 @@ EOF
   # hiccups, which says nothing about whether the package we want is
   # installable. Let the install be the judge.
   run_guest "apt-get update" || true
-  # Three attempts each, because the unpack of a ~100 MB .deb under proot dies
-  # about once per install and a dead unpack is not a failed one — see
-  # apt_install_tries. Firefox is still the phase's verdict; Chromium is still
-  # allowed to lose, it just no longer loses to a decompressor that aborted.
-  apt_install_tries 93 3 firefox || return 1
-  if apt_install_tries 94 3 chromium; then
+  run_guest "apt-get install -y --no-install-recommends firefox" || return 1
+  if run_guest "apt-get install -y --no-install-recommends chromium"; then
     CHROMIUM_OK=1
   else
     CHROMIUM_OK=
