@@ -1,6 +1,12 @@
 .gradle/
-openandroiddex-launcher/app/build/
+# Gradle output: the root project's, and EVERY module's. The per-module lines
+# used to be spelled out one at a time, so adding :linuxapp dropped 484
+# intermediates into `git status` — a wildcard is what keeps the next module
+# from doing it again. Nothing in this repo is a tracked directory named build/
+# (openandroiddex-wmd/build.sh is a file, and the trailing slash matches only
+# directories), so the rule cannot swallow a source path.
 openandroiddex-launcher/build/
+openandroiddex-launcher/*/build/
 
 # IDE, per-machine
 .idea/

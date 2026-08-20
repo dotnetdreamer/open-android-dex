@@ -1,0 +1,122 @@
+// LinuxOnDroid — the Linux feature, built as an app of its own.
+//
+// Same sources, same resources, same assets, same proot as :app. Nothing is
+// forked: this module compiles openandroiddex-launcher's tree against a manifest
+// that declares only the three components the container needs, so a phone with
+// no PC, no cable and no desktop shell can still run Ubuntu. The feature never
+// depended on any of that — LinuxService downloads the rootfs, runs the install
+// and hosts the runtime under the app's own uid, and the one line where
+// LinuxActivity names the shell (LauncherActivity.ACTION_CLOSE_WINDOW) is a
+// compile-time String constant, so it inlines and the class is never loaded.
+//
+// A SEPARATE MODULE and not a product flavour, because flavours rename every
+// task: `assembleDebug` would become `assembleFullDebug`, and that name is
+// wired into the Tauri build script, `npm run apk` and the release workflow.
+// A module leaves all of it alone and adds `:linuxapp:assembleDebug` beside it.
+plugins {
+    id 'com.android.application'
+}
+
+// The version is :app's, read out of it rather than copied. CI stamps exactly
+// one file (a sed over app/build.gradle in .github/workflows/desktop.yml), and
+// a second hard-coded pair here would quietly ship the wrong number forever —
+// which is the bug app/build.gradle's own versionCode comment records living
+// with for months.
+evaluationDependsOn(':app')
+def appConfig = project(':app').android.defaultConfig
+
+android {
+    // The CODE package, not the app id: every source file says
+    // `package com.ccrstech.openandroiddex.launcher` and looks its R class up
+    // there. Two modules may share a namespace; they are separate compilations.
+    namespace 'com.ccrstech.openandroiddex.launcher'
+    compileSdk 36
+
+    defaultConfig {
+        // A DIFFERENT package name, so this installs ALONGSIDE the desktop
+        // shell instead of replacing it — same signing key, so without this an
+        // install would be an "update" that swapped one app for the other.
+        //
+        // The cost is the thing worth knowing before installing both: separate
+        // package, separate private storage, therefore SEPARATE CONTAINERS.
+        // Two Ubuntu installs, two downloads, two lots of ~3 GB. There is no
+        // sharing them — an app cannot reach another app's data directory, and
+        // proot needs a directory it can write.
+        applicationId "com.ccrstech.linuxondroid"
+        minSdk 26
+        targetSdk 35
+        versionCode appConfig.versionCode
+        versionName appConfig.versionName
+
+        // The same two the launcher ships, and for the same reason: proot is a
+        // prebuilt binary per ABI, and an APK offering a third one would
+        // install on a phone it cannot run a container on.
+        ndk {
+            abiFilters 'arm64-v8a', 'x86_64'
+        }
+    }
+
+    // The launcher's committed debug key, not a per-machine one — see the long
+    // note in app/build.gradle. Sharing it also means a phone can hold both
+    // apps: two packages signed by the same key never collide.
+    signingConfigs {
+        debug {
+            storeFile file('../app/debug.keystore')
+            storePassword 'android'
+            keyAlias 'androiddebugkey'
+            keyPassword 'android'
+        }
+    }
+
+    buildTypes {
+        debug {
+            signingConfig signingConfigs.debug
+            // Not debuggable, for the reason app/build.gradle spells out: this
+            // is what ships, and a debuggable APK raises Android's own
+            // compatibility warning over the 4 KB-aligned proot prebuilts.
+            debuggable project.hasProperty('debuggableLauncher')
+        }
+        release {
+            minifyEnabled false
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    // :app's tree verbatim. The manifest is the ONLY file this module owns —
+    // it is what makes the difference between the two apps, and keeping it to
+    // one file is what keeps them from drifting.
+    sourceSets {
+        main {
+            manifest.srcFile 'src/main/AndroidManifest.xml'
+            java.srcDirs = ['../app/src/main/java']
+            res.srcDirs = ['../app/src/main/res']
+            assets.srcDirs = ['../app/src/main/assets']
+            jniLibs.srcDirs = ['../app/src/main/jniLibs']
+        }
+    }
+
+    packaging {
+        jniLibs {
+            // proot must be a REAL FILE in nativeLibraryDir to be exec'd; pairs
+            // with android:extractNativeLibs in the manifest. See app/build.gradle.
+            useLegacyPackaging = true
+            // 31 MB per ABI of QEMU (the Docker VM) and ~12 MB per ABI of
+            // WebRTC (the Web viewer). Neither feature has an entry point in
+            // this app's manifest, so neither library can be reached, let alone
+            // loaded — and together they are most of the download. The classes
+            // still compile and still ship; only the native code is dropped.
+            excludes += ['**/libqemu.so', '**/libjingle_peerconnection_so.so']
+        }
+    }
+}
+
+dependencies {
+    // Compiled but not shipped — see the jniLibs excludes above. It is here at
+    // all because the Web viewer's sources are part of the tree this module
+    // reuses and they must still compile.
+    implementation 'io.github.webrtc-sdk:android:144.7559.12'
+}

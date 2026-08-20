@@ -1,0 +1,136 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  LinuxOnDroid, standalone. The whole difference between this app and the
+  desktop shell is this file: same code, same resources, same proot — three
+  components instead of a dozen, and only the permissions those three need.
+
+  What is deliberately NOT here, and why nothing misses it: the shell
+  (LauncherActivity, CaptionService, the taskbar's window daemon), the Web
+  viewer, Docker, and RequestProvider. Their classes are still compiled in —
+  excluding sources would mean forking the tree — but a component the manifest
+  does not declare cannot be started by anyone, including us. RequestProvider is
+  the one that MUST go rather than merely may: its authority is a fixed string,
+  and two installed apps declaring the same authority is
+  INSTALL_FAILED_CONFLICTING_PROVIDER — the second install simply fails.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- Downloading the Ubuntu rootfs, apt inside the guest, and the loopback
+         socket the noVNC page is served over. Without it an app cannot create
+         ANY socket. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+
+    <!-- The Linux runtime (proot → Xvnc + websockify) is a long-running native
+         process tree this app owns; it lives in a foreground service so Android
+         does not reap it while the window is backgrounded — which, on a phone,
+         is what "keep running" does. specialUse: a self-hosted Linux container
+         is none of the predefined FGS types. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+
+    <!-- Asked for at runtime, once, by LinuxActivity — the only permission
+         dialog this app raises. The service runs either way; without the grant
+         Android just hides its notification, which on a phone is the only sign
+         a container is running and the way back to a session put aside. -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <!-- The shared folder at /sdcard/LinuxOnDeX, which linux-rt.sh binds into
+         the guest's Desktop. MediaProvider gates top-level names on shared
+         storage, so without this the folder cannot even be created, and scoped
+         storage denies us open() on anything another app put there.
+
+         DECLARED but never asked for: there is no in-app screen to request it
+         (that lives in the desktop shell), so this is the user's own trip to
+         Settings → Apps → Special app access → All files access. Everything
+         else about the container works without it; only the shared folder is
+         missing until then. Declaring it is what makes the grant STICK when
+         they do — PermissionPolicyService resets an app-op-backed permission
+         the package never requested.
+
+         It also makes this APK ineligible for Play without a declaration form.
+         Moot while it is debug-signed, which Play rejects outright. -->
+    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
+
+    <!-- label + icon are the product's, not the shell's: this app IS
+         LinuxOnDroid, so it says so in the app list, in Settings → Apps, and on
+         the recents card.
+
+         networkSecurityConfig: targetSdk 35 blocks cleartext http, which
+         includes the loopback noVNC page the viewer loads. The config permits
+         cleartext for 127.0.0.1 and nothing else.
+
+         extractNativeLibs: proot must be a real file in nativeLibraryDir to be
+         exec'd — see build.gradle's useLegacyPackaging. -->
+    <application
+        android:label="@string/ln_label"
+        android:icon="@mipmap/ic_linux"
+        android:extractNativeLibs="true"
+        android:networkSecurityConfig="@xml/network_security_config"
+        android:theme="@style/Theme.OpenAndroidDeX">
+
+        <!-- The launcher entry. The same trampoline the desktop build puts in
+             the phone's app list, kept rather than pointing the icon straight
+             at the window, because it owns the two things opening Linux means:
+             clearing the uninstall marker, and raising the one window there is
+             instead of building another. See LinuxAppActivity. -->
+        <activity
+            android:name=".LinuxAppActivity"
+            android:exported="true"
+            android:launchMode="singleTask"
+            android:taskAffinity="com.ccrstech.linuxondroid.open"
+            android:theme="@style/Theme.OpenAndroidDeX.Detour"
+            android:excludeFromRecents="true"
+            android:autoRemoveFromRecents="true"
+            android:resizeableActivity="true"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|density|keyboard|keyboardHidden|navigation|uiMode|locale|layoutDirection|fontScale">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- The window itself: the noVNC viewer over the container, plus the
+             install narration in front of it. Not exported — it is reached
+             through the trampoline above, and from the notification.
+
+             taskAffinity is this app's own. The string differs from the desktop
+             build's on purpose: affinity is matched by string, and two installed
+             apps offering the same one is a way for a window to be pulled into
+             a task that is not its own.
+
+             adjustResize, spelled out because the default is not it: an
+             unspecified soft-input mode resolves to PAN, which slides the whole
+             window up when the keyboard opens and takes the viewer's control
+             bar off the top of the screen. Resizing lets the page see the space
+             it has left and put its key row above the keyboard. -->
+        <activity
+            android:name=".LinuxActivity"
+            android:exported="false"
+            android:icon="@mipmap/ic_linux"
+            android:label="@string/ln_label"
+            android:launchMode="singleTask"
+            android:taskAffinity="com.ccrstech.linuxondroid.window"
+            android:resizeableActivity="true"
+            android:windowSoftInputMode="adjustResize"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|navigation|uiMode" />
+
+        <!-- Owns the whole container: downloads and verifies the rootfs, runs
+             the apt provisioning, and hosts the proot/Xvnc/websockify runtime,
+             all under this app's own uid. No shell user, no daemon, no PC —
+             which is what makes this app a repackage rather than a rewrite.
+
+             Its own process, as in the desktop build: a foreground service that
+             misses the platform's five-second startForeground deadline dies
+             with an uncaught ForegroundServiceDidNotStartInTimeException, and
+             sharing a process meant that took the window down with it. -->
+        <service
+            android:name=".LinuxService"
+            android:exported="false"
+            android:process=":linux"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Runs a user-launched Linux (Ubuntu/XFCE) container under proot" />
+        </service>
+    </application>
+</manifest>

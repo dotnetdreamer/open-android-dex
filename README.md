@@ -100,6 +100,25 @@ download — nothing to install separately.
 *Build number* seven times), then turn on **USB debugging**. Plug in and accept
 the authorisation prompt. That is the whole setup.
 
+### Just Linux, no PC
+
+`LinuxOnDroid-v<version>.apk` on the same release page is the Ubuntu container
+as an app of its own — **about 1 MB**, sideloaded, no cable and no desktop app.
+It downloads its own rootfs on first launch (keep ~3 GB free) and opens XFCE
+full-screen: the panel is a trackpad by default, with Touch and Direct one tap
+away. Needs arm64 or x86_64 and Android 8.0+.
+
+It installs *alongside* Open Android DeX rather than replacing it — different
+package name, same signing key — but the two keep **separate containers**. An
+app cannot reach another app's private storage, so both installed means two
+Ubuntu installs and two downloads.
+
+On phones with aggressive battery management (Xiaomi, Samsung, Huawei), exempt
+it from battery optimisation before starting the install. The download and the
+`apt` run live in a foreground service, and those OEMs still kill one that runs
+for twenty minutes with the screen off — the desktop app whitelists the launcher
+over `adb`, and a sideloaded app has no way to do that for itself.
+
 **macOS first launch** — the app is ad-hoc signed, not notarized, so macOS
 blocks it once:
 
@@ -150,6 +169,10 @@ hand-launching scrcpy or sideloading the APK skips all of that.
 npm run tauri build     # Windows → bundle/nsis/ ; macOS → bundle/{macos,dmg}/
 npm run apk             # phone-side payloads only (APK + wmd dex + asset sync)
 cargo test              # from src-tauri/ — adb, scrcpy and wm parsing tests
+
+# The standalone LinuxOnDroid APK, from openandroiddex-launcher/. Same sources
+# as the launcher behind a three-component manifest; leaves assembleDebug alone.
+./gradlew :linuxapp:assembleDebug
 
 # Frontend-only work, no JDK or Android SDK needed:
 SKIP_LAUNCHER_APK=1 SKIP_WMD_DEX=1 npm run tauri dev

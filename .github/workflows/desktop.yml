@@ -166,6 +166,19 @@ jobs:
         # app/build.gradle intact or releases stop being upgradable again.
         run: ./gradlew --no-daemon assembleDebug
 
+      - name: Build the standalone LinuxOnDroid APK
+        working-directory: openandroiddex-launcher
+        # The same sources as the launcher behind a three-component manifest —
+        # see linuxapp/build.gradle. It ships as a release asset of its own, for
+        # people who want Ubuntu on the phone and no desktop: nothing about the
+        # container ever needed the PC, and this proves it by leaving the PC out.
+        #
+        # Debug for the same reason as the step above (release has no
+        # signingConfig), and with the SAME committed key, which is what lets a
+        # phone hold this and the launcher at once — two package names signed
+        # alike collide over nothing.
+        run: ./gradlew --no-daemon :linuxapp:assembleDebug
+
       - name: Build wmd daemon dex
         # openandroiddex-wmd is not an Android project — javac + d8 straight to
         # a single dex, loaded by app_process at uid 2000, so it has its own
@@ -195,6 +208,24 @@ jobs:
           path: payloads/*
           if-no-files-found: error
           retention-days: 1
+
+      - name: Stage LinuxOnDroid under its download name
+        # Named for the version because this one is downloaded BY HAND from the
+        # releases page — the launcher APK inside the desktop app never is.
+        run: |
+          mkdir -p linuxondroid
+          cp openandroiddex-launcher/linuxapp/build/outputs/apk/debug/linuxapp-debug.apk \
+             "linuxondroid/LinuxOnDroid-v${{ needs.version.outputs.version }}.apk"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          # release-* is exactly what the release job globs, so attaching this
+          # to the GitHub release takes no change there at all. Not retention-
+          # limited like phone-payloads: that one is a build input, this one is
+          # the thing being published.
+          name: release-linuxondroid
+          path: linuxondroid/*
+          if-no-files-found: error
 
   build-windows:
     needs: [version, launcher]
