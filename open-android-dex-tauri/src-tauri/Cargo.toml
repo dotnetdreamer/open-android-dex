@@ -1,6 +1,6 @@
 [package]
 name = "open-android-dex-tauri"
-version = "0.3.14"
+version = "0.3.15"
 description = "Samsung-DeX-style desktop for Android phones"
 authors = ["Idrees Khan"]
 license = "GPL-3.0-or-later"
