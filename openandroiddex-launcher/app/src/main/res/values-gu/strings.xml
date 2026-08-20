@@ -352,7 +352,7 @@
     <string name="st_clip_note">Android એપને ક્લિપબોર્ડ ત્યારે જ વાંચવા દે છે જ્યારે તેની વિન્ડો ફોકસમાં હોય, એટલે ઇતિહાસ આ વિન્ડો આગળ હોય ત્યારે જ નોંધાય છે.</string>
     <string name="st_scope_stream">સ્ટ્રીમ અને ક્લિપબોર્ડ સેટિંગ્સ</string>
 
-    <string name="ln_label">Linux</string>
+    <string name="ln_label">LinuxOnDroid</string>
     <string name="ln_installing">Ubuntu ઇન્સ્ટૉલ થઈ રહ્યું છે…</string>
     <string name="ln_waiting">ડેસ્કટોપ ઍપ ઇન્સ્ટૉલ શરૂ કરે તેની રાહ જોવાય છે…</string>
     <string name="ln_starting">Linux ડેસ્કટોપ શરૂ થઈ રહ્યું છે…</string>
@@ -376,6 +376,9 @@
     <string name="ln_close_body">આનાથી ઉબુન્ટુ સત્ર સમાપ્ત થશે અને કન્ટેનર બંધ થશે. અંદર સાચવ્યા વગરનું બધું ગુમાવાશે. તેને ચાલુ રાખીને બાજુ પર મૂકવા માટે, વિન્ડો ન્યૂનતમ કરો.</string>
     <string name="ln_close_cancel">રદ કરો</string>
     <string name="ln_close_shutdown">બંધ કરો</string>
+    <string name="ln_close_body_phone">આનાથી Ubuntu સત્ર સમાપ્ત થાય છે અને કન્ટેનર બંધ થાય છે. અંદર સાચવ્યા વગરનું બધું ખોવાઈ જશે. “ચાલુ રાખો” તેને પૃષ્ઠભૂમિમાં ચાલુ રાખે છે, જેથી તમે પાછા આવી શકો.</string>
+    <string name="ln_close_keep">ચાલુ રાખો</string>
+    <string name="ln_on_desktop">Linux પહેલેથી જ DeX ડેસ્કટોપ પર ખુલ્લું છે. ફોન પર વાપરવા માટે તેને ત્યાં બંધ કરો.</string>
     <string name="ln_shared">શેર કરેલું ફોલ્ડર</string>
     <string name="ln_shared_grant">બધી ફાઇલોની ઍક્સેસની મંજૂરી આપો…</string>
     <string name="ln_shared_grant_failed">પરવાનગી સ્ક્રીન ખોલી શકાઈ નથી</string>

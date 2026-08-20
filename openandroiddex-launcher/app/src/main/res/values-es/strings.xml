@@ -352,7 +352,7 @@
     <string name="st_clip_note">Android solo deja leer el portapapeles a la app cuya ventana tiene el foco, así que el historial se captura mientras esta ventana está delante.</string>
     <string name="st_scope_stream">Ajustes de stream y portapapeles</string>
 
-    <string name="ln_label">Linux</string>
+    <string name="ln_label">LinuxOnDroid</string>
     <string name="ln_installing">Instalando Ubuntu…</string>
     <string name="ln_waiting">Esperando a que la aplicación de escritorio inicie la instalación…</string>
     <string name="ln_starting">Iniciando el escritorio Linux…</string>
@@ -376,6 +376,9 @@
     <string name="ln_close_body">Esto termina la sesión de Ubuntu y detiene el contenedor. Se perderá todo lo que no esté guardado dentro. Para dejarla a un lado sin detenerla, minimiza la ventana.</string>
     <string name="ln_close_cancel">Cancelar</string>
     <string name="ln_close_shutdown">Apagar</string>
+    <string name="ln_close_body_phone">Esto finaliza la sesión de Ubuntu y detiene el contenedor. Se pierde todo lo que no esté guardado dentro. «Mantener en marcha» lo deja funcionando en segundo plano para que puedas volver.</string>
+    <string name="ln_close_keep">Mantener en marcha</string>
+    <string name="ln_on_desktop">Linux ya está abierto en el escritorio DeX. Ciérralo allí para usarlo en el teléfono.</string>
     <string name="ln_shared">Carpeta compartida</string>
     <string name="ln_shared_grant">Permitir acceso a todos los archivos…</string>
     <string name="ln_shared_grant_failed">No se puede abrir la pantalla de permisos</string>

@@ -352,7 +352,7 @@
     <string name="st_clip_note">Android किसी ऐप को क्लिपबोर्ड तभी पढ़ने देता है जब उसकी विंडो फ़ोकस में हो, इसलिए इतिहास तभी दर्ज होता है जब यह विंडो सामने हो।</string>
     <string name="st_scope_stream">स्ट्रीम और क्लिपबोर्ड सेटिंग्स</string>
 
-    <string name="ln_label">Linux</string>
+    <string name="ln_label">LinuxOnDroid</string>
     <string name="ln_installing">Ubuntu इंस्टॉल हो रहा है…</string>
     <string name="ln_waiting">डेस्कटॉप ऐप के इंस्टॉल शुरू करने की प्रतीक्षा है…</string>
     <string name="ln_starting">Linux डेस्कटॉप शुरू हो रहा है…</string>
@@ -376,6 +376,9 @@
     <string name="ln_close_body">इससे उबंटू सत्र समाप्त हो जाएगा और कंटेनर रुक जाएगा. उसके अंदर जो कुछ भी सहेजा नहीं गया है वह खो जाएगा. उसे चालू रखते हुए एक ओर रखने के लिए, विंडो को छोटा करें.</string>
     <string name="ln_close_cancel">रद्द करें</string>
     <string name="ln_close_shutdown">बंद करें</string>
+    <string name="ln_close_body_phone">इससे Ubuntu सत्र समाप्त हो जाएगा और कंटेनर रुक जाएगा. उसके अंदर जो कुछ भी सहेजा नहीं गया है, वह चला जाएगा. “चलता रखें” इसे बैकग्राउंड में चलता छोड़ देता है, ताकि आप वापस आ सकें.</string>
+    <string name="ln_close_keep">चलता रखें</string>
+    <string name="ln_on_desktop">Linux पहले से ही DeX डेस्कटॉप पर खुला है. फ़ोन पर इस्तेमाल करने के लिए उसे वहाँ बंद करें.</string>
     <string name="ln_shared">साझा फ़ोल्डर</string>
     <string name="ln_shared_grant">सभी फ़ाइलों तक पहुँच की अनुमति दें…</string>
     <string name="ln_shared_grant_failed">अनुमति स्क्रीन नहीं खोली जा सकी</string>

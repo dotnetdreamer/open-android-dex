@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Adaptive-icon foreground for the Linux entry in the PHONE's app list — the one
+  LinuxAppActivity carries. Paths rather than mipmap PNGs for the reason
+  ic_launcher_foreground.xml spells out: one small file instead of five bitmaps,
+  crisp at every density.
+
+  A terminal prompt and not the penguin the desktop tile draws. The tile can use
+  an emoji because a TextView renders whatever font the device ships; a launcher
+  icon is a drawable, nothing in the framework draws a penguin, and a hand-traced
+  Tux at 66x66 with a launcher's mask over it reads as a grey smudge. A prompt is
+  legible at every mask and every size the phone's app list uses.
+
+  Geometry: an adaptive icon only guarantees the centre 66x66 (21..87) survives
+  masking, so the frame sits at 27..81 x 33..75, centred on 54,54 with room for
+  the stroke. Strokes are 4.5 — thinner disappears under a dark launcher wallpaper
+  at 48dp.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- The window: rounded rect, product accent. -->
+    <path
+        android:strokeColor="#FFC131"
+        android:strokeWidth="4.5"
+        android:strokeLineJoin="round"
+        android:pathData="M38,37 h32 a6,6 0 0 1 6,6 v22 a6,6 0 0 1 -6,6 h-32 a6,6 0 0 1 -6,-6 v-22 a6,6 0 0 1 6,-6 z" />
+
+    <!-- The prompt: chevron and caret. -->
+    <path
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="4.5"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:pathData="M41,48 L47,54 L41,60" />
+    <path
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="4.5"
+        android:strokeLineCap="round"
+        android:pathData="M52,60 L65,60" />
+</vector>

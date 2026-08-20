@@ -352,7 +352,7 @@
     <string name="st_clip_note">لا يسمح Android لتطبيق بقراءة الحافظة إلا حين تكون نافذته في البؤرة، لذا يُسجَّل المحتوى كلما كانت هذه النافذة في المقدمة.</string>
     <string name="st_scope_stream">إعدادات البث والحافظة</string>
 
-    <string name="ln_label">Linux</string>
+    <string name="ln_label">LinuxOnDroid</string>
     <string name="ln_installing">جارٍ تثبيت Ubuntu…</string>
     <string name="ln_waiting">في انتظار أن يبدأ تطبيق سطح المكتب التثبيت…</string>
     <string name="ln_starting">جارٍ تشغيل سطح مكتب Linux…</string>
@@ -376,6 +376,9 @@
     <string name="ln_close_body">سيؤدي هذا إلى إنهاء جلسة أوبونتو وإيقاف الحاوية. سيُفقد كل ما لم يُحفظ بداخلها. للاحتفاظ بها قيد التشغيل جانبًا، صغّر النافذة بدلًا من ذلك.</string>
     <string name="ln_close_cancel">إلغاء</string>
     <string name="ln_close_shutdown">إيقاف التشغيل</string>
+    <string name="ln_close_body_phone">سيؤدي هذا إلى إنهاء جلسة أوبونتو وإيقاف الحاوية. سيُفقد كل ما لم يُحفظ بداخلها. أما «إبقاء التشغيل» فيتركها تعمل في الخلفية لتعود إليها متى شئت.</string>
+    <string name="ln_close_keep">إبقاء التشغيل</string>
+    <string name="ln_on_desktop">لا يزال Linux مفتوحًا على سطح مكتب DeX. أغلقه هناك لاستخدامه على الهاتف.</string>
     <string name="ln_shared">مجلد مشترك</string>
     <string name="ln_shared_grant">السماح بالوصول إلى كل الملفات…</string>
     <string name="ln_shared_grant_failed">تعذّر فتح شاشة الأذونات</string>

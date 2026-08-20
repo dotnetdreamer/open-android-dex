@@ -73,9 +73,11 @@ Unplug it, and the phone is a plain phone again.
 
 ### Guest environments — on the phone, no root
 
-- **Linux** — Ubuntu 24.04 with XFCE under `proot`, in a resizable DeX window
-  via noVNC. Ships Firefox, Chromium, VS Code, git and openssh, and a shared
-  folder at `/sdcard/LinuxOnDeX` visible in your file manager.
+- **LinuxOnDroid** — Ubuntu 24.04 with XFCE under `proot`, in a resizable DeX
+  window via noVNC. Ships Firefox, Chromium, VS Code, git and openssh, and a
+  shared folder at `/sdcard/LinuxOnDeX` visible in your file manager. It also
+  gets its own icon in the phone's app list, so it opens with no desktop, no PC
+  and no cable — as the whole screen, with the touch controls that implies.
 - **Docker** — a real Docker engine inside a QEMU-TCG Alpine VM. Container and
   image lists over the Engine API, plus a root serial console. `docker pull`,
   `docker run` and `docker compose` all work.

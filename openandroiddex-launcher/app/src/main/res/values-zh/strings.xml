@@ -352,7 +352,7 @@
     <string name="st_clip_note">Android 只允许拥有窗口焦点的应用读取剪贴板，所以只有这个窗口在前台时才会记录历史。</string>
     <string name="st_scope_stream">串流与剪贴板设置</string>
 
-    <string name="ln_label">Linux</string>
+    <string name="ln_label">LinuxOnDroid</string>
     <string name="ln_installing">正在安装 Ubuntu…</string>
     <string name="ln_waiting">正在等待桌面应用开始安装…</string>
     <string name="ln_starting">正在启动 Linux 桌面…</string>
@@ -376,6 +376,9 @@
     <string name="ln_close_body">这将结束 Ubuntu 会话并停止容器，其中未保存的内容都会丢失。若只是想暂时收起而让它继续运行，请改为最小化窗口。</string>
     <string name="ln_close_cancel">取消</string>
     <string name="ln_close_shutdown">关闭</string>
+    <string name="ln_close_body_phone">这会结束 Ubuntu 会话并停止容器，其中未保存的内容都会丢失。“保持运行”会让它在后台继续运行，你随时可以回来。</string>
+    <string name="ln_close_keep">保持运行</string>
+    <string name="ln_on_desktop">Linux 已在 DeX 桌面上打开。请先在那里关闭，才能在手机上使用。</string>
     <string name="ln_shared">共享文件夹</string>
     <string name="ln_shared_grant">允许访问所有文件…</string>
     <string name="ln_shared_grant_failed">无法打开权限页面</string>

@@ -75,6 +75,8 @@ public class LinuxActivity extends Activity {
     private static final long START_RETRY_MS = 10_000;
     /** noVNC page loads attempted, one second apart, before giving up. */
     private static final int MAX_LOAD_TRIES = 40;
+    /** requestPermissions tag. Nothing reads the result — see askForNotifications. */
+    private static final int REQ_NOTIFICATIONS = 1;
 
     private static final String UI_NONE = "";
     private static final String UI_INSTALL = "install";
@@ -134,6 +136,16 @@ public class LinuxActivity extends Activity {
      * over a perfectly live desktop until closed and reopened).
      */
     private int shownRtPid;
+    /**
+     * Which window the loaded page was built for — see {@link #onPhone}. The
+     * viewer's default interaction method hangs off it (a phone has no pointer,
+     * so it opens as a trackpad; the desktop display has one, so the pointer
+     * goes where it is pointed), and the window can change displays under a
+     * page that is already up.
+     */
+    private boolean shownOnPhone;
+    /** The viewer URL without its ctx parameter — see {@link #vncUrl}. */
+    private String vncBase;
     private int loadTries;
     /** Consecutive polls the noVNC page reported itself disconnected. */
     private int deadPagePolls;
@@ -149,6 +161,34 @@ public class LinuxActivity extends Activity {
     private String shownActionTitle;
     /** The close question, so a second ✕ does not stack another one. */
     private Dialog closeDialog;
+
+    /**
+     * The live window, so {@link LinuxAppActivity} can tell WHERE it is.
+     * Weak, for the reason LauncherActivity's own live reference documents: a
+     * static strong reference to an Activity holds its whole view tree — and
+     * this one's is a WebView with a desktop in it.
+     */
+    private static java.lang.ref.WeakReference<LinuxActivity> live;
+
+    /**
+     * Is the one Linux window currently a window on the DESKTOP display?
+     *
+     * The app-list entry needs this and cannot get it any other way. It is not
+     * the same question as "is a desktop session running" (the window may be
+     * open on the phone while a session runs) and not the same as "is a window
+     * open" (the answer to that is yes in both places). Only the window itself
+     * knows which display it landed on, and it can be moved between them by the
+     * desktop's tile after it opens.
+     */
+    static boolean isOnDesktopDisplay() {
+        LinuxActivity a = live == null ? null : live.get();
+        if (a == null || a.isDestroyed() || a.isFinishing()) return false;
+        try {
+            return !a.onPhone();
+        } catch (Exception e) {
+            return false;   // a window without a display is not on the desktop
+        }
+    }
 
     /**
      * The caption's ✕. It arrives as a broadcast instead of a task removal
@@ -180,6 +220,7 @@ public class LinuxActivity extends Activity {
         // The taskbar's only way to know this window exists — our own package
         // has no icon on this desktop.
         OwnWindows.opened(this);
+        live = new java.lang.ref.WeakReference<>(this);
         theme = DexTheme.of(this);
         root = new FrameLayout(this) {
             @Override
@@ -203,6 +244,7 @@ public class LinuxActivity extends Activity {
         // and idempotent: the service no-ops if the distro is already installed
         // AND already carries this build's features.
         LinuxService.provision(this);
+        askForNotifications();
         IntentFilter closeFilter = new IntentFilter(LauncherActivity.ACTION_CLOSE_WINDOW);
         if (android.os.Build.VERSION.SDK_INT >= 33) {
             registerReceiver(closeReceiver, closeFilter, Context.RECEIVER_NOT_EXPORTED);
@@ -220,6 +262,9 @@ public class LinuxActivity extends Activity {
         super.onDestroy();
         destroyed = true;
         OwnWindows.closed(this);
+        // Only if it is still OURS: a display move destroys this instance after
+        // the replacement has already registered itself.
+        if (live != null && live.get() == this) live = null;
         if (closeDialog != null) {
             closeDialog.dismiss();
             closeDialog = null;
@@ -411,16 +456,93 @@ public class LinuxActivity extends Activity {
         if (now - startSentAt < START_RETRY_MS) return;
         startSentAt = now;
         final int w, h;
-        android.view.Display display = getDisplay();
-        if (display != null && display.getDisplayId() != android.view.Display.DEFAULT_DISPLAY) {
-            w = Math.max(root.getWidth(), 800);
-            h = Math.max(root.getHeight(), 600);
-        } else {
+        if (onPhone()) {
             w = 1280;
             h = 800;
+        } else {
+            w = Math.max(root.getWidth(), 800);
+            h = Math.max(root.getHeight(), 600);
         }
         LinuxService.start(this, w, h);
         DexLog.step("linux", "START " + w + "x" + h);
+    }
+
+    /**
+     * Which of the two windows this is: the phone's whole screen (opened from
+     * the app list, through {@link LinuxAppActivity}) or a freeform window on
+     * the desktop display.
+     *
+     * By DISPLAY and not by density, for the reason requestStart spells out
+     * above — and not by "who started us" either: the desktop's tile can pull
+     * this same activity across from the phone's display, so the answer changes
+     * over the life of one window and has to be asked each time it matters.
+     * A null display is a window on its way out; treat that as the phone, which
+     * is the branch that assumes nothing.
+     */
+    private boolean onPhone() {
+        android.view.Display display = getDisplay();
+        return display == null
+                || display.getDisplayId() == android.view.Display.DEFAULT_DISPLAY;
+    }
+
+    /** The same two words the viewer page reads out of its URL. */
+    private static String ctxName(boolean phone) {
+        return phone ? "phone" : "desktop";
+    }
+
+    /**
+     * The viewer URL, with the context this window is in RIGHT NOW.
+     *
+     * ctx is here rather than in vncBase because the retry ladder and the health
+     * probe reload the page for the rest of the window's life, and a URL built
+     * once carries whichever display the window happened to open on. It picks
+     * the page's default interaction method — Mouse (a trackpad) on the phone,
+     * where there is no pointer, and Direct on the desktop, where a real one is
+     * driving — so a stale one would quietly hand a reloaded phone window the
+     * desktop's answer. The page remembers a method the user picks per context,
+     * so neither window's choice ever becomes the other's default.
+     */
+    private String vncUrl() {
+        return vncBase + "&ctx=" + ctxName(onPhone());
+    }
+
+    /**
+     * The only runtime permission this app asks anyone for, and only here.
+     *
+     * {@link LinuxService} is a foreground service, so from Android 13 its
+     * ongoing notification is the container's one visible presence: it says a
+     * Linux session is running, it is the way back to a window put aside with
+     * "keep running", and while the install is going it carries the progress.
+     * Without the grant the service still runs — the platform suppresses the
+     * notification, it does not refuse the service — so nothing here is
+     * load-bearing, which is exactly why this asks once and never insists.
+     *
+     * ON THE PHONE ONLY. In a DeX session this window is on a display the user
+     * is looking at through a PC, and the permission dialog is a system window
+     * that would open on the PHONE's screen — behind the user, unanswerable,
+     * and blocking the desktop window's own start. That session gets its
+     * permissions from the PC over adb and has never asked the phone for
+     * anything; this is the first prompt in the app, and it stays out of there.
+     *
+     * Asked as the window opens rather than when the container starts: opening
+     * this window IS starting a container (provision above, then the poll's
+     * START), so the notification is seconds away either way, and a dialog that
+     * arrives while the desktop is booting would land on top of the guest.
+     */
+    private void askForNotifications() {
+        if (android.os.Build.VERSION.SDK_INT < 33) return;
+        if (!onPhone()) return;
+        try {
+            if (checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS)
+                    == android.content.pm.PackageManager.PERMISSION_GRANTED) return;
+            // No result handler: the answer changes nothing we do. Android
+            // stops showing this of its own accord once it has been refused,
+            // so a window opened every day does not ask every day.
+            requestPermissions(
+                    new String[]{android.Manifest.permission.POST_NOTIFICATIONS}, REQ_NOTIFICATIONS);
+        } catch (Exception e) {
+            DexLog.warn("linux", "could not ask about notifications", e);
+        }
     }
 
     /**
@@ -457,6 +579,34 @@ public class LinuxActivity extends Activity {
     // ── closing ──
 
     /**
+     * Back.
+     *
+     * It is the ONLY way out of this window on the phone — there is no caption
+     * and so no ✕ — and the default answer to it is the wrong one: finish()
+     * runs onDestroy, which stops the container. Pressing Back on a phone would
+     * have ended a live Ubuntu session, or aborted a 1.5 GB install, with no
+     * question asked and no way to say "I only wanted to look at something
+     * else".
+     *
+     * So Back asks the same question the caption's ✕ asks, and the dialog grows
+     * a "keep running" button on the phone (see confirmShutdown). It asks on the
+     * desktop display too: the ✕ was never the only route there either — a
+     * keyboard and scrcpy both deliver Back — and a silent shutdown behind one
+     * key press is no better with a title bar above it.
+     *
+     * Only while there is something to lose. On the error and idle screens
+     * there is no session and no install, so Back is just Back.
+     */
+    @Override
+    public void onBackPressed() {
+        if (UI_VNC.equals(uiState) || UI_START.equals(uiState) || UI_INSTALL.equals(uiState)) {
+            confirmShutdown();
+            return;
+        }
+        super.onBackPressed();
+    }
+
+    /**
      * The close question.
      *
      * Closing this window is not like closing the others: it ends a Linux
@@ -464,6 +614,14 @@ public class LinuxActivity extends Activity {
      * in the guest gets a chance to save. That is worth one confirmation. The
      * alternative is spelled out rather than implied — MINIMISING keeps
      * everything running, which is what people actually want most of the time.
+     *
+     * On the phone that alternative has to be a BUTTON, not a sentence: there is
+     * no taskbar to minimise into, and "put it aside" there means backgrounding
+     * the task — which is what moveTaskToBack does, and why the container
+     * survives it (onStop keeps everything; only onDestroy stops the service).
+     * It replaces Cancel rather than joining it: three buttons do not fit the
+     * 300dp panel this dialog is built to, and the dialog is cancelable, so Back
+     * and a tap outside still mean "never mind".
      *
      * Shut down goes through the service, which kills the runtime's whole
      * process group; finishing the activity alone would only close the viewer.
@@ -490,8 +648,10 @@ public class LinuxActivity extends Activity {
         head.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
         panel.addView(head);
 
+        final boolean phone = onPhone();
+
         TextView body = new TextView(this);
-        body.setText(s(R.string.ln_close_body));
+        body.setText(s(phone ? R.string.ln_close_body_phone : R.string.ln_close_body));
         body.setTextColor(theme.textDim);
         body.setTextSize(TypedValue.COMPLEX_UNIT_PX, sp(12.5f));
         LinearLayout.LayoutParams bodyLp = new LinearLayout.LayoutParams(
@@ -500,18 +660,44 @@ public class LinuxActivity extends Activity {
         panel.addView(body, bodyLp);
 
         LinearLayout buttons = new LinearLayout(this);
-        buttons.setOrientation(LinearLayout.HORIZONTAL);
+        // Stacked on the phone, side by side on the desktop. "Keep running"
+        // beside "Shut down" already fills this 300dp panel in English and
+        // overflows it in German — and a clipped button is not a button.
+        buttons.setOrientation(phone ? LinearLayout.VERTICAL : LinearLayout.HORIZONTAL);
         buttons.setGravity(Gravity.END);
         LinearLayout.LayoutParams rowLp = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         rowLp.topMargin = dp(18);
-        buttons.addView(dialogButton(s(R.string.ln_close_cancel), theme.hover, theme.text,
-                dialog::dismiss));
+        if (phone) {
+            buttons.addView(dialogButton(s(R.string.ln_close_keep), theme.hover, theme.text,
+                    () -> {
+                        dialog.dismiss();
+                        // NOT finish(): the window has to stay alive for the
+                        // container to. moveTaskToBack is the phone's minimise.
+                        moveTaskToBack(true);
+                    }));
+        } else {
+            buttons.addView(dialogButton(s(R.string.ln_close_cancel), theme.hover, theme.text,
+                    dialog::dismiss));
+        }
         buttons.addView(dialogButton(s(R.string.ln_close_shutdown), theme.danger, 0xFFFFFFFF,
                 () -> {
                     dialog.dismiss();
                     shutdownAndFinish();
                 }));
+        if (phone) {
+            // dialogButton builds for a row — wrap width, a left margin. In the
+            // stack each button is the panel's full width and the margin is
+            // above it, so a finger cannot miss and the destructive one is
+            // never where the other one just was.
+            for (int i = 0; i < buttons.getChildCount(); i++) {
+                LinearLayout.LayoutParams lp =
+                        (LinearLayout.LayoutParams) buttons.getChildAt(i).getLayoutParams();
+                lp.width = ViewGroup.LayoutParams.MATCH_PARENT;
+                lp.leftMargin = 0;
+                lp.topMargin = i == 0 ? 0 : dp(8);
+            }
+        }
         panel.addView(buttons, rowLp);
 
         DexFonts.applyTo(this, panel);
@@ -649,9 +835,29 @@ public class LinuxActivity extends Activity {
 
     /** Build the WebView (once, or on a runtime swap) underneath the card. */
     private void ensureVnc(Linux.Status st) {
-        if (UI_VNC.equals(uiState) && webView != null && st.rtPid == shownRtPid) return;
+        final boolean phone = onPhone();
+        if (UI_VNC.equals(uiState) && webView != null && st.rtPid == shownRtPid) {
+            // Same runtime, same page — but possibly not the same display any
+            // more. The tile can pull this window onto the desktop and the app
+            // icon opens it back on the phone, and the page's DEFAULT
+            // interaction method (and its chrome) is decided by which one it is.
+            //
+            // Rare on purpose: this activity does not declare `density` in its
+            // configChanges, so a display change normally recreates it and the
+            // page is rebuilt with the right ctx in its URL. This is the leg for
+            // two displays that agree on density, where the platform hands us a
+            // plain configuration change instead and the page never reloads.
+            if (phone != shownOnPhone) {
+                shownOnPhone = phone;
+                webView.evaluateJavascript(
+                        "window.dexContext && window.dexContext('" + ctxName(phone) + "')", null);
+                DexLog.step("linux", "viewer context -> " + ctxName(phone));
+            }
+            return;
+        }
         uiState = UI_VNC;
         shownRtPid = st.rtPid;
+        shownOnPhone = phone;
         loadTries = 0;
         vncConnected = false;
         dropWebView();
@@ -675,7 +881,10 @@ public class LinuxActivity extends Activity {
         // the version of the staged files — websockify sends no Cache-Control,
         // and without a changing query the WebView happily serves yesterday's
         // page out of its heuristic cache.
-        final String url = "http://127.0.0.1:" + st.port
+        //
+        // The ctx half is appended at every load rather than baked in here —
+        // see vncUrl().
+        vncBase = "http://127.0.0.1:" + st.port
                 + "/dex.html?password=" + st.pass + "&v=" + st.rtPid;
         webView.setWebViewClient(new WebViewClient() {
             /** RUNNING=1 means the session leader is alive, not that websockify
@@ -688,7 +897,7 @@ public class LinuxActivity extends Activity {
                     return;
                 }
                 main.postDelayed(() -> {
-                    if (!destroyed && UI_VNC.equals(uiState)) view.loadUrl(url);
+                    if (!destroyed && UI_VNC.equals(uiState)) view.loadUrl(vncUrl());
                 }, 1000);
             }
 
@@ -716,8 +925,9 @@ public class LinuxActivity extends Activity {
         // and a doubled pointer is the lesser of those two.
         root.addView(webView, 0, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
-        webView.loadUrl(url);
-        DexLog.step("linux", "vnc client loading port " + st.port);
+        webView.loadUrl(vncUrl());
+        DexLog.step("linux", "vnc client loading port " + st.port
+                + " as " + ctxName(phone));
     }
 
     /**
@@ -781,7 +991,10 @@ public class LinuxActivity extends Activity {
                         showError(s(R.string.ln_connect_failed), null);
                         return;
                     }
-                    webView.reload();
+                    // loadUrl and not reload(): the same page either way, except
+                    // that this one is built with the display the window is on
+                    // NOW (see vncUrl).
+                    webView.loadUrl(vncUrl());
                 });
     }
 

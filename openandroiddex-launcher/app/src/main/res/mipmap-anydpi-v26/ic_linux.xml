@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The Linux app-list entry's icon. minSdk is 26, so the adaptive icon is the
+     ONLY icon: there is no device this app runs on that would need a legacy PNG
+     fallback (same reasoning as ic_launcher.xml).
+
+     The background is ic_launcher_background deliberately — the shared dark
+     gradient is what makes this read as the SAME app's second entry in a drawer
+     that sorts the two nowhere near each other. -->
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+    <background android:drawable="@drawable/ic_launcher_background" />
+    <foreground android:drawable="@drawable/ic_linux_foreground" />
+    <monochrome android:drawable="@drawable/ic_linux_monochrome" />
+</adaptive-icon>

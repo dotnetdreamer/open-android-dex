@@ -352,7 +352,7 @@
     <string name="st_clip_note">O Android só deixa um app ler a área de transferência enquanto sua janela tem foco, então o histórico é capturado sempre que esta janela está à frente.</string>
     <string name="st_scope_stream">Opções de stream e área de transferência</string>
 
-    <string name="ln_label">Linux</string>
+    <string name="ln_label">LinuxOnDroid</string>
     <string name="ln_installing">Instalando o Ubuntu…</string>
     <string name="ln_waiting">Aguardando o aplicativo do computador iniciar a instalação…</string>
     <string name="ln_starting">Iniciando o desktop Linux…</string>
@@ -380,6 +380,9 @@
     <string name="ln_close_body">Isto encerra a sessão do Ubuntu e para o contentor. Tudo o que não estiver guardado lá dentro será perdido. Para a pôr de lado sem a parar, minimize a janela.</string>
     <string name="ln_close_cancel">Cancelar</string>
     <string name="ln_close_shutdown">Desligar</string>
+    <string name="ln_close_body_phone">Isto encerra a sessão do Ubuntu e para o contentor. Tudo o que não estiver guardado lá dentro é perdido. «Manter a funcionar» deixa-o a correr em segundo plano, para poder voltar.</string>
+    <string name="ln_close_keep">Manter a funcionar</string>
+    <string name="ln_on_desktop">O Linux já está aberto no ambiente de trabalho DeX. Feche-o aí para o usar no telemóvel.</string>
     <string name="ln_shared">Pasta partilhada</string>
     <string name="ln_shared_grant">Permitir acesso a todos os ficheiros…</string>
     <string name="ln_shared_grant_failed">Não é possível abrir o ecrã de permissões</string>

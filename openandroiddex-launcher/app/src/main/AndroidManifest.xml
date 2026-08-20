@@ -168,12 +168,50 @@
         <activity
             android:name=".LinuxActivity"
             android:exported="false"
+            android:icon="@mipmap/ic_linux"
             android:label="@string/ln_label"
             android:launchMode="singleTask"
             android:taskAffinity="com.ccrstech.openandroiddex.launcher.linux"
             android:resizeableActivity="true"
             android:windowSoftInputMode="adjustResize"
             android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|navigation|uiMode" />
+
+        <!-- Linux in the PHONE's app list. A second launcher entry of our own,
+             so the container can be opened with no desktop, no PC and no cable
+             — the feature never depended on any of them (see LinuxAppActivity
+             for why this is a trampoline and not an activity-alias, and
+             LinuxService for why the container is ours to run).
+
+             icon + label: this is the entry the phone's launcher DRAWS, so both
+             live here rather than being inherited from the application, which
+             would put a second "Open Android DeX" in the drawer.
+
+             It owns a task, is excluded from recents and draws nothing — the
+             same task-shaped hole WidgetDetourActivity documents, for the same
+             reason: with the package's default affinity a singleTask activity
+             joins the desktop's task and drags the shell into whatever bounds
+             the caller had.
+
+             exported, because a launcher entry has to be. It is safe to be:
+             everything it can do is what the icon does — clear the uninstall
+             marker and open the window. LinuxActivity itself stays unexported. -->
+        <activity
+            android:name=".LinuxAppActivity"
+            android:exported="true"
+            android:icon="@mipmap/ic_linux"
+            android:label="@string/ln_label"
+            android:launchMode="singleTask"
+            android:taskAffinity="com.ccrstech.openandroiddex.launcher.linuxapp"
+            android:theme="@style/Theme.OpenAndroidDeX.Detour"
+            android:excludeFromRecents="true"
+            android:autoRemoveFromRecents="true"
+            android:resizeableActivity="true"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|density|keyboard|keyboardHidden|navigation|uiMode|locale|layoutDirection|fontScale">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
 
         <!-- In-desktop Docker window (the container list, the image list and
              the VM's serial console). Same task rules as Settings and Linux,

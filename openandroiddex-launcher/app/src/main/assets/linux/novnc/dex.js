@@ -71,6 +71,9 @@ const TEXT = Object.freeze({
   toastMiddle: 'Next tap is a middle click',
   toastRight: 'Next tap is a right click',
   footDesktop: 'A mouse is connected. These methods apply to touch only.',
+  /* The markup's own wording, so the footnote can go back to it if this window
+     stops being a mouse-driven one (see setDesktopChrome). */
+  footTouch: 'A keyboard or mouse plugged into the desktop always works as it normally does.',
 });
 
 /* ── constants ──────────────────────────────────────────────────────────── */
@@ -106,6 +109,30 @@ const store = {
   },
 };
 
+/* ── which window this is ───────────────────────────────────────────────── */
+
+/*
+ * 'phone' — the app-list entry (LinuxAppActivity), where this page IS the
+ * phone's screen and there is no pointer at all — or 'desktop', a freeform
+ * window on the DeX display with a real mouse driving it.
+ *
+ * It arrives in the URL because only LinuxActivity can know it: the two are
+ * told apart by DISPLAY ID (see its onPhone), and nothing inside a WebView can
+ * read one. Both ways of guessing are wrong here, in opposite directions —
+ * `pointer: coarse` is what the scrcpy display reports for injected events, and
+ * the viewport is phone-narrow in CSS px on a 1440p desktop at three of the
+ * five display-size presets. An unmarked URL means desktop, which is what every
+ * page load before this parameter existed was.
+ */
+let ctx = 'desktop';
+
+function readCtx() {
+  try {
+    return new URLSearchParams(location.search).get('ctx') === 'phone'
+      ? 'phone' : 'desktop';
+  } catch (e) { return 'desktop'; }
+}
+
 /* ── state ──────────────────────────────────────────────────────────────── */
 
 const ui = {
@@ -116,10 +143,9 @@ const ui = {
   zoomUI: false,
   /*
    * 'direct' | 'touch' | 'mouse'. Only ever affects TOUCH: a real mouse is
-   * never remapped in any of the three. Direct is the default and the way this
-   * window behaved before the control layer existed — noVNC handles the input
-   * itself, so a pointer goes exactly where it is pointed. The other two exist
-   * for a phone, where there is no pointer to follow.
+   * never remapped in any of the three. The default depends on which window
+   * this is — see defaultMode. This value is only what the page holds between
+   * parse and boot(), which settles it before anything can read it.
    */
   mode: 'direct',
   zoom: 'fit',        // 'fit' | number (CSS px per framebuffer px)
@@ -565,10 +591,53 @@ function closeSheet() {
 
 const MODES = ['direct', 'touch', 'mouse'];
 
-function setMode(mode) {
-  ui.mode = MODES.indexOf(mode) >= 0 ? mode : 'direct';
+/*
+ * The default is a different answer in each window, and neither is a
+ * preference.
+ *
+ * On the DESKTOP display there is a real pointer, and Direct is what a mouse
+ * should do: it goes where it is pointed, which is also how this window behaved
+ * before the control layer existed.
+ *
+ * On the PHONE there is no pointer to follow. Direct there means poking at a
+ * 1280x800 desktop through a ~360 px window with a fingertip that covers a
+ * 40 px circle of it: a 1 px window border, a menu item and a scrollbar are all
+ * inside one touch. Mouse turns the panel into a trackpad — the cursor moves
+ * relative, accelerated, and every click lands at the ring you can see rather
+ * than under the finger hiding it — and it is the only one of the three that
+ * can hit anything small. Touch is the middle answer and stays one tap away.
+ */
+function defaultMode() {
+  return ctx === 'phone' ? 'mouse' : 'direct';
+}
+
+/*
+ * A method the user picked is remembered PER WINDOW, under its own key.
+ *
+ * One shared key was the obvious thing and it is wrong: both windows are the
+ * same origin (http://127.0.0.1:6080), so they are the same localStorage, and a
+ * phone session left behind Mouse for the next desktop session to inherit —
+ * the exact default this exists to get right. Per window, a choice sticks where
+ * it was made and each side still opens on its own default the first time.
+ */
+function savedMode() {
+  let v = store.get('mode.' + ctx, null);
+  /* Before the app-list entry there was one window, always the desktop's, and
+     one un-suffixed key. Honour that choice rather than resetting it. */
+  if (v === null && ctx === 'desktop') v = store.get('mode', null);
+  return MODES.indexOf(v) >= 0 ? v : defaultMode();
+}
+
+/**
+ * @param {string} mode one of MODES
+ * @param {boolean} [persist] false while APPLYING a default — a default that
+ *   wrote itself to storage would be indistinguishable from a choice the next
+ *   time this window opened, and would outlive any change to defaultMode.
+ */
+function setMode(mode, persist) {
+  ui.mode = MODES.indexOf(mode) >= 0 ? mode : defaultMode();
   document.body.dataset.mode = ui.mode;
-  store.set('mode', ui.mode);
+  if (persist !== false) store.set('mode.' + ctx, ui.mode);
   if (keys) keys.clearLatches();
   /* Whatever the old method was holding down is not the new method's to keep. */
   if (input) { input.releaseAll(); input.recentre(); }
@@ -735,14 +804,11 @@ function wire() {
      still reaches noVNC as VNC button 3. */
   document.addEventListener('contextmenu', (e) => e.preventDefault());
 
-  /* One real mouse event is enough to know this is the desktop display. Never
-     cleared — a device with both grammars keeps the tighter chrome. */
+  /* One real mouse event is enough to know a mouse is driving — including one
+     plugged into the PHONE, which the URL's context cannot tell us about. Only
+     a move to the phone's display ever takes it back off. */
   const sawMouse = (e) => {
-    if (e.isTrusted && e.pointerType === 'mouse') {
-      document.body.classList.add('is-desktop');
-      $('sheet-foot').textContent = TEXT.footDesktop;
-      layout();
-    }
+    if (e.isTrusted && e.pointerType === 'mouse') setDesktopChrome(true);
   };
   window.addEventListener('pointerdown', sawMouse, { capture: true, passive: true });
   window.addEventListener('pointermove', sawMouse, { capture: true, passive: true });
@@ -869,9 +935,48 @@ const api = {
 
 /* ── boot ───────────────────────────────────────────────────────────────── */
 
+/*
+ * The tighter, mouse-driven chrome, and the sheet footnote that goes with it.
+ *
+ * Turned on by two independent things: this page being the DESKTOP's window at
+ * all, which the URL says at boot, and a real mouse event arriving from
+ * anywhere. The first is what the pointer sniffer alone could not do — injected
+ * events on the scrcpy display may arrive with pointerType 'touch', and the
+ * desktop window then wore phone-sized chrome until something proved otherwise
+ * (it is the open question doc/linux-viewer.md lists, and this closes it).
+ */
+function setDesktopChrome(on) {
+  if (document.body.classList.contains('is-desktop') === on) return;
+  document.body.classList.toggle('is-desktop', on);
+  $('sheet-foot').textContent = on ? TEXT.footDesktop : TEXT.footTouch;
+  layout();
+}
+
+/*
+ * The window moved between displays without this page being rebuilt.
+ *
+ * LinuxActivity calls it. Usually a display change destroys and recreates that
+ * activity — a new WebView, a new URL, a new boot() — and this is never
+ * reached; it exists for the case where the two displays agree on density and
+ * the platform hands the activity a plain configuration change instead. Called
+ * with the context it already has, it does nothing.
+ *
+ * The method it lands on is whatever THIS context last had — the user's own
+ * choice if they made one here, its default if they did not — and applying that
+ * default must not record it as a choice, hence the false.
+ */
+window.dexContext = function (next) {
+  const to = next === 'phone' ? 'phone' : 'desktop';
+  if (to === ctx) return;
+  ctx = to;
+  setDesktopChrome(ctx === 'desktop');
+  setMode(savedMode(), false);
+};
+
 function boot() {
-  const saved = store.get('mode', 'direct');
-  ui.mode = MODES.indexOf(saved) >= 0 ? saved : 'direct';
+  ctx = readCtx();
+  if (ctx === 'desktop') setDesktopChrome(true);
+  ui.mode = savedMode();
   document.body.dataset.mode = ui.mode;
   setScroll(api.scroll === 'reverse' ? 'reverse' : 'natural');
   $('sens').value = String(api.sens);

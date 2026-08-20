@@ -124,15 +124,47 @@ Two details of that path are load-bearing:
 Keyboard is the opposite story: `sendKey(keysym, code, down)` is public and
 complete, and is what every key goes through.
 
-## Three interaction methods, and why the default is none of ours
+## Three interaction methods, and which one each window opens on
 
-**Direct is the default, and it is the behaviour this window had before any of
-this existed.** noVNC handles the input itself: a pointer goes exactly where it
-is pointed, its own `GestureHandler` answers touches, and nothing here
-recognises anything. That is the right answer whenever there is a real pointer
-to follow, which is the ordinary case — the desktop on a Windows or macOS
-machine, where the mouse should simply behave like a mouse. The other two exist
-for the case Direct cannot serve: a phone, where there is no pointer at all.
+**Direct is the behaviour this window had before any of this existed.** noVNC
+handles the input itself: a pointer goes exactly where it is pointed, its own
+`GestureHandler` answers touches, and nothing here recognises anything. That is
+the right answer whenever there is a real pointer to follow, which is the
+desktop display's ordinary case — a mouse on the PC should simply behave like a
+mouse. The other two exist for the case Direct cannot serve: a phone, where
+there is no pointer at all.
+
+**So the default is per window, not per app: Direct on the desktop display,
+Mouse in the phone's window.** Direct on a phone means poking at a 1280×800
+desktop through a ~360 px window with a fingertip that covers a 40 px circle of
+it — a 1 px window border, a menu item and a scrollbar are all inside one touch.
+Mouse is the only one of the three that can hit any of them: the cursor moves
+relative and accelerated, and the click lands at a ring you can see rather than
+under the finger hiding it. Touch stays one tap away for the times the guest
+really is being used as a touchscreen.
+
+**The page cannot work out which window it is in, so it is told.**
+`LinuxActivity` puts `&ctx=phone|desktop` in the URL, decided by display id (its
+`onPhone`). Both ways of guessing fail here and in opposite directions:
+`pointer: coarse` is what the scrcpy display reports for injected events, and
+the CSS viewport is phone-narrow on a 1440p desktop at most display-size
+presets. The same parameter now also sets the desktop's tighter chrome band at
+boot, which used to wait for the first real mouse event to arrive — an event
+that may never come if scrcpy's injections land as touch.
+
+**A method the user picks is remembered per window, under its own key**
+(`dexlinux.mode.phone` / `.desktop`). One shared key is the obvious thing and is
+wrong: both windows are the same origin, so they are the same `localStorage`,
+and a phone session would leave Mouse behind as the next desktop session's
+starting point — the exact default this exists to get right. Applying a default
+never writes it, so a default stays a default. The old un-suffixed key is read
+once as the desktop's, because before the app-list entry every session was one.
+
+**Moving the window between displays re-decides it.** Normally by rebuild — a
+display change recreates the activity, so the page reloads with the new `ctx` —
+and where the two displays agree on density and the platform sends a plain
+configuration change instead, `LinuxActivity` calls `window.dexContext(ctx)` on
+the live page, which lands on that window's remembered method or its default.
 
 noVNC's own vocabulary is fixed — one-finger drag is a left-drag, two fingers is
 scroll, and pinch holds Ctrl and asks the *remote app* to zoom. It is one mode,
@@ -276,6 +308,64 @@ would have sent a 1280×800 guest to a 2560-wide desktop at three of the five
 **This changes `$GEO` for containers that already exist.** The next spawn
 resizes their desktop.
 
+## Reaching it without a desktop
+
+The phone branch above was reachable only by accident until `LinuxAppActivity`:
+the way into this window was the desktop's tile, and the tile lives on the
+scrcpy display. Nothing under it ever needed that display — `LinuxService`
+downloads the rootfs, runs the install and hosts the runtime under this app's
+own uid — so the feature was a launcher away from standing on its own. It is a
+second `MAIN`/`LAUNCHER` activity in the same APK: installing the launcher now
+puts **two** icons in the phone's app list, "Open Android DeX" and
+"LinuxOnDroid", and
+the second one opens the container with no PC, no cable and no session.
+
+**A trampoline, not an `<activity-alias>`,** which is the shorter way to put a
+second icon in a drawer. An alias is its own component to the window manager:
+the task reports the ALIAS in `RunningTaskInfo.topActivity`, which is what wmd
+hands `CaptionService`, and four places compare that name to
+`LinuxActivity.class.getName()` to decide what a window is —
+`isDesktopTask` (an unrecognised name means "this IS the desktop", so the window
+would silently lose its caption), `onClose` (the ✕ would remove the task instead
+of asking first), the taskbar's own-window tiles and the Task Manager. It is not
+hypothetical: the desktop's tile pulls this very window across from the phone's
+display, so an alias-launched window ends up on the desktop wearing the wrong
+name. The trampoline keeps one identity and costs one class.
+
+**One window, and therefore one runtime.** `LinuxActivity` is `singleTask` on a
+task affinity of its own, so the app icon, the tile and the notification all
+raise the same window rather than stacking viewers — and the service refuses to
+spawn a second `Xvnc` while one is up (`runtimeUp`). The one case the framework
+would get wrong is the icon being tapped while the window is open **on the
+desktop**: a start from the phone's task moves that task to the phone's display,
+which would take a live session off the screen the user is actually looking at.
+So the icon asks `LinuxActivity.isOnDesktopDisplay()` first and says where the
+window is instead. That question is asked of the WINDOW, not of the session: a
+desktop can be running with this window open on the phone, and there the right
+answer is to raise it.
+
+**The phone's window opens as a trackpad.** `&ctx=phone` in the viewer URL makes
+Mouse the default there and Direct the default on the desktop display — see
+"Three interaction methods" above for why, and for what happens to a method the
+user picks instead.
+
+**It asks for one permission, and only here.** `POST_NOTIFICATIONS`, which
+nothing in this app had ever asked anyone for: the PC grants what a DeX session
+needs over adb, and a system dialog raised for the desktop's window would open
+on the *phone's* screen, behind the user. On the phone the foreground service's
+notification is the container's only visible presence — that a session is
+running, the install's progress, and the way back to a window put aside with
+"keep running" — so `LinuxActivity` asks as that window opens, once, and does
+not look at the answer: without the grant the platform hides the notification,
+it does not refuse the service.
+
+**Back had to grow a question.** On the phone it is the only way out — there is
+no caption and so no ✕ — and `finish()` runs `onDestroy`, which stops the
+container. Back now opens the same dialog the ✕ does, on both displays, and on
+the phone that dialog offers **Keep running** (`moveTaskToBack`, which keeps the
+activity and so keeps the container) in place of Cancel, stacked rather than in a
+row because two labels side by side overflow the 300 dp panel in German.
+
 ## Why not the obvious alternatives
 
 **Native Android chrome over the WebView.** The bar would be easy; everything
@@ -330,8 +420,10 @@ None of this has run on a device. In rough order of how quietly it would fail:
   `USE_PRIVATE_SCALE` was considered and not taken; if it janks, `_display.scale`
   is the same arithmetic without the observer round-trip.
 - **Whether `pointerType === 'mouse'` arrives on the scrcpy display.** Events are
-  injected below `PointerChoreographer`. If they arrive as touch, the desktop
-  gets phone-sized chrome — functional, wrong-looking.
+  injected below `PointerChoreographer`. It no longer decides the chrome — the
+  URL's `ctx` does that at boot — so if they arrive as touch the only thing left
+  to notice is that a mouse plugged into the *phone* will not tighten the
+  chrome until it moves.
 - **Whether the window insets land right in every orientation.** The page has no
   `env(safe-area-inset-*)` of its own — `LinuxActivity.applyInsets()` pads the
   root with the real ones, because in a WebView `env()` reports the display
@@ -340,6 +432,23 @@ None of this has run on a device. In rough order of how quietly it would fail:
   landscape and with a cutout.
 - **Whether a docked bar over XFCE's own panel is tolerable**, or whether the
   bar should default to collapsed after the first session.
+- **Whether the desktop's tile still reuses the window after the app icon
+  opened it.** A `singleTask` start matches an existing task by affinity, so it
+  should move that task to the desktop display rather than build a second
+  viewer; the relaunch that follows must report `isChangingConfigurations()` or
+  `onDestroy` would stop a container the user only moved. *Test:* open Linux
+  from the phone's app list, connect a session, click the tile, and check the
+  guest kept running (`rt.pid` unchanged in the log).
+- **Whether each window really opens on its own method after both have been
+  used.** The storage is per context and the default is never written, so the
+  order sessions happen in should not matter. *Test:* open on the phone (Mouse),
+  switch it to Touch, close it; open on the desktop — it must be Direct; reopen
+  on the phone — it must be Touch. Then check `localStorage` holds
+  `dexlinux.mode.phone` and no `dexlinux.mode.desktop`.
+- **Whether `ic_linux` reads at 48 dp.** The mark is a terminal prompt drawn as
+  three strokes, and thin strokes under a launcher's mask are how icons turn
+  into smudges. *Test:* look at it in the app list, in the themed-icon mode, and
+  in the recents card.
 
 ## Costs
 

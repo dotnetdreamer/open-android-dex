@@ -3,6 +3,7 @@ package com.ccrstech.openandroiddex.launcher;
 import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
+import android.app.PendingIntent;
 import android.app.Service;
 import android.content.Context;
 import android.content.Intent;
@@ -522,6 +523,7 @@ public class LinuxService extends Service {
                     .setSmallIcon(android.R.drawable.ic_menu_manage)
                     .setContentTitle(getString(R.string.ln_label))
                     .setContentText(text)
+                    .setContentIntent(openWindow())
                     .setOngoing(true)
                     .build();
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
@@ -532,6 +534,28 @@ public class LinuxService extends Service {
         } catch (Exception e) {
             DexLog.warn("linux", "could not enter the foreground", e);
         }
+    }
+
+    /**
+     * Tapping the ongoing notification opens the Linux window.
+     *
+     * It matters on the phone, where this notification is the one thing on
+     * screen that says a container is running and the only handle on a session
+     * put aside with "keep running" — and it costs nothing on the desktop,
+     * where there is usually no notification to tap: the PC never grants
+     * POST_NOTIFICATIONS and the app asks for it only in the phone's window
+     * (see LinuxActivity.askForNotifications).
+     *
+     * Through {@link LinuxAppActivity} rather than straight at the window: that
+     * is the same entry the app icon uses, so the "already open on the desktop"
+     * answer is given once, in one place. IMMUTABLE because nothing may rewrite
+     * this intent, and required from Android 12 in any case.
+     */
+    private PendingIntent openWindow() {
+        return PendingIntent.getActivity(this, 0,
+                new Intent(this, LinuxAppActivity.class)
+                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
     }
 
     /**

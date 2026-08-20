@@ -352,7 +352,7 @@
     <string name="st_clip_note">Android ne laisse une appli lire le presse-papiers que si sa fenêtre a le focus ; l\'historique est donc relevé quand cette fenêtre est au premier plan.</string>
     <string name="st_scope_stream">Réglages du flux et du presse-papiers</string>
 
-    <string name="ln_label">Linux</string>
+    <string name="ln_label">LinuxOnDroid</string>
     <string name="ln_installing">Installation d\'Ubuntu…</string>
     <string name="ln_waiting">En attente du lancement de l\'installation par l\'application de bureau…</string>
     <string name="ln_starting">Démarrage du bureau Linux…</string>
@@ -376,6 +376,9 @@
     <string name="ln_close_body">Cela met fin à la session Ubuntu et arrête le conteneur. Tout ce qui n’est pas enregistré à l’intérieur sera perdu. Pour la mettre de côté sans l’arrêter, réduisez plutôt la fenêtre.</string>
     <string name="ln_close_cancel">Annuler</string>
     <string name="ln_close_shutdown">Arrêter</string>
+    <string name="ln_close_body_phone">Cela met fin à la session Ubuntu et arrête le conteneur. Tout ce qui n’est pas enregistré à l’intérieur est perdu. « Continuer en arrière-plan » le laisse tourner pour que vous puissiez y revenir.</string>
+    <string name="ln_close_keep">Continuer en arrière-plan</string>
+    <string name="ln_on_desktop">Linux est déjà ouvert sur le bureau DeX. Fermez-le là-bas pour l’utiliser sur le téléphone.</string>
     <string name="ln_shared">Dossier partagé</string>
     <string name="ln_shared_grant">Autoriser l’accès à tous les fichiers…</string>
     <string name="ln_shared_grant_failed">Impossible d’ouvrir l’écran des autorisations</string>

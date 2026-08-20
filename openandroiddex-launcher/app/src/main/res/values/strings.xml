@@ -381,7 +381,14 @@
     <string name="lx_tx_cannot_open_folder">Cannot open the folder</string>
 
     <!-- ── Linux window ── -->
-    <string name="ln_label">Linux</string>
+    <!-- The feature's NAME, and the one string behind every surface that names
+         it: the icon in the phone's app list, the recents card, the desktop's
+         tile, the taskbar entry, the window caption and the foreground
+         service's notification (and its channel in system settings). A product
+         name, so every locale repeats it verbatim — like Docker. The prose
+         around it still says "Linux" where it means the operating system or the
+         session rather than this app. -->
+    <string name="ln_label">LinuxOnDroid</string>
     <string name="ln_installing">Installing Ubuntu…</string>
     <string name="ln_waiting">Waiting for the desktop app to start the install…</string>
     <string name="ln_starting">Starting Linux desktop…</string>
@@ -409,6 +416,12 @@
     <string name="ln_close_body">This ends the Ubuntu session and stops the container. Anything unsaved inside it is lost. To put it aside and keep it running, minimise the window instead.</string>
     <string name="ln_close_cancel">Cancel</string>
     <string name="ln_close_shutdown">Shut down</string>
+    <!-- Same question on the phone, where there is no window to minimise: the
+         way to put a session aside is the button beside it. -->
+    <string name="ln_close_body_phone">This ends the Ubuntu session and stops the container. Anything unsaved inside it is lost. Keep running leaves it going in the background, so you can come back to it.</string>
+    <string name="ln_close_keep">Keep running</string>
+    <!-- The app-list icon, when the window is already open on the desktop. -->
+    <string name="ln_on_desktop">Linux is already open on the DeX desktop. Close it there to use it on the phone.</string>
     <string name="ln_shared">Shared folder</string>
     <string name="ln_shared_grant">Allow access to all files…</string>
     <string name="ln_shared_grant_failed">Cannot open the permission screen</string>

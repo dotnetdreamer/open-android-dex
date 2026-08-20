@@ -352,7 +352,7 @@
     <string name="st_clip_note">Android lässt eine App die Zwischenablage nur lesen, solange ihr Fenster den Fokus hat — der Verlauf wird deshalb erfasst, wenn dieses Fenster vorn ist.</string>
     <string name="st_scope_stream">Stream- und Zwischenablage-Einstellungen</string>
 
-    <string name="ln_label">Linux</string>
+    <string name="ln_label">LinuxOnDroid</string>
     <string name="ln_installing">Ubuntu wird installiert…</string>
     <string name="ln_waiting">Warten, bis die Desktop-App die Installation startet…</string>
     <string name="ln_starting">Linux-Desktop wird gestartet…</string>
@@ -380,6 +380,9 @@
     <string name="ln_close_body">Damit endet die Ubuntu-Sitzung und der Container wird gestoppt. Alles nicht Gespeicherte darin geht verloren. Um sie beiseitezulegen und weiterlaufen zu lassen, minimiere stattdessen das Fenster.</string>
     <string name="ln_close_cancel">Abbrechen</string>
     <string name="ln_close_shutdown">Herunterfahren</string>
+    <string name="ln_close_body_phone">Damit endet die Ubuntu-Sitzung und der Container wird gestoppt. Alles nicht Gespeicherte darin geht verloren. „Weiterlaufen lassen“ lässt sie im Hintergrund weiterlaufen, sodass du zurückkehren kannst.</string>
+    <string name="ln_close_keep">Weiterlaufen lassen</string>
+    <string name="ln_on_desktop">Linux ist bereits auf dem DeX-Desktop geöffnet. Schließe es dort, um es auf dem Telefon zu nutzen.</string>
     <string name="ln_shared">Gemeinsamer Ordner</string>
     <string name="ln_shared_grant">Zugriff auf alle Dateien erlauben…</string>
     <string name="ln_shared_grant_failed">Der Berechtigungsbildschirm kann nicht geöffnet werden</string>
