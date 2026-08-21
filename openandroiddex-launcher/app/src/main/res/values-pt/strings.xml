@@ -116,6 +116,11 @@
     <string name="st_icons_small">Pequeno</string>
     <string name="st_icons_medium">Médio</string>
     <string name="st_icons_large">Grande</string>
+    <string name="st_home_app">App de início</string>
+    <string name="st_home_app_yes">Open Android DeX</string>
+    <string name="st_home_app_yes_sub">O Início e o gesto de deslizar para cima voltam para a área de trabalho.</string>
+    <string name="st_home_app_no">O launcher do telefone</string>
+    <string name="st_home_app_no_sub">O Início e o gesto de deslizar para cima saem da área de trabalho. Toque para mudar.</string>
     <string name="st_windows_note">As novas opções valem a partir da próxima janela aberta.</string>
 
     <string name="st_cursor_render">Desenho do ponteiro</string>
@@ -244,7 +249,31 @@
     <string name="lx_exit_dex">Sair do DeX</string>
     <string name="lx_exit_title">Sair do DeX?</string>
     <string name="lx_exit_body">O desktop é fechado e o telefone volta ao normal. Os apps ainda abertos aqui vão para o telefone.</string>
+    <string name="lx_exit_body_home">A área de trabalho é a sua tela de início, então será perguntado qual app assume isso.</string>
     <string name="lx_exiting">Saindo do DeX…</string>
+
+    <!-- Phone touchpad -->
+    <string name="lx_pad">Mouse</string>
+    <string name="lx_pad_on">Mouse ligado</string>
+    <string name="lx_pad_hint">Arraste para mover · Toque para clicar · Dois dedos para rolar</string>
+    <string name="lx_pad_title">Touchpad</string>
+    <string name="lx_pad_body">Use a faixa na parte de baixo da tela como touchpad. Segure o dedo parado para um toque longo, toque com dois dedos para o mesmo, e toque duas vezes e arraste para arrastar.</string>
+    <string name="lx_pad_speed">Velocidade do ponteiro</string>
+    <string name="lx_pad_size">Tamanho do touchpad</string>
+    <string name="lx_pad_scrolling">Rolagem</string>
+    <string name="lx_pad_natural">Natural</string>
+    <string name="lx_pad_reverse">Invertida</string>
+    <string name="lx_pad_foot">Um mouse ou teclado ligado ao telefone continua funcionando normalmente.</string>
+    <string name="lx_pad_no_overlay">O touchpad precisa de permissão para aparecer sobre outros apps.</string>
+    <string name="lx_pad_no_service">O ponteiro não consegue clicar até que o Open Android DeX seja ativado na Acessibilidade.</string>
+    <string name="lx_pad_failed">Não foi possível abrir o touchpad.</string>
+
+    <!-- Phone: who owns the Home button -->
+    <string name="lx_home_title">Trazer o Início de volta para cá?</string>
+    <string name="lx_home_body">O Início e o gesto de deslizar para cima vão para o launcher do telefone, então sair de um app sai da área de trabalho. Torne o Open Android DeX o app de início e os dois voltam para cá. O Voltar já faz isso.</string>
+    <string name="lx_home_set">Definir como início</string>
+    <string name="lx_home_not_now">Agora não</string>
+    <string name="lx_home_no_chooser">Este telefone não tem uma tela de app de início para abrir.</string>
     <string name="lx_cancel">Cancelar</string>
     <string name="lx_charging">Carregando</string>
     <string name="lx_plug_type">Tipo de conexão</string>
@@ -364,9 +393,15 @@
     <string name="ln_apps_chromium">Chromium</string>
     <string name="ln_apps_chromium_sub">Navegador. Uma transferência grande.</string>
     <string name="ln_apps_code">Visual Studio Code</string>
-    <string name="ln_apps_code_sub">Editor de código da Microsoft. A maior transferência aqui.</string>
+    <string name="ln_apps_code_sub">Editor de código da Microsoft. Uma transferência grande.</string>
     <string name="ln_apps_git">Git</string>
     <string name="ln_apps_git_sub">Pequeno. O VS Code precisa dele para o painel de controlo de origem.</string>
+    <string name="ln_apps_node">Node.js</string>
+    <string name="ln_apps_node_sub">Ambiente de execução JavaScript com npm. A versão LTS atual.</string>
+    <string name="ln_apps_gimp">GIMP</string>
+    <string name="ln_apps_gimp_sub">Editor de imagens para fotos e gráficos. Uma transferência grande.</string>
+    <string name="ln_apps_intellij">IntelliJ IDEA Community</string>
+    <string name="ln_apps_intellij_sub">IDE de Java da JetBrains. A maior transferência aqui.</string>
     <string name="ln_apps_go">Instalar</string>
     <string name="ln_apps_go_none">Instalar apenas o Ubuntu</string>
     <string name="ln_apps_menu">Escolher aplicações Linux…</string>

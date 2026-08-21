@@ -232,6 +232,11 @@ final class DexMedia {
                 + "." + (forward ? "on" : "off"));
         RequestProvider.enqueue("cfg", cfgKey(DexPrefs.KEY_AUDIO_DUP)
                 + "." + (duplicate ? "on" : "off"));
+        // Leaving "phone" retires the remembered output pick with the mode,
+        // wherever the mode was changed from (the flyout also hands the
+        // daemon's pin back; the Settings chooser has no daemon client, and a
+        // pin with forwarding over it routes nothing anyway).
+        if (forward) clearPhonePick(ctx);
         DexLog.step("media", "sound will play on: " + mode + " (live)");
     }
 
@@ -242,8 +247,11 @@ final class DexMedia {
 
     /**
      * The value the tray's "Media output" row shows: the chosen mode, named by
-     * where the sound actually comes out. For "phone" that is the phone's own
-     * active route — "Galaxy Buds" says more than "Phone only" does.
+     * where the sound actually comes out. For "phone" that is the pinned pick
+     * when there is one — MediaRouter cannot see a strategy pin, it names the
+     * active Bluetooth device even while the pin routes past it — and the
+     * phone's own active route otherwise. "Galaxy Buds" says more than "Phone
+     * only" does either way.
      */
     static String modeLabel(Context ctx) {
         switch (audioMode(ctx)) {
@@ -252,7 +260,54 @@ final class DexMedia {
             case AUDIO_BOTH:
                 return ctx.getString(R.string.lx_audio_both);
             default:
-                return outputName(ctx);
+                Output pick = phonePick(ctx);
+                return pick != null ? pick.name : outputName(ctx);
+        }
+    }
+
+    // ── the flyout's phone-output pick, remembered ─────────────────────────
+
+    /** Record a pick the daemon just accepted, so the UI can tell the truth. */
+    static void rememberPhonePick(Context ctx, Output out) {
+        DexPrefs.put(ctx, DexPrefs.KEY_MEDIA_PICK_TYPE, out.type);
+        DexPrefs.put(ctx, DexPrefs.KEY_MEDIA_PICK_ADDR, out.address);
+        DexPrefs.put(ctx, DexPrefs.KEY_MEDIA_PICK_NAME, out.name);
+        DexPrefs.put(ctx, DexPrefs.KEY_MEDIA_PICK_BOOT, bootCount(ctx));
+    }
+
+    /** Forget it — the pin was handed back, or superseded by a forwarding mode. */
+    static void clearPhonePick(Context ctx) {
+        DexPrefs.put(ctx, DexPrefs.KEY_MEDIA_PICK_TYPE, -1);
+    }
+
+    /**
+     * The remembered pick, or null when there is none worth believing: never
+     * made, cleared, or made before the last reboot — the pin lives in the
+     * audio service and died with it, so presenting it would be the exact lie
+     * this bookkeeping exists to avoid.
+     */
+    static Output phonePick(Context ctx) {
+        int type = DexPrefs.getInt(ctx, DexPrefs.KEY_MEDIA_PICK_TYPE, -1);
+        if (type < 0) return null;
+        if (DexPrefs.getInt(ctx, DexPrefs.KEY_MEDIA_PICK_BOOT, -1) != bootCount(ctx)) {
+            return null;
+        }
+        Output out = new Output();
+        out.type = type;
+        out.address = DexPrefs.getString(ctx, DexPrefs.KEY_MEDIA_PICK_ADDR, "");
+        out.name = DexPrefs.getString(ctx, DexPrefs.KEY_MEDIA_PICK_NAME, "");
+        out.builtin = type == android.media.AudioDeviceInfo.TYPE_BUILTIN_SPEAKER;
+        return out.name.isEmpty() ? null : out;
+    }
+
+    private static int bootCount(Context ctx) {
+        try {
+            return android.provider.Settings.Global.getInt(ctx.getContentResolver(),
+                    android.provider.Settings.Global.BOOT_COUNT);
+        } catch (Exception e) {
+            // No boot count (unusual, but the setting is not guaranteed):
+            // a stable 0 keeps the pick usable rather than never valid.
+            return 0;
         }
     }
 
@@ -342,10 +397,16 @@ final class DexMedia {
                 out.name = product == null ? "" : product.toString().trim();
                 if (out.name.isEmpty()) out.name = fallbackName(ctx, dev.getType());
                 // The same physical device shows up once per profile it offers
-                // (a headset is an A2DP sink and a BLE one); one row is enough.
+                // — a headset is an A2DP sink and a BLE one, under one name —
+                // so Bluetooth entries collapse by name alone. Everything else
+                // keeps the address in its identity: two no-name USB cards
+                // share a fallback label but are different hardware, and
+                // collapsing them would hide one entirely.
                 boolean dup = false;
                 for (Output have : found) {
-                    if (have.name.equalsIgnoreCase(out.name)) {
+                    if (!have.name.equalsIgnoreCase(out.name)) continue;
+                    if ((bluetooth(have.type) && bluetooth(out.type))
+                            || have.address.equals(out.address)) {
                         dup = true;
                         break;
                     }
@@ -374,6 +435,19 @@ final class DexMedia {
                 // The speaker is seeded by the caller; everything else —
                 // earpiece, telephony, FM, the remote submix scrcpy itself
                 // captures through — is not a listing.
+                return false;
+        }
+    }
+
+    /** The types where one physical device answers under several profiles. */
+    private static boolean bluetooth(int type) {
+        switch (type) {
+            case android.media.AudioDeviceInfo.TYPE_BLUETOOTH_A2DP:
+            case android.media.AudioDeviceInfo.TYPE_BLE_HEADSET:
+            case android.media.AudioDeviceInfo.TYPE_BLE_SPEAKER:
+            case android.media.AudioDeviceInfo.TYPE_HEARING_AID:
+                return true;
+            default:
                 return false;
         }
     }

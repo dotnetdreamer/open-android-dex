@@ -310,30 +310,50 @@ fn build_args(opts: &MirrorOptions) -> Vec<String> {
 const PROCESS_NAME: &str = "Open Android DeX";
 
 /// The path to spawn scrcpy by: on macOS a product-named hardlink to the
-/// bundled binary, refreshed every call so a bundle update can never leave it
-/// pointing at last version's inode. Anywhere the link cannot be made — a
-/// read-only resource dir — the plain binary is the answer, and the Dock
-/// label is the small price.
+/// bundled binary, refreshed when the binary changes so a bundle update can
+/// never leave it pointing at last version's inode. Anywhere the link cannot
+/// be made, the plain binary is the answer and the Dock label is the small
+/// price.
+///
+/// The link lives in the app-data dir, NEVER next to the binary: on an
+/// installed build that directory is inside the signed .app, and writing a
+/// file into a sealed Resources tree invalidates the bundle's code signature.
+/// The binary's own location stops mattering once it is spawned from
+/// elsewhere — the server, adb and icon are all named by env var, and the
+/// working directory is set to the real bin dir regardless.
 #[cfg(target_os = "macos")]
-fn branded_exe(exe: &std::path::Path) -> std::path::PathBuf {
+fn branded_exe(app: &AppHandle, exe: &std::path::Path) -> std::path::PathBuf {
     use std::os::unix::fs::MetadataExt;
-    let Some(dir) = exe.parent() else {
+    let Ok(dir) = app.path().app_data_dir().map(|d| d.join("bin")) else {
         return exe.to_path_buf();
     };
+    if std::fs::create_dir_all(&dir).is_err() {
+        return exe.to_path_buf();
+    }
     let link = dir.join(PROCESS_NAME);
-    // Only touch the link when it is missing or points at a superseded
-    // binary. Sessions spawn concurrently (the desktop, its audio companion,
-    // mirror windows), and an unconditional remove-and-relink here would be a
-    // window in which another spawn resolves a name that momentarily is not
-    // there.
-    if let (Ok(l), Ok(e)) = (std::fs::metadata(&link), std::fs::metadata(exe)) {
-        if l.dev() == e.dev() && l.ino() == e.ino() {
+    let Ok(src) = std::fs::metadata(exe) else {
+        return exe.to_path_buf();
+    };
+    // Only touch the link when it is missing or superseded. Sessions spawn
+    // concurrently (the desktop, its audio companion, mirror windows), and an
+    // unconditional remove-and-relink would be a window in which another
+    // spawn resolves a name that momentarily is not there. "Superseded" is
+    // inode inequality for a hardlink; for the copy fallback it is a size
+    // change, because a copy's mtime is its own and the sizes of two scrcpy
+    // releases have never matched.
+    if let Ok(l) = std::fs::metadata(&link) {
+        if (l.dev() == src.dev() && l.ino() == src.ino()) || l.len() == src.len() {
             return link;
         }
     }
     let _ = std::fs::remove_file(&link);
-    match std::fs::hard_link(exe, &link) {
-        Ok(()) => link,
+    if std::fs::hard_link(exe, &link).is_ok() {
+        return link;
+    }
+    // A different volume (app data and the .app usually share one, but this
+    // is not guaranteed): fall back to a real copy, permissions included.
+    match std::fs::copy(exe, &link) {
+        Ok(_) => link,
         Err(e) => {
             log::debug!("cannot brand the scrcpy process name: {e}");
             exe.to_path_buf()
@@ -342,7 +362,7 @@ fn branded_exe(exe: &std::path::Path) -> std::path::PathBuf {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn branded_exe(exe: &std::path::Path) -> std::path::PathBuf {
+fn branded_exe(_app: &AppHandle, exe: &std::path::Path) -> std::path::PathBuf {
     // Windows names taskbar entries after the window title, which is already
     // ours; nothing to fix.
     exe.to_path_buf()
@@ -355,7 +375,7 @@ fn spawn_scrcpy(app: &AppHandle, opts: &MirrorOptions) -> Result<Child, String> 
     let exe = bin.join(adb::exe_name("scrcpy"));
     adb::warn_if_not_executable(&exe);
     let mut cmd = if exe.exists() {
-        Command::new(branded_exe(&exe))
+        Command::new(branded_exe(app, &exe))
     } else {
         Command::new(adb::exe_name("scrcpy"))
     };
@@ -1208,10 +1228,32 @@ fn audio_companion_options(serial: &str, dup: bool) -> MirrorOptions {
     }
 }
 
-/// Serialises reconciles: two quick taps in the settings UI must not race two
-/// stop/start pairs into the same session key. Process-wide rather than
-/// per-serial — this path runs on a settings tap, never in a loop.
+/// Serialises the companion's whole lifecycle: reconciles against each other
+/// (two quick settings taps must not race two stop/start pairs into one
+/// session key), and — just as load-bearing — teardown against a reconcile in
+/// flight. A reconcile checks "is the desktop live" at its top and then
+/// blocks for seconds (an adb round-trip, a SIGTERM grace) before spawning;
+/// `stop_audio_companion` and `kill_all` take this lock so that they run
+/// either before that check (the reconcile then sees the desktop gone) or
+/// after the spawn (they then find the companion in the map and stop it).
+/// Without it, a companion spawned into that window would divert the phone's
+/// sound to a computer showing nothing, with nothing left to stop it.
+/// Process-wide rather than per-serial — this path runs on a settings tap,
+/// never in a loop.
+///
+/// Locked with [`audio_lock`], never with a bare `.lock().unwrap()`.
 static AUDIO_RECONCILE: Mutex<()> = Mutex::new(());
+
+/// AUDIO_RECONCILE, poison ignored. The guarded state is `()`, so a panic in
+/// one reconcile thread proves nothing about any invariant — but an unwrap
+/// here would resurface that panic in whoever locks next, and one of those is
+/// `kill_all` on the MAIN thread during app exit, where it would skip every
+/// phone and host restore this app owes on the way out.
+fn audio_lock() -> std::sync::MutexGuard<'static, ()> {
+    AUDIO_RECONCILE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
 
 /// Make the audio companion match the stored config, live.
 ///
@@ -1223,7 +1265,7 @@ static AUDIO_RECONCILE: Mutex<()> = Mutex::new(());
 ///
 /// Blocking (adb round-trips, a SIGTERM grace): callers spawn it on a thread.
 fn reconcile_audio_session(app: &AppHandle, serial: &str) {
-    let _guard = AUDIO_RECONCILE.lock().unwrap();
+    let _guard = audio_lock();
     let desktop_key = format!("{serial}|desktop");
     let audio_key = format!("{serial}|audio");
 
@@ -1324,6 +1366,29 @@ fn reconcile_audio_session(app: &AppHandle, serial: &str) {
         return;
     }
 
+    // The liveness check at the top is seconds old by now (device_sdk, the
+    // stop grace). Teardown holds AUDIO_RECONCILE too, so a spawn past a dead
+    // desktop would still be caught and stopped — this re-check just keeps
+    // that from being a spawn at all when the desktop ended mid-reconcile.
+    let desktop_still_live = {
+        let state = app.state::<MirrorState>();
+        let map = state.0.lock().unwrap();
+        map.get(&desktop_key)
+            .map(|s| {
+                s.child
+                    .lock()
+                    .unwrap()
+                    .try_wait()
+                    .map(|st| st.is_none())
+                    .unwrap_or(false)
+            })
+            .unwrap_or(false)
+    };
+    if !desktop_still_live {
+        log::info!("audio [{serial}] the desktop ended mid-reconcile — no companion");
+        return;
+    }
+
     match start_mirror(app.clone(), audio_companion_options(serial, dup)) {
         Ok(_) => log::info!(
             "audio [{serial}] forwarding to this computer ({})",
@@ -1344,7 +1409,13 @@ fn reconcile_audio_session_bg(app: &AppHandle, serial: &str) {
 /// Stop the audio companion if one is up — the desktop it accompanied is
 /// going away. Quiet when there is none: that is the common case whenever
 /// sound was left on the phone.
+///
+/// Takes AUDIO_RECONCILE, and that is the point: a reconcile in flight when
+/// the desktop ends is about to spawn a companion this function would
+/// otherwise not see. Behind the lock it runs after that spawn and stops it —
+/// or before the reconcile's own liveness check, which then answers "gone".
 fn stop_audio_companion(app: &AppHandle, serial: &str) {
+    let _guard = audio_lock();
     let audio_key = format!("{serial}|audio");
     let present = {
         let state = app.state::<MirrorState>();
@@ -2276,7 +2347,10 @@ impl RequestPump {
                 // "Where sound plays" is the one stream setting that takes
                 // effect NOW: audio lives in its own scrcpy process, so the
                 // change is a cycle of that companion, not a desktop restart.
-                if what == "audio" || what == "audiodup" {
+                // "reset" belongs in the list: a factory reset clears the
+                // stored audio keys, which is a mode change back to the
+                // default in everything but spelling.
+                if what == "audio" || what == "audiodup" || what == "reset" {
                     audio_dirty = true;
                 }
                 true
@@ -3208,6 +3282,13 @@ fn monitor(app: AppHandle, mut opts: MirrorOptions, attempt: Attempt, stop: Arc<
         // to a computer that no longer shows anything. A desktop RESTART
         // passes through here too; the relaunch's start_mirror reconciles a
         // fresh companion, so the sound is back within a couple of seconds.
+        //
+        // BEFORE the "stopped" emit below, and that ordering is an invariant:
+        // every relaunch path (desktop:restart, the wireless switch) starts
+        // the next desktop only after hearing "stopped", so this stop can
+        // never race a new desktop's freshly reconciled companion. A caller
+        // that started a desktop for this serial earlier than that would have
+        // its companion killed by this line — as silence, not as a leak.
         if opts.new_display.is_some() && opts.app_package.is_none() && !opts.audio_only {
             stop_audio_companion(&app, &opts.serial);
         }
@@ -3536,6 +3617,13 @@ pub fn live_session_output(app: &AppHandle) -> String {
 /// DeX" as pressing the button is, and a phone left with freeform windowing
 /// and a relaxed hidden-API policy on it is the state users notice.
 pub fn kill_all(app: &AppHandle) {
+    // Held across the whole exit: a reconcile that has already read "the
+    // desktop is live" is seconds from spawning an audio companion, and one
+    // spawned after the snapshot below would be an ownerless scrcpy diverting
+    // the phone's sound long after this app is gone. Behind the lock the
+    // reconcile either finished (its companion is in the snapshot) or starts
+    // after the desktops are dead and declines to spawn.
+    let _audio_guard = audio_lock();
     let mut serials: Vec<String> = Vec::new();
     // Collected under the lock and stopped outside it. `shut_down` waits, and
     // the session map is read by the Escape hook on every keystroke the

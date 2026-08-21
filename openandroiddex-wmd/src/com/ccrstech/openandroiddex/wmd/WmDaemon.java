@@ -600,6 +600,18 @@ public final class WmDaemon {
         // dark phone with no desktop left to turn it back on is the worst state to leave.
         Screen.restore();
 
+        // The media-route pin is desktop policy set with this process's authority
+        // (AUDIOROUTE SET), and this process is about to exit — left behind it would
+        // quietly overrule the phone's own output switcher. The PC clears it on a
+        // normal exit (restore_phone); this is the cable-pulled twin. Best effort:
+        // with nothing pinned the framework answers an error, which is the same
+        // outcome spelled differently.
+        try {
+            Audio.clear();
+        } catch (Throwable t) {
+            System.out.println("watchdog: no media-output pin to clear (" + t.getMessage() + ")");
+        }
+
         sh(globals);
 
         // Read the accessibility list NOW rather than taking it from the ARM: a session

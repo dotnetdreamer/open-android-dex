@@ -807,10 +807,12 @@ public class LinuxActivity extends Activity {
      *
      * Ubuntu, XFCE and the VNC stack are not on it: they ARE the container,
      * and a tick box that could switch off the desktop would be a tick box for
-     * an empty window. What is on it is the four optional apps, every one of
-     * them ticked — so the plain Install button builds exactly the container
+     * an empty window. What is on it is the optional apps, with the original
+     * four ticked — so the plain Install button builds exactly the container
      * this app built before the screen existed, and the screen only ever costs
-     * someone a tap unless they want it to cost them a download.
+     * someone a tap unless they want it to cost them a download. The later
+     * arrivals — Node.js, GIMP, IntelliJ — start unticked for the same
+     * reason: a default must never buy a download nobody asked for.
      *
      * Nothing here uninstalls. Unticking means "do not fetch it", which is why
      * the body text changes once there is a container: over a guest that
@@ -856,6 +858,9 @@ public class LinuxActivity extends Activity {
         appOption(list, "chromium", R.string.ln_apps_chromium, R.string.ln_apps_chromium_sub, go);
         appOption(list, "code", R.string.ln_apps_code, R.string.ln_apps_code_sub, go);
         appOption(list, "git", R.string.ln_apps_git, R.string.ln_apps_git_sub, go);
+        appOption(list, "nodejs", R.string.ln_apps_node, R.string.ln_apps_node_sub, go);
+        appOption(list, "gimp", R.string.ln_apps_gimp, R.string.ln_apps_gimp_sub, go);
+        appOption(list, "intellij", R.string.ln_apps_intellij, R.string.ln_apps_intellij_sub, go);
 
         go.setText(goLabel());
         go.setOnClickListener(v -> {
@@ -1294,8 +1299,8 @@ public class LinuxActivity extends Activity {
      * The same swap, for content that will not always fit.
      *
      * The other four screens are a glyph, a line and a button and are centred
-     * with confidence. The chooser is a title, a paragraph, four two-line rows
-     * and a button, and a phone held in landscape has barely 300 dp of height
+     * with confidence. The chooser is a title, a paragraph, seven two-line
+     * rows and a button, and a phone held in landscape has barely 300 dp of height
      * for it — where {@link #present} would simply centre it and clip both
      * ends, taking the Install button with them. fillViewport plus a centring
      * holder keeps it centred while it fits and scrolls it when it does not.

@@ -25,7 +25,12 @@ desktop, terminal, input, VncAuth. Not yet re-verified on the arm64 phone.
    base tarball if it is missing, then runs `linux-setup.sh <version> <features>`.
 2. `linux-setup.sh` phases: extract rootfs → configure → `apt-get update` →
    install XFCE4 + TigerVNC + noVNC → `vncpass` + xstartup → **git** →
-   **browsers** → VS Code → shared folder → dock → ready. Each phase drops a `.stamp-*` file, so re-runs resume; `setup.pid`
+   **Node.js** → **GIMP** → **browsers** → shared folder → VS Code →
+   **IntelliJ IDEA** → dock → ready. The optional apps (Firefox, Chromium,
+   VS Code, git, Node.js, GIMP, IntelliJ) run only when the app chooser's tick
+   list — handed over as `LINUX_APPS`, echoed back into `apps.done` on
+   success — asks for them. Each phase drops a `.stamp-*` file,
+   so re-runs resume; `setup.pid`
    guards against double-runs. `repair_dpkg` runs before the install so an
    interrupted unpack never wedges the rootfs permanently — `dpkg --configure -a`
    alone, which is all this used to do, does not, and the missing rungs are what

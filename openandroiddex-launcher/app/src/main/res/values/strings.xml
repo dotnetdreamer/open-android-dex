@@ -146,6 +146,11 @@
     <string name="st_icons_small">Small</string>
     <string name="st_icons_medium">Medium</string>
     <string name="st_icons_large">Large</string>
+    <string name="st_home_app">Home app</string>
+    <string name="st_home_app_yes">Open Android DeX</string>
+    <string name="st_home_app_yes_sub">Home and the swipe-up gesture come back to the desktop.</string>
+    <string name="st_home_app_no">The phone\'s launcher</string>
+    <string name="st_home_app_no_sub">Home and the swipe-up gesture leave the desktop. Tap to change it.</string>
     <string name="st_windows_note">New settings apply to the next window you open.</string>
     <string name="st_window_memory">Remember where windows go</string>
     <string name="st_window_memory_sub">Move or resize an app’s window and it opens there next time</string>
@@ -371,7 +376,31 @@
     <string name="lx_exit_dex">Exit DeX</string>
     <string name="lx_exit_title">Exit DeX?</string>
     <string name="lx_exit_body">The desktop closes and the phone goes back to normal. Apps still open here move to the phone.</string>
+    <string name="lx_exit_body_home">The desktop is your home screen, so you will be asked which app takes that over.</string>
     <string name="lx_exiting">Exiting DeX…</string>
+
+    <!-- Phone touchpad: the dock's Mouse button and its options -->
+    <string name="lx_pad">Mouse</string>
+    <string name="lx_pad_on">Mouse on</string>
+    <string name="lx_pad_hint">Drag to move · Tap to click · Two fingers to scroll</string>
+    <string name="lx_pad_title">Touchpad</string>
+    <string name="lx_pad_body">Use the strip at the bottom of the screen as a touchpad. Hold a finger still to long-press, tap with two fingers for the same, and double-tap then drag to drag.</string>
+    <string name="lx_pad_speed">Pointer speed</string>
+    <string name="lx_pad_size">Touchpad size</string>
+    <string name="lx_pad_scrolling">Scrolling</string>
+    <string name="lx_pad_natural">Natural</string>
+    <string name="lx_pad_reverse">Reverse</string>
+    <string name="lx_pad_foot">A mouse or keyboard plugged into the phone always works as it normally does.</string>
+    <string name="lx_pad_no_overlay">The touchpad needs permission to draw over other apps.</string>
+    <string name="lx_pad_no_service">The pointer cannot click until Open Android DeX is turned on in Accessibility.</string>
+    <string name="lx_pad_failed">The touchpad could not be opened.</string>
+
+    <!-- Phone: who owns the Home button -->
+    <string name="lx_home_title">Bring Home back here?</string>
+    <string name="lx_home_body">Home and the swipe-up gesture go to the phone\'s own launcher, so leaving an app leaves the desktop. Make Open Android DeX the home app and they come back here instead. Back already does.</string>
+    <string name="lx_home_set">Set as home</string>
+    <string name="lx_home_not_now">Not now</string>
+    <string name="lx_home_no_chooser">This phone has no home-app screen to open.</string>
     <string name="lx_cancel">Cancel</string>
     <string name="lx_charging">Charging</string>
     <string name="lx_plug_type">Plug type</string>
@@ -481,9 +510,15 @@
     <string name="ln_apps_chromium">Chromium</string>
     <string name="ln_apps_chromium_sub">Web browser. A large download.</string>
     <string name="ln_apps_code">Visual Studio Code</string>
-    <string name="ln_apps_code_sub">Code editor from Microsoft. The biggest download here.</string>
+    <string name="ln_apps_code_sub">Code editor from Microsoft. A large download.</string>
     <string name="ln_apps_git">Git</string>
     <string name="ln_apps_git_sub">Small. VS Code needs it for the Source Control panel.</string>
+    <string name="ln_apps_node">Node.js</string>
+    <string name="ln_apps_node_sub">JavaScript runtime with npm. The current LTS release.</string>
+    <string name="ln_apps_gimp">GIMP</string>
+    <string name="ln_apps_gimp_sub">Image editor for photos and graphics. A large download.</string>
+    <string name="ln_apps_intellij">IntelliJ IDEA Community</string>
+    <string name="ln_apps_intellij_sub">Java IDE from JetBrains. The biggest download here.</string>
     <string name="ln_apps_go">Install</string>
     <string name="ln_apps_go_none">Install Ubuntu only</string>
     <string name="ln_apps_menu">Choose Linux apps…</string>

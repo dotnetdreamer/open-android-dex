@@ -1041,8 +1041,16 @@ pub fn restore_phone(app: &tauri::AppHandle, serial: &str) {
     //    ART does not run shutdown hooks on SIGTERM — once that process is gone nothing on
     //    the device can undo it, and the user is left pressing power twice at a phone that
     //    looks broken.
-    if crate::wm::WmClient::new().restore_screen() {
+    let wm = crate::wm::WmClient::new();
+    if wm.restore_screen() {
         log::info!("{serial}: the phone's own screen was off — turned back on");
+    }
+    // 0b. the media-route pin, for the same reason and under the same
+    //     deadline: it is desktop policy set with the daemon's authority, and
+    //     step 4 is about to take that authority away. Left in place it would
+    //     overrule the phone's own output switcher long after DeX is gone.
+    if wm.clear_audio_route() {
+        log::info!("{serial}: the media-output pin was cleared");
     }
 
     let services = run_adb_timeout(

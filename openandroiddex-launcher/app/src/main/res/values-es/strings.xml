@@ -116,6 +116,11 @@
     <string name="st_icons_small">Pequeño</string>
     <string name="st_icons_medium">Mediano</string>
     <string name="st_icons_large">Grande</string>
+    <string name="st_home_app">App de inicio</string>
+    <string name="st_home_app_yes">Open Android DeX</string>
+    <string name="st_home_app_yes_sub">Inicio y el gesto de deslizar hacia arriba vuelven al escritorio.</string>
+    <string name="st_home_app_no">El launcher del teléfono</string>
+    <string name="st_home_app_no_sub">Inicio y el gesto de deslizar hacia arriba salen del escritorio. Toca para cambiarlo.</string>
     <string name="st_windows_note">Los ajustes nuevos se aplican a la siguiente ventana que abras.</string>
 
     <string name="st_cursor_render">Dibujo del puntero</string>
@@ -244,7 +249,31 @@
     <string name="lx_exit_dex">Salir de DeX</string>
     <string name="lx_exit_title">¿Salir de DeX?</string>
     <string name="lx_exit_body">El escritorio se cierra y el teléfono vuelve a la normalidad. Las apps que sigan abiertas aquí pasan al teléfono.</string>
+    <string name="lx_exit_body_home">El escritorio es tu pantalla de inicio, así que se te preguntará qué app la asume.</string>
     <string name="lx_exiting">Saliendo de DeX…</string>
+
+    <!-- Phone touchpad -->
+    <string name="lx_pad">Ratón</string>
+    <string name="lx_pad_on">Ratón activo</string>
+    <string name="lx_pad_hint">Arrastra para mover · Toca para hacer clic · Dos dedos para desplazar</string>
+    <string name="lx_pad_title">Panel táctil</string>
+    <string name="lx_pad_body">Usa la franja inferior de la pantalla como panel táctil. Mantén el dedo quieto para una pulsación larga, toca con dos dedos para lo mismo, y toca dos veces y arrastra para arrastrar.</string>
+    <string name="lx_pad_speed">Velocidad del puntero</string>
+    <string name="lx_pad_size">Tamaño del panel</string>
+    <string name="lx_pad_scrolling">Desplazamiento</string>
+    <string name="lx_pad_natural">Natural</string>
+    <string name="lx_pad_reverse">Invertido</string>
+    <string name="lx_pad_foot">Un ratón o teclado conectado al teléfono sigue funcionando con normalidad.</string>
+    <string name="lx_pad_no_overlay">El panel táctil necesita permiso para mostrarse sobre otras aplicaciones.</string>
+    <string name="lx_pad_no_service">El puntero no puede hacer clic hasta que actives Open Android DeX en Accesibilidad.</string>
+    <string name="lx_pad_failed">No se pudo abrir el panel táctil.</string>
+
+    <!-- Phone: who owns the Home button -->
+    <string name="lx_home_title">¿Que Inicio vuelva aquí?</string>
+    <string name="lx_home_body">Inicio y el gesto de deslizar hacia arriba van al launcher del teléfono, así que salir de una app sale del escritorio. Haz que Open Android DeX sea la app de inicio y volverán aquí. Atrás ya lo hace.</string>
+    <string name="lx_home_set">Definir como inicio</string>
+    <string name="lx_home_not_now">Ahora no</string>
+    <string name="lx_home_no_chooser">Este teléfono no tiene una pantalla de app de inicio que abrir.</string>
     <string name="lx_cancel">Cancelar</string>
     <string name="lx_charging">Cargando</string>
     <string name="lx_plug_type">Tipo de conexión</string>
@@ -364,9 +393,15 @@
     <string name="ln_apps_chromium">Chromium</string>
     <string name="ln_apps_chromium_sub">Navegador web. Una descarga grande.</string>
     <string name="ln_apps_code">Visual Studio Code</string>
-    <string name="ln_apps_code_sub">Editor de código de Microsoft. La descarga más grande de aquí.</string>
+    <string name="ln_apps_code_sub">Editor de código de Microsoft. Una descarga grande.</string>
     <string name="ln_apps_git">Git</string>
     <string name="ln_apps_git_sub">Pequeño. VS Code lo necesita para el panel de control de código fuente.</string>
+    <string name="ln_apps_node">Node.js</string>
+    <string name="ln_apps_node_sub">Entorno de ejecución de JavaScript con npm. La versión LTS actual.</string>
+    <string name="ln_apps_gimp">GIMP</string>
+    <string name="ln_apps_gimp_sub">Editor de imágenes para fotos y gráficos. Una descarga grande.</string>
+    <string name="ln_apps_intellij">IntelliJ IDEA Community</string>
+    <string name="ln_apps_intellij_sub">IDE de Java de JetBrains. La descarga más grande de aquí.</string>
     <string name="ln_apps_go">Instalar</string>
     <string name="ln_apps_go_none">Instalar solo Ubuntu</string>
     <string name="ln_apps_menu">Elegir apps de Linux…</string>

@@ -116,6 +116,11 @@
     <string name="st_icons_small">小</string>
     <string name="st_icons_medium">中</string>
     <string name="st_icons_large">大</string>
+    <string name="st_home_app">主屏幕应用</string>
+    <string name="st_home_app_yes">Open Android DeX</string>
+    <string name="st_home_app_yes_sub">主页键和上滑手势会回到桌面。</string>
+    <string name="st_home_app_no">手机自带的启动器</string>
+    <string name="st_home_app_no_sub">主页键和上滑手势会离开桌面。点按可更改。</string>
     <string name="st_windows_note">新设置将在你打开的下一个窗口生效。</string>
 
     <string name="st_cursor_render">指针绘制</string>
@@ -244,7 +249,31 @@
     <string name="lx_exit_dex">退出 DeX</string>
     <string name="lx_exit_title">退出 DeX？</string>
     <string name="lx_exit_body">桌面将关闭，手机恢复正常。仍在此处打开的应用会移回手机。</string>
+    <string name="lx_exit_body_home">桌面就是你的主屏幕，因此系统会询问改由哪个应用接管。</string>
     <string name="lx_exiting">正在退出 DeX…</string>
+
+    <!-- Phone touchpad -->
+    <string name="lx_pad">鼠标</string>
+    <string name="lx_pad_on">鼠标已开</string>
+    <string name="lx_pad_hint">拖动移动 · 轻点点击 · 双指滚动</string>
+    <string name="lx_pad_title">触控板</string>
+    <string name="lx_pad_body">把屏幕底部的这条区域当作触控板。手指按住不动即为长按，双指轻点同样如此，连点两下再拖动则为拖拽。</string>
+    <string name="lx_pad_speed">指针速度</string>
+    <string name="lx_pad_size">触控板大小</string>
+    <string name="lx_pad_scrolling">滚动</string>
+    <string name="lx_pad_natural">自然</string>
+    <string name="lx_pad_reverse">反向</string>
+    <string name="lx_pad_foot">插在手机上的鼠标或键盘始终照常工作。</string>
+    <string name="lx_pad_no_overlay">触控板需要“显示在其他应用上层”的权限。</string>
+    <string name="lx_pad_no_service">在无障碍中启用 Open Android DeX 之前，指针无法点击。</string>
+    <string name="lx_pad_failed">无法打开触控板。</string>
+
+    <!-- Phone: who owns the Home button -->
+    <string name="lx_home_title">让主页键回到这里？</string>
+    <string name="lx_home_body">主页键和上滑手势会回到手机自带的启动器，所以离开应用就等于离开桌面。把 Open Android DeX 设为主屏幕应用，两者就会回到这里。返回键本来就会。</string>
+    <string name="lx_home_set">设为主屏幕</string>
+    <string name="lx_home_not_now">暂不</string>
+    <string name="lx_home_no_chooser">这台手机没有可以打开的主屏幕应用设置。</string>
     <string name="lx_cancel">取消</string>
     <string name="lx_charging">充电中</string>
     <string name="lx_plug_type">接口类型</string>
@@ -364,9 +393,15 @@
     <string name="ln_apps_chromium">Chromium</string>
     <string name="ln_apps_chromium_sub">网页浏览器。下载较大。</string>
     <string name="ln_apps_code">Visual Studio Code</string>
-    <string name="ln_apps_code_sub">微软的代码编辑器。这里最大的下载。</string>
+    <string name="ln_apps_code_sub">微软的代码编辑器。较大的下载。</string>
     <string name="ln_apps_git">Git</string>
     <string name="ln_apps_git_sub">体积很小。VS Code 的源代码管理面板需要它。</string>
+    <string name="ln_apps_node">Node.js</string>
+    <string name="ln_apps_node_sub">带 npm 的 JavaScript 运行时。当前的 LTS 版本。</string>
+    <string name="ln_apps_gimp">GIMP</string>
+    <string name="ln_apps_gimp_sub">用于照片和图形的图像编辑器。较大的下载。</string>
+    <string name="ln_apps_intellij">IntelliJ IDEA Community</string>
+    <string name="ln_apps_intellij_sub">JetBrains 的 Java 集成开发环境。这里最大的下载。</string>
     <string name="ln_apps_go">安装</string>
     <string name="ln_apps_go_none">只安装 Ubuntu</string>
     <string name="ln_apps_menu">选择 Linux 应用…</string>

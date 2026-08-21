@@ -116,6 +116,11 @@
     <string name="st_icons_small">Petites</string>
     <string name="st_icons_medium">Moyennes</string>
     <string name="st_icons_large">Grandes</string>
+    <string name="st_home_app">Application d’accueil</string>
+    <string name="st_home_app_yes">Open Android DeX</string>
+    <string name="st_home_app_yes_sub">Accueil et le balayage vers le haut reviennent au bureau.</string>
+    <string name="st_home_app_no">Le lanceur du téléphone</string>
+    <string name="st_home_app_no_sub">Accueil et le balayage vers le haut quittent le bureau. Touchez pour changer.</string>
     <string name="st_windows_note">Les nouveaux réglages valent pour la prochaine fenêtre ouverte.</string>
 
     <string name="st_cursor_render">Rendu du pointeur</string>
@@ -244,7 +249,31 @@
     <string name="lx_exit_dex">Quitter DeX</string>
     <string name="lx_exit_title">Quitter DeX ?</string>
     <string name="lx_exit_body">Le bureau se ferme et le téléphone revient à la normale. Les applis encore ouvertes ici passent sur le téléphone.</string>
+    <string name="lx_exit_body_home">Le bureau est votre écran d’accueil : il vous sera demandé quelle application le remplace.</string>
     <string name="lx_exiting">Fermeture de DeX…</string>
+
+    <!-- Phone touchpad -->
+    <string name="lx_pad">Souris</string>
+    <string name="lx_pad_on">Souris activée</string>
+    <string name="lx_pad_hint">Faites glisser pour déplacer · Touchez pour cliquer · Deux doigts pour défiler</string>
+    <string name="lx_pad_title">Pavé tactile</string>
+    <string name="lx_pad_body">Utilisez la bande en bas de l’écran comme pavé tactile. Gardez le doigt immobile pour un appui long, touchez à deux doigts pour la même chose, et touchez deux fois puis faites glisser pour déplacer.</string>
+    <string name="lx_pad_speed">Vitesse du pointeur</string>
+    <string name="lx_pad_size">Taille du pavé</string>
+    <string name="lx_pad_scrolling">Défilement</string>
+    <string name="lx_pad_natural">Naturel</string>
+    <string name="lx_pad_reverse">Inversé</string>
+    <string name="lx_pad_foot">Une souris ou un clavier branché au téléphone fonctionne toujours normalement.</string>
+    <string name="lx_pad_no_overlay">Le pavé tactile a besoin de l’autorisation de s’afficher par-dessus les autres applications.</string>
+    <string name="lx_pad_no_service">Le pointeur ne peut pas cliquer tant qu’Open Android DeX n’est pas activé dans l’Accessibilité.</string>
+    <string name="lx_pad_failed">Impossible d’ouvrir le pavé tactile.</string>
+
+    <!-- Phone: who owns the Home button -->
+    <string name="lx_home_title">Ramener Accueil ici ?</string>
+    <string name="lx_home_body">Accueil et le balayage vers le haut mènent au lanceur du téléphone : quitter une application quitte donc le bureau. Faites d’Open Android DeX l’application d’accueil et ils reviendront ici. Retour le fait déjà.</string>
+    <string name="lx_home_set">Définir comme accueil</string>
+    <string name="lx_home_not_now">Pas maintenant</string>
+    <string name="lx_home_no_chooser">Ce téléphone n’a pas d’écran de choix de l’application d’accueil.</string>
     <string name="lx_cancel">Annuler</string>
     <string name="lx_charging">En charge</string>
     <string name="lx_plug_type">Type de prise</string>
@@ -364,9 +393,15 @@
     <string name="ln_apps_chromium">Chromium</string>
     <string name="ln_apps_chromium_sub">Navigateur web. Un gros téléchargement.</string>
     <string name="ln_apps_code">Visual Studio Code</string>
-    <string name="ln_apps_code_sub">Éditeur de code de Microsoft. Le plus gros téléchargement ici.</string>
+    <string name="ln_apps_code_sub">Éditeur de code de Microsoft. Un gros téléchargement.</string>
     <string name="ln_apps_git">Git</string>
     <string name="ln_apps_git_sub">Petit. VS Code en a besoin pour le panneau de contrôle de source.</string>
+    <string name="ln_apps_node">Node.js</string>
+    <string name="ln_apps_node_sub">Environnement d\'exécution JavaScript avec npm. La version LTS actuelle.</string>
+    <string name="ln_apps_gimp">GIMP</string>
+    <string name="ln_apps_gimp_sub">Éditeur d\'images pour photos et graphismes. Un gros téléchargement.</string>
+    <string name="ln_apps_intellij">IntelliJ IDEA Community</string>
+    <string name="ln_apps_intellij_sub">IDE Java de JetBrains. Le plus gros téléchargement ici.</string>
     <string name="ln_apps_go">Installer</string>
     <string name="ln_apps_go_none">Installer Ubuntu seul</string>
     <string name="ln_apps_menu">Choisir les applis Linux…</string>

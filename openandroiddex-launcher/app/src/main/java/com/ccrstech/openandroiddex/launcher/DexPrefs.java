@@ -229,6 +229,35 @@ final class DexPrefs {
     /** JSON array, most recent first — see {@link DexClipboard}. Not a setting. */
     static final String KEY_CLIP_HISTORY = "clipboard_history";
 
+    // ── The phone's own touchpad — see {@link DexPointer} ──
+    // Not in the Settings window: these belong to a surface that only exists
+    // on the phone's screen, and they are reached from the dock button that
+    // turns it on. Persisted all the same, because a pointer speed you have to
+    // dial in again on every session is one nobody dials in twice.
+    /**
+     * Shared prefix, so {@link #affectsShell} can exclude the whole group by
+     * name: the dock and {@link DexPointer} apply these themselves, and a shell
+     * repaint per nudge of the pointer-speed slider would rebuild the very
+     * desktop the pad is floating over.
+     */
+    static final String PAD_PREFIX = "pad_";
+    /** Touchpad armed. Restored on the next desktop so the choice sticks. */
+    static final String KEY_PAD_ON = PAD_PREFIX + "on";
+    /** 1…5, the same five steps the Linux viewer's pointer-speed slider offers. */
+    static final String KEY_PAD_SPEED = PAD_PREFIX + "speed";
+    /** Natural (content follows the fingers) or reverse. */
+    static final String KEY_PAD_NATURAL = PAD_PREFIX + "natural";
+    /** Touchpad height as a percentage of the display. */
+    static final String KEY_PAD_HEIGHT = PAD_PREFIX + "height";
+
+    /**
+     * The home-role offer has been put to the user once — see
+     * {@link LauncherActivity#maybeOfferHome}. A record of a question asked,
+     * not of the answer: the answer lives with the platform, which is the only
+     * thing that knows who holds the role now.
+     */
+    static final String KEY_HOME_ASKED = "home_asked";
+
     // ── Defaults ──
     /** This is Open Android DeX; the DeX shell is what it opens on. */
     static final String DEF_SHELL = SHELL_DEX;
@@ -274,6 +303,17 @@ final class DexPrefs {
     static final String DEF_CURSOR_OUTLINE = DexCursors.OUTLINE_CONTRAST;
     static final boolean DEF_CURSOR_SHADOW = true;
     static final int DEF_CURSOR_SPEED = 0;
+    /**
+     * The touchpad is OFF until asked for. The phone's screen is a touchscreen
+     * first — taking that away on the first launch, to hand back a cursor
+     * nobody asked for, is the one thing this feature must not do.
+     */
+    static final boolean DEF_PAD_ON = false;
+    /** Mid-slider, and the value dex-input.js opens on. */
+    static final int DEF_PAD_SPEED = 3;
+    static final boolean DEF_PAD_NATURAL = true;
+    /** Enough strip to swipe across, with the shell still the larger half. */
+    static final int DEF_PAD_HEIGHT = 28;
     /** Stays scrcpy's own default: uhid captures the PC's mouse, so it is opt-in. */
     static final String DEF_MOUSE_MODE = "sdk";
     static final String DEF_FONT = "default";
@@ -296,6 +336,19 @@ final class DexPrefs {
     static final String DEF_CODEC = "auto";
     static final String DEF_ENCODER = "auto";
     static final boolean DEF_CLIP_SYNC = true;
+
+    // ── The media flyout's phone-output pick ──
+    // Which of the phone's own outputs the user pinned media to (via the
+    // window daemon), remembered because nothing queryable reports it back:
+    // MediaRouter names the ACTIVE BT device, not where the strategy pin
+    // actually routes. Type -1 means "no pick". Launcher-local — no
+    // PC_PREFIX, nothing is pushed. The boot count rides along because the
+    // pin lives in the audio service and dies with a reboot; a pick from a
+    // previous boot must not be presented as current (see DexMedia.phonePick).
+    static final String KEY_MEDIA_PICK_TYPE = "media_pick_type";
+    static final String KEY_MEDIA_PICK_ADDR = "media_pick_addr";
+    static final String KEY_MEDIA_PICK_NAME = "media_pick_name";
+    static final String KEY_MEDIA_PICK_BOOT = "media_pick_boot";
     /**
      * The Samsung DeX three-finger set, which is also Windows 11's and macOS's
      * own — so a laptop user's existing habits keep working, pointed at Android
@@ -333,7 +386,11 @@ final class DexPrefs {
                 // Stored here, applied by adb on the phone. The shell paints
                 // nothing from it, so repainting the whole desktop on every
                 // nudge of the speed slider would be pure waste.
-                && !KEY_CURSOR_SPEED.equals(key);
+                && !KEY_CURSOR_SPEED.equals(key)
+                // The phone's touchpad — see PAD_PREFIX.
+                && !key.startsWith(PAD_PREFIX)
+                // A note that a prompt has been shown. Nothing paints from it.
+                && !KEY_HOME_ASKED.equals(key);
     }
 
     static SharedPreferences prefs(Context ctx) {

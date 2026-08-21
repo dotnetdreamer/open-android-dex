@@ -116,6 +116,11 @@
     <string name="st_icons_small">નાનું</string>
     <string name="st_icons_medium">મધ્યમ</string>
     <string name="st_icons_large">મોટું</string>
+    <string name="st_home_app">હોમ ઍપ</string>
+    <string name="st_home_app_yes">Open Android DeX</string>
+    <string name="st_home_app_yes_sub">હોમ અને ઉપર સ્વાઇપ કરવાનો ઇશારો ડેસ્કટૉપ પર પાછા આવે છે.</string>
+    <string name="st_home_app_no">ફોનનું લૉન્ચર</string>
+    <string name="st_home_app_no_sub">હોમ અને ઉપર સ્વાઇપ કરવાનો ઇશારો ડેસ્કટૉપ છોડી દે છે. બદલવા ટૅપ કરો.</string>
     <string name="st_windows_note">નવી સેટિંગ્સ તમે ખોલો તે આગલી વિન્ડોથી લાગુ પડે છે.</string>
 
     <string name="st_cursor_render">પોઇન્ટર રેન્ડરિંગ</string>
@@ -244,7 +249,31 @@
     <string name="lx_exit_dex">DeX બંધ કરો</string>
     <string name="lx_exit_title">DeX બંધ કરવું છે?</string>
     <string name="lx_exit_body">ડેસ્કટોપ બંધ થશે અને ફોન સામાન્ય થઈ જશે. અહીં ખુલ્લી ઐપ ફોન પર જશે.</string>
+    <string name="lx_exit_body_home">ડેસ્કટૉપ જ તમારી હોમ સ્ક્રીન છે, એટલે એ કઈ ઍપ સંભાળશે તે પૂછવામાં આવશે.</string>
     <string name="lx_exiting">DeX બંધ થઈ રહ્યું છે…</string>
+
+    <!-- Phone touchpad -->
+    <string name="lx_pad">માઉસ</string>
+    <string name="lx_pad_on">માઉસ ચાલુ</string>
+    <string name="lx_pad_hint">ખસેડવા ખેંચો · ક્લિક કરવા ટૅપ કરો · સ્ક્રોલ કરવા બે આંગળી</string>
+    <string name="lx_pad_title">ટચપૅડ</string>
+    <string name="lx_pad_body">સ્ક્રીનની નીચેની પટ્ટીને ટચપૅડ તરીકે વાપરો. લાંબા દબાણ માટે આંગળી સ્થિર રાખો, એ જ માટે બે આંગળીથી ટૅપ કરો, અને ખેંચવા માટે બે વાર ટૅપ કરીને ખેંચો.</string>
+    <string name="lx_pad_speed">પોઇન્ટરની ઝડપ</string>
+    <string name="lx_pad_size">ટચપૅડનું કદ</string>
+    <string name="lx_pad_scrolling">સ્ક્રોલિંગ</string>
+    <string name="lx_pad_natural">કુદરતી</string>
+    <string name="lx_pad_reverse">ઊલટું</string>
+    <string name="lx_pad_foot">ફોન સાથે જોડેલું માઉસ કે કીબોર્ડ હંમેશની જેમ કામ કરતું રહે છે.</string>
+    <string name="lx_pad_no_overlay">ટચપૅડને બીજી ઍપ ઉપર દોરવાની પરવાનગી જોઈએ છે.</string>
+    <string name="lx_pad_no_service">ઍક્સેસિબિલિટીમાં Open Android DeX ચાલુ ન થાય ત્યાં સુધી પોઇન્ટર ક્લિક કરી શકતું નથી.</string>
+    <string name="lx_pad_failed">ટચપૅડ ખૂલી શક્યું નહીં.</string>
+
+    <!-- Phone: who owns the Home button -->
+    <string name="lx_home_title">હોમ અહીં પાછું લાવવું?</string>
+    <string name="lx_home_body">હોમ અને ઉપર સ્વાઇપ કરવાનો ઇશારો ફોનના પોતાના લૉન્ચરમાં જાય છે, એટલે ઍપ છોડતાં ડેસ્કટૉપ પણ છૂટી જાય છે. Open Android DeX ને હોમ ઍપ બનાવો એટલે એ બંને અહીં પાછાં આવશે. બૅક તો પહેલેથી જ આવે છે.</string>
+    <string name="lx_home_set">હોમ તરીકે સેટ કરો</string>
+    <string name="lx_home_not_now">હમણાં નહીં</string>
+    <string name="lx_home_no_chooser">આ ફોનમાં હોમ ઍપ પસંદ કરવાની સ્ક્રીન નથી.</string>
     <string name="lx_cancel">રદ કરો</string>
     <string name="lx_charging">ચાર્જ થાય છે</string>
     <string name="lx_plug_type">પ્લગ પ્રકાર</string>
@@ -364,9 +393,15 @@
     <string name="ln_apps_chromium">Chromium</string>
     <string name="ln_apps_chromium_sub">વેબ બ્રાઉઝર. મોટું ડાઉનલોડ.</string>
     <string name="ln_apps_code">Visual Studio Code</string>
-    <string name="ln_apps_code_sub">માઇક્રોસોફ્ટનું કોડ એડિટર. અહીંનું સેવાથી મોટું ડાઉનલોડ.</string>
+    <string name="ln_apps_code_sub">માઇક્રોસોફ્ટનું કોડ એડિટર. એક મોટું ડાઉનલોડ.</string>
     <string name="ln_apps_git">Git</string>
     <string name="ln_apps_git_sub">નાનું. VS Code ને સોર્સ કંટ્રોલ પેનલ માટે જરૂર છે.</string>
+    <string name="ln_apps_node">Node.js</string>
+    <string name="ln_apps_node_sub">npm સાથે JavaScript રનટાઇમ. વર્તમાન LTS આવૃત્તિ.</string>
+    <string name="ln_apps_gimp">GIMP</string>
+    <string name="ln_apps_gimp_sub">ફોટા અને ગ્રાફિક્સ માટે ઇમેજ એડિટર. એક મોટું ડાઉનલોડ.</string>
+    <string name="ln_apps_intellij">IntelliJ IDEA Community</string>
+    <string name="ln_apps_intellij_sub">JetBrains નું Java IDE. અહીંનું સૌથી મોટું ડાઉનલોડ.</string>
     <string name="ln_apps_go">ઇન્સ્ટોલ કરો</string>
     <string name="ln_apps_go_none">ફક્ત ઉબુન્તુ ઇન્સ્ટોલ કરો</string>
     <string name="ln_apps_menu">લિનક્સ એપ પસંદ કરો…</string>

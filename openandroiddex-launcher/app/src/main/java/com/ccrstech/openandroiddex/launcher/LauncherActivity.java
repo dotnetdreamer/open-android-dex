@@ -43,8 +43,11 @@ import android.os.SystemClock;
 import android.provider.DocumentsContract;
 import android.provider.Settings;
 import android.text.Editable;
+import android.text.SpannableString;
+import android.text.Spanned;
 import android.text.TextUtils;
 import android.text.TextWatcher;
+import android.text.style.RelativeSizeSpan;
 import android.util.TypedValue;
 import android.view.Display;
 import android.view.Gravity;
@@ -122,6 +125,27 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
      * windows either overlapping the bar or short of it.
      */
     static final int TASKBAR_DP = 52;
+
+    /**
+     * Height of the phone dock — the bar's replacement on the phone's own
+     * screen ({@link #onPhone}). Taller than the taskbar because nothing on
+     * the other side of the glass is aiming a pointer at it: these are finger
+     * targets, and 56dp is the platform's own floor for one.
+     *
+     * Free to differ from {@link #TASKBAR_DP}: the 52 there is a contract with
+     * the PC, which sizes maximized windows against it, and there is no PC on
+     * this display.
+     */
+    static final int DOCK_DP = 56;
+
+    /**
+     * How long the PC may go quiet before the phone stops assuming one is
+     * there. Generous against the heartbeat it is measured on: that is every
+     * fiftieth poll of a loop that ticks between 50 and 300ms, so ~15s at its
+     * slowest, and being wrong here costs an exit that closes only the phone's
+     * window.
+     */
+    private static final long PC_SILENCE_MS = 30_000L;
 
     /**
      * Below this display width the shell lays its chrome out compactly — see
@@ -280,6 +304,12 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
     private float drawerRawX, drawerRawY;
     private View taskbarView;
     private boolean taskbarOverlay = false;
+    /** The phone dock's Mouse button, so it can show the touchpad's state. */
+    private TextView padButton;
+    /** The phone's touchpad and pointer; null until asked for. See {@link DexPointer}. */
+    private DexPointer pointer;
+    private PopupWindow padPopup;
+    private PopupWindow homePopup;
     private PopupWindow recentsPopup;
     private PopupWindow calendarPopup;
     private PopupWindow batteryPopup;
@@ -391,10 +421,19 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
     /** Last broadcast seq applied — the PC fires broadcasts without waiting,
      *  so they can arrive out of order. */
     private int lastSeq = -1;
+    /**
+     * uptime of the last word from the PC, or 0 if it has never spoken.
+     *
+     * The running-apps broadcast doubles as the PC's heartbeat: it is re-sent
+     * every fiftieth poll even when nothing has changed, so silence here means
+     * silence on the whole channel. Only {@link #pcAlive} reads it.
+     */
+    private long pcSeenAt;
 
     private final BroadcastReceiver runningReceiver = new BroadcastReceiver() {
         @Override
         public void onReceive(Context ctx, Intent intent) {
+            pcSeenAt = SystemClock.uptimeMillis();
             int seq = intent.getIntExtra("seq", -1);
             if (seq >= 0) {
                 // drop stale in-flight broadcasts; a much smaller seq means
@@ -686,6 +725,12 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
         releaseOrphanedAdd();
         buildUi();
         setupTaskbar();
+        // After the dock, which is what its button reports into.
+        restorePad();
+        // Posted, and late: this is a flyout anchored to the dock, and onCreate
+        // is the one moment the dock may still be an in-activity bar waiting on
+        // the overlay app-op (see scheduleOverlayUpgrade).
+        handler.postDelayed(this::maybeOfferHome, 1500);
         loadApps();
         IntentFilter filter = new IntentFilter(ACTION_RUNNING);
         if (android.os.Build.VERSION.SDK_INT >= 33) {
@@ -815,6 +860,10 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
         }
         dismissPopups();
         hideDrawer();
+        // The pad and the pointer are overlay WINDOWS: nothing takes them down
+        // with the activity, and a leaked one is a cursor floating over the
+        // phone's own home screen with no way left to dismiss it.
+        if (pointer != null) pointer.detach();
         if (taskbarOverlay && taskbarView != null) {
             try {
                 getWindowManager().removeViewImmediate(taskbarView);
@@ -975,6 +1024,11 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
         }
         buildUi();
         setupTaskbar();
+        // The pad and the pointer are windows of their own — buildUi cannot
+        // reach them, so a palette or density change would leave the touchpad
+        // painted in the shell's last theme until it was toggled off and on.
+        if (pointer != null) pointer.refresh();
+        relayoutDock();
         refreshOpenApps();
         updateClock();
     }
@@ -1077,6 +1131,31 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
      */
     boolean compact() {
         return compact;
+    }
+
+    /**
+     * True when the shell is drawn on the phone's OWN screen rather than on a
+     * display of its own.
+     *
+     * <p>Unlike {@link #compact()} this IS a feature switch, and the only one
+     * in the shell. A desktop display is a picture on a computer with a mouse
+     * and a keyboard in front of it; the phone's screen is a touchscreen the
+     * user is holding, with its own back gesture, its own clock, its own
+     * battery icon and no pointer at all. The taskbar's three clusters are
+     * either duplicated by the phone's own chrome (clock, battery, nav keys)
+     * or aimed at a computer that is not there (the fullscreen toggle drives
+     * the PC's scrcpy window) — so on this display the bar is replaced by a
+     * dock of the three things that still mean something: the drawer, the
+     * touchpad, and the way out. See {@link #buildPhoneDock}.
+     *
+     * <p>By DISPLAY and not by width, for the reason {@link #compact()} gives:
+     * a desktop display driven at a phone-like "Display size" is narrow and
+     * still a desktop. A null display is a window on its way out; treat it as
+     * the phone, which is the branch that assumes nothing.
+     */
+    boolean onPhone() {
+        Display display = getDisplay();
+        return display == null || display.getDisplayId() == Display.DEFAULT_DISPLAY;
     }
 
     /**
@@ -1220,11 +1299,14 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
     }
 
     private void addTaskbarToActivity() {
+        boolean dock = onPhone();
         FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, dp(TASKBAR_DP), Gravity.BOTTOM);
+                dock ? ViewGroup.LayoutParams.WRAP_CONTENT : ViewGroup.LayoutParams.MATCH_PARENT,
+                dp(dock ? DOCK_DP : TASKBAR_DP),
+                dock ? (Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL) : Gravity.BOTTOM);
         // targetSdk 35 runs the activity window edge to edge, so on the phone's
         // own screen this would otherwise land under the gesture pill.
-        lp.bottomMargin = bottomSystemInset();
+        lp.bottomMargin = bottomSystemInset() + dockLift();
         rootFrame.addView(taskbarView, lp);
     }
 
@@ -1234,16 +1316,20 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
             DexLog.warn("taskbar", "no overlay permission yet — app windows will cover the bar");
             return false;
         }
+        boolean dock = onPhone();
         WindowManager.LayoutParams barLp = new WindowManager.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, dp(TASKBAR_DP),
+                dock ? ViewGroup.LayoutParams.WRAP_CONTENT : ViewGroup.LayoutParams.MATCH_PARENT,
+                dp(dock ? DOCK_DP : TASKBAR_DP),
                 WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
                 WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
                 PixelFormat.TRANSLUCENT);
         // No y offset for the gesture pill here, unlike addTaskbarToActivity:
         // an overlay window is already laid out inside the safe area (see
         // bottomSystemInset), and offsetting it again lifts the bar off the
-        // bottom edge by the height of the pill.
-        barLp.gravity = Gravity.BOTTOM;
+        // bottom edge by the height of the pill. The dock's own offset is a
+        // different thing — it is the touchpad underneath it, not an inset.
+        barLp.gravity = dock ? (Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL) : Gravity.BOTTOM;
+        barLp.y = dockLift();
         try {
             getWindowManager().addView(taskbarView, barLp);
         } catch (Exception e) {
@@ -1252,6 +1338,92 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
         }
         taskbarOverlay = true;
         return true;
+    }
+
+    /**
+     * How far the phone dock floats off the bottom edge, in px.
+     *
+     * <p>A gap always, because the dock is a pill and a pill flush to the edge
+     * reads as a bar that failed to reach it — plus the whole touchpad when
+     * one is up, so the dock is never the thing your thumb hits while aiming
+     * for the pad. Zero on a desktop display, where the bar IS the edge.
+     */
+    private int dockLift() {
+        if (!onPhone()) return 0;
+        int pad = 0;
+        if (pointer != null && pointer.showing()) {
+            Point size = new Point();
+            getWindowManager().getDefaultDisplay().getRealSize(size);
+            pad = DexPointer.heightPx(this, size.y);
+        }
+        return dp(10) + pad;
+    }
+
+    /**
+     * Height at the bottom of the display that belongs to the shell's own
+     * chrome, in px — what every full-surface panel and every launched window
+     * has to stop short of.
+     *
+     * On a desktop display that is the taskbar and nothing else, which is why
+     * this used to be {@code dp(TASKBAR_DP)} spelled out at each call site. On
+     * the phone it is the dock, and the touchpad underneath it when one is up:
+     * a window sized against the taskbar's 52dp there would put its bottom
+     * quarter under a pad the user is dragging a finger across.
+     *
+     * <p>NOT the system's own bars — those are {@link #bottomSystemInset},
+     * which some callers owe and others (anything already laid out inside the
+     * safe area) do not.
+     */
+    private int bottomChrome() {
+        return onPhone() ? dockLift() + dp(DOCK_DP) : dp(TASKBAR_DP);
+    }
+
+    /**
+     * The same reserve in DISPLAY coordinates, which is a different number.
+     *
+     * {@link #bottomChrome} measures our own chrome from where it is drawn, and
+     * the dock is drawn inside the safe area — the window manager lays an
+     * APPLICATION_OVERLAY out above the gesture pill. A launch rect is in raw
+     * display pixels, where that pill is real estate like any other, so it owes
+     * the system inset on top. Measured on a 1080x2340 phone: chrome 187px,
+     * pill 43px, and a window sized against the first alone runs 43px under the
+     * dock.
+     *
+     * <p>Identical to {@link #bottomChrome} on a desktop display, which has no
+     * system bars at all.
+     */
+    private int bottomReserve() {
+        return bottomSystemInset() + bottomChrome();
+    }
+
+    /** What the icon grid owes the chrome below it, in px. */
+    private int deskBottomInset() {
+        return bottomReserve() + dp(onPhone() ? 8 : 14);
+    }
+
+    /** Re-seat the dock and the icon grid after the touchpad came or went. */
+    private void relayoutDock() {
+        if (!onPhone()) return;
+        if (desktopGrid != null) {
+            desktopGrid.setPadding(desktopGrid.getPaddingLeft(), desktopGrid.getPaddingTop(),
+                    desktopGrid.getPaddingRight(), deskBottomInset());
+        }
+        if (taskbarView == null) return;
+        try {
+            if (taskbarOverlay) {
+                WindowManager.LayoutParams lp =
+                        (WindowManager.LayoutParams) taskbarView.getLayoutParams();
+                lp.y = dockLift();
+                getWindowManager().updateViewLayout(taskbarView, lp);
+            } else if (taskbarView.getLayoutParams() instanceof FrameLayout.LayoutParams) {
+                FrameLayout.LayoutParams lp =
+                        (FrameLayout.LayoutParams) taskbarView.getLayoutParams();
+                lp.bottomMargin = bottomSystemInset() + dockLift();
+                taskbarView.setLayoutParams(lp);
+            }
+        } catch (Exception e) {
+            DexLog.warn("pointer", "cannot re-seat the dock", e);
+        }
     }
 
     /**
@@ -1323,7 +1495,7 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
         desktopGrid.setPadding(dp(compact ? 10 : 18),
                 topSystemInset() + dp(compact ? 34 : 56),
                 dp(compact ? 10 : 18),
-                bottomSystemInset() + dp(TASKBAR_DP + 14));
+                deskBottomInset());
         root.addView(desktopGrid, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
 
@@ -1511,7 +1683,7 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
         // The in-activity flavour; showDrawer sets it again for whichever host
         // the drawer actually gets.
         panel.setPadding(pad, topSystemInset() + drawerTopPad(), pad,
-                bottomSystemInset() + dp(TASKBAR_DP + 12));
+                bottomReserve() + dp(12));
         panel.setClickable(true);
 
         panel.addView(buildPinnedRow(), new LinearLayout.LayoutParams(
@@ -1979,8 +2151,7 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
     private FrameLayout.LayoutParams startPanelParams() {
         Point size = new Point();
         getWindowManager().getDefaultDisplay().getRealSize(size);
-        int available = Math.max(dp(240),
-                size.y - topSystemInset() - bottomSystemInset() - dp(TASKBAR_DP));
+        int available = Math.max(dp(240), size.y - topSystemInset() - bottomReserve());
         int width = compact
                 ? Math.max(dp(260), size.x - dp(20))
                 : Math.min(dp(620), Math.round(size.x * 0.92f));
@@ -2939,6 +3110,7 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
      * strip is what shrinks and scrolls, and the tray keeps its full width.
      */
     private View buildTaskbar() {
+        if (onPhone()) return buildPhoneDock();
         View nav = theme.win11 ? buildWin11NavCluster() : buildNavCluster();
         View apps = theme.win11 ? buildWin11Cluster() : buildAppsCluster();
         View tray = buildTrayCluster();
@@ -2982,6 +3154,113 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
 
         updateClock();
         return bar;
+    }
+
+    /**
+     * The phone dock: Apps · Mouse · Exit DeX, and nothing else.
+     *
+     * <p>What the taskbar's other controls were for is either already on this
+     * screen or on the other end of a cable that is not plugged in. Back, home
+     * and recents are the phone's own gestures. The clock, the date and the
+     * battery are in the status bar an inch above this. The fullscreen toggle
+     * resizes a scrcpy window on a computer. The open-apps strip mirrors a
+     * display that, here, is this one. Three things survive that reading:
+     *
+     * <ul>
+     *   <li><b>Apps</b> — the drawer, which is the only route to Linux,
+     *       Docker, the Web viewer and Settings: {@link #loadApps} skips our
+     *       own package, so those four exist as tiles in the drawer and
+     *       nowhere else.
+     *   <li><b>Mouse</b> — the touchpad ({@link DexPointer}). A desktop drawn
+     *       for a pointer, on a display that has none.
+     *   <li><b>Exit DeX</b> — the way out, which on this display may have to
+     *       be taken locally; see {@link #requestExit}.
+     * </ul>
+     *
+     * <p>A centred pill rather than a full-width strip: it is three buttons,
+     * and stretching them across a phone would put the two outer ones where no
+     * thumb reaches.
+     */
+    private View buildPhoneDock() {
+        LinearLayout dock = new LinearLayout(this);
+        dock.setOrientation(LinearLayout.HORIZONTAL);
+        dock.setGravity(Gravity.CENTER_VERTICAL);
+        dock.setPadding(dp(6), 0, dp(6), 0);
+        dock.setBackground(theme.surface(theme.bar(), dp(DOCK_DP) / 2f));
+        dock.setElevation(theme.perf ? 0f : dp(8));
+
+        dock.addView(dockButton("⊞", getString(R.string.lx_apps),
+                theme.text, v -> toggleDrawer(), null));
+
+        padButton = dockButton("🖱", getString(R.string.lx_pad),
+                theme.text, v -> togglePad(), v -> showPadOptions());
+        dock.addView(padButton);
+        updatePadButton();
+
+        // A drawable and not a ⏻, for the reason buildTrayCluster spells out:
+        // U+23FB is not in every device's fonts, and the one control here that
+        // ends the session is the last one that may render as a tofu box.
+        dock.addView(dockIconButton(android.R.drawable.ic_lock_power_off,
+                getString(R.string.lx_exit_dex), theme.danger, v -> toggleExitPopup()));
+        return dock;
+    }
+
+    /** A dock button whose icon is a drawable rather than a glyph. */
+    private TextView dockIconButton(int iconRes, String label, int tint,
+                                    View.OnClickListener onClick) {
+        TextView btn = dockButton("", label, tint, onClick, null);
+        btn.setText(label);
+        Drawable icon = getDrawable(iconRes);
+        if (icon != null) {
+            icon = icon.mutate();
+            // Sized to the glyph line the other two buttons draw, so the three
+            // labels sit on one baseline.
+            icon.setBounds(0, 0, Math.round(sp(10.5f) * 1.7f), Math.round(sp(10.5f) * 1.7f));
+            icon.setTint(tint);
+        }
+        btn.setCompoundDrawables(null, icon, null, null);
+        btn.setCompoundDrawablePadding(dp(2));
+        return btn;
+    }
+
+    /**
+     * A dock button: glyph over label, sized for a thumb.
+     *
+     * <p>Labelled, unlike every control on the taskbar. There is no hover on a
+     * touchscreen, so a tooltip has nowhere to appear and a bare glyph is the
+     * whole of what the button ever says about itself.
+     */
+    private TextView dockButton(String glyph, String label, int tint,
+                                View.OnClickListener onClick, View.OnClickListener onHold) {
+        TextView btn = new TextView(this);
+        btn.setText(dockLabel(glyph, label));
+        btn.setContentDescription(label);
+        btn.setTextColor(tint);
+        btn.setTextSize(TypedValue.COMPLEX_UNIT_PX, sp(10.5f));
+        btn.setLineSpacing(0f, 0.95f);
+        btn.setGravity(Gravity.CENTER);
+        btn.setPadding(dp(14), dp(6), dp(14), dp(6));
+        btn.setBackground(tapBackground(0x00000000, theme.hover, 16));
+        btn.setOnClickListener(onClick);
+        if (onHold != null) {
+            btn.setOnLongClickListener(v -> {
+                onHold.onClick(v);
+                return true;
+            });
+        }
+        return btn;
+    }
+
+    /**
+     * Glyph over label, in one TextView. Two views would be tidier to read and
+     * would cost the button its single content description — a screen reader
+     * would announce the emoji, then the word.
+     */
+    private CharSequence dockLabel(String glyph, String label) {
+        SpannableString text = new SpannableString(glyph + "\n" + label);
+        text.setSpan(new RelativeSizeSpan(1.7f), 0, glyph.length(),
+                Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        return text;
     }
 
     /** Taskbar's left cluster: back · home · open apps. */
@@ -3428,8 +3707,7 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
                     // The overlay is laid out inside the safe area, so the
                     // height it may claim is the display less BOTH system bars,
                     // less the taskbar strip it must stop short of.
-                    Math.max(dp(200), size.y - topSystemInset()
-                            - bottomSystemInset() - dp(TASKBAR_DP)),
+                    Math.max(dp(200), size.y - topSystemInset() - bottomReserve()),
                     WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
                     WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
                     PixelFormat.TRANSLUCENT);
@@ -3466,10 +3744,10 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
             // system bars as well as the taskbar strip. The Start menu pays it
             // as a margin instead, since its panel does not fill the window.
             if (theme.win11) {
-                startPanelBottomMargin(bottomSystemInset() + dp(TASKBAR_DP + 8));
+                startPanelBottomMargin(bottomReserve() + dp(8));
             } else {
                 drawerPanel.setPadding(pad, topSystemInset() + drawerTopPad(), pad,
-                        bottomSystemInset() + dp(TASKBAR_DP + 12));
+                        bottomReserve() + dp(12));
             }
             if (drawer.getParent() == null) {
                 rootFrame.addView(drawer, new FrameLayout.LayoutParams(
@@ -3553,6 +3831,8 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
         if (exitPopup != null && exitPopup.isShowing()) exitPopup.dismiss();
         if (widgetPicker != null && widgetPicker.isShowing()) widgetPicker.dismiss();
         if (mediaPopup != null && mediaPopup.isShowing()) mediaPopup.dismiss();
+        if (padPopup != null && padPopup.isShowing()) padPopup.dismiss();
+        if (homePopup != null && homePopup.isShowing()) homePopup.dismiss();
         recentsPopup = null;
         calendarPopup = null;
         batteryPopup = null;
@@ -3561,6 +3841,8 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
         exitPopup = null;
         widgetPicker = null;
         mediaPopup = null;
+        padPopup = null;
+        homePopup = null;
     }
 
     private PopupWindow makePopup(View content) {
@@ -3587,8 +3869,12 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
         // that window — but the notification flyout is also re-opened from a
         // posted notification, which arrives whenever the phone says so.
         if (taskbarView == null || taskbarView.getWindowToken() == null) return;
-        popup.showAtLocation(taskbarView, Gravity.BOTTOM | horizontalGravity,
-                dp(8), dp(TASKBAR_DP + 8));
+        // The phone dock is a centred pill, not a full-width bar: an END-
+        // anchored flyout would hang off a corner the dock does not reach.
+        boolean dock = onPhone();
+        popup.showAtLocation(taskbarView,
+                Gravity.BOTTOM | (dock ? Gravity.CENTER_HORIZONTAL : horizontalGravity),
+                dock ? 0 : dp(8), bottomChrome() + dp(8));
         Glass.apply(this, popup, uiDensity);
     }
 
@@ -4371,23 +4657,24 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
         String mode = DexMedia.audioMode(this);
         panel.addView(mediaRow(getString(R.string.lx_audio_computer),
                 DexMedia.AUDIO_COMPUTER.equals(mode),
-                () -> DexMedia.setAudioMode(this, DexMedia.AUDIO_COMPUTER)));
+                () -> pickForwarding(DexMedia.AUDIO_COMPUTER)));
         panel.addView(mediaRow(getString(R.string.lx_audio_both),
                 DexMedia.AUDIO_BOTH.equals(mode),
-                () -> DexMedia.setAudioMode(this, DexMedia.AUDIO_BOTH)));
+                () -> pickForwarding(DexMedia.AUDIO_BOTH)));
 
         panel.addView(mediaDivider());
 
         // The phone's own outputs. Which row is lit: only meaningful while
-        // sound stays on the phone, and then it is the active route — matched
-        // by name, because MediaRouter names the route and getDevices names
-        // the device, and the two agree for anything that has a product name.
-        // When nothing matches, it is the speaker: the one output with no
-        // name of its own.
+        // sound stays on the phone, and then it is the remembered pick when
+        // one exists — MediaRouter cannot see a strategy pin, it names the
+        // active Bluetooth device even while the pin routes past it — and the
+        // active route by name otherwise. When nothing matches, it is the
+        // speaker: the one output with no name of its own.
         java.util.List<DexMedia.Output> outputs = DexMedia.outputs(this);
         int lit = -1;
         if (DexMedia.AUDIO_PHONE.equals(mode)) {
-            String route = DexMedia.outputName(this);
+            DexMedia.Output pick = DexMedia.phonePick(this);
+            String route = pick != null ? pick.name : DexMedia.outputName(this);
             for (int ix = 0; ix < outputs.size(); ix++) {
                 if (outputs.get(ix).name.equalsIgnoreCase(route)) {
                     lit = ix;
@@ -4449,22 +4736,44 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
     }
 
     /**
-     * Send the sound to one of the phone's own outputs: forwarding off, and
-     * the media route pinned to the device — by the window daemon, whose uid
-     * holds the routing permission this app never will (the same shape as
-     * {@link #setPhoneScreen}). When the daemon cannot — gone, too old to
-     * know the verb, or the framework refused — the platform's own picker
-     * opens instead, so the tap still ends somewhere the choice can be made.
+     * A forwarding pick: the mode does the work (the PC cycles its audio
+     * companion), and any phone-output pin is handed back so the phone half
+     * of "computer and phone" comes out of whatever the phone would use on
+     * its own. Best effort on the unpin: with nothing pinned the daemon
+     * answers ERR, which is the same outcome spelled differently.
+     */
+    private void pickForwarding(String mode) {
+        DexMedia.setAudioMode(this, mode);   // also retires the phone pick
+        if (qsWm == null) qsWm = new WmClient();
+        final WmClient client = qsWm;
+        client.post(client::audioRouteClear);
+    }
+
+    /**
+     * Send the sound to one of the phone's own outputs: the media route
+     * pinned to the device by the window daemon — whose uid holds the routing
+     * permission this app never will — and only THEN forwarding off. In that
+     * order, and the order is the honesty (same shape as
+     * {@link #setPhoneScreen}): a pin that failed must not have already
+     * silenced the computer and moved the sound somewhere the user did not
+     * tap. On failure nothing changes and the platform's own picker opens
+     * instead, so the tap still ends somewhere the choice can be made.
      */
     private void routeToPhoneOutput(DexMedia.Output out) {
-        DexMedia.setAudioMode(this, DexMedia.AUDIO_PHONE);
         if (qsWm == null) qsWm = new WmClient();
         final WmClient client = qsWm;
         client.post(() -> {
-            if (client.audioRoute(out.type, out.address)) return;
-            DexLog.warn("media", "the daemon could not route to " + out.name
-                    + " — offering the phone's own picker");
-            runOnUiThread(this::openPhoneOutputPicker);
+            final boolean routed = client.audioRoute(out.type, out.address);
+            runOnUiThread(() -> {
+                if (routed) {
+                    DexMedia.setAudioMode(this, DexMedia.AUDIO_PHONE);
+                    DexMedia.rememberPhonePick(this, out);
+                } else {
+                    DexLog.warn("media", "the daemon could not route to " + out.name
+                            + " — offering the phone's own picker");
+                    openPhoneOutputPicker();
+                }
+            });
         });
     }
 
@@ -4620,6 +4929,374 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
         return panel;
     }
 
+    // ── Dock: the phone's touchpad ──
+
+    /**
+     * Turn the touchpad and its pointer on or off.
+     *
+     * <p>Both grants this needs are the PC's to give over adb, and on a phone
+     * that was never plugged into one they may simply be absent. Say which one
+     * is missing rather than flipping a switch that then does nothing: a
+     * pointer you cannot see and a pointer that cannot click look identical
+     * from the outside, and neither looks like a permission.
+     */
+    private void togglePad() {
+        dismissPopups();
+        if (pointer == null) pointer = new DexPointer(this);
+        if (pointer.showing()) {
+            pointer.detach();
+            DexPrefs.put(this, DexPrefs.KEY_PAD_ON, false);
+            relayoutDock();
+            updatePadButton();
+            return;
+        }
+        if (!pointer.canDrawOverlay()) {
+            Toast.makeText(this, getString(R.string.lx_pad_no_overlay), Toast.LENGTH_LONG).show();
+            return;
+        }
+        if (!pointer.attach()) {
+            Toast.makeText(this, getString(R.string.lx_pad_failed), Toast.LENGTH_LONG).show();
+            return;
+        }
+        DexPrefs.put(this, DexPrefs.KEY_PAD_ON, true);
+        relayoutDock();
+        updatePadButton();
+        // Attached, visible, and unable to click a thing. The pad is still
+        // worth leaving up — the accessibility service is granted from the
+        // Settings window this very dock opens — but the pointer has to say so
+        // itself, because nothing else about it looks broken.
+        if (!pointer.canInject()) {
+            Toast.makeText(this, getString(R.string.lx_pad_no_service), Toast.LENGTH_LONG).show();
+        }
+    }
+
+    /** Bring the touchpad back on a fresh desktop if it was on when the last one ended. */
+    private void restorePad() {
+        if (!onPhone()) return;
+        if (!DexPrefs.getBool(this, DexPrefs.KEY_PAD_ON, DexPrefs.DEF_PAD_ON)) return;
+        if (pointer == null) pointer = new DexPointer(this);
+        if (!pointer.attach()) return;
+        relayoutDock();
+        updatePadButton();
+    }
+
+    /** The Mouse button carries the only state the dock has. */
+    private void updatePadButton() {
+        if (padButton == null) return;
+        boolean on = pointer != null && pointer.showing();
+        padButton.setText(dockLabel("🖱", getString(on ? R.string.lx_pad_on : R.string.lx_pad)));
+        padButton.setTextColor(on ? theme.accent : theme.text);
+        padButton.setBackground(tapBackground(on ? theme.accentSoft : 0x00000000, theme.hover, 16));
+    }
+
+    /**
+     * The touchpad's settings, on a hold of the Mouse button.
+     *
+     * <p>The same three dials the Linux viewer's interaction sheet offers for
+     * its Mouse method, in the same order and with the same ranges — pointer
+     * speed, scroll direction, and how much of the screen the pad takes. They
+     * are here rather than in the Settings window because this surface only
+     * exists on the phone's display and only while the pad is up; a row in
+     * Settings would be a control for something the user cannot see from
+     * there, on a desktop where it can never appear.
+     */
+    private void showPadOptions() {
+        if (padPopup != null && padPopup.isShowing()) {
+            dismissPopups();
+            return;
+        }
+        dismissPopups();
+        hideDrawer();
+        padPopup = makePopup(buildPadOptionsView());
+        showTrayPopup(padPopup, Gravity.CENTER_HORIZONTAL);
+    }
+
+    private View buildPadOptionsView() {
+        int panelWidth = dp(280);
+        LinearLayout panel = new LinearLayout(this);
+        panel.setOrientation(LinearLayout.VERTICAL);
+        panel.setPadding(dp(14), dp(12), dp(14), dp(10));
+
+        TextView title = new TextView(this);
+        title.setText(getString(R.string.lx_pad_title));
+        title.setTextColor(theme.text);
+        title.setTextSize(TypedValue.COMPLEX_UNIT_PX, sp(14));
+        title.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        panel.addView(title);
+
+        TextView body = new TextView(this);
+        body.setText(getString(R.string.lx_pad_body));
+        body.setTextColor(theme.textDim);
+        body.setTextSize(TypedValue.COMPLEX_UNIT_PX, sp(11.5f));
+        body.setPadding(0, dp(4), 0, dp(8));
+        panel.addView(body, new LinearLayout.LayoutParams(panelWidth,
+                ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        panel.addView(padSliderRow(getString(R.string.lx_pad_speed),
+                DexPrefs.KEY_PAD_SPEED, DexPointer.MIN_SPEED, DexPointer.MAX_SPEED,
+                DexPrefs.DEF_PAD_SPEED, panelWidth));
+        panel.addView(padSliderRow(getString(R.string.lx_pad_size),
+                DexPrefs.KEY_PAD_HEIGHT, DexPointer.MIN_HEIGHT, DexPointer.MAX_HEIGHT,
+                DexPrefs.DEF_PAD_HEIGHT, panelWidth));
+
+        TextView scrollName = new TextView(this);
+        scrollName.setText(getString(R.string.lx_pad_scrolling));
+        scrollName.setTextColor(theme.textDim);
+        scrollName.setTextSize(TypedValue.COMPLEX_UNIT_PX, sp(10.5f));
+        scrollName.setPadding(dp(6), dp(6), 0, dp(4));
+        panel.addView(scrollName);
+
+        LinearLayout chips = new LinearLayout(this);
+        chips.setOrientation(LinearLayout.HORIZONTAL);
+        boolean natural = DexPrefs.getBool(this, DexPrefs.KEY_PAD_NATURAL, DexPrefs.DEF_PAD_NATURAL);
+        chips.addView(padChip(getString(R.string.lx_pad_natural), natural, true));
+        chips.addView(padChip(getString(R.string.lx_pad_reverse), !natural, false));
+        panel.addView(chips, new LinearLayout.LayoutParams(panelWidth,
+                ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        TextView foot = new TextView(this);
+        foot.setText(getString(R.string.lx_pad_foot));
+        foot.setTextColor(theme.textFaint);
+        foot.setTextSize(TypedValue.COMPLEX_UNIT_PX, sp(10.5f));
+        foot.setPadding(dp(6), dp(10), dp(6), dp(2));
+        panel.addView(foot, new LinearLayout.LayoutParams(panelWidth,
+                ViewGroup.LayoutParams.WRAP_CONTENT));
+        return panel;
+    }
+
+    /**
+     * One touchpad dial.
+     *
+     * <p>Committed on release, not live: both of these rebuild the pad's
+     * windows, and doing that once per pixel of a drag would take the very
+     * surface the finger is dragging on out from under it.
+     */
+    private View padSliderRow(String label, String key, int min, int max, int def, int panelWidth) {
+        LinearLayout wrap = new LinearLayout(this);
+        wrap.setOrientation(LinearLayout.VERTICAL);
+        wrap.setPadding(dp(4), dp(2), dp(4), dp(2));
+
+        TextView name = new TextView(this);
+        name.setText(label);
+        name.setTextColor(theme.textDim);
+        name.setTextSize(TypedValue.COMPLEX_UNIT_PX, sp(10.5f));
+        name.setPadding(dp(6), 0, 0, 0);
+        wrap.addView(name);
+
+        SeekBar bar = new SeekBar(this);
+        bar.setMax(max - min);
+        bar.setProgress(Math.max(0, Math.min(max - min,
+                DexPrefs.getInt(this, key, def) - min)));
+        // Same null-checked tint as the volume rows, and for the same reason:
+        // an OEM SeekBar style is free to supply neither drawable.
+        android.graphics.PorterDuffColorFilter tint = new android.graphics.PorterDuffColorFilter(
+                theme.accent, android.graphics.PorterDuff.Mode.SRC_IN);
+        if (bar.getProgressDrawable() != null) bar.getProgressDrawable().setColorFilter(tint);
+        if (bar.getThumb() != null) bar.getThumb().setColorFilter(tint);
+        bar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override
+            public void onProgressChanged(SeekBar seekBar, int value, boolean fromUser) {
+            }
+
+            @Override
+            public void onStartTrackingTouch(SeekBar seekBar) {
+            }
+
+            @Override
+            public void onStopTrackingTouch(SeekBar seekBar) {
+                DexPrefs.put(LauncherActivity.this, key, seekBar.getProgress() + min);
+                if (pointer == null) return;
+                pointer.refresh();
+                relayoutDock();
+                // A taller pad moves the dock, and this flyout is anchored to
+                // the dock — but a PopupWindow does not follow its anchor. Show
+                // it again where the dock now is, rather than leave it lying
+                // across the pad it just resized.
+                if (DexPrefs.KEY_PAD_HEIGHT.equals(key)) {
+                    dismissPopups();
+                    showPadOptions();
+                }
+            }
+        });
+        wrap.addView(bar, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        wrap.setLayoutParams(new LinearLayout.LayoutParams(panelWidth,
+                ViewGroup.LayoutParams.WRAP_CONTENT));
+        return wrap;
+    }
+
+    /** Natural / reverse, as a pair of chips — the viewer sheet's own control. */
+    private TextView padChip(String label, boolean selected, boolean natural) {
+        TextView chip = new TextView(this);
+        chip.setText(label);
+        chip.setTextColor(selected ? 0xFFFFFFFF : theme.textDim);
+        chip.setTextSize(TypedValue.COMPLEX_UNIT_PX, sp(11.5f));
+        chip.setGravity(Gravity.CENTER);
+        chip.setPadding(dp(14), dp(7), dp(14), dp(7));
+        chip.setBackground(selected
+                ? tapBackground(theme.accent, lighten(theme.accent), 14)
+                : tapBackground(theme.field, theme.hover, 14));
+        chip.setOnClickListener(v -> {
+            DexPrefs.put(this, DexPrefs.KEY_PAD_NATURAL, natural);
+            if (pointer != null) pointer.refresh();
+            dismissPopups();
+            showPadOptions();
+        });
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        lp.rightMargin = dp(8);
+        chip.setLayoutParams(lp);
+        return chip;
+    }
+
+    // ── Dock: the home app ──
+
+    /**
+     * Does the phone's Home button / swipe-up gesture come back to this
+     * desktop?
+     *
+     * <p>Only if we hold the home role. The manifest declares
+     * {@code category.HOME}, so the shell is ELIGIBLE — but eligibility is not
+     * the same as being chosen, and while the phone's own launcher holds the
+     * role, Home from an app the desktop launched leaves the desktop entirely.
+     * Back does not, which is why it is the one that already behaves.
+     *
+     * <p>There is no way to take the role from code: it is a user choice the
+     * platform guards, and the most an app may do is ask. See
+     * {@link #openHomeChooser}.
+     *
+     * <p>Static and Context-based so the Settings window can ask the same
+     * question without a live desktop.
+     */
+    static boolean isDefaultHome(Context ctx) {
+        try {
+            ResolveInfo info = ctx.getPackageManager().resolveActivity(
+                    new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME),
+                    PackageManager.MATCH_DEFAULT_ONLY);
+            return info != null && info.activityInfo != null
+                    && ctx.getPackageName().equals(info.activityInfo.packageName);
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    /**
+     * Ask to become the home app.
+     *
+     * <p>The role dialog first — one tap, in place, and it names us — falling
+     * back to the phone's home-app screen where the role is unavailable (below
+     * API 29, and on builds that have taken it out). Neither is something we
+     * can answer on the user's behalf, and that is the point: taking over Home
+     * is exactly the kind of change that should cost a deliberate yes.
+     */
+    static void openHomeChooser(Context ctx) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            try {
+                android.app.role.RoleManager roles =
+                        ctx.getSystemService(android.app.role.RoleManager.class);
+                if (roles != null
+                        && roles.isRoleAvailable(android.app.role.RoleManager.ROLE_HOME)) {
+                    Intent ask = roles.createRequestRoleIntent(
+                            android.app.role.RoleManager.ROLE_HOME);
+                    ask.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                    ctx.startActivity(ask);
+                    return;
+                }
+            } catch (Exception e) {
+                DexLog.warn("home", "role request refused — falling back to settings", e);
+            }
+        }
+        try {
+            ctx.startActivity(new Intent(android.provider.Settings.ACTION_HOME_SETTINGS)
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+        } catch (Exception e) {
+            DexLog.warn("home", "no home-app screen on this phone", e);
+            Toast.makeText(ctx, ctx.getString(R.string.lx_home_no_chooser),
+                    Toast.LENGTH_LONG).show();
+        }
+    }
+
+    /**
+     * Offer the home role, once, on the phone's own screen.
+     *
+     * <p>Once: a prompt that returns every session is a prompt people learn to
+     * dismiss without reading, and the answer is remembered either way — taking
+     * the role settles it, and declining is a decision too. The Settings
+     * window's Windows section carries the same action permanently, so "Not
+     * now" is never a door that closes.
+     */
+    private void maybeOfferHome() {
+        if (isFinishing() || !onPhone()) return;
+        if (isDefaultHome(this)) return;
+        if (DexPrefs.getBool(this, DexPrefs.KEY_HOME_ASKED, false)) return;
+        if (taskbarView == null || taskbarView.getWindowToken() == null) return;
+        DexLog.step("home", "phone's launcher holds the home role — offering to take it");
+        dismissPopups();
+        homePopup = makePopup(buildHomeView());
+        showTrayPopup(homePopup, Gravity.CENTER_HORIZONTAL);
+    }
+
+    private View buildHomeView() {
+        int panelWidth = dp(280);
+        LinearLayout panel = new LinearLayout(this);
+        panel.setOrientation(LinearLayout.VERTICAL);
+        panel.setPadding(dp(16), dp(14), dp(16), dp(10));
+
+        TextView title = new TextView(this);
+        title.setText(getString(R.string.lx_home_title));
+        title.setTextColor(theme.text);
+        title.setTextSize(TypedValue.COMPLEX_UNIT_PX, sp(14));
+        title.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        panel.addView(title);
+
+        TextView body = new TextView(this);
+        body.setText(getString(R.string.lx_home_body));
+        body.setTextColor(theme.textDim);
+        body.setTextSize(TypedValue.COMPLEX_UNIT_PX, sp(12));
+        body.setPadding(0, dp(6), 0, dp(12));
+        panel.addView(body, new LinearLayout.LayoutParams(panelWidth,
+                ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        LinearLayout buttons = new LinearLayout(this);
+        buttons.setOrientation(LinearLayout.HORIZONTAL);
+        buttons.setGravity(Gravity.END | Gravity.CENTER_VERTICAL);
+
+        TextView later = new TextView(this);
+        later.setText(getString(R.string.lx_home_not_now));
+        later.setTextColor(theme.textDim);
+        later.setTextSize(TypedValue.COMPLEX_UNIT_PX, sp(12.5f));
+        later.setGravity(Gravity.CENTER);
+        later.setPadding(dp(16), dp(8), dp(16), dp(8));
+        later.setBackground(tapBackground(0x00000000, theme.hover, 10));
+        later.setOnClickListener(v -> {
+            DexPrefs.put(this, DexPrefs.KEY_HOME_ASKED, true);
+            dismissPopups();
+        });
+        buttons.addView(later);
+
+        TextView confirm = new TextView(this);
+        confirm.setText(getString(R.string.lx_home_set));
+        confirm.setTextColor(0xFFFFFFFF);
+        confirm.setTextSize(TypedValue.COMPLEX_UNIT_PX, sp(12.5f));
+        confirm.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        confirm.setGravity(Gravity.CENTER);
+        confirm.setPadding(dp(18), dp(8), dp(18), dp(8));
+        confirm.setBackground(tapBackground(theme.accent, lighten(theme.accent), 10));
+        confirm.setOnClickListener(v -> {
+            DexPrefs.put(this, DexPrefs.KEY_HOME_ASKED, true);
+            dismissPopups();
+            openHomeChooser(this);
+        });
+        LinearLayout.LayoutParams confirmLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        confirmLp.leftMargin = dp(8);
+        buttons.addView(confirm, confirmLp);
+
+        panel.addView(buttons, new LinearLayout.LayoutParams(panelWidth,
+                ViewGroup.LayoutParams.WRAP_CONTENT));
+        return panel;
+    }
+
     // ── Tray: exit DeX ──
 
     private void toggleExitPopup() {
@@ -4652,7 +5329,12 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
         panel.addView(title);
 
         TextView body = new TextView(this);
-        body.setText(getString(R.string.lx_exit_body));
+        // The extra sentence only where it is true — and where it warns about
+        // the one thing this button does that nothing else here does: send the
+        // user through a system chooser. See requestExit.
+        body.setText(onPhone() && !pcAlive() && isDefaultHome(this)
+                ? getString(R.string.lx_exit_body) + " " + getString(R.string.lx_exit_body_home)
+                : getString(R.string.lx_exit_body));
         body.setTextColor(theme.textDim);
         body.setTextSize(TypedValue.COMPLEX_UNIT_PX, sp(12));
         body.setPadding(0, dp(6), 0, dp(12));
@@ -4704,9 +5386,45 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
     private void requestExit() {
         dismissPopups();
         hideDrawer();
-        DexLog.step("exit", "exit requested from the taskbar");
+        DexLog.step("exit", "exit requested from the " + (onPhone() ? "dock" : "taskbar"));
         RequestProvider.enqueue("exit", "dex");
+        // Raised even when nothing is listening: the queue is durable, and a PC
+        // that is merely slow to poll must still get the real exit rather than
+        // a phone that closed its own window and left the session up.
+        //
+        // But on the phone's own screen the queue may genuinely have nobody on
+        // the other end — the desktop runs unplugged there — and then this is
+        // the whole of the exit. Without this branch the dock's one
+        // irreversible button would be the one that does nothing at all.
+        if (onPhone() && !pcAlive()) {
+            DexLog.step("exit", "no PC on the channel — closing the desktop here");
+            if (pointer != null) pointer.detach();
+            // A home screen cannot close itself: finishing the one the platform
+            // has chosen just relaunches it, and Exit DeX would read as a dead
+            // button. Hand the role back first — that IS the exit once the
+            // desktop is what Home comes back to.
+            if (isDefaultHome(this)) {
+                DexLog.step("exit", "we hold the home role — handing it back on the way out");
+                openHomeChooser(this);
+            }
+            finishAndRemoveTask();
+            return;
+        }
         Toast.makeText(this, getString(R.string.lx_exiting), Toast.LENGTH_LONG).show();
+    }
+
+    /**
+     * Is there a computer driving this session?
+     *
+     * <p>Two independent answers, because either can be the stale one. The
+     * window daemon's desktop display is authoritative but only while the
+     * caption service is up and the daemon is answering; the PC's heartbeat
+     * (see {@link #pcSeenAt}) needs neither, but lags a session that has only
+     * just started. A yes from either is a yes.
+     */
+    private boolean pcAlive() {
+        if (CaptionService.desktopDisplay() > Display.DEFAULT_DISPLAY) return true;
+        return pcSeenAt > 0 && SystemClock.uptimeMillis() - pcSeenAt < PC_SILENCE_MS;
     }
 
     // ── Open-apps row (center of the taskbar) ──
@@ -5242,6 +5960,13 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
 
     /** Centered rect for a desktop window of this size, clamped to the display. */
     Rect desktopWindowRect(int wPx, int hPx) {
+        // Settings, Linux, Docker, the Web viewer and the Task Manager all ask
+        // for a rect in the high hundreds of dp — sizes chosen for a 1920x1080
+        // desktop. On a 381dp-wide phone every one of them clamps to the same
+        // nine tenths of the screen, which is a window with a sliver of
+        // wallpaper around it and the dock across its foot. Maximize instead,
+        // for the reason nextWindowBounds gives.
+        if (onPhone()) return nextWindowBounds();
         Point size = displaySize();
         int w = Math.min(wPx, size.x * 9 / 10);
         int h = Math.min(hPx, size.y * 9 / 10);
@@ -5260,8 +5985,12 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
      * below is what a window that has never been moved still gets.
      */
     private Rect desktopWindowRect(Class<?> own, int wPx, int hPx) {
+        // Nothing to recall on the phone: every window there opens maximized,
+        // and a rect scaled down from a 1920x1080 desktop would land a window
+        // somewhere in the middle of a screen that has room for one.
+        if (onPhone()) return nextWindowBounds();
         Rect remembered = WindowMemory.recall(this, WindowMemory.keyFor(this, own),
-                displaySize(), dp(TASKBAR_DP));
+                displaySize(), bottomReserve());
         return remembered != null ? remembered : desktopWindowRect(wPx, hPx);
     }
 
@@ -5523,7 +6252,15 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
     public Rect nextWindowBounds() {
         Point size = new Point();
         getWindowManager().getDefaultDisplay().getRealSize(size);
-        String mode = DexPrefs.getString(this, DexPrefs.KEY_LAUNCH_MODE, DexPrefs.DEF_LAUNCH_MODE);
+        // The phone's screen has room for exactly one window, so the launch
+        // mode does not apply there: a cascade deals 380dp-wide windows down a
+        // diagonal that runs off the bottom in three, and "center" leaves a
+        // border of wallpaper on all four sides of the only thing on screen.
+        // Maximized is the only one of the three that means anything here — and
+        // maximized, not fullscreen: it stops above the dock, so the way out
+        // stays visible instead of being covered by what it launched.
+        String mode = onPhone() ? "maximized"
+                : DexPrefs.getString(this, DexPrefs.KEY_LAUNCH_MODE, DexPrefs.DEF_LAUNCH_MODE);
         float scale;
         switch (DexPrefs.getString(this, DexPrefs.KEY_WINDOW_SIZE, DexPrefs.DEF_WINDOW_SIZE)) {
             case "compact":
@@ -5536,17 +6273,20 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
                 scale = 1f;
         }
         int w = Math.min(size.x - dp(16), Math.round(size.x * 0.55f * scale));
-        int h = Math.min(size.y - dp(TASKBAR_DP + 16), Math.round(size.y * 0.72f * scale));
+        int h = Math.min(size.y - bottomReserve() - dp(16), Math.round(size.y * 0.72f * scale));
         int x;
         int y;
         if ("maximized".equals(mode)) {
             x = dp(2);
-            y = dp(2);
+            // Zero on a desktop display, which has no status bar — so this is
+            // the same rect it has always been there. On the phone it is what
+            // keeps the window's caption out from under the clock.
+            y = topSystemInset() + dp(2);
             w = size.x - dp(4);
-            h = size.y - dp(TASKBAR_DP) - dp(4);
+            h = size.y - bottomReserve() - y - dp(2);
         } else if ("center".equals(mode)) {
             x = (size.x - w) / 2;
-            y = Math.max(dp(8), (size.y - dp(TASKBAR_DP) - h) / 2);
+            y = Math.max(dp(8), (size.y - bottomReserve() - h) / 2);
         } else {
             int step = dp(30);
             x = dp(64) + (cascade % 5) * step;
@@ -5568,8 +6308,9 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
      */
     @Override
     public Rect windowBoundsFor(String pkg) {
+        if (onPhone()) return nextWindowBounds();   // see desktopWindowRect(Class,…)
         Rect remembered = WindowMemory.recall(this, WindowMemory.keyFor(this, pkg, null),
-                displaySize(), dp(TASKBAR_DP));
+                displaySize(), bottomReserve());
         return remembered != null ? remembered : nextWindowBounds();
     }
 

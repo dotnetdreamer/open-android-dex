@@ -116,6 +116,11 @@
     <string name="st_icons_small">छोटा</string>
     <string name="st_icons_medium">मध्यम</string>
     <string name="st_icons_large">बड़ा</string>
+    <string name="st_home_app">होम ऐप</string>
+    <string name="st_home_app_yes">Open Android DeX</string>
+    <string name="st_home_app_yes_sub">होम और ऊपर स्वाइप करने का इशारा डेस्कटॉप पर वापस आते हैं।</string>
+    <string name="st_home_app_no">फ़ोन का लॉन्चर</string>
+    <string name="st_home_app_no_sub">होम और ऊपर स्वाइप करने का इशारा डेस्कटॉप छोड़ देते हैं। बदलने के लिए टैप करें।</string>
     <string name="st_windows_note">नई सेटिंग्स अगली बार खोली गई विंडो पर लागू होंगी।</string>
 
     <string name="st_cursor_render">पॉइंटर रेंडरिंग</string>
@@ -244,7 +249,31 @@
     <string name="lx_exit_dex">DeX बंद करें</string>
     <string name="lx_exit_title">DeX बंद करें?</string>
     <string name="lx_exit_body">डेस्कटॉप बंद हो जाएगा और फ़ोन सामान्य हो जाएगा। यहाँ खुले ऐप फ़ोन पर चले जाएंगे।</string>
+    <string name="lx_exit_body_home">डेस्कटॉप ही आपकी होम स्क्रीन है, इसलिए पूछा जाएगा कि उसे कौन-सी ऐप संभालेगी।</string>
     <string name="lx_exiting">DeX बंद हो रहा है…</string>
+
+    <!-- Phone touchpad -->
+    <string name="lx_pad">माउस</string>
+    <string name="lx_pad_on">माउस चालू</string>
+    <string name="lx_pad_hint">खिसकाने के लिए खींचें · क्लिक के लिए टैप करें · स्क्रॉल के लिए दो उंगली</string>
+    <string name="lx_pad_title">टचपैड</string>
+    <string name="lx_pad_body">स्क्रीन के नीचे की पट्टी को टचपैड की तरह इस्तेमाल करें। देर तक दबाने के लिए उंगली स्थिर रखें, यही काम दो उंगली से टैप करके भी होता है, और खींचने के लिए दो बार टैप करके खींचें।</string>
+    <string name="lx_pad_speed">पॉइंटर की गति</string>
+    <string name="lx_pad_size">टचपैड का आकार</string>
+    <string name="lx_pad_scrolling">स्क्रॉलिंग</string>
+    <string name="lx_pad_natural">सामान्य</string>
+    <string name="lx_pad_reverse">उल्टा</string>
+    <string name="lx_pad_foot">फ़ोन से जुड़ा माउस या कीबोर्ड हमेशा की तरह काम करता रहता है।</string>
+    <string name="lx_pad_no_overlay">टचपैड को दूसरी ऐप्स के ऊपर दिखने की अनुमति चाहिए।</string>
+    <string name="lx_pad_no_service">जब तक सुलभता में Open Android DeX चालू नहीं होता, पॉइंटर क्लिक नहीं कर सकता।</string>
+    <string name="lx_pad_failed">टचपैड नहीं खुल सका।</string>
+
+    <!-- Phone: who owns the Home button -->
+    <string name="lx_home_title">होम को यहाँ वापस लाएँ?</string>
+    <string name="lx_home_body">होम और ऊपर स्वाइप करने का इशारा फ़ोन के अपने लॉन्चर पर जाता है, इसलिए ऐप छोड़ने पर डेस्कटॉप भी छूट जाता है। Open Android DeX को होम ऐप बनाइए, फिर दोनों यहीं वापस आएँगे। बैक तो पहले से ही आता है।</string>
+    <string name="lx_home_set">होम के रूप में सेट करें</string>
+    <string name="lx_home_not_now">अभी नहीं</string>
+    <string name="lx_home_no_chooser">इस फ़ोन में होम ऐप चुनने की स्क्रीन नहीं है।</string>
     <string name="lx_cancel">रद्द करें</string>
     <string name="lx_charging">चार्ज हो रहा है</string>
     <string name="lx_plug_type">प्लग प्रकार</string>
@@ -364,9 +393,15 @@
     <string name="ln_apps_chromium">Chromium</string>
     <string name="ln_apps_chromium_sub">वेब ब्राउज़र. बड़ा डाउनलोड.</string>
     <string name="ln_apps_code">Visual Studio Code</string>
-    <string name="ln_apps_code_sub">माइक्रोसॉफ़्ट का कोड एडिटर. यहाँ सबसे बड़ा डाउनलोड.</string>
+    <string name="ln_apps_code_sub">माइक्रोसॉफ़्ट का कोड एडिटर. एक बड़ा डाउनलोड.</string>
     <string name="ln_apps_git">Git</string>
     <string name="ln_apps_git_sub">छोटा. VS Code को सोर्स कंट्रोल पैनल के लिए यह चाहिए.</string>
+    <string name="ln_apps_node">Node.js</string>
+    <string name="ln_apps_node_sub">npm के साथ JavaScript रनटाइम. वर्तमान LTS संस्करण.</string>
+    <string name="ln_apps_gimp">GIMP</string>
+    <string name="ln_apps_gimp_sub">फ़ोटो और ग्राफ़िक्स के लिए इमेज एडिटर. एक बड़ा डाउनलोड.</string>
+    <string name="ln_apps_intellij">IntelliJ IDEA Community</string>
+    <string name="ln_apps_intellij_sub">JetBrains का Java IDE. यहाँ सबसे बड़ा डाउनलोड.</string>
     <string name="ln_apps_go">इंस्टॉल करें</string>
     <string name="ln_apps_go_none">सिर्फ़ उबंटू इंस्टॉल करें</string>
     <string name="ln_apps_menu">लिनक्स ऐप चुनें…</string>

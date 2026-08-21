@@ -59,18 +59,22 @@ final class Linux {
      * openssh-client), because VS Code's Source Control panel is only an advert
      * for a Download Git for Linux button without it. 11 = the vscode:// URL
      * handler, without which signing in to GitHub from VS Code dead-ends on
-     * "Failed to open URI".
+     * "Failed to open URI". 12 = the Node.js phase judged by version, not
+     * presence: its first cut could be satisfied by noble's archive — node 18,
+     * and no npm, since Ubuntu splits npm out — whenever one apt-get update
+     * hiccuped, and then held that forever. The bump carries the pinned
+     * NodeSource repo and the retake into every guest that asked for Node.
      *
-     * The app CHOOSER (see {@link #apps}) is deliberately NOT a level 12. A
-     * feature bump exists to carry something new INTO guests that are already
-     * built, and there is nothing here to carry: every guest built before the
-     * chooser was built with all four apps, which is exactly what the chooser
-     * reports for them. Bumping would have re-run the whole setup script on
-     * every existing container to arrive where it already was. What brings the
-     * script back when a selection CHANGES is {@code apps.done} — see
-     * {@link #needsProvision}.
+     * The app CHOOSER (see {@link #apps}) is deliberately NOT a feature level.
+     * A feature bump exists to carry something new INTO guests that are
+     * already built, and the chooser had nothing to carry: every guest built
+     * before it was built with all four apps, which is exactly what the
+     * chooser reports for them. Bumping would have re-run the whole setup
+     * script on every existing container to arrive where it already was. What
+     * brings the script back when a selection CHANGES is {@code apps.done} —
+     * see {@link #needsProvision}.
      */
-    static final int FEATURE_LEVEL = 11;
+    static final int FEATURE_LEVEL = 12;
 
     /**
      * Guest binaries whose presence the setup log reports, as
@@ -85,6 +89,9 @@ final class Linux {
             {"chromium", "usr/bin/chromium"},
             {"code", "opt/vscode/bin/code"},
             {"git", "usr/bin/git"},
+            {"nodejs", "usr/bin/node"},
+            {"gimp", "usr/bin/gimp"},
+            {"intellij", "opt/intellij/bin/idea.sh"},
     };
 
     /**
@@ -127,22 +134,22 @@ final class Linux {
     // ── which optional apps the user asked for ──
 
     /**
-     * The ids the chooser offers, in the order it lists them, as one
-     * space-separated string.
+     * The selection when nothing was ever stored: the four apps every guest
+     * was built with before the chooser existed.
      *
-     * Derived from {@link #GUEST_APPS} rather than written out again: this
-     * string is compared byte-for-byte against what the setup script echoes
-     * back into {@code apps.done}, so two lists that could drift apart would
-     * mean a container that re-provisions itself on every single launch.
+     * Deliberately NOT the whole of {@link #GUEST_APPS}. Node.js, GIMP and
+     * IntelliJ arrived after the chooser, so a default of "everything" would
+     * claim them on behalf of every pre-chooser guest — none of which has
+     * them, and whose owners never asked — and quietly pre-tick gigabytes of
+     * developer tooling for every fresh install. Ticked is a decision the
+     * user makes; this string is what stands until they do.
+     *
+     * The setup script's own LINUX_APPS fallback is this same string, and the
+     * two meet byte-for-byte through {@code apps.done} in
+     * {@link #needsProvision}: a drift between them would mean a container
+     * that re-provisions itself on every single launch.
      */
-    private static String allApps() {
-        StringBuilder sb = new StringBuilder();
-        for (String[] app : GUEST_APPS) {
-            if (sb.length() > 0) sb.append(' ');
-            sb.append(app[0]);
-        }
-        return sb.toString();
-    }
+    private static final String DEFAULT_APPS = "firefox chromium code git";
 
     /** What {@link #apps} stores when the user ticked nothing at all. */
     static final String NO_APPS = "none";
@@ -191,13 +198,13 @@ final class Linux {
      * The selection, as the setup script wants it: space-separated ids in
      * {@link #GUEST_APPS} order, or {@link #NO_APPS}.
      *
-     * Defaults to everything when nothing was ever stored. That default is what
-     * makes this invisible to every container that predates it, and it is also
-     * the honest answer for a bare-shell run of the script.
+     * Defaults to {@link #DEFAULT_APPS} when nothing was ever stored. That
+     * default is what makes this invisible to every container that predates
+     * it, and it is also the honest answer for a bare-shell run of the script.
      */
     static String apps(Context ctx) {
         String stored = readText(appsFile(ctx)).trim();
-        return stored.isEmpty() ? allApps() : stored;
+        return stored.isEmpty() ? DEFAULT_APPS : stored;
     }
 
     /** Did the user tick this id? */
@@ -207,7 +214,8 @@ final class Linux {
 
     /**
      * Record the tick list. Canonical order and canonical spelling, because the
-     * string is compared against the script's echo of it — see {@link #allApps}.
+     * string is compared against the script's echo of it — see
+     * {@link #needsProvision}.
      *
      * A write that fails is logged and otherwise survivable: {@link #apps}
      * falls back to everything, which is the pre-chooser behaviour, and
@@ -235,13 +243,14 @@ final class Linux {
      * The selection the guest was actually BUILT with — the setup script writes
      * it as its last act, next to {@code state.env}.
      *
-     * Absent means a container built before the chooser existed, which is
-     * everything. Reading it as anything else would put every one of those
-     * through a provisioning pass to discover they were already right.
+     * Absent means a container built before the chooser existed, which was
+     * built with exactly {@link #DEFAULT_APPS}. Reading it as anything else
+     * would put every one of those through a provisioning pass to discover
+     * they were already right.
      */
     private static String appsBuilt(Context ctx) {
         String done = readText(new File(root(ctx), "apps.done")).trim();
-        return done.isEmpty() ? allApps() : done;
+        return done.isEmpty() ? DEFAULT_APPS : done;
     }
 
     /** The folder Android and the guest share, under Documents/. */
@@ -543,10 +552,10 @@ final class Linux {
         // rather than cost it a folder.
         if (ensureSharedDir()) env.put("LINUX_SHARED", sharedDir().getAbsolutePath());
         // The chooser's tick list. ALWAYS set, and never to the empty string:
-        // the script treats an UNSET LINUX_APPS as "everything" so that a bare
-        // shell run still builds a full guest, and an empty value would be
-        // indistinguishable from "the user ticked nothing". That is what
-        // NO_APPS is for.
+        // the script treats an UNSET LINUX_APPS as DEFAULT_APPS so that a bare
+        // shell run still builds the guest this app always built, and an empty
+        // value would be indistinguishable from "the user ticked nothing".
+        // That is what NO_APPS is for.
         env.put("LINUX_APPS", apps(ctx));
         return env;
     }

@@ -116,6 +116,11 @@
     <string name="st_icons_small">صغيرة</string>
     <string name="st_icons_medium">متوسطة</string>
     <string name="st_icons_large">كبيرة</string>
+    <string name="st_home_app">تطبيق الشاشة الرئيسية</string>
+    <string name="st_home_app_yes">Open Android DeX</string>
+    <string name="st_home_app_yes_sub">زر الشاشة الرئيسية وإيماءة السحب لأعلى يعودان إلى سطح المكتب.</string>
+    <string name="st_home_app_no">مشغّل الهاتف</string>
+    <string name="st_home_app_no_sub">زر الشاشة الرئيسية وإيماءة السحب لأعلى يغادران سطح المكتب. اضغط للتغيير.</string>
     <string name="st_windows_note">تسري الإعدادات الجديدة على النافذة التالية التي تفتحها.</string>
 
     <string name="st_cursor_render">رسم المؤشر</string>
@@ -244,7 +249,31 @@
     <string name="lx_exit_dex">إنهاء DeX</string>
     <string name="lx_exit_title">إنهاء DeX؟</string>
     <string name="lx_exit_body">سيُغلق سطح المكتب ويعود الهاتف إلى وضعه الطبيعي. والتطبيقات المفتوحة هنا ستنتقل إلى الهاتف.</string>
+    <string name="lx_exit_body_home">سطح المكتب هو شاشتك الرئيسية، لذا سيُطلب منك اختيار التطبيق الذي يتولّى ذلك.</string>
     <string name="lx_exiting">جارٍ إنهاء DeX…</string>
+
+    <!-- Phone touchpad -->
+    <string name="lx_pad">الماوس</string>
+    <string name="lx_pad_on">الماوس يعمل</string>
+    <string name="lx_pad_hint">اسحب للتحريك · انقر للنقر · إصبعان للتمرير</string>
+    <string name="lx_pad_title">لوحة اللمس</string>
+    <string name="lx_pad_body">استخدم الشريط أسفل الشاشة كلوحة لمس. أبقِ إصبعك ثابتًا للضغط المطوّل، أو انقر بإصبعين للنتيجة نفسها، وانقر نقرًا مزدوجًا ثم اسحب للسحب.</string>
+    <string name="lx_pad_speed">سرعة المؤشر</string>
+    <string name="lx_pad_size">حجم لوحة اللمس</string>
+    <string name="lx_pad_scrolling">التمرير</string>
+    <string name="lx_pad_natural">طبيعي</string>
+    <string name="lx_pad_reverse">عكسي</string>
+    <string name="lx_pad_foot">الماوس أو لوحة المفاتيح الموصولة بالهاتف تعمل كالمعتاد دائمًا.</string>
+    <string name="lx_pad_no_overlay">تحتاج لوحة اللمس إذنًا بالعرض فوق التطبيقات الأخرى.</string>
+    <string name="lx_pad_no_service">لا يمكن للمؤشر النقر حتى تُفعّل Open Android DeX في إمكانية الوصول.</string>
+    <string name="lx_pad_failed">تعذّر فتح لوحة اللمس.</string>
+
+    <!-- Phone: who owns the Home button -->
+    <string name="lx_home_title">إعادة زر الشاشة الرئيسية إلى هنا؟</string>
+    <string name="lx_home_body">زر الشاشة الرئيسية وإيماءة السحب لأعلى يذهبان إلى مشغّل الهاتف، فمغادرة التطبيق تعني مغادرة سطح المكتب. اجعل Open Android DeX تطبيق الشاشة الرئيسية ليعودا إلى هنا. زر الرجوع يفعل ذلك أصلًا.</string>
+    <string name="lx_home_set">تعيينه كشاشة رئيسية</string>
+    <string name="lx_home_not_now">ليس الآن</string>
+    <string name="lx_home_no_chooser">لا توجد في هذا الهاتف شاشة لاختيار تطبيق الشاشة الرئيسية.</string>
     <string name="lx_cancel">إلغاء</string>
     <string name="lx_charging">قيد الشحن</string>
     <string name="lx_plug_type">نوع التوصيل</string>
@@ -364,9 +393,15 @@
     <string name="ln_apps_chromium">Chromium</string>
     <string name="ln_apps_chromium_sub">متصفح ويب. تنزيل كبير.</string>
     <string name="ln_apps_code">Visual Studio Code</string>
-    <string name="ln_apps_code_sub">محرر أكواد من مايكروسوفت. أكبر تنزيل هنا.</string>
+    <string name="ln_apps_code_sub">محرر أكواد من مايكروسوفت. تنزيل كبير.</string>
     <string name="ln_apps_git">Git</string>
     <string name="ln_apps_git_sub">صغير. يحتاجه VS Code للوحة التحكم بالمصادر.</string>
+    <string name="ln_apps_node">Node.js</string>
+    <string name="ln_apps_node_sub">بيئة تشغيل JavaScript مع npm. أحدث إصدار LTS.</string>
+    <string name="ln_apps_gimp">GIMP</string>
+    <string name="ln_apps_gimp_sub">محرر صور للصور والرسوميات. تنزيل كبير.</string>
+    <string name="ln_apps_intellij">IntelliJ IDEA Community</string>
+    <string name="ln_apps_intellij_sub">بيئة تطوير Java من JetBrains. أكبر تنزيل هنا.</string>
     <string name="ln_apps_go">تثبيت</string>
     <string name="ln_apps_go_none">تثبيت أوبونتو فقط</string>
     <string name="ln_apps_menu">اختيار تطبيقات لينكس…</string>

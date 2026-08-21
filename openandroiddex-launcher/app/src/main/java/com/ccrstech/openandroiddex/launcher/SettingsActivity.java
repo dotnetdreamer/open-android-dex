@@ -1386,6 +1386,18 @@ public class SettingsActivity extends Activity {
                         showSection(SEC_WINDOWS, false);
                     });
         }
+        // Which app owns Home. Here rather than in a section of its own
+        // because this is the setting that decides where a window GOES when
+        // you leave it: with the phone's launcher holding the role, Home from
+        // anything the desktop opened lands outside the desktop entirely.
+        LinearLayout homeCard = card(body);
+        cardHeader(homeCard, s(R.string.st_home_app));
+        boolean isHome = LauncherActivity.isDefaultHome(this);
+        actionRow(homeCard, "⌂", isHome ? 0xFF34d399 : theme.accent,
+                s(isHome ? R.string.st_home_app_yes : R.string.st_home_app_no),
+                s(isHome ? R.string.st_home_app_yes_sub : R.string.st_home_app_no_sub),
+                () -> LauncherActivity.openHomeChooser(this));
+
         note(body, s(R.string.st_windows_note));
     }
 

@@ -43,6 +43,16 @@ VER=$1
 FEAT=$2
 [ -n "$FEAT" ] || FEAT=1
 
+# Which optional apps go in, from the app's chooser (Linux.setApps): ids in
+# canonical order, space-separated, or "none" for an empty tick list. Unset
+# means a bare shell run, which gets what every guest was built with before
+# the chooser existed. The value is echoed back into apps.done VERBATIM at the
+# end and compared byte-for-byte by Linux.needsProvision — the app's default
+# selection is this same string, so the two must never drift — which is why it
+# is never normalised, reordered or rewritten here.
+APPS_SEL=${LINUX_APPS:-"firefox chromium code git"}
+wants() { case " $APPS_SEL " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
+
 # ── state.env / failure plumbing ──────────────────────────────────────────
 
 state() { # phase pct msg
@@ -444,43 +454,52 @@ install_browsers() {
   run_guest "apt-get install -y --no-install-recommends curl ca-certificates" || return 1
   run_guest "install -d -m 0755 /etc/apt/keyrings" || return 1
 
-  # apt 2.4+ (noble has 2.7) reads ASCII-armoured keys straight from Signed-By,
-  # so nothing has to be dearmoured and gpg is never needed.
-  run_guest "curl -fsSL https://packages.mozilla.org/apt/repo-signing-key.gpg -o /etc/apt/keyrings/packages.mozilla.org.asc" || return 1
-  mkdir -p rootfs/etc/apt/preferences.d || return 1
-  cat > rootfs/etc/apt/sources.list.d/mozilla.sources <<'EOF' || return 1
+  # Each browser's repo goes in only when that browser was asked for: an
+  # unticked browser should cost neither its download nor a repo apt polls on
+  # every update from then on.
+  if wants firefox; then
+    # apt 2.4+ (noble has 2.7) reads ASCII-armoured keys straight from
+    # Signed-By, so nothing has to be dearmoured and gpg is never needed.
+    run_guest "curl -fsSL https://packages.mozilla.org/apt/repo-signing-key.gpg -o /etc/apt/keyrings/packages.mozilla.org.asc" || return 1
+    mkdir -p rootfs/etc/apt/preferences.d || return 1
+    cat > rootfs/etc/apt/sources.list.d/mozilla.sources <<'EOF' || return 1
 Types: deb
 URIs: https://packages.mozilla.org/apt
 Suites: mozilla
 Components: main
 Signed-By: /etc/apt/keyrings/packages.mozilla.org.asc
 EOF
-  cat > rootfs/etc/apt/preferences.d/mozilla <<'EOF' || return 1
+    cat > rootfs/etc/apt/preferences.d/mozilla <<'EOF' || return 1
 Package: *
 Pin: origin packages.mozilla.org
 Pin-Priority: 1000
 EOF
+  fi
 
-  # Launchpad serves PPA keys by fingerprint from the Ubuntu keyserver.
-  run_guest "curl -fsSL 'https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x5301FA4FD93244FBC6F6149982BB6851C64F6880' -o /etc/apt/keyrings/xtradeb.asc" || true
-  cat > rootfs/etc/apt/sources.list.d/xtradeb.sources <<'EOF' || return 1
+  if wants chromium; then
+    # Launchpad serves PPA keys by fingerprint from the Ubuntu keyserver.
+    run_guest "curl -fsSL 'https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x5301FA4FD93244FBC6F6149982BB6851C64F6880' -o /etc/apt/keyrings/xtradeb.asc" || true
+    cat > rootfs/etc/apt/sources.list.d/xtradeb.sources <<'EOF' || return 1
 Types: deb
 URIs: https://ppa.launchpadcontent.net/xtradeb/apps/ubuntu
 Suites: noble
 Components: main
 Signed-By: /etc/apt/keyrings/xtradeb.asc
 EOF
+  fi
 
-  # NOT fatal: apt-get update returns non-zero if ANY of the four repos
-  # hiccups, which says nothing about whether the package we want is
-  # installable. Let the install be the judge.
+  # NOT fatal: apt-get update returns non-zero if ANY of the repos hiccups,
+  # which says nothing about whether the package we want is installable. Let
+  # the install be the judge.
   run_guest "apt-get update" || true
-  run_guest "apt-get install -y --no-install-recommends firefox" || return 1
-  if run_guest "apt-get install -y --no-install-recommends chromium"; then
+  if wants firefox; then
+    run_guest "apt-get install -y --no-install-recommends firefox" || return 1
+  fi
+  if wants chromium && run_guest "apt-get install -y --no-install-recommends chromium"; then
     CHROMIUM_OK=1
   else
     CHROMIUM_OK=
-    echo "WARNING: chromium install failed; firefox is installed" >&2
+    ! wants chromium || echo "WARNING: chromium install failed" >&2
   fi
 
   # Point the installed menu entries at the wrappers. /usr/local/bin comes
@@ -493,9 +512,10 @@ EOF
 
 # -- phase: browser tuning -------------------------------------------------
 # Separate from the install phase because it has to reach guests that already
-# have the browsers: .stamp-browsers is set on those, so anything added to
-# install_browsers would never run there. This phase carries its own stamp and
-# a FEATURE bump brings it to everyone.
+# have the browsers: install_browsers only runs while a wanted browser is
+# missing, so anything added here instead of there still lands on guests whose
+# browsers settled long ago. This phase carries its own stamp and a FEATURE
+# bump brings it to everyone.
 tune_browsers() {
   # Launch wrappers. BOTH browsers' sandboxes want user namespaces, which a
   # ptrace chroot cannot provide. They live here rather than in the install
@@ -762,20 +782,151 @@ setup_git() {
   return 0
 }
 
+# -- phase: Node.js --------------------------------------------------------
+# The current LTS line, from NodeSource's repo. noble's own nodejs .deb is
+# 18.x, two LTS lines behind what the chooser row promises — and it ships
+# WITHOUT npm, which Ubuntu splits into a package of its own. NodeSource's
+# nodejs carries npm inside it, so one install is the whole toolchain. Same
+# recipe as Mozilla's repo in install_browsers: apt 2.4+ reads the
+# ASCII-armoured key straight from Signed-By, no gpg — plus the same pin,
+# because `nodejs` is a name the Ubuntu archive also answers to and the
+# archive must never win it.
+#
+# The phase is judged by VERSION AND npm, in the guest — never by a binary
+# existing. The first cut checked presence, and presence cannot tell node 24
+# from the archive's 18: one hiccup in the (deliberately non-fatal) apt-get
+# update left NodeSource's list unfetched, apt satisfied `nodejs` from noble
+# instead, and the guard then called node-18-without-npm settled forever.
+# Measured on device. node_current is both the "already installed" guard and
+# the post-install verdict, so a guest holding the wrong node heals on its
+# next provisioning pass instead of keeping it.
+#
+# NODE_MAJOR moves by hand when the LTS line does (even majors, every
+# October): NodeSource serves no "current LTS" alias for its deb path, so a
+# URL that tracked it would be a URL that does not exist.
+#
+# Unstamped, like setup_git: the chooser can tick this long after every other
+# phase settled, and a touch-stamp would skip straight past that request
+# forever. Non-fatal like Chromium — a guest without Node is still a working
+# guest.
+NODE_MAJOR=24
+node_current() {
+  _nv=$(run_guest "npm --version >/dev/null 2>&1 && node --version" 2>/dev/null | head -1)
+  case "$_nv" in v*) ;; *) return 1 ;; esac
+  _nv=${_nv#v}
+  _nv=${_nv%%.*}
+  [ "$_nv" -ge "$NODE_MAJOR" ] 2>/dev/null
+}
+setup_node() {
+  if node_current; then
+    note "nodejs: already installed"
+    return 0
+  fi
+  guest_or_note "nodejs-prereqs" \
+    "apt-get install -y --no-install-recommends curl ca-certificates" || return 1
+  run_guest "install -d -m 0755 /etc/apt/keyrings" || return 1
+  guest_or_note "nodejs-key" \
+    "curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key -o /etc/apt/keyrings/nodesource.asc" \
+    || return 1
+  cat > rootfs/etc/apt/sources.list.d/nodesource.sources <<EOF || return 1
+Types: deb
+URIs: https://deb.nodesource.com/node_${NODE_MAJOR}.x
+Suites: nodistro
+Components: main
+Signed-By: /etc/apt/keyrings/nodesource.asc
+EOF
+  mkdir -p rootfs/etc/apt/preferences.d || return 1
+  cat > rootfs/etc/apt/preferences.d/nodesource <<'EOF' || return 1
+Package: nodejs
+Pin: origin deb.nodesource.com
+Pin-Priority: 1000
+EOF
+  # Non-fatal like every other update here: a hiccup in ONE repo fails the
+  # whole command and says nothing about whether nodejs is installable.
+  run_guest "apt-get update" || true
+  # But refuse to install ANYTHING when NodeSource's list is not actually
+  # there: apt would quietly satisfy `nodejs` from the noble archive instead,
+  # and a wrong node in place is worse than none — it reads as done to
+  # everything except a version check.
+  if ! run_guest "apt-cache policy nodejs | grep -q nodesource"; then
+    note "nodejs: NodeSource repo unavailable — refusing the archive's 18.x"
+    return 1
+  fi
+  guest_or_note "nodejs" \
+    "apt-get install -y --no-install-recommends nodejs" || return 1
+  if ! node_current; then
+    note "nodejs: wrong version or npm missing after install"
+    return 1
+  fi
+  note "nodejs: $(run_guest "node --version" 2>/dev/null | head -1) with npm — ready"
+  return 0
+}
 
 # Before the browsers on purpose: git is one small package and the browsers are
 # the slowest phase in the script. An editor that can open a repository should
 # not be waiting on a 400 MB download to get there.
-state installing-desktop 92 git
-setup_git || note "git: phase failed, continuing"
-
-if [ ! -f .stamp-browsers ]; then
-  state installing-desktop 93 install-browsers
-  install_browsers || fail install-browsers
-  touch .stamp-browsers
+if wants git; then
+  state installing-desktop 92 git
+  setup_git || note "git: phase failed, continuing"
 fi
 
-if [ ! -f .stamp-browser-tune ]; then
+# Ahead of the browsers for the same reason git is: one small download that
+# should not queue behind two big ones.
+if wants nodejs; then
+  state installing-desktop 92 nodejs
+  setup_node || note "nodejs: phase failed, continuing"
+fi
+
+# -- phase: GIMP -----------------------------------------------------------
+# Straight from the Ubuntu archive: unlike the browsers there is no snap stub
+# squatting on this name — noble's gimp is the real package. Its menu entry
+# comes with the .deb, so unlike VS Code and IntelliJ nothing has to be
+# written for it; setup_dock adds the desktop and panel launchers.
+#
+# Unstamped and guarded on the binary, like setup_git: the chooser can tick
+# this long after every other phase settled. Non-fatal like Chromium — a
+# guest without GIMP is still a working guest.
+setup_gimp() {
+  if [ -x rootfs/usr/bin/gimp ]; then
+    note "gimp: already installed"
+    return 0
+  fi
+  guest_or_note "gimp" \
+    "apt-get install -y --no-install-recommends gimp" || return 1
+  if [ ! -x rootfs/usr/bin/gimp ]; then
+    note "gimp: MISSING after install"
+    return 1
+  fi
+  note "gimp: ready"
+  return 0
+}
+
+if wants gimp; then
+  state installing-desktop 93 gimp
+  setup_gimp || note "gimp: phase failed, continuing"
+fi
+
+# Guarded on the selection AND the binaries, not on a stamp: the chooser can
+# come back with a browser ticked that the stamped pass was never asked for,
+# and a plain .stamp-browsers would skip past that request forever. A wanted
+# browser that is already in place costs one stat here, exactly like setup_git.
+browsers_pending() {
+  if wants firefox && [ ! -x rootfs/usr/bin/firefox ]; then return 0; fi
+  if wants chromium && [ ! -x rootfs/usr/bin/chromium ]; then return 0; fi
+  return 1
+}
+
+BROWSERS_RAN=
+if browsers_pending; then
+  state installing-desktop 93 install-browsers
+  install_browsers || fail install-browsers
+  BROWSERS_RAN=1
+fi
+
+# Re-tuned whenever an install pass just ran, not only on the first pass: the
+# tuning is per-browser (Firefox's AutoConfig only lands when Firefox exists)
+# and the default-browser pick depends on what is installed NOW.
+if [ ! -f .stamp-browser-tune ] || [ -n "$BROWSERS_RAN" ]; then
   state installing-desktop 96 configure-browsers
   tune_browsers || fail configure-browsers
   touch .stamp-browser-tune
@@ -924,6 +1075,14 @@ setup_dock() {
   if [ -x rootfs/opt/vscode/bin/code ]; then
     dock_entry dex-code "Visual Studio Code" /opt/vscode/resources/app/resources/linux/code.png /usr/local/bin/dex-code 'Development;IDE;'
     DOCK_IDS="$DOCK_IDS dex-code"
+  fi
+  if [ -x rootfs/usr/bin/gimp ]; then
+    dock_entry dex-gimp GIMP gimp /usr/bin/gimp 'Graphics;'
+    DOCK_IDS="$DOCK_IDS dex-gimp"
+  fi
+  if [ -x rootfs/opt/intellij/bin/idea.sh ]; then
+    dock_entry dex-intellij "IntelliJ IDEA" /opt/intellij/bin/idea.svg /opt/intellij/bin/idea.sh 'Development;IDE;'
+    DOCK_IDS="$DOCK_IDS dex-intellij"
   fi
   note "dock: launchers ->${DOCK_IDS:- none}"
   [ -n "$DOCK_IDS" ] || return 0
@@ -1110,7 +1269,14 @@ vscode_settled() {
   [ "$_at" -ge "$FEAT" ] 2>/dev/null
 }
 
-if ! vscode_settled; then
+# A tick that is NEW since the last build re-opens a settled verdict: settling
+# means "stop paying for the attempt", and a user who just asked again has put
+# fresh attempts back on the table. apps.done is what the last build was asked
+# for; it is rewritten at the end of this run.
+prev_wants() { case " $(cat apps.done 2>/dev/null) " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
+if wants code && ! prev_wants code; then rm -f .stamp-vscode .vscode-attempts; fi
+
+if wants code && ! vscode_settled; then
   state installing-desktop 98 install-vscode
   if install_vscode; then
     echo "$FEAT" > .stamp-vscode
@@ -1187,6 +1353,81 @@ EOF
 state installing-desktop 98 vscode-url-handler
 setup_vscode_urls || note "vscode-url-handler: phase failed, continuing"
 
+# -- phase: IntelliJ IDEA --------------------------------------------------
+# Community Edition, from JetBrains' official tarball — the same shape as the
+# VS Code phase, for stronger reasons: JetBrains publishes no .deb at all
+# (their Linux channels are snap and Toolbox, neither of which can exist in
+# here), and the tarball bundles its own JetBrains Runtime, so no Java has to
+# be installed for it. The data-services URL is JetBrains' documented "latest
+# release" redirect, the same role update.code.visualstudio.com plays for VS
+# Code. A JVM needs no sandbox flags, so unlike the Electron apps there is no
+# dex- wrapper: the stock idea.sh is the launcher everywhere.
+#
+# The X/AWT libraries are listed by hand because --no-install-recommends
+# strips them from everything else and the bundled JBR dlopens them at
+# startup; missing, IDEA dies before its first window.
+#
+# The tarball ships no .desktop, so the Applications menu needs one from us —
+# same as VS Code, and like it this one belongs on the XDG path: there is no
+# packaged entry for it to duplicate.
+#
+# Unstamped and guarded on the binary, like setup_git. Non-fatal like
+# Chromium — a guest without IDEA is still a working guest.
+setup_intellij() {
+  if [ -x rootfs/opt/intellij/bin/idea.sh ]; then
+    note "intellij: already installed"
+    return 0
+  fi
+  case "$(uname -m)" in
+    aarch64|arm64) IJ_PLATFORM=linuxARM64 ;;
+    x86_64)        IJ_PLATFORM=linux ;;
+    *) note "intellij: no build for $(uname -m)"; return 1 ;;
+  esac
+
+  guest_or_note "intellij-deps" "apt-get install -y --no-install-recommends \
+    curl ca-certificates fontconfig libfreetype6 libxext6 libxrender1 \
+    libxtst6 libxi6" || return 1
+
+  note "intellij: downloading (about 1 GB)"
+  guest_or_note "intellij-download" \
+    "curl -fL --retry 3 -o /tmp/intellij.tar.gz 'https://data.services.jetbrains.com/products/download?code=IIC&platform=$IJ_PLATFORM&type=release'" \
+    || return 1
+
+  note "intellij: extracting"
+  # --strip-components=1 drops the tarball's idea-IC-<build>/ wrapper dir.
+  # The rm is outside the && chain so a partial extraction still frees 1 GB.
+  guest_or_note "intellij-extract" \
+    "rm -rf /opt/intellij && mkdir -p /opt/intellij && tar -xzf /tmp/intellij.tar.gz -C /opt/intellij --strip-components=1; rm -f /tmp/intellij.tar.gz" \
+    || return 1
+  if [ ! -x rootfs/opt/intellij/bin/idea.sh ]; then
+    note "intellij-extract FAILED: /opt/intellij/bin/idea.sh missing after extraction"
+    return 1
+  fi
+
+  mkdir -p rootfs/usr/local/share/applications || return 1
+  cat > rootfs/usr/local/share/applications/intellij.desktop <<'EOF' || return 1
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=IntelliJ IDEA Community
+GenericName=Java IDE
+Comment=Capable and Ergonomic IDE for JVM
+Icon=/opt/intellij/bin/idea.svg
+Exec=/opt/intellij/bin/idea.sh %f
+Terminal=false
+StartupNotify=true
+StartupWMClass=jetbrains-idea-ce
+Categories=Development;IDE;
+EOF
+  note "intellij: installed"
+  return 0
+}
+
+if wants intellij; then
+  state installing-desktop 98 intellij
+  setup_intellij || note "intellij: phase failed, continuing"
+fi
+
 # -- VS Code settings ------------------------------------------------------
 # Extension installs fail in here with "cannot verify the extension signature
 # ... Signature verification failed with 'UnknownError'". The verifier is a
@@ -1257,6 +1498,13 @@ state installing-desktop 99 dock
 setup_dock || true
 # After setup_dock, which is what installs python3.
 tune_vscode || true
+
+# The selection this guest was built from, echoed back VERBATIM:
+# Linux.needsProvision compares it byte-for-byte against the stored tick list,
+# and a mismatch is what brings this script back when the chooser's answer
+# changes. Written just before `ready`, so a run that died mid-way never
+# records a selection it did not build.
+printf '%s\n' "$APPS_SEL" > apps.done
 
 state ready 100 ready
 echo "provisioned OK (payload version $VER, features $FEAT)"

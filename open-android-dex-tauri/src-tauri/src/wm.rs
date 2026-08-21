@@ -190,6 +190,18 @@ impl WmClient {
         self.ok("SCREEN 1")
     }
 
+    /// Hand the phone's media route back to its own policy.
+    ///
+    /// Session-end housekeeping: picking a phone output in the desktop's
+    /// media flyout pins the media strategy to that device (the daemon's
+    /// AUDIOROUTE SET), and a pin is desktop policy — left behind, it would
+    /// quietly overrule the phone's own output switcher ever after. Best
+    /// effort like everything here: a daemon too old to know the verb
+    /// answers ERR, and there was then no pin to clear either.
+    pub fn clear_audio_route(&self) -> bool {
+        self.ok("AUDIOROUTE CLEAR")
+    }
+
     /// Arm (and keep alive) the daemon's dead-man switch.
     ///
     /// Every other undo in this project runs from the PC. This one cannot: when the cable
