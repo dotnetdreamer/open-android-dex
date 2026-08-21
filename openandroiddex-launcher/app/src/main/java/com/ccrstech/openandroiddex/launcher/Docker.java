@@ -214,16 +214,36 @@ final class Docker {
      * forward is bound to 127.0.0.1 and never to the phone's real address.
      */
     static int enginePort(Context ctx) {
-        File f = new File(root(ctx), "port");
-        String s = readFile(f);
+        int chosen = enginePortIfSet(ctx);
+        if (chosen != 0) return chosen;
+        File dir = root(ctx);
+        // The directory is not a given: a first run has not made it yet and a
+        // reset has just deleted it, and a write into a missing directory is
+        // how a port gets "chosen" into thin air.
+        dir.mkdirs();
+        int port = 20000 + new java.security.SecureRandom().nextInt(30000);
+        writeFile(new File(dir, "port"), String.valueOf(port));
+        return port;
+    }
+
+    /**
+     * The port that HAS been chosen, or 0 when there is not one yet.
+     *
+     * For readers — the window above all. {@link #enginePort} mints a port as
+     * a side effect of being asked, which is right for the service that is
+     * about to boot QEMU with it and wrong for everyone else. The window asked
+     * once in onCreate, provisioning then deleted the whole directory and
+     * chose a different number for the VM it started, and the window spent the
+     * rest of its life polling a port nothing was listening on while the
+     * engine sat there answering on another.
+     */
+    static int enginePortIfSet(Context ctx) {
         try {
-            int p = Integer.parseInt(s.trim());
+            int p = Integer.parseInt(readFile(new File(root(ctx), "port")).trim());
             if (p > 1024 && p < 65536) return p;
         } catch (Exception ignored) {
         }
-        int port = 20000 + new java.security.SecureRandom().nextInt(30000);
-        writeFile(f, String.valueOf(port));
-        return port;
+        return 0;
     }
 
     // ── state ─────────────────────────────────────────────────────────────

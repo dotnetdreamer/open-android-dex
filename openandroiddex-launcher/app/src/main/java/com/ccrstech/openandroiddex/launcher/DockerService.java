@@ -386,6 +386,11 @@ public class DockerService extends Service {
             Docker.writeFile(new File(dir, "mem"), String.valueOf(Docker.DEFAULT_MEM_MB));
             Docker.writeFile(new File(dir, "cpus"), String.valueOf(Docker.DEFAULT_CPUS));
             Docker.consoleLog(this).delete(); // one file per run, like the PC trace
+            // The state file outlives the VM. Without this, a machine that was
+            // up yesterday boots today under the previous run's "ready /
+            // engine-up": the window narrates a stage this boot has not reached
+            // and starts querying an engine that does not exist yet.
+            writeState("boot", 0, "starting");
             ProcessBuilder pb = new ProcessBuilder(
                     "/system/bin/sh", Docker.rtScript(this).getAbsolutePath());
             pb.directory(dir);

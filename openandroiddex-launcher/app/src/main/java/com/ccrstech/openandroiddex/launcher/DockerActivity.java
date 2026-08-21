@@ -254,7 +254,7 @@ public class DockerActivity extends Activity {
         // has no icon on this desktop.
         OwnWindows.opened(this);
         theme = DexTheme.of(this);
-        port = Docker.enginePort(this);
+        port = Docker.enginePortIfSet(this);
         forwarded = Docker.forwardedPorts(this);
 
         root = new LinearLayout(this);
@@ -453,6 +453,10 @@ public class DockerActivity extends Activity {
     private void tick() {
         if (poll == null) return;
         ticks++;
+        // Re-read rather than trust onCreate: the port is chosen when the
+        // machine is provisioned, which routinely happens while this window is
+        // already open, and a reset chooses another one.
+        port = Docker.enginePortIfSet(this);
         Docker.Status st = Docker.readStatus(this);
         long now = android.os.SystemClock.elapsedRealtime();
         boolean provisioning = Docker.needsProvision(this);
@@ -485,7 +489,7 @@ public class DockerActivity extends Activity {
         List<DockerApi.Container> containers = null;
         List<DockerApi.Image> images = null;
         List<DockerApi.Volume> volumes = null;
-        if (st.running && "ready".equals(st.phase)) {
+        if (port != 0 && st.running && "ready".equals(st.phase)) {
             engineVersion = DockerApi.version(port);
             if (engineVersion != null) {
                 if (pane == PANE_CONTAINERS || pane == PANE_DETAIL) {
