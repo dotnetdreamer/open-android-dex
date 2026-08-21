@@ -16,6 +16,10 @@ Unplug it and your phone goes back to being a phone.
 
 **Free. Open source. No account. No subscription. No root.**
 
+<img src="doc/img/windows.png" alt="Ubuntu and the DeX settings app open side by side on the desktop" width="100%">
+
+<sub>Ubuntu snapped to the left, the desktop's own settings app snapped to the right, both running on the phone.</sub>
+
 </div>
 
 ---
@@ -45,7 +49,7 @@ at your monitor's size, sitting next to your other windows.
 
 - **A taskbar** along the bottom with your open apps, a clock and calendar, a
   battery indicator, and quick switches for Wi-Fi, Bluetooth, mobile data,
-  airplane mode, torch and rotation — plus one that turns the phone's own screen
+  airplane mode, torch and rotation, plus one that turns the phone's own screen
   off while the desktop keeps running
 - **Proper windows.** Every app gets a title bar with close, minimise, maximise
   and snap left or right. Drag them where you want. Resize them from a corner.
@@ -58,6 +62,11 @@ at your monitor's size, sitting next to your other windows.
   themselves
 - **Two looks.** A DeX style desktop, or a Windows 11 style one with a Start
   button. Switch between them in one click
+
+Open the app drawer and the four built in tools sit at the top, above everything
+else you have installed.
+
+![Settings, LinuxOnDroid, Docker and the Web viewer at the top of the app drawer](doc/img/app-drawer.png)
 
 ### Ubuntu, a whole Linux computer, running on your phone
 
@@ -74,6 +83,8 @@ there is a separate download called **LinuxOnDroid**. It is about 1 MB, you
 install it on the phone by itself, and that is all you need. No computer, no
 cable, no desktop app. Tap the icon and Ubuntu opens fullscreen on your phone.
 Keep about 3 GB free for it.
+
+![Ubuntu 24.04 with XFCE running in a resizable window on the desktop](doc/img/linux.png)
 
 ### Your desktop in a web browser
 
@@ -115,6 +126,9 @@ and no restart.
 - **Picture quality.** Resolution, frame rate, sharpness and sound, so you can
   trade smoothness for battery life on an older phone
 - **Text size, window behaviour and clipboard sharing**, among others
+
+<img src="doc/img/settings.png" alt="The settings app showing desktop style, themes and the glass sliders" width="560">
+<img src="doc/img/quick-settings.png" alt="The quick settings tray in the taskbar" width="200" align="top">
 
 ### Cut the cable
 
