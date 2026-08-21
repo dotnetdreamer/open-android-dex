@@ -6,15 +6,20 @@
 
 Plug your Android phone into your Windows PC or Mac and a real desktop opens on
 your screen, with a taskbar, an app drawer, and windows you can drag, resize and
-snap side by side.
+snap side by side
 
-Unplug it and your phone goes back to being a phone.
+Unplug it and your phone goes back to being a phone
 
 [![Download](https://img.shields.io/github/v/release/dotnetdreamer/open-android-dex?label=Download&style=for-the-badge&color=2ea043)](https://github.com/dotnetdreamer/open-android-dex/releases/latest)
 [![Licence](https://img.shields.io/badge/Licence-GPL--3.0-blue?style=for-the-badge)](LICENSE)
 [![Platform](https://img.shields.io/badge/Windows%20%7C%20macOS-lightgrey?style=for-the-badge)](https://github.com/dotnetdreamer/open-android-dex/releases/latest)
 
-**Free. Open source. No account. No subscription. No root.**
+**Free. Open source. No account. No subscription. No root**
+
+
+https://github.com/user-attachments/assets/9b44d8f4-8e9b-47b5-bd44-3ef486eb8e60
+
+
 
 <img src="doc/img/windows.png" alt="Ubuntu and the DeX settings app open side by side on the desktop" width="100%">
 
