@@ -656,7 +656,11 @@ fn spawn_display_watchdog(
             output_tail(&output, 30)
         );
         // Killed without setting `stop`, so the monitor reads it as a failed
-        // attempt rather than a deliberate shutdown.
+        // attempt rather than a deliberate shutdown — and killed outright
+        // rather than through `shut_down`, for that same reason: SIGTERM lets
+        // scrcpy exit 0, and a zero exit is precisely what tells `monitor`
+        // nothing went wrong. The degraded retry that turns "the desktop never
+        // came up" into "it came up without audio" hangs off that failure.
         let _ = child.lock().unwrap().kill();
     });
 }
@@ -3079,6 +3083,78 @@ pub fn start_mirror(app: AppHandle, mut options: MirrorOptions) -> Result<Sessio
     Ok(info)
 }
 
+/// How long a scrcpy process is given to stop itself before it is killed.
+///
+/// A ceiling for a hung process, not a budget: scrcpy's teardown is an SDL
+/// quit and a few frees, and it lands in tens of milliseconds. It is spent on
+/// the app-exit path too, where the user has already asked for the window to
+/// go away, so it stays short enough not to read as a slow quit.
+#[cfg(unix)]
+const EXIT_GRACE: Duration = Duration::from_millis(600);
+
+#[cfg(unix)]
+extern "C" {
+    /// `kill(2)`, for the one signal `Child::kill` cannot send.
+    ///
+    /// Declared rather than pulled in: a crate for three lines of C would be
+    /// the only reason `libc` appeared in this tree, and the Accessibility API
+    /// in `embed/macos.rs` is already declared the same way.
+    fn kill(pid: i32, sig: i32) -> i32;
+}
+
+/// Stop a scrcpy process, asking before insisting.
+///
+/// `Child::kill` is SIGKILL on Unix, and an uncatchable signal is the one way
+/// to leave the user's POINTER behind. Under `--mouse=uhid` scrcpy's window
+/// has the mouse captured — on macOS that is SDL holding
+/// `CGAssociateMouseAndMouseCursorPosition(false)` — and the only code that
+/// ever hands it back is scrcpy's own shutdown. SIGKILLed, that code never
+/// runs and the capture outlives the process that asked for it, so the cursor
+/// stays inside a window that is no longer there.
+///
+/// The next session is then blamed for it. Switching Settings → Mouse &
+/// cursor → Pointer rendering back to "Computer" restarts the desktop and the
+/// mouse is *still* held — not by the innocent `--mouse=sdk` session that has
+/// just started, but by the uhid one this function used to close too bluntly.
+///
+/// Windows keeps the blunt kill, and that is not an oversight: the OS drops a
+/// dead process's cursor clip itself, and asking a GUI process to quit there
+/// means finding its window and posting `WM_CLOSE` — machinery bought for a
+/// problem that host does not have.
+///
+/// **Callers must set `stop_requested` first.** A clean exit is exit code 0,
+/// and `monitor` reads a zero exit as "did not fail" — which is the right
+/// reading only when it already knows the stop was deliberate. The one caller
+/// that cannot say that (a session which never produced a display, so the
+/// degraded retry has to see a failure) still kills outright, on purpose.
+fn shut_down(child: &Mutex<Child>) {
+    #[cfg(unix)]
+    {
+        const SIGTERM: i32 = 15;
+        let pid = child.lock().unwrap().id() as i32;
+        // scrcpy installs a handler for this — it is the path Ctrl+C already
+        // takes — and turns it into an SDL quit, which is the same teardown
+        // the window's close button runs.
+        if unsafe { kill(pid, SIGTERM) } == 0 {
+            let deadline = Instant::now() + EXIT_GRACE;
+            while Instant::now() < deadline {
+                // try_wait caches the status, so the monitor thread polling
+                // this same child still sees the exit after this reaps it.
+                if matches!(child.lock().unwrap().try_wait(), Ok(Some(_))) {
+                    return;
+                }
+                thread::sleep(Duration::from_millis(20));
+            }
+            log::warn!(
+                "scrcpy pid {pid} ignored SIGTERM for {}ms — killing it, which can leave the \
+                 mouse captured if this session was drawing the pointer on the phone",
+                EXIT_GRACE.as_millis()
+            );
+        }
+    }
+    let _ = child.lock().unwrap().kill();
+}
+
 #[tauri::command(async)]
 pub fn stop_mirror(app: AppHandle, session_key: String) -> Result<(), String> {
     let state = app.state::<MirrorState>();
@@ -3091,7 +3167,7 @@ pub fn stop_mirror(app: AppHandle, session_key: String) -> Result<(), String> {
         Some((child, stop)) => {
             log::info!("mirror [{session_key}] stop requested");
             stop.store(true, Ordering::SeqCst);
-            let _ = child.lock().unwrap().kill();
+            shut_down(&child);
             Ok(())
         }
         None => {
@@ -3159,17 +3235,25 @@ pub fn live_session_output(app: &AppHandle) -> String {
 /// and a relaxed hidden-API policy on it is the state users notice.
 pub fn kill_all(app: &AppHandle) {
     let mut serials: Vec<String> = Vec::new();
+    // Collected under the lock and stopped outside it. `shut_down` waits, and
+    // the session map is read by the Escape hook on every keystroke the
+    // machine sees (`session_pid`) — that reader answers "not our window" and
+    // passes the key on when the lock is busy, so holding it across the wait
+    // would spend the user's last half second in the app deaf to Escape.
+    let mut children: Vec<(String, Arc<Mutex<Child>>)> = Vec::new();
     if let Some(state) = app.try_state::<MirrorState>() {
         let map = state.0.lock().unwrap();
         for (key, s) in map.iter() {
             s.stop_requested.store(true, Ordering::SeqCst);
-            if s.child.lock().unwrap().kill().is_ok() {
-                log::info!("mirror [{key}] killed on app exit");
-            }
+            children.push((key.clone(), s.child.clone()));
             if !serials.contains(&s.serial) {
                 serials.push(s.serial.clone());
             }
         }
+    }
+    for (key, child) in children {
+        shut_down(&child);
+        log::info!("mirror [{key}] stopped on app exit");
     }
     // Outside the lock: the restore talks to adb, and holding the session map
     // across seconds of I/O would block anything else that touches it.
