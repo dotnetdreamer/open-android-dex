@@ -77,14 +77,24 @@ Firefox, Chromium, VS Code, git and SSH are already installed. There is a shared
 folder so files move between Android and Linux without any fuss. No root, and no
 long setup guide to follow. Press the button and let it download.
 
+![Ubuntu 24.04 with XFCE running in a resizable window on the desktop](doc/img/linux.png)
+
 **You can also get just the Linux part on its own.** On the
 [releases page](https://github.com/dotnetdreamer/open-android-dex/releases/latest)
 there is a separate download called **LinuxOnDroid**. It is about 1 MB, you
 install it on the phone by itself, and that is all you need. No computer, no
-cable, no desktop app. Tap the icon and Ubuntu opens fullscreen on your phone.
-Keep about 3 GB free for it.
+cable, no desktop app. Tap the icon and Ubuntu opens on your phone. Keep about
+3 GB free for it.
 
-![Ubuntu 24.04 with XFCE running in a resizable window on the desktop](doc/img/linux.png)
+<img src="doc/img/phone-linux.png" alt="Ubuntu running on the phone on its own, with the control strip along the top" width="300">
+
+A control strip sits along the top wherever Linux is running, on the phone or in
+a window. It holds the pointer, the keyboard, the screen and zoom. Tap the
+pointer and you pick how touch should behave: point where you look, use the
+screen as a touchscreen, or use it as a trackpad. Each one spells out what taps,
+drags and two finger gestures do.
+
+<img src="doc/img/linux-controls.png" alt="The interaction method panel offering Direct, Touch and Mouse control" width="380">
 
 ### Your desktop in a web browser
 
