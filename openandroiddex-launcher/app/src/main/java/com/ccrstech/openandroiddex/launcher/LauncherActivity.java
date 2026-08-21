@@ -16,6 +16,7 @@ import android.content.pm.LauncherApps;
 import android.content.pm.PackageManager;
 import android.content.pm.ResolveInfo;
 import android.content.res.ColorStateList;
+import android.graphics.Bitmap;
 import android.graphics.Canvas;
 import android.graphics.PixelFormat;
 import android.graphics.Color;
@@ -571,6 +572,9 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
     /** Drop progress + the confirmation that follows it. Built on first use. */
     private TransferHud transferHud;
 
+    /** The screenshot flash and the preview it leaves behind. Built on first use. */
+    private ShotHud shotHud;
+
     private final BroadcastReceiver transferReceiver = new BroadcastReceiver() {
         @Override
         public void onReceive(Context ctx, Intent intent) {
@@ -847,6 +851,7 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
         } catch (Exception ignored) {
         }
         if (transferHud != null) transferHud.detach();
+        if (shotHud != null) shotHud.detach();
         if (live != null && live.get() == this) live = null;
         // never end a session — or a recreate — with a detour task standing
         // on the display, waiting for a desktop that is going away
@@ -1010,6 +1015,12 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
         if (transferHud != null) {
             transferHud.detach();
             transferHud = null;
+        }
+        // Same reason as the card above: built at the old density, in the old
+        // palette, and parented to a rootFrame that is about to be replaced.
+        if (shotHud != null) {
+            shotHud.detach();
+            shotHud = null;
         }
         if (taskbarView != null) {
             if (taskbarOverlay) {
@@ -4949,7 +4960,27 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
      */
     private void takeDesktopShot() {
         dismissPopups();
-        handler.postDelayed(() -> DexShot.take(this), 320);
+        if (shotHud == null) shotHud = new ShotHud(this);
+        final ShotHud hud = shotHud;
+        handler.postDelayed(() -> DexShot.take(this, new DexShot.Result() {
+            @Override
+            public void captured() {
+                // The flash, the moment the pixels are the system's — see
+                // ShotHud: raising it any earlier would put it IN the image.
+                if (shotHud == hud) hud.flash();
+            }
+
+            @Override
+            public void saved(Bitmap thumb, Uri uri) {
+                // A rebuild (density, theme, display change) replaces the hud,
+                // and the old one's windows are already gone by then.
+                if (shotHud != hud) {
+                    if (thumb != null) thumb.recycle();
+                    return;
+                }
+                if (uri != null) hud.show(thumb, uri);
+            }
+        }), 320);
     }
 
     // ── Dock: the phone's touchpad ──
