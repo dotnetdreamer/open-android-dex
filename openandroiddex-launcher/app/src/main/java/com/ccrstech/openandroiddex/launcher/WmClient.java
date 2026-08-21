@@ -320,6 +320,27 @@ final class WmClient {
         return costs;
     }
 
+    /**
+     * Route the phone's MEDIA audio to one of its own outputs — speaker, a
+     * paired headset — addressed by AudioDeviceInfo type and address, the two
+     * fields that name the same device in every process. An empty address is
+     * sent as "-" so the line protocol keeps its token count.
+     *
+     * Only the daemon can do this: selecting a route is MODIFY_AUDIO_ROUTING,
+     * which shell (uid 2000) holds and an app never will. False means the
+     * daemon is gone, too old to know the verb, or the framework refused —
+     * the caller falls back to opening the platform's own picker.
+     */
+    boolean audioRoute(int type, String address) {
+        return ok(request("AUDIOROUTE SET " + type + " "
+                + (address == null || address.isEmpty() ? "-" : address)));
+    }
+
+    /** Give the media route back to the framework's own choice. */
+    boolean audioRouteClear() {
+        return ok(request("AUDIOROUTE CLEAR"));
+    }
+
     private static boolean ok(String reply) {
         return reply != null && reply.startsWith("OK");
     }

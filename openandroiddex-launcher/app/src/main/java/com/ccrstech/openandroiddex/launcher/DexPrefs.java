@@ -288,8 +288,8 @@ final class DexPrefs {
      * The opposite of scrcpy's own default, and the opposite of what this app
      * shipped before: sound moved to the computer and the handset went silent,
      * which reads as a broken phone rather than as a choice. See
-     * {@link #KEY_AUDIO_DUP}. MUST match the default in apply_stored_config on
-     * the desktop side, which is what governs a phone that has never been
+     * {@link #KEY_AUDIO_DUP}. MUST match the default in stored_audio_forwarding
+     * on the desktop side, which is what governs a phone that has never been
      * configured.
      */
     static final boolean DEF_AUDIO_DUP = true;

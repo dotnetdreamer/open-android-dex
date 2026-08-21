@@ -90,6 +90,12 @@ pub struct MirrorOptions {
     /// Two-way clipboard sync. Off adds --no-clipboard-autosync.
     #[serde(default = "default_true")]
     pub clipboard_autosync: bool,
+    /// An audio-only companion (`--no-video --no-window --no-control`), the
+    /// process that carries the desktop's sound so that "where sound plays"
+    /// can change without tearing the desktop down — see
+    /// `reconcile_audio_session`. Never set by the frontend.
+    #[serde(default)]
+    pub audio_only: bool,
 }
 
 fn default_true() -> bool {
@@ -98,8 +104,14 @@ fn default_true() -> bool {
 
 impl MirrorOptions {
     /// One session per phone screen ("<serial>"), per virtual desktop
-    /// ("<serial>|desktop") or per app window ("<serial>|<package>").
+    /// ("<serial>|desktop"), per app window ("<serial>|<package>") — or the
+    /// desktop's audio companion ("<serial>|audio"), which must be branched
+    /// first: it has neither a package nor a display and would otherwise
+    /// collide with the plain phone-screen mirror.
     fn session_key(&self) -> String {
+        if self.audio_only {
+            return format!("{}|audio", self.serial);
+        }
         match (&self.app_package, &self.new_display) {
             (Some(pkg), _) => format!("{}|{}", self.serial, pkg),
             (None, Some(_)) => format!("{}|desktop", self.serial),
@@ -154,6 +166,10 @@ pub struct SessionHandle {
     hwnd: Arc<std::sync::atomic::AtomicIsize>,
     /// Last lines scrcpy printed on this attempt.
     output: OutputLog,
+    /// Whether this session was spawned with `--audio-dup` — what
+    /// `reconcile_audio_session` compares against the stored config to decide
+    /// if the audio companion must be cycled. Meaningless for video sessions.
+    audio_playback: bool,
 }
 
 impl SessionHandle {
@@ -192,6 +208,20 @@ fn emit_status(app: &AppHandle, ev: MirrorEvent) {
 
 fn build_args(opts: &MirrorOptions) -> Vec<String> {
     let mut args = vec!["-s".into(), opts.serial.clone()];
+    // The audio companion is sound and nothing else. No window means no
+    // mouse/keyboard options may follow (scrcpy rejects several of them
+    // without a display), and --no-control keeps it from being a second
+    // clipboard syncer fighting the desktop session's.
+    if opts.audio_only {
+        args.push("--no-video".into());
+        args.push("--no-window".into());
+        args.push("--no-control".into());
+        if opts.audio_playback {
+            args.push("--audio-source=playback".into());
+            args.push("--audio-dup".into());
+        }
+        return args;
+    }
     if opts.max_size > 0 {
         args.push(format!("--max-size={}", opts.max_size));
     }
@@ -268,6 +298,56 @@ fn build_args(opts: &MirrorOptions) -> Vec<String> {
     args
 }
 
+/// What the macOS Dock and menu bar call the scrcpy process.
+///
+/// A bare (unbundled) executable is named after its FILE — there is no
+/// Info.plist to say otherwise — so the desktop window sat in the Dock as
+/// "scrcpy" over our own icon. Spawning through a hardlink with this name is
+/// the whole fix: same inode, same directory, so scrcpy still finds its
+/// server and dylibs next to itself. MUST match productName in
+/// tauri.conf.json — two names in the Dock would be worse than one wrong one.
+#[cfg(target_os = "macos")]
+const PROCESS_NAME: &str = "Open Android DeX";
+
+/// The path to spawn scrcpy by: on macOS a product-named hardlink to the
+/// bundled binary, refreshed every call so a bundle update can never leave it
+/// pointing at last version's inode. Anywhere the link cannot be made — a
+/// read-only resource dir — the plain binary is the answer, and the Dock
+/// label is the small price.
+#[cfg(target_os = "macos")]
+fn branded_exe(exe: &std::path::Path) -> std::path::PathBuf {
+    use std::os::unix::fs::MetadataExt;
+    let Some(dir) = exe.parent() else {
+        return exe.to_path_buf();
+    };
+    let link = dir.join(PROCESS_NAME);
+    // Only touch the link when it is missing or points at a superseded
+    // binary. Sessions spawn concurrently (the desktop, its audio companion,
+    // mirror windows), and an unconditional remove-and-relink here would be a
+    // window in which another spawn resolves a name that momentarily is not
+    // there.
+    if let (Ok(l), Ok(e)) = (std::fs::metadata(&link), std::fs::metadata(exe)) {
+        if l.dev() == e.dev() && l.ino() == e.ino() {
+            return link;
+        }
+    }
+    let _ = std::fs::remove_file(&link);
+    match std::fs::hard_link(exe, &link) {
+        Ok(()) => link,
+        Err(e) => {
+            log::debug!("cannot brand the scrcpy process name: {e}");
+            exe.to_path_buf()
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn branded_exe(exe: &std::path::Path) -> std::path::PathBuf {
+    // Windows names taskbar entries after the window title, which is already
+    // ours; nothing to fix.
+    exe.to_path_buf()
+}
+
 /// Spawn scrcpy — bundled copy preferred, PATH fallback for dev machines.
 /// The bundled adb is forced via the ADB env var so scrcpy shares our server.
 fn spawn_scrcpy(app: &AppHandle, opts: &MirrorOptions) -> Result<Child, String> {
@@ -275,7 +355,7 @@ fn spawn_scrcpy(app: &AppHandle, opts: &MirrorOptions) -> Result<Child, String> 
     let exe = bin.join(adb::exe_name("scrcpy"));
     adb::warn_if_not_executable(&exe);
     let mut cmd = if exe.exists() {
-        Command::new(&exe)
+        Command::new(branded_exe(&exe))
     } else {
         Command::new(adb::exe_name("scrcpy"))
     };
@@ -500,6 +580,7 @@ fn register_session(
         density: density.clone(),
         hwnd: Arc::new(std::sync::atomic::AtomicIsize::new(0)),
         output: output.clone(),
+        audio_playback: opts.audio_playback,
     };
     let state = app.state::<MirrorState>();
     state.0.lock().unwrap().insert(key.clone(), handle);
@@ -1031,38 +1112,15 @@ fn apply_stored_config(app: &AppHandle, opts: &mut MirrorOptions) {
         }
         _ => opts.video_encoder = None,
     }
-    if let Some(audio) = map.get("audio") {
-        opts.audio = audio != "off";
-    }
-    // "Where sound plays" (the taskbar's quick settings, and Settings ->
-    // Scrcpy Config). Off is scrcpy's own default, which DIVERTS the phone's
-    // audio to this computer and leaves the handset silent; on asks for
-    // --audio-source=playback --audio-dup, which duplicates it so both are
-    // audible. Only meaningful while `audio` is on -- with nothing being
-    // forwarded there is nothing to duplicate.
-    // Default ON, which is a deliberate reversal of scrcpy's own behaviour.
-    //
-    // scrcpy's default audio source DIVERTS the phone's output to this
-    // computer: the handset goes silent, and a video playing in a window on
-    // the desktop makes no sound on the phone sitting next to it. That is
-    // right for a desk with speakers and wrong for a phone in your hand, and
-    // it is the commonest "there is no sound" report this app gets. Playback
-    // capture duplicates instead, so both are audible and the volume on each
-    // side decides what you actually hear — which is a knob the user already
-    // has, on both devices, and which works without reconnecting anything.
-    opts.audio_playback = map.get("audiodup").map(|v| v != "off").unwrap_or(true);
-    // --audio-dup is Android 13+ (it needs playback capture). Asking for it on
-    // an older phone is not a degraded session, it is scrcpy exiting on the
-    // command line and no desktop at all, so the phone is asked before the
-    // argument is built.
-    if opts.audio_playback && device_sdk(app, &opts.serial).is_some_and(|sdk| sdk < 33) {
-        log::info!(
-            "{}: Android 12 or older — sound will move to this computer rather than \
-             playing on both, which is all scrcpy can do below 13",
-            opts.serial
-        );
-        opts.audio_playback = false;
-    }
+    // Audio never rides the desktop session any more. It lives in a companion
+    // audio-only scrcpy process (see `reconcile_audio_session`), precisely so
+    // that "where sound plays" — the taskbar's quick settings, and Settings →
+    // Stream — can change LIVE, by cycling that small process, instead of
+    // costing a desktop restart. The stored `audio`/`audiodup` keys are still
+    // the source of truth; `stored_audio_forwarding` reads them for the
+    // companion.
+    opts.audio = false;
+    opts.audio_playback = false;
     if let Some(clipboard) = map.get("clipboard") {
         opts.clipboard_autosync = clipboard != "off";
     }
@@ -1098,6 +1156,205 @@ fn apply_stored_config(app: &AppHandle, opts: &mut MirrorOptions) {
 /// default: enough for a desktop of text and windows, and low enough that a
 /// Wi-Fi link with something else on it stops being the bottleneck.
 const PERF_BIT_RATE_MBPS: u32 = 4;
+
+/// The stored "where sound plays" choice, as (forward, duplicate).
+///
+/// Three states behind two booleans: (true, false) moves the sound to this
+/// computer (scrcpy's default source DIVERTS — the handset goes silent),
+/// (true, true) plays it on both, (false, _) leaves the phone alone. Defaults
+/// to "both", a deliberate reversal of scrcpy's own behaviour and the
+/// commonest answer to "there is no sound" — MUST match DEF_AUDIO /
+/// DEF_AUDIO_DUP in the launcher's DexPrefs.
+fn stored_audio_forwarding(app: &AppHandle) -> (bool, bool) {
+    let map = load_config(app);
+    let forward = map.get("audio").map(|v| v != "off").unwrap_or(true);
+    let dup = map.get("audiodup").map(|v| v != "off").unwrap_or(true);
+    (forward, dup)
+}
+
+/// The audio companion's whole command line, by way of MirrorOptions.
+///
+/// Everything visual is zeroed on purpose: `build_args` short-circuits on
+/// `audio_only` and emits none of it, and `session_key` brands the session
+/// "<serial>|audio". No auto-reconnect — when the phone drops, the desktop's
+/// own reconnect brings this companion back (see `monitor`), which avoids
+/// handing a process that can fail instantly (a refused audio source) an
+/// unsupervised respawn loop.
+fn audio_companion_options(serial: &str, dup: bool) -> MirrorOptions {
+    MirrorOptions {
+        serial: serial.to_string(),
+        max_size: 0,
+        video_bit_rate_mbps: 0,
+        max_fps: 0,
+        audio: true,
+        stay_awake: false,
+        turn_screen_off: false,
+        always_on_top: false,
+        fullscreen: false,
+        window_title: String::new(),
+        auto_reconnect: false,
+        app_package: None,
+        new_display: None,
+        vd_no_decorations: false,
+        window_borderless: false,
+        audio_playback: dup,
+        freeform: false,
+        mouse_bind: None,
+        mouse_mode: None,
+        video_codec: None,
+        video_encoder: None,
+        clipboard_autosync: true,
+        audio_only: true,
+    }
+}
+
+/// Serialises reconciles: two quick taps in the settings UI must not race two
+/// stop/start pairs into the same session key. Process-wide rather than
+/// per-serial — this path runs on a settings tap, never in a loop.
+static AUDIO_RECONCILE: Mutex<()> = Mutex::new(());
+
+/// Make the audio companion match the stored config, live.
+///
+/// Runs whenever the answer could have changed: a desktop session coming up,
+/// an `audio`/`audiodup` cfg row arriving from the launcher, a desktop
+/// reconnect. Cycling a `--no-video` scrcpy takes about a second and touches
+/// nothing the user is looking at — that is the whole trick that turns "on
+/// the next session" into "now".
+///
+/// Blocking (adb round-trips, a SIGTERM grace): callers spawn it on a thread.
+fn reconcile_audio_session(app: &AppHandle, serial: &str) {
+    let _guard = AUDIO_RECONCILE.lock().unwrap();
+    let desktop_key = format!("{serial}|desktop");
+    let audio_key = format!("{serial}|audio");
+
+    let (forward, mut dup) = stored_audio_forwarding(app);
+
+    // The companion accompanies a desktop; without one there is nothing to
+    // keep silent-but-streaming, and a leftover companion would divert the
+    // phone's sound to a computer showing nothing.
+    let desktop_live = {
+        let state = app.state::<MirrorState>();
+        let map = state.0.lock().unwrap();
+        map.get(&desktop_key)
+            .map(|s| {
+                s.child
+                    .lock()
+                    .unwrap()
+                    .try_wait()
+                    .map(|st| st.is_none())
+                    .unwrap_or(false)
+            })
+            .unwrap_or(false)
+    };
+    let mut want = desktop_live && forward;
+
+    if want {
+        // Both of scrcpy's audio paths have an Android floor, and asking past
+        // it is not a degraded session — it is the companion exiting on its
+        // command line. --audio-dup needs playback capture (13); any audio
+        // forwarding at all needs 11. A phone that did not answer is treated
+        // as able: it is usually still settling, and the worst case is a
+        // companion that exits with its reason in the log.
+        let sdk = device_sdk(app, serial);
+        if dup && sdk.is_some_and(|s| s < 33) {
+            log::info!(
+                "{serial}: Android 12 or older — sound will move to this computer rather \
+                 than playing on both, which is all scrcpy can do below 13"
+            );
+            dup = false;
+        }
+        if sdk.is_some_and(|s| s < 30) {
+            log::info!("{serial}: Android 10 or older — scrcpy cannot forward audio at all");
+            want = false;
+        }
+    }
+
+    // What is running now, if anything — and is it already the right shape?
+    let current = {
+        let state = app.state::<MirrorState>();
+        let map = state.0.lock().unwrap();
+        map.get(&audio_key).and_then(|s| {
+            let live = s
+                .child
+                .lock()
+                .unwrap()
+                .try_wait()
+                .map(|st| st.is_none())
+                .unwrap_or(false);
+            live.then_some(s.audio_playback)
+        })
+    };
+
+    match (current, want) {
+        (Some(running_dup), true) if running_dup == dup => return, // already right
+        (None, false) => return,                                   // already absent
+        (Some(_), _) => {
+            // Wrong shape, or no longer wanted: stop it. stop_mirror sets the
+            // intent flag first, so the companion's monitor reads the exit as
+            // deliberate and does not report a failure.
+            let _ = stop_mirror(app.clone(), audio_key.clone());
+            // A SIGKILL after an ignored SIGTERM returns before the exit is
+            // reaped; give it a beat so the restart below does not trip
+            // start_mirror's duplicate-key check on a corpse.
+            for _ in 0..20 {
+                let gone = {
+                    let state = app.state::<MirrorState>();
+                    let map = state.0.lock().unwrap();
+                    map.get(&audio_key)
+                        .map(|s| {
+                            s.child
+                                .lock()
+                                .unwrap()
+                                .try_wait()
+                                .map(|st| st.is_some())
+                                .unwrap_or(true)
+                        })
+                        .unwrap_or(true)
+                };
+                if gone {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(50));
+            }
+        }
+        (None, true) => {}
+    }
+    if !want {
+        log::info!("audio [{serial}] sound stays on the phone — no companion");
+        return;
+    }
+
+    match start_mirror(app.clone(), audio_companion_options(serial, dup)) {
+        Ok(_) => log::info!(
+            "audio [{serial}] forwarding to this computer ({})",
+            if dup { "phone keeps playing too" } else { "phone goes silent" }
+        ),
+        Err(e) => log::warn!("audio [{serial}] companion did not start: {e}"),
+    }
+}
+
+/// `reconcile_audio_session` from a thread that must not block (the request
+/// pump, start_mirror's caller).
+fn reconcile_audio_session_bg(app: &AppHandle, serial: &str) {
+    let app = app.clone();
+    let serial = serial.to_string();
+    thread::spawn(move || reconcile_audio_session(&app, &serial));
+}
+
+/// Stop the audio companion if one is up — the desktop it accompanied is
+/// going away. Quiet when there is none: that is the common case whenever
+/// sound was left on the phone.
+fn stop_audio_companion(app: &AppHandle, serial: &str) {
+    let audio_key = format!("{serial}|audio");
+    let present = {
+        let state = app.state::<MirrorState>();
+        let present = state.0.lock().unwrap().contains_key(&audio_key);
+        present
+    };
+    if present {
+        let _ = stop_mirror(app.clone(), audio_key);
+    }
+}
 
 /// The "Default" display-size preset: 160dpi at 1080p, scaled by
 /// resolution — MUST match SettingsActivity.defaultDpi in the launcher.
@@ -1913,6 +2170,11 @@ impl RequestPump {
     /// run best-effort.
     fn handle_requests(&mut self, reqs: &str, display: i32) {
         let mut ack_id = 0u64;
+        // The audio mode arrives as TWO cfg rows (audio + audiodup — see
+        // DexMedia.setAudioMode), usually in the same drain. Reconciling after
+        // each row would briefly spawn the companion in the in-between shape,
+        // so the rows only mark this and one reconcile runs after the loop.
+        let mut audio_dirty = false;
         for line in reqs.lines() {
             let (Some(cmd_pos), Some(arg_pos)) = (line.find("cmd="), line.find("arg=")) else {
                 continue;
@@ -2011,6 +2273,12 @@ impl RequestPump {
                 let (what, value) = arg.split_once('.').unwrap_or((arg, ""));
                 log::info!("request-pump [{}] config: {what}={value}", self.key);
                 remember_config(&self.app, what, value);
+                // "Where sound plays" is the one stream setting that takes
+                // effect NOW: audio lives in its own scrcpy process, so the
+                // change is a cycle of that companion, not a desktop restart.
+                if what == "audio" || what == "audiodup" {
+                    audio_dirty = true;
+                }
                 true
             } else if cmd == "perf" {
                 // "Reduce quality" (Settings → Performance). The launcher does
@@ -2192,6 +2460,14 @@ impl RequestPump {
                 "content delete --uri content://com.ccrstech.openandroiddex.launcher.requests/v2 --where \"id<={ack_id}\""
             ));
             self.last_req_id = self.last_req_id.max(ack_id);
+        }
+        if audio_dirty {
+            // On a thread — this pump also carries window requests, and a
+            // reconcile holds an adb round-trip and a SIGTERM grace.
+            let serial = self.key.split('|').next().unwrap_or("").to_string();
+            if !serial.is_empty() {
+                reconcile_audio_session_bg(&self.app, &serial);
+            }
         }
     }
 }
@@ -2900,6 +3176,12 @@ fn monitor(app: AppHandle, mut opts: MirrorOptions, attempt: Attempt, stop: Arc<
                                 intentional: false,
                             },
                         );
+                        // The audio companion has no reconnect of its own — it
+                        // died with the cable. A desktop that just came back
+                        // brings it back too.
+                        if opts.new_display.is_some() && opts.app_package.is_none() {
+                            reconcile_audio_session_bg(&app, &opts.serial);
+                        }
                         continue;
                     }
                     Err(e) => log::error!("mirror [{key}] reconnect failed: {e}"),
@@ -2921,6 +3203,14 @@ fn monitor(app: AppHandle, mut opts: MirrorOptions, attempt: Attempt, stop: Arc<
         // the user ever started.
         stop.store(true, Ordering::SeqCst);
         transfer::forget(&key);
+        // …and so does the audio companion, whose lifetime nests inside the
+        // desktop's. Left running it would keep diverting the phone's sound
+        // to a computer that no longer shows anything. A desktop RESTART
+        // passes through here too; the relaunch's start_mirror reconciles a
+        // fresh companion, so the sound is back within a couple of seconds.
+        if opts.new_display.is_some() && opts.app_package.is_none() && !opts.audio_only {
+            stop_audio_companion(&app, &opts.serial);
+        }
         emit_status(
             &app,
             MirrorEvent {
@@ -3044,8 +3334,12 @@ pub fn start_mirror(app: AppHandle, mut options: MirrorOptions) -> Result<Sessio
     let pid = attempt.pid;
 
     // The phone's own log for as long as this session lives: scrcpy's server
-    // logs there too, and so does our launcher.
-    diag::stream_device_log(&app, &options.serial, &key, stop.clone());
+    // logs there too, and so does our launcher. Not for the audio companion —
+    // its lifetime nests inside a desktop session that is already streaming
+    // this same log, and a second logcat would double every line.
+    if !options.audio_only {
+        diag::stream_device_log(&app, &options.serial, &key, stop.clone());
+    }
 
     emit_status(
         &app,
@@ -3069,6 +3363,14 @@ pub fn start_mirror(app: AppHandle, mut options: MirrorOptions) -> Result<Sessio
             size,
             stop.clone(),
         );
+    }
+
+    // A desktop brings its sound along: the audio companion is spawned (or
+    // not — "phone only") to match the stored choice. On a thread, because
+    // the reconcile asks the phone its API level and this command is on the
+    // launch pipeline's critical path.
+    if options.new_display.is_some() && options.app_package.is_none() && !options.audio_only {
+        reconcile_audio_session_bg(&app, &options.serial);
     }
 
     let info = SessionInfo {

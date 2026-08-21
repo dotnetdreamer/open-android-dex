@@ -400,9 +400,10 @@
     <string name="lx_media_pause">Pause</string>
     <string name="lx_media_next">Next track</string>
     <string name="st_audio_output">Where sound plays</string>
-    <string name="st_audio_computer_sub">Sound moves to the computer. The phone stays silent — this is the default.</string>
-    <string name="st_audio_both_sub">Sound comes out of the computer and the phone. Costs the phone a little more work.</string>
+    <string name="st_audio_computer_sub">Sound moves to the computer. The phone stays silent.</string>
+    <string name="st_audio_both_sub">Sound comes out of the computer and the phone — this is the default. Costs the phone a little more work.</string>
     <string name="st_audio_phone_sub">Nothing is sent to the computer. Sound stays on the phone.</string>
+    <string name="st_audio_live_note">Where sound plays changes right away — the one stream setting that needs no restart.</string>
     <string name="lx_sound_output">SOUND OUTPUT</string>
     <string name="lx_media_output">Media output</string>
     <string name="lx_audio_computer">Computer only</string>
@@ -410,6 +411,10 @@
     <string name="lx_audio_phone">Phone only</string>
     <string name="lx_output_unknown">Phone speaker</string>
     <string name="lx_output_no_switcher">This phone has no sound output picker to open</string>
+    <string name="lx_output_more">All outputs on phone…</string>
+    <string name="lx_output_wired">Wired headphones</string>
+    <string name="lx_output_usb">USB audio</string>
+    <string name="lx_output_bluetooth">Bluetooth device</string>
     <string name="lx_volume_refused">Turn off Do Not Disturb on the phone to change the ringer</string>
     <string name="lx_notifications">Notifications</string>
     <string name="lx_no_notifications">Nothing new</string>

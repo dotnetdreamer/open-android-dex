@@ -212,18 +212,48 @@ final class DexMedia {
      * set from a previous choice would silently pick it up again the next time
      * forwarding came back on.
      *
-     * The values are pushed to the desktop app, which bakes them into scrcpy's
-     * command line — so like every other stream setting this lands on the NEXT
-     * session, and the caller says so.
+     * The values are pushed to the desktop app, which cycles its audio-only
+     * scrcpy companion to match — the desktop itself carries no audio — so
+     * the change is audible within a couple of seconds, no restart involved.
+     *
+     * The wire key must be the cfg key WITHOUT the {@code stream_} prefix:
+     * the PC stores what it receives verbatim and reads "audio"/"audiodup".
+     * This method once pushed the prefixed pref key, which the PC filed under
+     * a name nothing reads — the chooser looked like it worked (the pref, and
+     * so the UI, changed) while every session kept the default. That is the
+     * bug to think of before "simplifying" these two lines back.
      */
     static void setAudioMode(Context ctx, String mode) {
         boolean forward = !AUDIO_PHONE.equals(mode);
         boolean duplicate = AUDIO_BOTH.equals(mode);
         DexPrefs.put(ctx, DexPrefs.KEY_AUDIO, forward);
         DexPrefs.put(ctx, DexPrefs.KEY_AUDIO_DUP, duplicate);
-        RequestProvider.enqueue("cfg", DexPrefs.KEY_AUDIO + "." + (forward ? "on" : "off"));
-        RequestProvider.enqueue("cfg", DexPrefs.KEY_AUDIO_DUP + "." + (duplicate ? "on" : "off"));
-        DexLog.step("media", "sound will play on: " + mode + " (next session)");
+        RequestProvider.enqueue("cfg", cfgKey(DexPrefs.KEY_AUDIO)
+                + "." + (forward ? "on" : "off"));
+        RequestProvider.enqueue("cfg", cfgKey(DexPrefs.KEY_AUDIO_DUP)
+                + "." + (duplicate ? "on" : "off"));
+        DexLog.step("media", "sound will play on: " + mode + " (live)");
+    }
+
+    /** A pref key as the PC expects it on the wire: the PC_PREFIX stripped. */
+    private static String cfgKey(String prefKey) {
+        return prefKey.substring(DexPrefs.PC_PREFIX.length());
+    }
+
+    /**
+     * The value the tray's "Media output" row shows: the chosen mode, named by
+     * where the sound actually comes out. For "phone" that is the phone's own
+     * active route — "Galaxy Buds" says more than "Phone only" does.
+     */
+    static String modeLabel(Context ctx) {
+        switch (audioMode(ctx)) {
+            case AUDIO_COMPUTER:
+                return ctx.getString(R.string.lx_audio_computer);
+            case AUDIO_BOTH:
+                return ctx.getString(R.string.lx_audio_both);
+            default:
+                return outputName(ctx);
+        }
     }
 
     /**
@@ -259,15 +289,120 @@ final class DexMedia {
     }
 
     /**
+     * One of the phone's own sound outputs, as the media-output flyout lists
+     * it. {@code type} and {@code address} are what the window daemon needs to
+     * find the same device on its side of the socket — an AudioDeviceInfo id
+     * is transient and per-process, so it never crosses the wire.
+     */
+    static final class Output {
+        int type;
+        String address = "";
+        String name = "";
+        boolean builtin;
+    }
+
+    /**
+     * The phone's own sound outputs: its speaker, plus whatever is plugged in
+     * or paired and connected — the rows of the media-output flyout.
+     *
+     * {@link AudioManager#getDevices} rather than MediaRouter because it is
+     * the list that carries a TYPE and an ADDRESS, which is what the window
+     * daemon needs to select one; MediaRouter names only the active route.
+     * Needs no permission. The earpiece, FM, telephony and remote-submix sinks
+     * are filtered out: they are outputs in the framework's accounting, not
+     * places a person sends music.
+     *
+     * The builtin speaker is always first and always present (every phone has
+     * one), so the flyout never draws an empty phone section.
+     */
+    static List<Output> outputs(Context ctx) {
+        List<Output> found = new java.util.ArrayList<>();
+        Output speaker = new Output();
+        speaker.type = android.media.AudioDeviceInfo.TYPE_BUILTIN_SPEAKER;
+        speaker.builtin = true;
+        speaker.name = ctx.getString(R.string.lx_output_unknown);
+        found.add(speaker);
+        try {
+            AudioManager am = (AudioManager) ctx.getSystemService(Context.AUDIO_SERVICE);
+            if (am == null) return found;
+            for (android.media.AudioDeviceInfo dev
+                    : am.getDevices(AudioManager.GET_DEVICES_OUTPUTS)) {
+                if (!listable(dev.getType())) continue;
+                Output out = new Output();
+                out.type = dev.getType();
+                // getAddress is public API only from 28; below that it is a
+                // NoSuchMethodError, which the catch around this loop would
+                // not stop. Without an address a Bluetooth pick will come back
+                // ERR from the daemon and fall through to the platform picker —
+                // the right worst case for a phone too old to route at all.
+                if (android.os.Build.VERSION.SDK_INT >= 28) {
+                    out.address = dev.getAddress() == null ? "" : dev.getAddress();
+                }
+                CharSequence product = dev.getProductName();
+                out.name = product == null ? "" : product.toString().trim();
+                if (out.name.isEmpty()) out.name = fallbackName(ctx, dev.getType());
+                // The same physical device shows up once per profile it offers
+                // (a headset is an A2DP sink and a BLE one); one row is enough.
+                boolean dup = false;
+                for (Output have : found) {
+                    if (have.name.equalsIgnoreCase(out.name)) {
+                        dup = true;
+                        break;
+                    }
+                }
+                if (!dup) found.add(out);
+            }
+        } catch (Exception e) {
+            DexLog.warn("media", "cannot list the phone's sound outputs", e);
+        }
+        return found;
+    }
+
+    /** Sinks a person would choose. The rest of GET_DEVICES_OUTPUTS is noise. */
+    private static boolean listable(int type) {
+        switch (type) {
+            case android.media.AudioDeviceInfo.TYPE_WIRED_HEADSET:
+            case android.media.AudioDeviceInfo.TYPE_WIRED_HEADPHONES:
+            case android.media.AudioDeviceInfo.TYPE_BLUETOOTH_A2DP:
+            case android.media.AudioDeviceInfo.TYPE_USB_DEVICE:
+            case android.media.AudioDeviceInfo.TYPE_USB_HEADSET:
+            case android.media.AudioDeviceInfo.TYPE_HEARING_AID:
+            case android.media.AudioDeviceInfo.TYPE_BLE_HEADSET:
+            case android.media.AudioDeviceInfo.TYPE_BLE_SPEAKER:
+                return true;
+            default:
+                // The speaker is seeded by the caller; everything else —
+                // earpiece, telephony, FM, the remote submix scrcpy itself
+                // captures through — is not a listing.
+                return false;
+        }
+    }
+
+    private static String fallbackName(Context ctx, int type) {
+        switch (type) {
+            case android.media.AudioDeviceInfo.TYPE_WIRED_HEADSET:
+            case android.media.AudioDeviceInfo.TYPE_WIRED_HEADPHONES:
+                return ctx.getString(R.string.lx_output_wired);
+            case android.media.AudioDeviceInfo.TYPE_USB_DEVICE:
+            case android.media.AudioDeviceInfo.TYPE_USB_HEADSET:
+                return ctx.getString(R.string.lx_output_usb);
+            default:
+                return ctx.getString(R.string.lx_output_bluetooth);
+        }
+    }
+
+    /**
      * Open the phone's own output picker — speaker, headset, Bluetooth, and on
      * many phones the computers it can cast to.
      *
-     * <b>The platform's picker, never one of ours, and that is not laziness.</b>
+     * <b>The fallback behind our own flyout, and the only door to casting.</b>
      * Selecting an audio route is MODIFY_AUDIO_ROUTING, a signature permission
-     * no third-party app can hold; {@code MediaRouter2Manager}, which can
-     * transfer another app's session, is @SystemApi behind MEDIA_CONTENT_CONTROL.
-     * A device list we drew ourselves would be a list of buttons that cannot do
-     * anything. So the job here is to FIND the real picker.
+     * no third-party app can hold — which is why this app draws no picker of
+     * its own THAT SWITCHES ITSELF. The flyout in the tray gets away with one
+     * by not doing the switching: the window daemon does, at uid 2000, which
+     * holds the permission (see WmClient#audioRoute). When the daemon cannot —
+     * gone, old, refused — or for the targets only the platform knows how to
+     * reach (cast receivers), the job here is to FIND the real picker.
      *
      * There is no single way to open it, because there is no single picker:
      * <ul>

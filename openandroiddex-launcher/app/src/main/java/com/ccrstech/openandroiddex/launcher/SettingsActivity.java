@@ -2393,6 +2393,11 @@ public class SettingsActivity extends Activity {
                 showSection(SEC_STREAM, false);
             });
         }
+        // The one exception to the restart footer below: audio rides its own
+        // scrcpy process on the PC, which is cycled the moment the change
+        // arrives. Said here because the footer's blanket claim is otherwise
+        // a reason to restart for nothing.
+        note(body, s(R.string.st_audio_live_note));
 
         restartFooter(body);
     }

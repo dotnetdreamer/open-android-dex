@@ -287,6 +287,7 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
     private PopupWindow notifPopup;
     private PopupWindow exitPopup;
     private PopupWindow widgetPicker;
+    private PopupWindow mediaPopup;
 
     // ── desktop widgets (AppWidgetHost) ──
     private DexWidgetHost widgetHost;
@@ -3551,6 +3552,7 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
         if (notifPopup != null && notifPopup.isShowing()) notifPopup.dismiss();
         if (exitPopup != null && exitPopup.isShowing()) exitPopup.dismiss();
         if (widgetPicker != null && widgetPicker.isShowing()) widgetPicker.dismiss();
+        if (mediaPopup != null && mediaPopup.isShowing()) mediaPopup.dismiss();
         recentsPopup = null;
         calendarPopup = null;
         batteryPopup = null;
@@ -3558,6 +3560,7 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
         notifPopup = null;
         exitPopup = null;
         widgetPicker = null;
+        mediaPopup = null;
     }
 
     private PopupWindow makePopup(View content) {
@@ -4314,25 +4317,164 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
         panel.addView(header, new LinearLayout.LayoutParams(panelWidth,
                 ViewGroup.LayoutParams.WRAP_CONTENT));
 
-        // ONE row, and it opens the phone's own media-output panel.
+        // ONE row, and it opens OUR media-output flyout — every place this
+        // desktop can send sound, one tap each, applied live.
         //
-        // Not a switcher of our own, and not a pair of rows splitting the
-        // question in two, which is what this replaced. Android will not let an
-        // ordinary app SELECT a route — that is MODIFY_AUDIO_ROUTING, a
-        // signature permission — so anything we drew ourselves would be a list
-        // of buttons that do nothing. The platform's panel is the real control:
-        // it lists the phone's speaker, every paired headset AND the computers
-        // the phone can cast to, it switches the moment a row is tapped, and it
-        // needs no reconnection because none of it goes through scrcpy.
+        // This used to open the phone's own picker instead, on the reasoning
+        // that an ordinary app cannot SELECT a route (MODIFY_AUDIO_ROUTING is
+        // a signature permission) and a list of our own would be buttons that
+        // do nothing. Both facts still hold — but neither applies any more:
+        // the forwarding rows are answered by the PC cycling its audio-only
+        // scrcpy companion, and the phone's own outputs are switched by the
+        // window daemon, which runs at uid 2000 and holds the routing
+        // permission this app never will. The platform picker is still one
+        // tap away, at the bottom of the flyout, for everything it alone can
+        // do — casting, mostly.
         panel.addView(qsValueRow(getString(R.string.lx_media_output),
-                DexMedia.outputName(this), panelWidth, () -> {
-                    dismissPopups();
-                    if (!DexMedia.openOutputSwitcher(this,
-                            desktopWindowOptions(desktopWindowRect(dp(560), dp(620))))) {
-                        Toast.makeText(this, getString(R.string.lx_output_no_switcher),
-                                Toast.LENGTH_LONG).show();
-                    }
-                }));
+                DexMedia.modeLabel(this), panelWidth, this::toggleMediaOutputPopup));
+    }
+
+    /**
+     * The media-output flyout: one flat list of everywhere the sound can go.
+     *
+     * Three kinds of row behind one look, because that is how a person thinks
+     * about it — "play it there" — even though the mechanisms could not be
+     * more different:
+     * <ul>
+     * <li>The two forwarding rows (computer / computer and phone) write the
+     *     audio mode; the PC hears the cfg push and cycles its audio-only
+     *     scrcpy companion. Audible in a couple of seconds, desktop untouched.</li>
+     * <li>The phone's own outputs (speaker, each connected headset) turn
+     *     forwarding off and ask the window daemon — uid 2000, which holds
+     *     MODIFY_AUDIO_ROUTING — to pin the phone's media to that device.</li>
+     * <li>The last row opens the platform's own picker, the one control that
+     *     can reach what only the phone knows how to offer (casting targets).</li>
+     * </ul>
+     */
+    private void toggleMediaOutputPopup() {
+        if (mediaPopup != null && mediaPopup.isShowing()) {
+            dismissPopups();
+            return;
+        }
+        dismissPopups();
+        LinearLayout panel = new LinearLayout(this);
+        panel.setOrientation(LinearLayout.VERTICAL);
+        panel.setPadding(dp(8), dp(8), dp(8), dp(8));
+
+        TextView header = new TextView(this);
+        header.setText(getString(R.string.lx_media_output));
+        header.setTextColor(theme.textFaint);
+        header.setTextSize(TypedValue.COMPLEX_UNIT_PX, sp(11));
+        header.setPadding(dp(10), dp(4), dp(10), dp(6));
+        panel.addView(header);
+
+        String mode = DexMedia.audioMode(this);
+        panel.addView(mediaRow(getString(R.string.lx_audio_computer),
+                DexMedia.AUDIO_COMPUTER.equals(mode),
+                () -> DexMedia.setAudioMode(this, DexMedia.AUDIO_COMPUTER)));
+        panel.addView(mediaRow(getString(R.string.lx_audio_both),
+                DexMedia.AUDIO_BOTH.equals(mode),
+                () -> DexMedia.setAudioMode(this, DexMedia.AUDIO_BOTH)));
+
+        panel.addView(mediaDivider());
+
+        // The phone's own outputs. Which row is lit: only meaningful while
+        // sound stays on the phone, and then it is the active route — matched
+        // by name, because MediaRouter names the route and getDevices names
+        // the device, and the two agree for anything that has a product name.
+        // When nothing matches, it is the speaker: the one output with no
+        // name of its own.
+        java.util.List<DexMedia.Output> outputs = DexMedia.outputs(this);
+        int lit = -1;
+        if (DexMedia.AUDIO_PHONE.equals(mode)) {
+            String route = DexMedia.outputName(this);
+            for (int ix = 0; ix < outputs.size(); ix++) {
+                if (outputs.get(ix).name.equalsIgnoreCase(route)) {
+                    lit = ix;
+                    break;
+                }
+            }
+            if (lit < 0) lit = 0;
+        }
+        for (int ix = 0; ix < outputs.size(); ix++) {
+            final DexMedia.Output out = outputs.get(ix);
+            panel.addView(mediaRow(out.name, ix == lit, () -> routeToPhoneOutput(out)));
+        }
+
+        panel.addView(mediaDivider());
+        panel.addView(mediaRow(getString(R.string.lx_output_more), false,
+                this::openPhoneOutputPicker));
+
+        mediaPopup = makePopup(panel);
+        showTrayPopup(mediaPopup, Gravity.END);
+    }
+
+    /** One flyout row: a check column and a name. The check is the state. */
+    private View mediaRow(String label, boolean selected, Runnable onPick) {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(dp(10), dp(7), dp(10), dp(7));
+        row.setBackground(tapBackground(0x00000000, theme.hover, 9));
+        TextView check = new TextView(this);
+        check.setText(selected ? "✓" : "");
+        check.setTextColor(theme.accent);
+        check.setTextSize(TypedValue.COMPLEX_UNIT_PX, sp(12.5f));
+        row.addView(check, new LinearLayout.LayoutParams(dp(18),
+                ViewGroup.LayoutParams.WRAP_CONTENT));
+        TextView name = new TextView(this);
+        name.setText(label);
+        name.setTextColor(theme.text);
+        name.setTextSize(TypedValue.COMPLEX_UNIT_PX, sp(13));
+        name.setSingleLine(true);
+        name.setEllipsize(TextUtils.TruncateAt.END);
+        row.addView(name, new LinearLayout.LayoutParams(dp(230),
+                ViewGroup.LayoutParams.WRAP_CONTENT));
+        row.setOnClickListener(v -> {
+            dismissPopups();
+            onPick.run();
+        });
+        return row;
+    }
+
+    private View mediaDivider() {
+        View divider = new View(this);
+        divider.setBackgroundColor(theme.divider);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(1));
+        lp.topMargin = dp(4);
+        lp.bottomMargin = dp(4);
+        divider.setLayoutParams(lp);
+        return divider;
+    }
+
+    /**
+     * Send the sound to one of the phone's own outputs: forwarding off, and
+     * the media route pinned to the device — by the window daemon, whose uid
+     * holds the routing permission this app never will (the same shape as
+     * {@link #setPhoneScreen}). When the daemon cannot — gone, too old to
+     * know the verb, or the framework refused — the platform's own picker
+     * opens instead, so the tap still ends somewhere the choice can be made.
+     */
+    private void routeToPhoneOutput(DexMedia.Output out) {
+        DexMedia.setAudioMode(this, DexMedia.AUDIO_PHONE);
+        if (qsWm == null) qsWm = new WmClient();
+        final WmClient client = qsWm;
+        client.post(() -> {
+            if (client.audioRoute(out.type, out.address)) return;
+            DexLog.warn("media", "the daemon could not route to " + out.name
+                    + " — offering the phone's own picker");
+            runOnUiThread(this::openPhoneOutputPicker);
+        });
+    }
+
+    /** The platform's own output picker — the pre-flyout behaviour, kept as the fallback. */
+    private void openPhoneOutputPicker() {
+        if (!DexMedia.openOutputSwitcher(this,
+                desktopWindowOptions(desktopWindowRect(dp(560), dp(620))))) {
+            Toast.makeText(this, getString(R.string.lx_output_no_switcher),
+                    Toast.LENGTH_LONG).show();
+        }
     }
 
     private View buildQuickSettingsView() {

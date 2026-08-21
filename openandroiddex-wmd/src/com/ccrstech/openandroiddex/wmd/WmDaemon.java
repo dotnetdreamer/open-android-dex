@@ -40,6 +40,8 @@ import java.util.List;
  *   PROCS <pkg…>                              -> TOTAL <busy> <total> /
  *                                                PROC <pkg> <rssKb> <jiffies> … / END
  *   MOVEDISPLAY <task> <display>              -> OK          take a claimed window back
+ *   AUDIOROUTE SET <type> <address|->         -> OK          pin media to a phone output
+ *   AUDIOROUTE CLEAR                          -> OK          back to the phone's own policy
  *   ARM <ttlSeconds> <settings chain…>        -> OK          refresh the dead-man switch
  *   BYE                                       -> (closes)
  *   ERR <reason>                              on any failure
@@ -377,6 +379,33 @@ public final class WmDaemon {
                 }
                 out.println("END");
                 return;
+            }
+
+            // "AUDIOROUTE SET <type> <address|->" / "AUDIOROUTE CLEAR" — pin the
+            // phone's MEDIA to one of its own outputs, or hand the choice back.
+            // The one verb here that is not about windows: it lives on this
+            // socket because selecting a route is MODIFY_AUDIO_ROUTING, held by
+            // this uid and by no app. See Audio for the mechanism; any failure
+            // (an OEM that moved the API, a refused permission) comes back as
+            // ERR and the launcher opens the platform's own picker instead.
+            case "AUDIOROUTE": {
+                if (a.length < 2) {
+                    out.println("ERR audioroute needs SET or CLEAR");
+                    return;
+                }
+                switch (a[1].toUpperCase()) {
+                    case "SET":
+                        Audio.route(i(a, 2), a.length > 3 && !"-".equals(a[3]) ? a[3] : "");
+                        out.println("OK");
+                        return;
+                    case "CLEAR":
+                        Audio.clear();
+                        out.println("OK");
+                        return;
+                    default:
+                        out.println("ERR unknown audioroute " + a[1]);
+                        return;
+                }
             }
 
             case "MOVEDISPLAY": {
