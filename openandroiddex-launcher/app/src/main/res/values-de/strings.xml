@@ -355,6 +355,21 @@
     <string name="st_scope_stream">Stream- und Zwischenablage-Einstellungen</string>
 
     <string name="ln_label">LinuxOnDroid</string>
+    <!-- Linux: what goes into the container, asked before the download starts -->
+    <string name="ln_apps_title">Wähle aus, was installiert wird</string>
+    <string name="ln_apps_body">Ubuntu und der XFCE-Desktop kommen immer mit. Entferne den Haken bei allem, was du nicht willst — es wird dann nicht heruntergeladen.</string>
+    <string name="ln_apps_body_again">Ubuntu und der XFCE-Desktop sind bereits installiert. Setze einen Haken bei allem, was hinzukommen soll. Ein entfernter Haken löscht nichts.</string>
+    <string name="ln_apps_firefox">Firefox</string>
+    <string name="ln_apps_firefox_sub">Webbrowser von Mozilla. Ein großer Download.</string>
+    <string name="ln_apps_chromium">Chromium</string>
+    <string name="ln_apps_chromium_sub">Webbrowser. Ein großer Download.</string>
+    <string name="ln_apps_code">Visual Studio Code</string>
+    <string name="ln_apps_code_sub">Code-Editor von Microsoft. Der größte Download hier.</string>
+    <string name="ln_apps_git">Git</string>
+    <string name="ln_apps_git_sub">Klein. VS Code braucht es für die Quellcodeverwaltung.</string>
+    <string name="ln_apps_go">Installieren</string>
+    <string name="ln_apps_go_none">Nur Ubuntu installieren</string>
+    <string name="ln_apps_menu">Linux-Apps auswählen…</string>
     <string name="ln_installing">Ubuntu wird installiert…</string>
     <string name="ln_waiting">Warten, bis die Desktop-App die Installation startet…</string>
     <string name="ln_starting">Linux-Desktop wird gestartet…</string>

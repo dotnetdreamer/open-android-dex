@@ -355,6 +355,21 @@
     <string name="st_scope_stream">串流与剪贴板设置</string>
 
     <string name="ln_label">LinuxOnDroid</string>
+    <!-- Linux: what goes into the container, asked before the download starts -->
+    <string name="ln_apps_title">选择要安装的内容</string>
+    <string name="ln_apps_body">Ubuntu 和 XFCE 桌面总会安装。取消勾选你不想要的，它就不会被下载。</string>
+    <string name="ln_apps_body_again">Ubuntu 和 XFCE 桌面已经安装。勾选你想要添加的。取消勾选不会删除已经装好的东西。</string>
+    <string name="ln_apps_firefox">Firefox</string>
+    <string name="ln_apps_firefox_sub">Mozilla 的网页浏览器。下载较大。</string>
+    <string name="ln_apps_chromium">Chromium</string>
+    <string name="ln_apps_chromium_sub">网页浏览器。下载较大。</string>
+    <string name="ln_apps_code">Visual Studio Code</string>
+    <string name="ln_apps_code_sub">微软的代码编辑器。这里最大的下载。</string>
+    <string name="ln_apps_git">Git</string>
+    <string name="ln_apps_git_sub">体积很小。VS Code 的源代码管理面板需要它。</string>
+    <string name="ln_apps_go">安装</string>
+    <string name="ln_apps_go_none">只安装 Ubuntu</string>
+    <string name="ln_apps_menu">选择 Linux 应用…</string>
     <string name="ln_installing">正在安装 Ubuntu…</string>
     <string name="ln_waiting">正在等待桌面应用开始安装…</string>
     <string name="ln_starting">正在启动 Linux 桌面…</string>

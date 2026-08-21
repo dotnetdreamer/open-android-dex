@@ -85,6 +85,16 @@ public class LinuxService extends Service {
     static void provision(Context ctx) {
         final Context app = ctx.getApplicationContext();
         new Thread(() -> {
+            // Linux.needsProvision answers false while the chooser has not been
+            // through, which is what keeps the desktop's provision-on-launch
+            // from starting a 1.5 GB download behind a question nobody has been
+            // shown. Said out loud here rather than folded into the line below,
+            // because "already provisioned" would be a lie about a phone with
+            // no container on it at all.
+            if (Linux.needsAppChoice(app)) {
+                DexLog.step("linux", "waiting for the app choice before installing");
+                return;
+            }
             if (!Linux.needsProvision(app)) {
                 DexLog.step("linux", "already provisioned (v" + Linux.PAYLOAD_VERSION
                         + " f" + Linux.FEATURE_LEVEL + ") — " + Linux.installedApps(app));
@@ -204,15 +214,27 @@ public class LinuxService extends Service {
             idleStop();
             return;
         }
-        Linux.Status st = Linux.readStatus(this);
-        // Provisioned means BOTH: built from this payload, and carrying this
-        // build's features. The second half is what lets a new feature (the
-        // browsers) reach a guest that is already "ready" — the setup script's
-        // stamps make the re-run skip everything that is already done.
-        if (st.version == Linux.PAYLOAD_VERSION && "ready".equals(st.phase)
-                && st.features >= Linux.FEATURE_LEVEL) {
+        // The chooser has to be answered before anything is built. Checked
+        // here as well as in the static provision(), for the same reason the
+        // uninstall marker is: that one decides on its own thread and then
+        // sends an intent, and RESET reaches this method without going through
+        // it at all — a reinstall asked for before the first container exists
+        // must land on the chooser, not on a download of everything.
+        if (Linux.needsAppChoice(this)) {
+            DexLog.step("linux", "waiting for the app choice before installing");
+            idleStop();
+            return;
+        }
+        // ONE test, and it is Linux.needsProvision's — the same one the caller
+        // used to decide to send this intent. A second, hand-rolled copy of it
+        // lived here and had drifted: it knew about the payload version and the
+        // feature level but not about the VS Code stamp, so an unsettled VS
+        // Code brought the intent all the way here and was then answered with
+        // "already provisioned". Its documented retry-on-the-next-launch never
+        // ran once. The app selection would have gone the same way.
+        if (!Linux.needsProvision(this)) {
             DexLog.step("linux", "already provisioned (v" + Linux.PAYLOAD_VERSION
-                    + " f" + Linux.FEATURE_LEVEL + ")");
+                    + " f" + Linux.FEATURE_LEVEL + ") — " + Linux.installedApps(this));
             idleStop();
             return;
         }

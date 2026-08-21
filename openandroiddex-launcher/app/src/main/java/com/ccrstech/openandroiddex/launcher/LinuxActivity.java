@@ -41,9 +41,10 @@ import android.widget.TextView;
  * The app owns the container: {@link LinuxService} downloads the rootfs, runs
  * the install, and hosts the runtime, all under this app's own uid. This
  * window drives it purely through the service and by reading {@link Linux}'s
- * on-disk state — no daemon, no PC. It shows whichever of four screens the
- * state calls for: installing (with real progress), starting, the live
- * WebView, or an error with a Retry.
+ * on-disk state — no daemon, no PC. It shows whichever of five screens the
+ * state calls for: the app chooser (once, before anything is downloaded),
+ * installing (with real progress), starting, the live WebView, or an error
+ * with a Retry.
  *
  * Closing the window shuts the container down — the caption's ✕ is routed here
  * as {@link LauncherActivity#ACTION_CLOSE_WINDOW} rather than removing the
@@ -79,10 +80,18 @@ public class LinuxActivity extends Activity {
     private static final int REQ_NOTIFICATIONS = 1;
 
     private static final String UI_NONE = "";
+    private static final String UI_APPS = "apps";
     private static final String UI_INSTALL = "install";
     private static final String UI_START = "start";
     private static final String UI_VNC = "vnc";
     private static final String UI_ERROR = "error";
+
+    /**
+     * Open straight on the app chooser, whatever state the container is in.
+     * What the Linux tile's "Choose Linux apps…" sends; without it the chooser
+     * is shown once, before the first install, and never again.
+     */
+    static final String EXTRA_CHOOSE_APPS = "choose_apps";
 
     private DexTheme theme;
     /** Off-main thread for the status poll (it reads files, not a socket). */
@@ -106,6 +115,16 @@ public class LinuxActivity extends Activity {
     private TextView startMsg;
     /** Set by the health probe once noVNC's canvas has a real framebuffer. */
     private boolean vncConnected;
+
+    /**
+     * The chooser was asked for explicitly, rather than being the thing that
+     * has to happen before an install can start. Set by
+     * {@link #EXTRA_CHOOSE_APPS}, cleared when the screen is answered or
+     * dismissed — the poll would otherwise put the desktop back a beat later.
+     */
+    private boolean chooserForced;
+    /** The ticks, held across polls so a rebuild cannot lose them. */
+    private java.util.LinkedHashSet<String> appPicks;
 
     /** When phase=none was first seen; 0 while it is anything else. */
     private long noneSince;
@@ -230,7 +249,13 @@ public class LinuxActivity extends Activity {
                 // belongs to it (vim, dialogs), not to the window.
                 if (event.getKeyCode() == KeyEvent.KEYCODE_ESCAPE
                         && !UI_VNC.equals(uiState)) {
-                    if (event.getAction() == KeyEvent.ACTION_UP) finish();
+                    if (event.getAction() == KeyEvent.ACTION_UP) {
+                        // On the chooser, Escape is Back: that screen can be
+                        // sitting over a live session (the tile's menu opens
+                        // it there), and finish() would take the container
+                        // down as a side effect of dismissing a dialog.
+                        if (UI_APPS.equals(uiState)) onBackPressed(); else finish();
+                    }
                     return true;
                 }
                 return super.dispatchKeyEvent(event);
@@ -240,9 +265,12 @@ public class LinuxActivity extends Activity {
         setContentView(root);
         applyInsets();
         DexCursors.decorate(root);
+        chooserForced = getIntent() != null
+                && getIntent().getBooleanExtra(EXTRA_CHOOSE_APPS, false);
         // Kick provisioning ourselves — the app owns it now, no PC push. Safe
         // and idempotent: the service no-ops if the distro is already installed
-        // AND already carries this build's features.
+        // AND already carries this build's features, and it stays out of the
+        // way entirely while the app chooser has yet to be answered.
         LinuxService.provision(this);
         askForNotifications();
         IntentFilter closeFilter = new IntentFilter(LauncherActivity.ACTION_CLOSE_WINDOW);
@@ -305,10 +333,41 @@ public class LinuxActivity extends Activity {
         }
     };
 
+    /**
+     * The tile's "Choose Linux apps…" while this window is already open.
+     *
+     * This activity is singleTask, so that start lands here rather than
+     * building a second window — and without this the extra would be dropped
+     * on the floor and the menu entry would do nothing but raise the window.
+     */
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        if (intent == null || !intent.getBooleanExtra(EXTRA_CHOOSE_APPS, false)) return;
+        chooserForced = true;
+        showAppChooser();
+    }
+
     /** One status → UI step. Main thread. */
     private void apply(Linux.Status st, String rtLog) {
         if (destroyed) return;
         if (st == null) return;
+
+        // Ahead of every branch below, because none of them can make progress
+        // while this is true: with no choice made, provisioning is deliberately
+        // inert, so the window would sit on "waiting for the install to start"
+        // over the very screen that starts it. The forced case is the tile's
+        // menu entry, and it outranks a live session for the same reason a
+        // dialog does — the user asked for it.
+        // Never over an UNINSTALLED container, though: provisioning is
+        // deliberately inert there, so Install would be a button that does
+        // nothing. The branch further down closes the window instead, which is
+        // the right answer — opening Linux again is what reverses an uninstall.
+        if (!Linux.isUninstalled(this) && (chooserForced || Linux.needsAppChoice(this))) {
+            showAppChooser();
+            return;
+        }
 
         if (!"error".equals(st.phase)) retryPending = false;
         // A connect verdict is only about THIS runtime while it lives; a
@@ -599,6 +658,16 @@ public class LinuxActivity extends Activity {
      */
     @Override
     public void onBackPressed() {
+        // The chooser reached from the tile is sitting over something — a live
+        // session, an install, whatever the window was showing. Back means
+        // "never mind", not "close the window": dropping the flag lets the very
+        // next poll put that back.
+        if (UI_APPS.equals(uiState) && chooserForced) {
+            dismissChooser();
+            uiState = UI_NONE;
+            shownActionTitle = null;
+            return;
+        }
         if (UI_VNC.equals(uiState) || UI_START.equals(uiState) || UI_INSTALL.equals(uiState)) {
             confirmShutdown();
             return;
@@ -731,7 +800,163 @@ public class LinuxActivity extends Activity {
         return button;
     }
 
-    // ── the four screens ──
+    // ── the five screens ──
+
+    /**
+     * What to install, asked once, before a single byte is downloaded.
+     *
+     * Ubuntu, XFCE and the VNC stack are not on it: they ARE the container,
+     * and a tick box that could switch off the desktop would be a tick box for
+     * an empty window. What is on it is the four optional apps, every one of
+     * them ticked — so the plain Install button builds exactly the container
+     * this app built before the screen existed, and the screen only ever costs
+     * someone a tap unless they want it to cost them a download.
+     *
+     * Nothing here uninstalls. Unticking means "do not fetch it", which is why
+     * the body text changes once there is a container: over a guest that
+     * already has Chromium in it, an unticked Chromium box that removed 300 MB
+     * of working software on Save would be a trap, and one that quietly did
+     * nothing would be a lie. It says which it is.
+     *
+     * Rebuilt only on a state change, like every other screen here: the poll
+     * runs every 1.5 s and a rebuild would put every tick back where it
+     * started while the user was still reading the list.
+     */
+    private void showAppChooser() {
+        if (UI_APPS.equals(uiState)) return;
+        uiState = UI_APPS;
+        // Seeded from what is stored, which is everything until it is not.
+        appPicks = new java.util.LinkedHashSet<>();
+        for (String id : Linux.OPTIONAL_APPS) {
+            if (Linux.wantsApp(this, id)) appPicks.add(id);
+        }
+
+        LinearLayout column = centeredColumn();
+        glyph(column);
+        title(column, s(R.string.ln_apps_title));
+        // "already installed" is keyed off the container, not off the forced
+        // flag: a reinstall asked for before the first container exists lands
+        // on this screen too, and there the first-run wording is the true one.
+        TextView body = subtext(column, s(Linux.isInstalled(this)
+                ? R.string.ln_apps_body_again : R.string.ln_apps_body));
+        // The only multi-line subtext in this window. Left to WRAP_CONTENT it
+        // is one line as wide as the desktop window happens to be.
+        body.getLayoutParams().width = dp(300);
+
+        final TextView go = primaryButton(s(R.string.ln_apps_go), null);
+        LinearLayout list = new LinearLayout(this);
+        list.setOrientation(LinearLayout.VERTICAL);
+        LinearLayout.LayoutParams listLp = new LinearLayout.LayoutParams(
+                dp(300), ViewGroup.LayoutParams.WRAP_CONTENT);
+        listLp.topMargin = dp(16);
+        listLp.gravity = Gravity.CENTER_HORIZONTAL;
+        column.addView(list, listLp);
+
+        appOption(list, "firefox", R.string.ln_apps_firefox, R.string.ln_apps_firefox_sub, go);
+        appOption(list, "chromium", R.string.ln_apps_chromium, R.string.ln_apps_chromium_sub, go);
+        appOption(list, "code", R.string.ln_apps_code, R.string.ln_apps_code_sub, go);
+        appOption(list, "git", R.string.ln_apps_git, R.string.ln_apps_git_sub, go);
+
+        go.setText(goLabel());
+        go.setOnClickListener(v -> {
+            Linux.setApps(this, appPicks);
+            dismissChooser();
+            uiState = UI_NONE;
+            shownActionTitle = null;
+            noneSince = 0;
+            LinuxService.provision(this);
+            // Straight to the install screen rather than waiting up to 1.5 s
+            // for the poll to notice: this button is the one place in the flow
+            // where nothing at all happens on screen for a beat otherwise, and
+            // a tap that appears to do nothing gets tapped again.
+            //
+            // Only when there IS an install, though. Reopened from the tile and
+            // answered without changing anything, this button has nothing to
+            // do, and "waiting for the install to start" over a live desktop
+            // would be an install that never arrives. The next poll puts the
+            // window back where it was.
+            if (Linux.needsProvision(this)) showInstalling(new Linux.Status());
+        });
+        LinearLayout.LayoutParams goLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        goLp.topMargin = dp(22);
+        goLp.gravity = Gravity.CENTER_HORIZONTAL;
+        column.addView(go, goLp);
+
+        presentScrolling(column);
+    }
+
+    /**
+     * The chooser is done with — answered or waved away.
+     *
+     * The EXTRA has to go as well as the flag. This activity is destroyed and
+     * rebuilt whenever the window changes display, and it is rebuilt from the
+     * intent it was started with: a lingering extra would put the chooser back
+     * over the desktop every time the window was dragged to the other screen.
+     */
+    private void dismissChooser() {
+        chooserForced = false;
+        if (getIntent() != null) getIntent().removeExtra(EXTRA_CHOOSE_APPS);
+    }
+
+    /** "Install", or the plainer truth when every box is empty. */
+    private String goLabel() {
+        return s(appPicks.isEmpty() ? R.string.ln_apps_go_none : R.string.ln_apps_go);
+    }
+
+    /**
+     * One tickable row: the box, the name, and one line saying what it is.
+     *
+     * The whole row is the target and the CheckBox is not clickable in its own
+     * right. Two independently clickable things stacked on one another is how
+     * a tap on the label toggles nothing on a phone and a tap on the box
+     * toggles twice on the desktop, where the row also has a hover state.
+     */
+    private void appOption(LinearLayout list, String id, int nameRes, int subRes,
+                           TextView go) {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(dp(8), dp(9), dp(12), dp(9));
+        row.setBackground(tapBackground(0x00000000, theme.hover, 10));
+
+        final android.widget.CheckBox box = new android.widget.CheckBox(this);
+        box.setChecked(appPicks.contains(id));
+        box.setClickable(false);
+        box.setFocusable(false);
+        box.setButtonTintList(ColorStateList.valueOf(theme.accent));
+        row.addView(box, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        LinearLayout labels = new LinearLayout(this);
+        labels.setOrientation(LinearLayout.VERTICAL);
+        TextView name = new TextView(this);
+        name.setText(s(nameRes));
+        name.setTextColor(theme.text);
+        name.setTextSize(TypedValue.COMPLEX_UNIT_PX, sp(13.5f));
+        name.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        labels.addView(name);
+        TextView sub = new TextView(this);
+        sub.setText(s(subRes));
+        sub.setTextColor(theme.textFaint);
+        sub.setTextSize(TypedValue.COMPLEX_UNIT_PX, sp(11.5f));
+        LinearLayout.LayoutParams subLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        subLp.topMargin = dp(1);
+        labels.addView(sub, subLp);
+        LinearLayout.LayoutParams labelsLp = new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+        labelsLp.leftMargin = dp(6);
+        row.addView(labels, labelsLp);
+
+        row.setOnClickListener(v -> {
+            if (!appPicks.remove(id)) appPicks.add(id);
+            box.setChecked(appPicks.contains(id));
+            go.setText(goLabel());
+        });
+        list.addView(row, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+    }
 
     private void showInstalling(Linux.Status st) {
         if (UI_INSTALL.equals(uiState)) {
@@ -1017,21 +1242,27 @@ public class LinuxActivity extends Activity {
         title(column, titleText);
         if (detail != null && !detail.isEmpty()) subtext(column, detail);
 
-        TextView retry = new TextView(this);
-        retry.setText(buttonLabel);
-        retry.setTextColor(0xFFFFFFFF);
-        retry.setTextSize(TypedValue.COMPLEX_UNIT_PX, sp(13));
-        retry.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
-        retry.setGravity(Gravity.CENTER);
-        retry.setPadding(dp(26), dp(10), dp(26), dp(10));
-        retry.setBackground(tapBackground(theme.accent, lighten(theme.accent), 12));
-        retry.setOnClickListener(v -> retryProvision());
+        TextView retry = primaryButton(buttonLabel, this::retryProvision);
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         lp.topMargin = dp(20);
         lp.gravity = Gravity.CENTER_HORIZONTAL;
         column.addView(retry, lp);
         present(column);
+    }
+
+    /** The accent-filled button this window uses for its one real action. */
+    private TextView primaryButton(String label, Runnable onClick) {
+        TextView button = new TextView(this);
+        button.setText(label);
+        button.setTextColor(0xFFFFFFFF);
+        button.setTextSize(TypedValue.COMPLEX_UNIT_PX, sp(13));
+        button.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        button.setGravity(Gravity.CENTER);
+        button.setPadding(dp(26), dp(10), dp(26), dp(10));
+        button.setBackground(tapBackground(theme.accent, lighten(theme.accent), 12));
+        if (onClick != null) button.setOnClickListener(v -> onClick.run());
+        return button;
     }
 
     // ── building blocks ──
@@ -1057,6 +1288,39 @@ public class LinuxActivity extends Activity {
         root.addView(column, lp);
         DexFonts.applyTo(this, column);
         DexCursors.decorate(column);
+    }
+
+    /**
+     * The same swap, for content that will not always fit.
+     *
+     * The other four screens are a glyph, a line and a button and are centred
+     * with confidence. The chooser is a title, a paragraph, four two-line rows
+     * and a button, and a phone held in landscape has barely 300 dp of height
+     * for it — where {@link #present} would simply centre it and clip both
+     * ends, taking the Install button with them. fillViewport plus a centring
+     * holder keeps it centred while it fits and scrolls it when it does not.
+     */
+    private void presentScrolling(LinearLayout column) {
+        dropWebView();
+        startCard = null;
+        startMsg = null;
+        root.removeAllViews();
+
+        LinearLayout holder = new LinearLayout(this);
+        holder.setOrientation(LinearLayout.VERTICAL);
+        holder.setGravity(Gravity.CENTER);
+        holder.setPadding(dp(20), dp(20), dp(20), dp(20));
+        holder.addView(column, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        android.widget.ScrollView scroller = new android.widget.ScrollView(this);
+        scroller.setFillViewport(true);
+        scroller.addView(holder, new ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        root.addView(scroller, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        DexFonts.applyTo(this, scroller);
+        DexCursors.decorate(scroller);
     }
 
     /** The WebView holds a websocket and a decoder — never leave one behind. */

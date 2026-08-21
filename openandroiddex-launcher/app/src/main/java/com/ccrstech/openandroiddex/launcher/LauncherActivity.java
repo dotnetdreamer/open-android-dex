@@ -2411,12 +2411,23 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
         if (!Linux.hasAllFiles()) {
             menu.getMenu().add(0, 3, 2, getString(R.string.ln_shared_grant));
         }
-        menu.getMenu().add(0, 4, 3, getString(R.string.ln_reinstall));
+        // The way back to the install chooser. Without it that screen is a
+        // one-way door: it is shown once, before the first container exists,
+        // and someone who unticked VS Code to save the download would have no
+        // route to it short of deleting the whole container and starting
+        // again. Offered even before there is a container — the screen is the
+        // first thing an install goes through anyway — but not while Linux is
+        // uninstalled, where provisioning is deliberately inert and the button
+        // would lead nowhere.
+        if (!Linux.isUninstalled(this)) {
+            menu.getMenu().add(0, 6, 3, getString(R.string.ln_apps_menu));
+        }
+        menu.getMenu().add(0, 4, 4, getString(R.string.ln_reinstall));
         // Only while there is something to remove. Offering "Uninstall" over a
         // container that is already gone is an action that would do nothing,
         // and it is the entry that reads most like it should.
         if (Linux.isInstalled(this)) {
-            menu.getMenu().add(0, 5, 4, getString(R.string.ln_uninstall));
+            menu.getMenu().add(0, 5, 5, getString(R.string.ln_uninstall));
         }
         // One explicit id per branch and NO trailing else. The else used to be
         // the reinstall, so any item added after it would have dropped the user
@@ -2433,10 +2444,48 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
                 confirmLinuxReinstall();
             } else if (id == 5) {
                 confirmLinuxUninstall();
+            } else if (id == 6) {
+                chooseLinuxApps();
             }
             return true;
         });
         menu.show();
+    }
+
+    /**
+     * Reopen the install chooser — which apps go into the container.
+     *
+     * The screen itself lives in the Linux window, because that is where the
+     * install it drives is narrated and because a second copy of it in a dialog
+     * out here would be a second copy to keep true. So this is a start with one
+     * extra on it; LinuxActivity is singleTask, so an open window takes it
+     * through onNewIntent rather than growing a second one.
+     *
+     * The restore comes first for the same reason it does in launchLinux: a
+     * minimised window is not on any display, and starting it without asking
+     * CaptionService to bring it back leaves the chooser on a window nobody can
+     * see.
+     */
+    private void chooseLinuxApps() {
+        hideDrawer();
+        dismissPopups();
+        if (minimisedActivities.contains(LinuxActivity.class.getName())) {
+            sendBroadcast(new Intent(ACTION_RESTORE)
+                    .setPackage(getPackageName())
+                    .putExtra("pkg", getPackageName())
+                    .putExtra("activity", LinuxActivity.class.getName()));
+        }
+        Intent intent = new Intent(this, LinuxActivity.class)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                .putExtra(LinuxActivity.EXTRA_CHOOSE_APPS, true);
+        ActivityOptions opts = shapeForDesktop(
+                ActivityOptions.makeBasic(), desktopWindowRect(dp(1100), dp(750)));
+        try {
+            startActivity(intent, opts.toBundle());
+        } catch (Exception e) {
+            DexLog.warn("linux", "cannot open the app chooser", e);
+            Toast.makeText(this, getString(R.string.ln_cannot_open), Toast.LENGTH_SHORT).show();
+        }
     }
 
     /**

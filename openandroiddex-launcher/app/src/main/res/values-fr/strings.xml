@@ -355,6 +355,21 @@
     <string name="st_scope_stream">Réglages du flux et du presse-papiers</string>
 
     <string name="ln_label">LinuxOnDroid</string>
+    <!-- Linux: what goes into the container, asked before the download starts -->
+    <string name="ln_apps_title">Choisissez ce qui sera installé</string>
+    <string name="ln_apps_body">Ubuntu et le bureau XFCE sont toujours installés. Décochez ce que vous ne voulez pas et il ne sera pas téléchargé.</string>
+    <string name="ln_apps_body_again">Ubuntu et le bureau XFCE sont déjà installés. Cochez ce que vous voulez ajouter. Décocher ne supprime rien de ce qui est déjà là.</string>
+    <string name="ln_apps_firefox">Firefox</string>
+    <string name="ln_apps_firefox_sub">Navigateur web de Mozilla. Un gros téléchargement.</string>
+    <string name="ln_apps_chromium">Chromium</string>
+    <string name="ln_apps_chromium_sub">Navigateur web. Un gros téléchargement.</string>
+    <string name="ln_apps_code">Visual Studio Code</string>
+    <string name="ln_apps_code_sub">Éditeur de code de Microsoft. Le plus gros téléchargement ici.</string>
+    <string name="ln_apps_git">Git</string>
+    <string name="ln_apps_git_sub">Petit. VS Code en a besoin pour le panneau de contrôle de source.</string>
+    <string name="ln_apps_go">Installer</string>
+    <string name="ln_apps_go_none">Installer Ubuntu seul</string>
+    <string name="ln_apps_menu">Choisir les applis Linux…</string>
     <string name="ln_installing">Installation d\'Ubuntu…</string>
     <string name="ln_waiting">En attente du lancement de l\'installation par l\'application de bureau…</string>
     <string name="ln_starting">Démarrage du bureau Linux…</string>

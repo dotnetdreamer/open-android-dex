@@ -60,6 +60,15 @@ final class Linux {
      * for a Download Git for Linux button without it. 11 = the vscode:// URL
      * handler, without which signing in to GitHub from VS Code dead-ends on
      * "Failed to open URI".
+     *
+     * The app CHOOSER (see {@link #apps}) is deliberately NOT a level 12. A
+     * feature bump exists to carry something new INTO guests that are already
+     * built, and there is nothing here to carry: every guest built before the
+     * chooser was built with all four apps, which is exactly what the chooser
+     * reports for them. Bumping would have re-run the whole setup script on
+     * every existing container to arrive where it already was. What brings the
+     * script back when a selection CHANGES is {@code apps.done} — see
+     * {@link #needsProvision}.
      */
     static final int FEATURE_LEVEL = 11;
 
@@ -79,21 +88,160 @@ final class Linux {
     };
 
     /**
+     * The ids the chooser offers, in the order it lists them — which is also
+     * the order {@link #setApps} writes them in and therefore the order the
+     * setup script's echo comes back in. One list, so the two can never drift.
+     */
+    static final String[] OPTIONAL_APPS = ids(GUEST_APPS);
+
+    private static String[] ids(String[][] apps) {
+        String[] out = new String[apps.length];
+        for (int i = 0; i < apps.length; i++) out[i] = apps[i][0];
+        return out;
+    }
+
+    /**
      * Which of the optional apps actually made it into the guest.
      *
      * The setup log lives in private storage that nothing can read without a
      * debuggable build, so "VS Code is nowhere to be found" was unanswerable
      * from the outside — its phase is non-fatal by design and says so only in
      * that log. This line goes to logcat, which the PC's session trace picks up.
+     *
+     * Three answers, not two: {@code off} is an app the user did not tick, and
+     * telling it apart from {@code NO} is the whole point of the line. Without
+     * it, an install that did exactly what it was asked to do reads in the log
+     * as three failures.
      */
     static String installedApps(Context ctx) {
         StringBuilder sb = new StringBuilder();
         for (String[] app : GUEST_APPS) {
             boolean here = new File(root(ctx), "rootfs/" + app[1]).exists();
             if (sb.length() > 0) sb.append(' ');
-            sb.append(app[0]).append('=').append(here ? "yes" : "NO");
+            sb.append(app[0]).append('=')
+                    .append(here ? "yes" : (wantsApp(ctx, app[0]) ? "NO" : "off"));
         }
         return sb.toString();
+    }
+
+    // ── which optional apps the user asked for ──
+
+    /**
+     * The ids the chooser offers, in the order it lists them, as one
+     * space-separated string.
+     *
+     * Derived from {@link #GUEST_APPS} rather than written out again: this
+     * string is compared byte-for-byte against what the setup script echoes
+     * back into {@code apps.done}, so two lists that could drift apart would
+     * mean a container that re-provisions itself on every single launch.
+     */
+    private static String allApps() {
+        StringBuilder sb = new StringBuilder();
+        for (String[] app : GUEST_APPS) {
+            if (sb.length() > 0) sb.append(' ');
+            sb.append(app[0]);
+        }
+        return sb.toString();
+    }
+
+    /** What {@link #apps} stores when the user ticked nothing at all. */
+    static final String NO_APPS = "none";
+
+    /**
+     * The user's tick list, kept OUTSIDE the container.
+     *
+     * A sibling of {@code linux/}, exactly like the uninstall marker and for
+     * the same reason: a reset deletes that whole tree, and a selection stored
+     * in there would be thrown away by the one operation whose entire job is to
+     * rebuild the guest from it.
+     *
+     * A file rather than SharedPreferences, because {@link LinuxService} runs
+     * in its own {@code :linux} process and cross-process preferences have not
+     * been honest since MODE_MULTI_PROCESS was deprecated. Everything else this
+     * class shares with the service is a file for the same reason.
+     */
+    private static File appsFile(Context ctx) {
+        return new File(ctx.getFilesDir(), "linux-apps");
+    }
+
+    /**
+     * Has the user never said what to install?
+     *
+     * The tick file is the record of having been asked. The rootfs is the
+     * grandfather clause: a guest built before the chooser existed was built
+     * with all four apps, and asking its owner to choose now would be asking
+     * about a decision taken for them long ago — one this screen could not
+     * reverse anyway, since unticking never removes anything.
+     *
+     * The ROOTFS and not {@code state.env}, which is the obvious test and the
+     * wrong one: {@link LinuxService#reset} recreates state.env as its first
+     * act, so a reinstall asked for by someone who has never been through the
+     * chooser would have skipped straight past it into a full download.
+     *
+     * Everything that starts an install is gated on this — see
+     * {@link LinuxService#provision(Context)} — so the ~1.5 GB download cannot
+     * begin behind a question the user has not been shown yet.
+     */
+    static boolean needsAppChoice(Context ctx) {
+        if (appsFile(ctx).exists()) return false;
+        return !new File(root(ctx), "rootfs").isDirectory();
+    }
+
+    /**
+     * The selection, as the setup script wants it: space-separated ids in
+     * {@link #GUEST_APPS} order, or {@link #NO_APPS}.
+     *
+     * Defaults to everything when nothing was ever stored. That default is what
+     * makes this invisible to every container that predates it, and it is also
+     * the honest answer for a bare-shell run of the script.
+     */
+    static String apps(Context ctx) {
+        String stored = readText(appsFile(ctx)).trim();
+        return stored.isEmpty() ? allApps() : stored;
+    }
+
+    /** Did the user tick this id? */
+    static boolean wantsApp(Context ctx, String id) {
+        return (" " + apps(ctx) + " ").contains(" " + id + " ");
+    }
+
+    /**
+     * Record the tick list. Canonical order and canonical spelling, because the
+     * string is compared against the script's echo of it — see {@link #allApps}.
+     *
+     * A write that fails is logged and otherwise survivable: {@link #apps}
+     * falls back to everything, which is the pre-chooser behaviour, and
+     * {@code state.env} appears a moment later so the question is not asked
+     * twice. Losing a preference is worth far less than refusing to install.
+     */
+    static void setApps(Context ctx, java.util.Collection<String> picked) {
+        StringBuilder sb = new StringBuilder();
+        for (String[] app : GUEST_APPS) {
+            if (!picked.contains(app[0])) continue;
+            if (sb.length() > 0) sb.append(' ');
+            sb.append(app[0]);
+        }
+        String sel = sb.length() == 0 ? NO_APPS : sb.toString();
+        try (java.io.FileOutputStream out = new java.io.FileOutputStream(appsFile(ctx))) {
+            out.write(sel.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        } catch (Exception e) {
+            DexLog.warn("linux", "could not store the app selection", e);
+            return;
+        }
+        DexLog.step("linux", "apps selected: " + sel);
+    }
+
+    /**
+     * The selection the guest was actually BUILT with — the setup script writes
+     * it as its last act, next to {@code state.env}.
+     *
+     * Absent means a container built before the chooser existed, which is
+     * everything. Reading it as anything else would put every one of those
+     * through a provisioning pass to discover they were already right.
+     */
+    private static String appsBuilt(Context ctx) {
+        String done = readText(new File(root(ctx), "apps.done")).trim();
+        return done.isEmpty() ? allApps() : done;
     }
 
     /** The folder Android and the guest share, under Documents/. */
@@ -394,6 +542,12 @@ final class Linux {
         // -b source — an unusable path here would stop the container starting
         // rather than cost it a folder.
         if (ensureSharedDir()) env.put("LINUX_SHARED", sharedDir().getAbsolutePath());
+        // The chooser's tick list. ALWAYS set, and never to the empty string:
+        // the script treats an UNSET LINUX_APPS as "everything" so that a bare
+        // shell run still builds a full guest, and an empty value would be
+        // indistinguishable from "the user ticked nothing". That is what
+        // NO_APPS is for.
+        env.put("LINUX_APPS", apps(ctx));
         return env;
     }
 
@@ -447,12 +601,29 @@ final class Linux {
         // the storage back; provision-on-launch would otherwise hand them the
         // download again three seconds after the next desktop start.
         if (isUninstalled(ctx)) return false;
+        // Nothing may be provisioned until the user has said what to install.
+        // The desktop kicks this three seconds into every launch, so without
+        // the gate the download would start behind a question that has not
+        // been asked — and then the chooser would be choosing for a container
+        // that was already being built.
+        if (needsAppChoice(ctx)) return false;
         Status st = readStatus(ctx);
         if (st.version != PAYLOAD_VERSION
                 || !"ready".equals(st.phase)
                 || st.features < FEATURE_LEVEL) {
             return true;
         }
+        // A selection that no longer matches what the guest was built with —
+        // the chooser is reachable again from the Linux tile, and a guest that
+        // is otherwise `ready` would never run the setup script again to
+        // honour a newly ticked app. Compared against what the SCRIPT echoed
+        // back, not against a flag we set ourselves, so a run that died before
+        // finishing is not mistaken for one that did.
+        if (!apps(ctx).equals(appsBuilt(ctx))) return true;
+        // VS Code was not asked for, so its stamp says nothing about whether
+        // there is work left. Without this the test below would read a missing
+        // stamp as an unsettled install and provision on every single launch.
+        if (!wantsApp(ctx, "code")) return false;
         // An optional install that has neither succeeded nor been given up on
         // at THIS feature level. Without it the guest reaches `ready` and
         // provisioning never runs again — so VS Code's "it retries on the next

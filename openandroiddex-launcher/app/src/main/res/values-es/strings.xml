@@ -355,6 +355,21 @@
     <string name="st_scope_stream">Ajustes de stream y portapapeles</string>
 
     <string name="ln_label">LinuxOnDroid</string>
+    <!-- Linux: what goes into the container, asked before the download starts -->
+    <string name="ln_apps_title">Elige qué instalar</string>
+    <string name="ln_apps_body">Ubuntu y el escritorio XFCE se instalan siempre. Desmarca lo que no quieras y no se descargará.</string>
+    <string name="ln_apps_body_again">Ubuntu y el escritorio XFCE ya están instalados. Marca lo que quieras añadir. Desmarcar no borra lo que ya está ahí.</string>
+    <string name="ln_apps_firefox">Firefox</string>
+    <string name="ln_apps_firefox_sub">Navegador web de Mozilla. Una descarga grande.</string>
+    <string name="ln_apps_chromium">Chromium</string>
+    <string name="ln_apps_chromium_sub">Navegador web. Una descarga grande.</string>
+    <string name="ln_apps_code">Visual Studio Code</string>
+    <string name="ln_apps_code_sub">Editor de código de Microsoft. La descarga más grande de aquí.</string>
+    <string name="ln_apps_git">Git</string>
+    <string name="ln_apps_git_sub">Pequeño. VS Code lo necesita para el panel de control de código fuente.</string>
+    <string name="ln_apps_go">Instalar</string>
+    <string name="ln_apps_go_none">Instalar solo Ubuntu</string>
+    <string name="ln_apps_menu">Elegir apps de Linux…</string>
     <string name="ln_installing">Instalando Ubuntu…</string>
     <string name="ln_waiting">Esperando a que la aplicación de escritorio inicie la instalación…</string>
     <string name="ln_starting">Iniciando el escritorio Linux…</string>

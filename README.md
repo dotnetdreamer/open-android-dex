@@ -78,9 +78,11 @@ else you have installed.
 This is Ubuntu 24.04 with a full desktop, running on the phone itself, in a
 window on your screen. Not a terminal.
 
-Firefox, Chromium, VS Code, git and SSH are already installed. There is a shared
-folder so files move between Android and Linux without any fuss. No root, and no
-long setup guide to follow. Press the button and let it download.
+Before it starts downloading it asks what you want in it: Firefox, Chromium,
+VS Code and git. All four are ticked, so you can just press Install and get the
+lot — or untick the ones you will not use and save the download. There is a
+shared folder so files move between Android and Linux without any fuss. No root,
+and no long setup guide to follow.
 
 ![Ubuntu 24.04 with XFCE running in a resizable window on the desktop](doc/img/linux.png)
 

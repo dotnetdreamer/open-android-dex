@@ -355,6 +355,21 @@
     <string name="st_scope_stream">स्ट्रीम और क्लिपबोर्ड सेटिंग्स</string>
 
     <string name="ln_label">LinuxOnDroid</string>
+    <!-- Linux: what goes into the container, asked before the download starts -->
+    <string name="ln_apps_title">चुनें कि क्या इंस्टॉल करना है</string>
+    <string name="ln_apps_body">उबंटू और XFCE डेस्कटॉप हमेशा इंस्टॉल होते हैं. जो नहीं चाहिए उसका टिक हटा दें, वह डाउनलोड नहीं होगा.</string>
+    <string name="ln_apps_body_again">उबंटू और XFCE डेस्कटॉप पहले से इंस्टॉल हैं. जो जोड़ना हो उसे टिक करें. टिक हटाने से पहले से लगा हुआ कुछ नहीं हटता.</string>
+    <string name="ln_apps_firefox">Firefox</string>
+    <string name="ln_apps_firefox_sub">मोज़िला का वेब ब्राउज़र. बड़ा डाउनलोड.</string>
+    <string name="ln_apps_chromium">Chromium</string>
+    <string name="ln_apps_chromium_sub">वेब ब्राउज़र. बड़ा डाउनलोड.</string>
+    <string name="ln_apps_code">Visual Studio Code</string>
+    <string name="ln_apps_code_sub">माइक्रोसॉफ़्ट का कोड एडिटर. यहाँ सबसे बड़ा डाउनलोड.</string>
+    <string name="ln_apps_git">Git</string>
+    <string name="ln_apps_git_sub">छोटा. VS Code को सोर्स कंट्रोल पैनल के लिए यह चाहिए.</string>
+    <string name="ln_apps_go">इंस्टॉल करें</string>
+    <string name="ln_apps_go_none">सिर्फ़ उबंटू इंस्टॉल करें</string>
+    <string name="ln_apps_menu">लिनक्स ऐप चुनें…</string>
     <string name="ln_installing">Ubuntu इंस्टॉल हो रहा है…</string>
     <string name="ln_waiting">डेस्कटॉप ऐप के इंस्टॉल शुरू करने की प्रतीक्षा है…</string>
     <string name="ln_starting">Linux डेस्कटॉप शुरू हो रहा है…</string>

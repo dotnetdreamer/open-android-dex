@@ -13,12 +13,14 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.HandlerThread;
 import android.os.Looper;
+import android.text.InputType;
 import android.text.TextUtils;
 import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.KeyEvent;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.inputmethod.EditorInfo;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.FrameLayout;
@@ -67,6 +69,8 @@ public class DockerActivity extends Activity {
     private static final long START_RETRY_MS = 15_000;
     /** Same idea for provisioning, which is far longer and far less frequent. */
     private static final long PROVISION_RETRY_MS = 60_000;
+    /** Gap between console attach attempts, so a missing socket is not a spin. */
+    private static final long CONSOLE_RETRY_MS = 3_000;
 
     private static final int PANE_CONTAINERS = 0;
     private static final int PANE_IMAGES = 1;
@@ -91,7 +95,8 @@ public class DockerActivity extends Activity {
     private ScrollView consoleScroll;
     private EditText consoleInput;
 
-    private long startSentAt;
+    /** Volatile: written by the poll thread, read by {@link #render} on main. */
+    private volatile long startSentAt;
     private long provisionSentAt;
     /** When the VM was first seen alive, for the "… (42s)" on the slow stages. */
     private long runningSince;
@@ -100,6 +105,10 @@ public class DockerActivity extends Activity {
     private String lastSignature = "";
 
     private ConsoleLink console;
+    /** Earliest elapsed-time we may try to attach again; see {@link #attachConsole}. */
+    private long consoleRetryAt;
+    /** So a console that simply is not there says so once, not once per poll. */
+    private boolean saidDetached;
 
     /**
      * The caption's ✕ arrives here rather than removing the task, so the
@@ -282,8 +291,9 @@ public class DockerActivity extends Activity {
         if (poll == null) return;
         Docker.Status st = Docker.readStatus(this);
         long now = android.os.SystemClock.elapsedRealtime();
+        boolean provisioning = Docker.needsProvision(this);
 
-        if (Docker.needsProvision(this)) {
+        if (provisioning) {
             // On a cooldown rather than once, and rather than "only while the
             // phase is not already pushing": a service killed mid-download
             // leaves that phase behind forever, and a window that trusted it
@@ -322,12 +332,22 @@ public class DockerActivity extends Activity {
         // console is the Console tab's business, not the header's.
         String tail = (st.running && engineVersion == null) ? lastConsoleLine() : "";
 
+        // Whether START is already on its way. The cooldown above IS the answer:
+        // while it holds, this window has sent a start and every further press
+        // is swallowed, and it keeps being refreshed for as long as the poll
+        // goes on retrying — so it stays true across the whole boot rather than
+        // expiring in the middle of one. A machine that stopped on its own or
+        // failed clears it, because then the button is the way back.
+        boolean pending = !st.running && !st.died && !"error".equals(st.phase)
+                && (provisioning || now - startSentAt < START_RETRY_MS);
+
         final Docker.Status fst = st;
         final String fver = engineVersion;
         final List<DockerApi.Container> fc = containers;
         final List<DockerApi.Image> fi = images;
         final String ftail = tail;
-        main.post(() -> render(fst, fver, fc, fi, ftail));
+        final boolean fpending = pending;
+        main.post(() -> render(fst, fver, fc, fi, ftail, fpending));
 
         poll.postDelayed(this::tick, POLL_MS);
     }
@@ -390,9 +410,13 @@ public class DockerActivity extends Activity {
 
     private void render(Docker.Status st, String version,
                         List<DockerApi.Container> containers, List<DockerApi.Image> images,
-                        String tail) {
+                        String tail, boolean pending) {
         boolean up = st.running && version != null;
-        powerBtn.setText(getString(st.running ? R.string.dk_stop : R.string.dk_start));
+        if (pending) {
+            powerPending();
+        } else {
+            powerLive(st.running ? R.string.dk_stop : R.string.dk_start);
+        }
 
         if (st.running) {
             if (runningSince == 0) runningSince = android.os.SystemClock.elapsedRealtime();
@@ -432,6 +456,10 @@ public class DockerActivity extends Activity {
         }
         detailLine.setText(tail);
         detailLine.setVisibility(tail.isEmpty() ? View.GONE : View.VISIBLE);
+
+        // Above the early-out below: whether the console is attached has
+        // nothing to do with whether the container list changed.
+        if (pane == PANE_CONSOLE) attachConsole();
 
         // A repaint of a list the user might be scrolling is worse than a
         // slightly stale one, so only rebuild when something actually moved.
@@ -602,6 +630,11 @@ public class DockerActivity extends Activity {
         consoleView.setTextSize(TypedValue.COMPLEX_UNIT_PX, sp(11));
         consoleView.setPadding(dp(12), dp(8), dp(12), dp(8));
         consoleView.setTextIsSelectable(true);
+        // Selectable text is FOCUSABLE text, and this view is first in the pane,
+        // so it takes the initial focus and then eats every key typed into the
+        // window — a TextView has nowhere to put them. Anything that means text
+        // is handed on to the entry field, focus and all.
+        consoleView.setOnKeyListener((v, code, ev) -> typedAtScrollback(ev));
         consoleScroll.addView(consoleView);
         wrap.addView(consoleScroll, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
@@ -612,14 +645,34 @@ public class DockerActivity extends Activity {
 
         consoleInput = new EditText(this);
         consoleInput.setHint(R.string.dk_console_hint);
+        // A command line, so no suggestions and no autocorrect: an IME that
+        // helpfully capitalises a flag or "corrects" node:alpine sends the wrong
+        // thing. Input type before setSingleLine, which derives from it.
+        consoleInput.setInputType(InputType.TYPE_CLASS_TEXT
+                | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
         consoleInput.setSingleLine(true);
+        consoleInput.setImeOptions(EditorInfo.IME_ACTION_SEND);
         consoleInput.setTypeface(Typeface.MONOSPACE);
         consoleInput.setTextColor(theme.text);
         consoleInput.setHintTextColor(theme.textFaint);
         consoleInput.setBackground(theme.surface(theme.field, dp(8)));
         consoleInput.setPadding(dp(10), dp(8), dp(10), dp(8));
+        // Enter arrives by two routes and a listener for one leaves the other
+        // dead: a physical keyboard — which is most of this desktop — sends a
+        // key event, an IME never does and sends an editor action instead.
         consoleInput.setOnKeyListener((v, code, ev) -> {
-            if (ev.getAction() == KeyEvent.ACTION_DOWN && code == KeyEvent.KEYCODE_ENTER) {
+            if (ev.getAction() == KeyEvent.ACTION_DOWN
+                    && (code == KeyEvent.KEYCODE_ENTER
+                        || code == KeyEvent.KEYCODE_NUMPAD_ENTER)) {
+                sendConsoleLine();
+                return true;
+            }
+            return false;
+        });
+        consoleInput.setOnEditorActionListener((v, action, ev) -> {
+            if (action == EditorInfo.IME_ACTION_SEND
+                    || action == EditorInfo.IME_ACTION_DONE
+                    || action == EditorInfo.IME_NULL) {
                 sendConsoleLine();
                 return true;
             }
@@ -633,7 +686,29 @@ public class DockerActivity extends Activity {
         entry.addView(send);
 
         wrap.addView(entry);
+        // Posted rather than called: the framework hands initial focus to the
+        // first focusable view during the first traversal, which has not
+        // happened yet, and would take it straight back off the field.
+        consoleInput.post(consoleInput::requestFocus);
         return wrap;
+    }
+
+    /**
+     * A key that landed on the scrollback instead of the entry field.
+     *
+     * Only keys that mean text move the focus. Arrows and Ctrl chords stay where
+     * they are, so selecting and copying an error message out of the log still
+     * works — that is what the scrollback is focusable for in the first place.
+     */
+    private boolean typedAtScrollback(KeyEvent ev) {
+        if (ev.getAction() != KeyEvent.ACTION_DOWN) return false;
+        if (consoleInput == null || consoleInput.hasFocus()) return false;
+        if (ev.isCtrlPressed() || ev.isAltPressed() || ev.isMetaPressed()) return false;
+        boolean text = ev.getUnicodeChar(ev.getMetaState()) != 0
+                || ev.getKeyCode() == KeyEvent.KEYCODE_DEL;
+        if (!text) return false;
+        consoleInput.requestFocus();
+        return consoleInput.dispatchKeyEvent(ev);
     }
 
     // ── console link ──
@@ -650,47 +725,93 @@ public class DockerActivity extends Activity {
      */
     private final class ConsoleLink extends Thread {
         private volatile boolean closed;
-        private LocalSocket sock;
+        /** Volatile: {@link #write} reads it from the main thread. */
+        private volatile LocalSocket sock;
+        /** Set by the first byte the guest sends back; see {@link #probe}. */
+        private volatile boolean heard;
 
         @Override
         public void run() {
+            LocalSocket s = new LocalSocket();
             try {
-                LocalSocket s = new LocalSocket();
                 s.connect(new LocalSocketAddress(
                         Docker.consoleSocket(DockerActivity.this).getAbsolutePath(),
                         LocalSocketAddress.Namespace.FILESYSTEM));
                 sock = s;
+                if (closed) return; // closed while we were still connecting
+                probe();
                 byte[] buf = new byte[4096];
                 int n;
                 while (!closed && (n = s.getInputStream().read(buf)) > 0) {
+                    heard = true;
                     final String chunk = new String(buf, 0, n,
                             java.nio.charset.StandardCharsets.UTF_8);
                     main.post(() -> appendConsole(chunk));
                 }
             } catch (Exception e) {
-                if (!closed) {
-                    main.post(() -> appendConsole(
-                            "\n[" + getString(R.string.dk_console_detached) + "]\n"));
+                if (!closed) DexLog.warn("docker", "console link failed", e);
+            } finally {
+                // The socket is closed HERE, on every exit, and that is the
+                // load-bearing line in this class. The chardev in QEMU serves
+                // ONE client and stops accepting while it has one, so a link
+                // leaked by a close() that raced the connect, or by a read loop
+                // that simply ended, holds the slot for the life of the
+                // process. Every later attach then lands in the listen backlog,
+                // where connect() succeeds, reads never return and writes go
+                // nowhere: a console that worked once and was silent forever
+                // after, with nothing anywhere saying why.
+                try {
+                    s.close();
+                } catch (Exception ignored) {
                 }
+                main.post(() -> {
+                    if (console != this) return;
+                    console = null;
+                    if (!closed) {
+                        appendConsole("\n[" + getString(R.string.dk_console_detached) + "]\n");
+                    }
+                });
             }
         }
 
-        void write(String line) {
+        /**
+         * Prove the pipe carries in both directions before the user finds out
+         * the hard way.
+         *
+         * A bare newline costs the guest one fresh prompt and nothing else, and
+         * a console that is genuinely attached answers within milliseconds —
+         * the shell on ttyAMA0 echoes what it is given. Silence means our bytes
+         * are going into a socket nobody is reading.
+         */
+        private void probe() {
+            write("");
+            main.postDelayed(() -> {
+                if (closed || heard || console != this) return;
+                appendConsole("\n[" + getString(R.string.dk_console_silent) + "]\n");
+            }, 2000);
+        }
+
+        /** @return null when the line left, else why it did not. */
+        String write(String line) {
             LocalSocket s = sock;
-            if (s == null) return;
+            if (s == null) return getString(R.string.dk_console_detached);
             try {
                 OutputStream out = s.getOutputStream();
                 out.write((line + "\n").getBytes(java.nio.charset.StandardCharsets.UTF_8));
                 out.flush();
+                return null;
             } catch (Exception e) {
                 DexLog.warn("docker", "console write failed", e);
+                String why = e.getMessage();
+                return why == null ? e.getClass().getSimpleName() : why;
             }
         }
 
         void close() {
             closed = true;
+            LocalSocket s = sock;
             try {
-                if (sock != null) sock.close();
+                if (s != null) s.close();
             } catch (Exception ignored) {
             }
         }
@@ -703,19 +824,42 @@ public class DockerActivity extends Activity {
         if (log.length() > 16000) log = log.substring(log.length() - 16000);
         consoleView.setText(log);
         scrollConsoleDown();
+        saidDetached = false;
+        consoleRetryAt = 0;
+        attachConsole();
+    }
 
+    /**
+     * Attach to the live console unless we already are.
+     *
+     * Separate from the seeding above because the poll calls it too. A VM that
+     * restarts while this pane is open takes its socket with it, and a pane that
+     * attached exactly once would sit there looking perfectly normal, swallowing
+     * everything typed into it, for as long as the window stayed open.
+     */
+    private void attachConsole() {
+        if (console != null || consoleView == null) return;
+        long now = android.os.SystemClock.elapsedRealtime();
+        if (now < consoleRetryAt) return;
+        consoleRetryAt = now + CONSOLE_RETRY_MS;
         if (!Docker.consoleSocket(this).exists()) {
-            appendConsole("\n[" + getString(R.string.dk_console_detached) + "]\n");
+            if (!saidDetached) {
+                saidDetached = true;
+                appendConsole("\n[" + getString(R.string.dk_console_detached) + "]\n");
+            }
             return;
         }
-        console = new ConsoleLink();
-        console.setDaemon(true);
-        console.start();
+        saidDetached = false;
+        ConsoleLink c = new ConsoleLink();
+        console = c;
+        c.setDaemon(true);
+        c.start();
     }
 
     private void closeConsole() {
         ConsoleLink c = console;
         console = null;
+        consoleRetryAt = 0;
         if (c != null) c.close();
     }
 
@@ -735,16 +879,37 @@ public class DockerActivity extends Activity {
         if (consoleScroll != null) consoleScroll.post(() -> consoleScroll.fullScroll(View.FOCUS_DOWN));
     }
 
+    /**
+     * Send what is in the entry field, and say in the pane what happened.
+     *
+     * In the pane rather than a Toast: this window lives on the desktop display
+     * and a text Toast is drawn by the system on its own, so the one warning
+     * this had was being rendered where nobody was looking. Between that, a
+     * write that returned silently when the socket was not up yet, and a guest
+     * that only echoes while it is really listening, a dead console was
+     * pixel-for-pixel identical to a working one.
+     *
+     * Split on newlines because pasting is a normal way to get a command in
+     * here, and a single-line field otherwise turns a pasted block into one
+     * unrunnable run-on line.
+     */
     private void sendConsoleLine() {
         if (consoleInput == null) return;
+        String text = consoleInput.getText().toString();
+        attachConsole(); // in case the link dropped while the pane sat open
         ConsoleLink c = console;
-        String line = consoleInput.getText().toString();
         if (c == null) {
-            Toast.makeText(this, R.string.dk_console_detached, Toast.LENGTH_SHORT).show();
+            appendConsole("\n[" + getString(R.string.dk_console_detached) + "]\n");
             return;
         }
         consoleInput.setText("");
-        c.write(line);
+        for (String line : text.split("\r?\n")) {
+            String why = c.write(line);
+            if (why != null) {
+                appendConsole("\n[" + getString(R.string.dk_console_not_sent, why) + "]\n");
+                return;
+            }
+        }
     }
 
     // ── actions ──
@@ -758,7 +923,33 @@ public class DockerActivity extends Activity {
         long now = android.os.SystemClock.elapsedRealtime();
         if (now - startSentAt < START_RETRY_MS) return;
         startSentAt = now;
+        // Now, not on the next poll. Two seconds of a live Start button that
+        // has already been pressed and will ignore the next press is how this
+        // read as broken: the press has to change something the moment it lands.
+        powerPending();
         DockerService.start(this);
+    }
+
+    /**
+     * The power button while the machine is on its way up.
+     *
+     * Disabled rather than merely relabelled, because the press really is a
+     * no-op here — {@link #onPower} swallows it under the same cooldown that
+     * keeps the poll from booting a second VM — and an hourglass over a button
+     * that answers nothing is the difference between "working" and "broken".
+     */
+    private void powerPending() {
+        powerBtn.setText(getString(R.string.dk_starting));
+        powerBtn.setEnabled(false);
+        powerBtn.setAlpha(0.5f);
+        DexCursors.apply(powerBtn, DexCursors.ROLE_WAIT);
+    }
+
+    private void powerLive(int label) {
+        powerBtn.setText(getString(label));
+        powerBtn.setEnabled(true);
+        powerBtn.setAlpha(1f);
+        DexCursors.apply(powerBtn, DexCursors.ROLE_HAND);
     }
 
     private void engineCall(java.util.concurrent.Callable<Boolean> call) {

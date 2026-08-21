@@ -355,6 +355,21 @@
     <string name="st_scope_stream">સ્ટ્રીમ અને ક્લિપબોર્ડ સેટિંગ્સ</string>
 
     <string name="ln_label">LinuxOnDroid</string>
+    <!-- Linux: what goes into the container, asked before the download starts -->
+    <string name="ln_apps_title">શું ઇન્સ્ટોલ કરવું તે પસંદ કરો</string>
+    <string name="ln_apps_body">ઉબુન્તુ અને XFCE ડેસ્કટોપ હમેશા ઇન્સ્ટોલ થાય છે. જે ન જોઈએ તેનું ટિક હટાવો, તે ડાઉનલોડ નહીં થાય.</string>
+    <string name="ln_apps_body_again">ઉબુન્તુ અને XFCE ડેસ્કટોપ પહેલેથી ઇન્સ્ટોલ છે. જે ઉમેરવું હોય તેને ટિક કરો. ટિક હટાવવાથી પહેલેથી ઇન્સ્ટોલ કરેલું દૂર થતું નથી.</string>
+    <string name="ln_apps_firefox">Firefox</string>
+    <string name="ln_apps_firefox_sub">મોઝિલાનું વેબ બ્રાઉઝર. મોટું ડાઉનલોડ.</string>
+    <string name="ln_apps_chromium">Chromium</string>
+    <string name="ln_apps_chromium_sub">વેબ બ્રાઉઝર. મોટું ડાઉનલોડ.</string>
+    <string name="ln_apps_code">Visual Studio Code</string>
+    <string name="ln_apps_code_sub">માઇક્રોસોફ્ટનું કોડ એડિટર. અહીંનું સેવાથી મોટું ડાઉનલોડ.</string>
+    <string name="ln_apps_git">Git</string>
+    <string name="ln_apps_git_sub">નાનું. VS Code ને સોર્સ કંટ્રોલ પેનલ માટે જરૂર છે.</string>
+    <string name="ln_apps_go">ઇન્સ્ટોલ કરો</string>
+    <string name="ln_apps_go_none">ફક્ત ઉબુન્તુ ઇન્સ્ટોલ કરો</string>
+    <string name="ln_apps_menu">લિનક્સ એપ પસંદ કરો…</string>
     <string name="ln_installing">Ubuntu ઇન્સ્ટૉલ થઈ રહ્યું છે…</string>
     <string name="ln_waiting">ડેસ્કટોપ ઍપ ઇન્સ્ટૉલ શરૂ કરે તેની રાહ જોવાય છે…</string>
     <string name="ln_starting">Linux ડેસ્કટોપ શરૂ થઈ રહ્યું છે…</string>

@@ -355,6 +355,21 @@
     <string name="st_scope_stream">Opções de stream e área de transferência</string>
 
     <string name="ln_label">LinuxOnDroid</string>
+    <!-- Linux: what goes into the container, asked before the download starts -->
+    <string name="ln_apps_title">Escolha o que instalar</string>
+    <string name="ln_apps_body">O Ubuntu e o ambiente de trabalho XFCE entram sempre. Desmarque o que não quiser e não será transferido.</string>
+    <string name="ln_apps_body_again">O Ubuntu e o ambiente de trabalho XFCE já estão instalados. Marque o que quiser acrescentar. Desmarcar não remove o que já lá está.</string>
+    <string name="ln_apps_firefox">Firefox</string>
+    <string name="ln_apps_firefox_sub">Navegador da Mozilla. Uma transferência grande.</string>
+    <string name="ln_apps_chromium">Chromium</string>
+    <string name="ln_apps_chromium_sub">Navegador. Uma transferência grande.</string>
+    <string name="ln_apps_code">Visual Studio Code</string>
+    <string name="ln_apps_code_sub">Editor de código da Microsoft. A maior transferência aqui.</string>
+    <string name="ln_apps_git">Git</string>
+    <string name="ln_apps_git_sub">Pequeno. O VS Code precisa dele para o painel de controlo de origem.</string>
+    <string name="ln_apps_go">Instalar</string>
+    <string name="ln_apps_go_none">Instalar apenas o Ubuntu</string>
+    <string name="ln_apps_menu">Escolher aplicações Linux…</string>
     <string name="ln_installing">Instalando o Ubuntu…</string>
     <string name="ln_waiting">Aguardando o aplicativo do computador iniciar a instalação…</string>
     <string name="ln_starting">Iniciando o desktop Linux…</string>

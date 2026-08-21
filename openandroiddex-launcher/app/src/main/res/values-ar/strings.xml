@@ -355,6 +355,21 @@
     <string name="st_scope_stream">إعدادات البث والحافظة</string>
 
     <string name="ln_label">LinuxOnDroid</string>
+    <!-- Linux: what goes into the container, asked before the download starts -->
+    <string name="ln_apps_title">اختر ما تريد تثبيته</string>
+    <string name="ln_apps_body">أوبونتو وسطح مكتب XFCE يُثبتان دائمًا. أزل العلامة عن أي شيء لا تريده ولن يُنزّل.</string>
+    <string name="ln_apps_body_again">أوبونتو وسطح مكتب XFCE مثبتان بالفعل. حدد ما تريد إضافته. إزالة العلامة لا تحذف ما هو مثبت بالفعل.</string>
+    <string name="ln_apps_firefox">Firefox</string>
+    <string name="ln_apps_firefox_sub">متصفح ويب من موزيلا. تنزيل كبير.</string>
+    <string name="ln_apps_chromium">Chromium</string>
+    <string name="ln_apps_chromium_sub">متصفح ويب. تنزيل كبير.</string>
+    <string name="ln_apps_code">Visual Studio Code</string>
+    <string name="ln_apps_code_sub">محرر أكواد من مايكروسوفت. أكبر تنزيل هنا.</string>
+    <string name="ln_apps_git">Git</string>
+    <string name="ln_apps_git_sub">صغير. يحتاجه VS Code للوحة التحكم بالمصادر.</string>
+    <string name="ln_apps_go">تثبيت</string>
+    <string name="ln_apps_go_none">تثبيت أوبونتو فقط</string>
+    <string name="ln_apps_menu">اختيار تطبيقات لينكس…</string>
     <string name="ln_installing">جارٍ تثبيت Ubuntu…</string>
     <string name="ln_waiting">في انتظار أن يبدأ تطبيق سطح المكتب التثبيت…</string>
     <string name="ln_starting">جارٍ تشغيل سطح مكتب Linux…</string>

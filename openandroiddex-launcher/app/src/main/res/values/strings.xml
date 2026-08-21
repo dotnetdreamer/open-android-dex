@@ -411,6 +411,21 @@
          around it still says "Linux" where it means the operating system or the
          session rather than this app. -->
     <string name="ln_label">LinuxOnDroid</string>
+    <!-- Linux: what goes into the container, asked before the download starts -->
+    <string name="ln_apps_title">Choose what to install</string>
+    <string name="ln_apps_body">Ubuntu and the XFCE desktop always go in. Untick anything you do not want and it will not be downloaded.</string>
+    <string name="ln_apps_body_again">Ubuntu and the XFCE desktop are already installed. Tick anything you want added. Unticking does not remove what is already there.</string>
+    <string name="ln_apps_firefox">Firefox</string>
+    <string name="ln_apps_firefox_sub">Web browser from Mozilla. A large download.</string>
+    <string name="ln_apps_chromium">Chromium</string>
+    <string name="ln_apps_chromium_sub">Web browser. A large download.</string>
+    <string name="ln_apps_code">Visual Studio Code</string>
+    <string name="ln_apps_code_sub">Code editor from Microsoft. The biggest download here.</string>
+    <string name="ln_apps_git">Git</string>
+    <string name="ln_apps_git_sub">Small. VS Code needs it for the Source Control panel.</string>
+    <string name="ln_apps_go">Install</string>
+    <string name="ln_apps_go_none">Install Ubuntu only</string>
+    <string name="ln_apps_menu">Choose Linux apps…</string>
     <string name="ln_installing">Installing Ubuntu…</string>
     <string name="ln_waiting">Waiting for the desktop app to start the install…</string>
     <string name="ln_starting">Starting Linux desktop…</string>
@@ -468,6 +483,7 @@ If you switch this off again later, Android force-closes Linux and the desktop r
     <string name="dk_error">Docker setup failed</string>
     <string name="dk_start">Start</string>
     <string name="dk_stop">Stop</string>
+    <string name="dk_starting">Starting…</string>
     <string name="dk_tab_containers">Containers</string>
     <string name="dk_tab_images">Images</string>
     <string name="dk_tab_console">Console</string>
@@ -484,6 +500,8 @@ If you switch this off again later, Android force-closes Linux and the desktop r
     <string name="dk_console_hint">Type a command, e.g. docker run hello-world</string>
     <string name="dk_console_send">Send</string>
     <string name="dk_console_detached">console not attached</string>
+    <string name="dk_console_silent">the VM is not answering this console — it may still be booting, or another window still holds it</string>
+    <string name="dk_console_not_sent">not sent — %1$s</string>
     <string name="dk_close_title">Stop Docker?</string>
     <string name="dk_close_body">This shuts the whole machine down, so every running container stops with it. Images, volumes and containers themselves are kept. To put this aside and leave your containers running, minimise the window instead.</string>
     <string name="dk_close_stop">Stop</string>
