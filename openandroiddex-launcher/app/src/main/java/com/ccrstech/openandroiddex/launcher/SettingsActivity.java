@@ -72,6 +72,7 @@ public class SettingsActivity extends Activity {
     private static final String SEC_LANGUAGE = "language";
     private static final String SEC_WALLPAPER = "wallpaper";
     private static final String SEC_WINDOWS = "windows";
+    private static final String SEC_NOTIFICATIONS = "notifications";
     private static final String SEC_MOUSE = "mouse";
     private static final String SEC_TOUCHPAD = "touchpad";
     private static final String SEC_STREAM = "stream";
@@ -269,7 +270,12 @@ public class SettingsActivity extends Activity {
                 R.string.st_darkness}));
         navs.add(new Nav(SEC_WINDOWS, R.string.st_nav_windows, R.string.st_nav_windows_sub,
                 "🪟", 0xFFfb923c, new int[]{R.string.st_launch_mode,
-                R.string.st_window_size, R.string.st_icon_size}));
+                R.string.st_window_size, R.string.st_icon_size,
+                R.string.st_window_memory}));
+        navs.add(new Nav(SEC_NOTIFICATIONS, R.string.st_nav_notifications,
+                R.string.st_nav_notifications_sub,
+                "🔔", 0xFFf87171, new int[]{R.string.st_notif_show, R.string.st_notif_popup,
+                R.string.st_notif_calls, R.string.st_notif_access}));
         navs.add(new Nav(SEC_MOUSE, R.string.st_nav_mouse, R.string.st_nav_mouse_sub,
                 "➤", 0xFFf472b6, new int[]{R.string.st_cursor_style,
                 R.string.st_cursor_size, R.string.st_cursor_color, R.string.st_cursor_outline,
@@ -281,7 +287,7 @@ public class SettingsActivity extends Activity {
         navs.add(new Nav(SEC_STREAM, R.string.st_nav_stream, R.string.st_nav_stream_sub,
                 "🎞", 0xFFf59e0b, new int[]{R.string.st_resolution, R.string.st_codec,
                 R.string.st_encoder, R.string.st_bitrate, R.string.st_fps,
-                R.string.st_audio_forward}));
+                R.string.st_audio_output}));
         navs.add(new Nav(SEC_CLIPBOARD, R.string.st_nav_clipboard, R.string.st_nav_clipboard_sub,
                 "📋", 0xFF4ade80, new int[]{R.string.st_clip_sync, R.string.st_clip_current,
                 R.string.st_clip_history}));
@@ -547,6 +553,9 @@ public class SettingsActivity extends Activity {
                 break;
             case SEC_WINDOWS:
                 buildWindowsSection(body);
+                break;
+            case SEC_NOTIFICATIONS:
+                buildNotificationsSection(body);
                 break;
             case SEC_MOUSE:
                 buildMouseSection(body);
@@ -1351,7 +1360,114 @@ public class SettingsActivity extends Activity {
                 showSection(SEC_WINDOWS, false);
             });
         }
+
+        // Below the launch mode, because that is the relationship: the mode is
+        // what an app gets until it has been moved, and this is what happens
+        // after it has.
+        LinearLayout memoryCard = card(body);
+        boolean remembering = WindowMemory.enabled(this);
+        toggleRow(memoryCard, s(R.string.st_window_memory), s(R.string.st_window_memory_sub),
+                remembering, true, on -> {
+                    DexPrefs.put(this, DexPrefs.KEY_WINDOW_MEMORY, on);
+                    showSection(SEC_WINDOWS, false);
+                });
+        if (remembering) {
+            int count = WindowMemory.count(this);
+            // The count is the row's whole point: it says whether there is
+            // anything to forget before the user taps a button that cannot be
+            // undone, and it is the only feedback that the feature is working.
+            actionRow(memoryCard, "↺", 0xFFf87171, s(R.string.st_window_memory_forget),
+                    count > 0 ? getString(R.string.st_window_memory_count, count)
+                            : s(R.string.st_window_memory_none),
+                    () -> {
+                        WindowMemory.forget(this);
+                        Toast.makeText(this, s(R.string.st_window_memory_cleared),
+                                Toast.LENGTH_SHORT).show();
+                        showSection(SEC_WINDOWS, false);
+                    });
+        }
         note(body, s(R.string.st_windows_note));
+    }
+
+    // ── section: Notifications ──
+
+    /**
+     * The phone's notifications on the desktop, and the grant everything here
+     * depends on.
+     *
+     * The access row is FIRST and is not a switch, for the reason the mouse
+     * section puts its rendering card at the top: with no notification access
+     * every control below it is inert, and a pair of switches above a missing
+     * grant reads as a broken feature rather than as one that has not been
+     * turned on. The row is live — it re-reads on every build, so coming back
+     * from the phone's screen shows the new state.
+     */
+    private void buildNotificationsSection(LinearLayout body) {
+        boolean granted = DexNotifications.connected();
+
+        LinearLayout accessCard = card(body);
+        cardHeader(accessCard, s(R.string.st_notif_header));
+        actionRow(accessCard, granted ? "✓" : "!", granted ? theme.positive : 0xFFfacc15,
+                s(R.string.st_notif_access),
+                s(granted ? R.string.st_notif_access_on : R.string.st_notif_access_off),
+                this::openNotificationAccess);
+
+        LinearLayout card = card(body);
+        boolean showing = DexPrefs.getBool(this, DexPrefs.KEY_NOTIFICATIONS,
+                DexPrefs.DEF_NOTIFICATIONS);
+        toggleRow(card, s(R.string.st_notif_show), s(R.string.st_notif_show_sub),
+                showing, true, on -> {
+                    DexPrefs.put(this, DexPrefs.KEY_NOTIFICATIONS, on);
+                    showSection(SEC_NOTIFICATIONS, false);
+                });
+        // Nested under the switch above rather than beside it: a pop-up or a
+        // call banner with notifications off would be the one notification that
+        // still got through, which is not what "off" means.
+        if (showing) {
+            toggleRow(card, s(R.string.st_notif_popup), s(R.string.st_notif_popup_sub),
+                    DexPrefs.getBool(this, DexPrefs.KEY_NOTIF_POPUP, DexPrefs.DEF_NOTIF_POPUP),
+                    false, on -> DexPrefs.put(this, DexPrefs.KEY_NOTIF_POPUP, on));
+            toggleRow(card, s(R.string.st_notif_calls), s(R.string.st_notif_calls_sub),
+                    DexPrefs.getBool(this, DexPrefs.KEY_NOTIF_CALLS, DexPrefs.DEF_NOTIF_CALLS),
+                    false, on -> DexPrefs.put(this, DexPrefs.KEY_NOTIF_CALLS, on));
+        }
+
+        note(body, s(R.string.st_notif_note));
+        note(body, s(R.string.st_notif_media_note));
+    }
+
+    /**
+     * The phone's notification-access screen, in a window on this desktop.
+     *
+     * The per-app deep link where the platform has one (Android 11+), because
+     * the plain list is long and our entry is not near the top of it.
+     */
+    private void openNotificationAccess() {
+        Intent intent = null;
+        if (android.os.Build.VERSION.SDK_INT >= 30) {
+            intent = new Intent(
+                    android.provider.Settings.ACTION_NOTIFICATION_LISTENER_DETAIL_SETTINGS)
+                    .putExtra(
+                            android.provider.Settings
+                                    .EXTRA_NOTIFICATION_LISTENER_COMPONENT_NAME,
+                            DexNotifications.component(this).flattenToString());
+            if (intent.resolveActivity(getPackageManager()) == null) intent = null;
+        }
+        if (intent == null) {
+            intent = new Intent(
+                    android.provider.Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS);
+        }
+        // NEW_TASK plus our own launch bounds, for the reason spelled out on
+        // WidgetDetourActivity: a system screen that joined THIS task would be
+        // given this window's bounds and draw the Settings window inside its
+        // own dialog.
+        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        try {
+            startActivity(intent, desktopOptions());
+        } catch (Exception e) {
+            DexLog.warn("notifications", "cannot open the notification-access screen", e);
+            Toast.makeText(this, s(R.string.lx_notif_grant_failed), Toast.LENGTH_LONG).show();
+        }
     }
 
     // ── section: Mouse & cursor ──
@@ -1406,7 +1522,7 @@ public class SettingsActivity extends Activity {
      */
     private static final String[] GESTURE_VALUES = {
             "none", "openapps", "showdesktop", "nextwindow", "prevwindow",
-            "drawer", "maximize", "home", "back", "notifications",
+            "drawer", "maximize", "home", "back", "notifications", "notifcentre",
     };
 
     /** Index-aligned with {@link #GESTURE_VALUES} — see the note there. */
@@ -1421,6 +1537,7 @@ public class SettingsActivity extends Activity {
             R.string.st_ga_home,
             R.string.st_ga_back,
             R.string.st_ga_notifications,
+            R.string.st_ga_notifcentre,
     };
 
     /**
@@ -1490,6 +1607,10 @@ public class SettingsActivity extends Activity {
             String subtitle = null;
             if ("openapps".equals(value)) subtitle = s(R.string.st_ga_openapps_sub);
             if ("showdesktop".equals(value)) subtitle = s(R.string.st_ga_showdesktop_sub);
+            // These two are one word apart and open adjacent tray flyouts, so
+            // they say which is which rather than leaving the user to try both.
+            if ("notifications".equals(value)) subtitle = s(R.string.st_ga_notifications_sub);
+            if ("notifcentre".equals(value)) subtitle = s(R.string.st_ga_notifcentre_sub);
             choiceRow(card, null, s(GESTURE_LABELS[i]), subtitle, value.equals(current),
                     () -> {
                         if (!enabled) return;
@@ -2246,10 +2367,32 @@ public class SettingsActivity extends Activity {
                     });
         }
 
+        // Where sound plays. A three-way choice rather than the on/off switch
+        // this used to be, because the off state was never the interesting one:
+        // scrcpy's default DIVERTS the phone's audio to the computer instead of
+        // copying it, so the handset goes silent and there was no way to ask
+        // for both. The middle option is that missing answer. The same control
+        // is in the taskbar's quick settings, which is where someone hunting
+        // for missing sound actually looks.
         LinearLayout audioCard = card(body);
-        boolean audio = DexPrefs.getBool(this, DexPrefs.KEY_AUDIO, DexPrefs.DEF_AUDIO);
-        toggleRow(audioCard, s(R.string.st_audio_forward), s(R.string.st_audio_forward_sub),
-                audio, true, on -> pcConfig(DexPrefs.KEY_AUDIO, on.booleanValue()));
+        cardHeader(audioCard, s(R.string.st_audio_output));
+        String mode = DexMedia.audioMode(this);
+        String[][] modes = {
+                {DexMedia.AUDIO_COMPUTER, s(R.string.lx_audio_computer),
+                        s(R.string.st_audio_computer_sub)},
+                {DexMedia.AUDIO_BOTH, s(R.string.lx_audio_both),
+                        s(R.string.st_audio_both_sub)},
+                {DexMedia.AUDIO_PHONE, s(R.string.lx_audio_phone),
+                        s(R.string.st_audio_phone_sub)},
+        };
+        for (String[] entry : modes) {
+            choiceRow(audioCard, null, entry[1], entry[2], entry[0].equals(mode), () -> {
+                // Writes both underlying keys and pushes both to the PC — see
+                // DexMedia.setAudioMode. NOT pcConfig, which is one key.
+                DexMedia.setAudioMode(this, entry[0]);
+                showSection(SEC_STREAM, false);
+            });
+        }
 
         restartFooter(body);
     }
@@ -2507,6 +2650,25 @@ public class SettingsActivity extends Activity {
     private void openUrl(String url) {
         Intent intent = new Intent(Intent.ACTION_VIEW, Uri.parse(url))
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        try {
+            startActivity(intent, desktopOptions());
+        } catch (Exception e) {
+            Toast.makeText(this, s(R.string.st_no_browser), Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    /**
+     * Freeform launch options for a window opened FROM this one — a browser, a
+     * system screen. Anything started without them comes up fullscreen over the
+     * desktop, because bounds alone are not honoured on a decoration-free
+     * display.
+     *
+     * NEW-TASK LAUNCHES ONLY, for the reason
+     * {@link LauncherActivity#desktopWindowOptions} spells out: bounds are
+     * applied to the task the activity resolves into, so handing these to a
+     * start that joins THIS task would resize the Settings window instead.
+     */
+    private android.os.Bundle desktopOptions() {
         Point size = new Point();
         getWindowManager().getDefaultDisplay().getRealSize(size);
         android.app.ActivityOptions opts = android.app.ActivityOptions.makeBasic();
@@ -2522,11 +2684,7 @@ public class SettingsActivity extends Activity {
                     .invoke(opts, 5 /* WINDOWING_MODE_FREEFORM */);
         } catch (Exception ignored) {
         }
-        try {
-            startActivity(intent, opts.toBundle());
-        } catch (Exception e) {
-            Toast.makeText(this, s(R.string.st_no_browser), Toast.LENGTH_SHORT).show();
-        }
+        return opts.toBundle();
     }
 
     // ── exit ──
@@ -2609,8 +2767,18 @@ public class SettingsActivity extends Activity {
                 // with the effects it suppresses: putting the look back to
                 // stock has to include the switch that was hiding it
                 DexPrefs.KEY_PERF));
+        // KEY_WINDOW_GEOMETRY rides in this scope alongside the switch that
+        // fills it: a reset that put the launch mode back to stock and left
+        // every remembered rect in place would look like the reset had not
+        // worked — every app would still open exactly where it used to.
         scopes.add(new ResetScope(R.string.st_scope_windows, DexPrefs.KEY_LAUNCH_MODE,
-                DexPrefs.KEY_WINDOW_SIZE, DexPrefs.KEY_ICON_SIZE));
+                DexPrefs.KEY_WINDOW_SIZE, DexPrefs.KEY_ICON_SIZE,
+                DexPrefs.KEY_WINDOW_MEMORY, DexPrefs.KEY_WINDOW_GEOMETRY));
+        // The GRANT is not in here and cannot be: notification access is the
+        // platform's to hold, not ours, and nothing in this app can give it
+        // back afterwards. Only our own two switches are reset.
+        scopes.add(new ResetScope(R.string.st_scope_notifications, DexPrefs.KEY_NOTIFICATIONS,
+                DexPrefs.KEY_NOTIF_POPUP, DexPrefs.KEY_NOTIF_CALLS));
         // KEY_MOUSE_MODE deliberately lives in the STREAM scope, not here: it
         // is a stream_* key, and runFactoryReset turns any one of those into a
         // blanket "cfg reset.all" on the PC — so putting it here would let
@@ -2627,7 +2795,8 @@ public class SettingsActivity extends Activity {
         // and the two sides would disagree with nothing to reconcile them.
         scopes.add(new ResetScope(R.string.st_scope_stream, DexPrefs.KEY_RESOLUTION,
                 DexPrefs.KEY_BITRATE, DexPrefs.KEY_FPS, DexPrefs.KEY_CODEC,
-                DexPrefs.KEY_ENCODER, DexPrefs.KEY_AUDIO, DexPrefs.KEY_CLIP_SYNC,
+                DexPrefs.KEY_ENCODER, DexPrefs.KEY_AUDIO, DexPrefs.KEY_AUDIO_DUP,
+                DexPrefs.KEY_CLIP_SYNC,
                 DexPrefs.KEY_CLIP_HISTORY, DexPrefs.KEY_MOUSE_MODE,
                 DexPrefs.KEY_GESTURES, DexPrefs.KEY_GESTURE_3UP,
                 DexPrefs.KEY_GESTURE_3DOWN, DexPrefs.KEY_GESTURE_3LEFT,

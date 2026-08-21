@@ -84,6 +84,24 @@
         <intent>
             <action android:name="android.intent.action.VIEW_DOWNLOADS" />
         </intent>
+        <!-- The phone's media-output picker, whichever of these it has. There
+             is no standard one — see DexMedia.openOutputSwitcher for what each
+             is and which phones carry it. Declared here because package
+             visibility hides them all otherwise: the chain would judge every
+             candidate absent and fall through to its last resort on a phone
+             that has the first. -->
+        <intent>
+            <action android:name="android.settings.panel.action.MEDIA_OUTPUT" />
+        </intent>
+        <intent>
+            <action android:name="com.android.systemui.action.LAUNCH_MEDIA_OUTPUT_DIALOG" />
+        </intent>
+        <intent>
+            <action android:name="com.android.systemui.action.OPEN_MEDIA_OUTPUT" />
+        </intent>
+        <intent>
+            <action android:name="android.settings.BLUETOOTH_SETTINGS" />
+        </intent>
     </queries>
 
     <!-- An app with no android:icon gets the platform's default one — the green
@@ -313,6 +331,40 @@
             <meta-data
                 android:name="android.accessibilityservice"
                 android:resource="@xml/caption_service" />
+        </service>
+
+        <!-- The phone's notifications on the desktop, and — through the same
+             grant — the media transport in the quick-settings panel.
+
+             A NotificationListenerService is the ONLY way an ordinary app may
+             read notifications, and MediaSessionManager#getActiveSessions is
+             gated on an enabled listener COMPONENT rather than on a permission
+             of its own, so this one declaration carries both features. That is
+             also why there is no MEDIA_CONTENT_CONTROL here: it is a signature
+             permission a third-party app can never hold, and the listener route
+             is the supported one.
+
+             android:permission is REQUIRED and is the platform's half of the
+             contract: it says only the system may bind us. Without it the
+             service is not recognised as a listener at all and never appears on
+             the notification-access screen.
+
+             android:process — deliberately NONE, unlike LinuxService and
+             DockerService. Its whole audience is in the launcher's process: the
+             taskbar draws the flyout, the call banner is one of the launcher's
+             own overlay windows, and both read the list through plain statics
+             (DexNotifications) rather than over a binder.
+
+             exported is implied by the intent-filter and is correct here — the
+             system is the only caller the permission above admits. -->
+        <service
+            android:name=".DexNotifications"
+            android:exported="true"
+            android:label="@string/app_name"
+            android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
+            <intent-filter>
+                <action android:name="android.service.notification.NotificationListenerService" />
+            </intent-filter>
         </service>
 
         <!-- Owns the whole Linux stack under the app's own uid: downloads +

@@ -14,7 +14,7 @@ import java.util.List;
  * re-arranges every session. This is the other half: {@link CaptionService}
  * watches the freeform tasks it already polls and writes down each one's rect
  * once it stops moving, and {@link LauncherActivity} asks here before it falls
- * back to {@link LauncherActivity#nextWindowBounds()}.
+ * back to {@link LauncherActivity#windowBoundsFor}.
  *
  * The rect is stored WITH the display it was measured on. A desktop's pixel
  * size is not a constant — the Display size setting rewrites the density, the

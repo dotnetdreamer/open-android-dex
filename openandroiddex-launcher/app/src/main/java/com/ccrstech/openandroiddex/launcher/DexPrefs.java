@@ -105,6 +105,33 @@ final class DexPrefs {
     static final String KEY_WINDOW_SIZE = "window_size";
     /** "small" | "medium" | "large" — desktop/drawer icon scale. */
     static final String KEY_ICON_SIZE = "icon_size";
+    /**
+     * Put each app's window back where it was last left, instead of dealing it
+     * onto the cascade. When off, {@link #KEY_LAUNCH_MODE} decides every launch
+     * — which is what this setting overrides, per app, once an app has been
+     * moved. See {@link WindowMemory}.
+     */
+    static final String KEY_WINDOW_MEMORY = "window_memory";
+    /**
+     * The remembered rects themselves. NOT a setting — it is written by the
+     * window poll rather than by a user, which is why it is excluded from
+     * {@link #affectsShell} below and never goes through {@link #put}.
+     */
+    static final String KEY_WINDOW_GEOMETRY = "window_geometry";
+
+    // ── Notifications ──
+    // All three are read by the shell alone; the grant that makes any of them
+    // possible is not stored here at all, because it is the platform's (see
+    // DexNotifications).
+    /** Whether the phone's notifications reach the desktop at all. */
+    static final String KEY_NOTIFICATIONS = "notifications_enabled";
+    /**
+     * A notification announces itself with a card in the corner as it arrives,
+     * instead of only appearing under the taskbar's bell.
+     */
+    static final String KEY_NOTIF_POPUP = "notifications_popup";
+    /** A ringing call raises a banner with answer/decline over the desktop. */
+    static final String KEY_NOTIF_CALLS = "notifications_calls";
 
     // ── Mouse & cursor ──
     // Everything here except KEY_MOUSE_MODE is drawn by us, on our own
@@ -143,6 +170,25 @@ final class DexPrefs {
     static final String KEY_CODEC = PC_PREFIX + "codec";
     static final String KEY_ENCODER = PC_PREFIX + "encoder";
     static final String KEY_AUDIO = PC_PREFIX + "audio";
+    /**
+     * Whether the phone keeps playing the sound it is sending to the computer.
+     *
+     * scrcpy's default audio source does not COPY the phone's output, it takes
+     * it: the stream is redirected to the computer and the handset goes silent.
+     * That is right for a desk with speakers on it and wrong for everyone who
+     * expected a video playing on the desktop to be audible from the phone in
+     * front of them — the commonest "there is no sound" report there is.
+     *
+     * On, this asks scrcpy for --audio-source=playback --audio-dup, which
+     * duplicates rather than diverts. It costs a little more work on the phone,
+     * which is why it is a choice and not the default.
+     *
+     * Meaningless while {@link #KEY_AUDIO} is off — with nothing being sent to
+     * the computer there is nothing to duplicate, and the phone keeps its sound
+     * by default. The UI presents the pair as one three-way choice for that
+     * reason; see DexMedia.AUDIO_* .
+     */
+    static final String KEY_AUDIO_DUP = PC_PREFIX + "audiodup";
     static final String KEY_CLIP_SYNC = PC_PREFIX + "clipboard";
     /**
      * "sdk" | "uhid" — which side of the cable draws the mouse pointer.
@@ -204,6 +250,24 @@ final class DexPrefs {
     static final String DEF_LAUNCH_MODE = "cascade";
     static final String DEF_WINDOW_SIZE = "standard";
     static final String DEF_ICON_SIZE = "medium";
+    /**
+     * On, because a desktop that forgets is the thing being fixed — and it
+     * costs nothing until an app has actually been moved: with no record for a
+     * package the launch falls straight back to {@link #KEY_LAUNCH_MODE}.
+     */
+    static final boolean DEF_WINDOW_MEMORY = true;
+    /**
+     * All on. The grant is the real gate — with no notification access none of
+     * these do anything at all — so defaulting them off would mean a user who
+     * granted access still saw nothing and had three more switches to find.
+     *
+     * The pop-up in particular is on because it is what "show notifications on
+     * the desktop" means to the person who asked for it: a bell you have to
+     * click is a place notifications are FILED, not a desktop that shows them.
+     */
+    static final boolean DEF_NOTIFICATIONS = true;
+    static final boolean DEF_NOTIF_POPUP = true;
+    static final boolean DEF_NOTIF_CALLS = true;
     static final String DEF_CURSOR_STYLE = DexCursors.STYLE_DEX;
     static final int DEF_CURSOR_SIZE = 100;
     static final String DEF_CURSOR_COLOR = "white";
@@ -218,6 +282,17 @@ final class DexPrefs {
     static final int DEF_BITRATE = 8;
     static final int DEF_FPS = 0;                 // 0 = scrcpy decides
     static final boolean DEF_AUDIO = true;
+    /**
+     * ON — the phone keeps its own sound unless the user says otherwise.
+     *
+     * The opposite of scrcpy's own default, and the opposite of what this app
+     * shipped before: sound moved to the computer and the handset went silent,
+     * which reads as a broken phone rather than as a choice. See
+     * {@link #KEY_AUDIO_DUP}. MUST match the default in apply_stored_config on
+     * the desktop side, which is what governs a phone that has never been
+     * configured.
+     */
+    static final boolean DEF_AUDIO_DUP = true;
     static final String DEF_CODEC = "auto";
     static final String DEF_ENCODER = "auto";
     static final boolean DEF_CLIP_SYNC = true;
@@ -244,6 +319,11 @@ final class DexPrefs {
      */
     static boolean affectsShell(String key) {
         return key != null && !key.startsWith(PC_PREFIX) && !KEY_CLIP_HISTORY.equals(key)
+                // Written by the window poll every time a drag stops, so a
+                // shell repaint here would be a repaint per drag. Like the
+                // clipboard history above, it is a record rather than a
+                // setting — see WindowMemory.
+                && !KEY_WINDOW_GEOMETRY.equals(key)
                 // The web viewer's own settings, for the same reason as the
                 // PC's: nothing on this desktop is drawn from any of them, so
                 // nudging the bitrate must not repaint the shell. See Web.

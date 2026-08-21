@@ -731,6 +731,13 @@ const RESTORE_TIMEOUT: Duration = Duration::from_secs(8);
 /// leaving anything the user enabled themselves (TalkBack, a password
 /// manager) exactly where it was.
 fn without_caption_service(list: &str) -> String {
+    without_component(list, CAPTION_SERVICE_COMPONENT)
+}
+
+/// The same, for any component. Both of the secure settings we touch are
+/// colon-separated lists shared with whatever the user enabled themselves, and
+/// clobbering either one turns their own services off.
+fn without_component(list: &str, component: &str) -> String {
     let list = list.trim();
     // `settings get` prints the literal string "null" for an unset key.
     if list.is_empty() || list == "null" {
@@ -738,9 +745,23 @@ fn without_caption_service(list: &str) -> String {
     }
     list.split(':')
         .map(str::trim)
-        .filter(|s| !s.is_empty() && *s != CAPTION_SERVICE_COMPONENT)
+        .filter(|s| !s.is_empty() && *s != component)
         .collect::<Vec<_>>()
         .join(":")
+}
+
+/// Add a component to a colon-separated list, or leave the list alone when it
+/// is already there. The other half of [`without_component`].
+fn with_component(list: &str, component: &str) -> String {
+    let list = list.trim();
+    let list = if list == "null" { "" } else { list };
+    if list.is_empty() {
+        return component.to_string();
+    }
+    if list.split(':').any(|s| s.trim() == component) {
+        return list.to_string();
+    }
+    format!("{list}:{component}")
 }
 
 /// A value read back from `settings get` that is safe to hand to
@@ -1050,6 +1071,26 @@ pub fn restore_phone(app: &tauri::AppHandle, serial: &str) {
     } else {
         script.push_str(&format!(
             "settings put secure enabled_accessibility_services '{remaining}'; "
+        ));
+    }
+
+    // 2b. notification access, but ONLY when this app is what turned it on.
+    //
+    //     The launcher runs standalone on the phone, where the user grants this
+    //     themselves on the phone's own screen — and that grant is for the
+    //     desktop they use without a PC. Revoking it here because a cable was
+    //     unplugged would take away something we never gave, every session.
+    //     `enable_notification_listener` records which case this is.
+    //
+    //     `disallow_listener` rather than a rewrite of
+    //     `enabled_notification_listeners`, so the user's own listeners (a
+    //     watch companion, a car head unit) are untouched by construction and
+    //     the undo costs no extra read. On a build with no such verb it prints
+    //     a usage line and changes nothing — the same outcome as the grant
+    //     never having landed.
+    if notification_grant_is_ours(app, serial) {
+        script.push_str(&format!(
+            "cmd notification disallow_listener {NOTIFICATION_LISTENER_COMPONENT}; "
         ));
     }
 
@@ -1468,6 +1509,10 @@ pub fn adb_start_launcher(
     // clear) is left looking granted, so the state reads as "permission fine,
     // service just isn't running".
     enable_caption_service(&app, &serial);
+    // After the force-stop for the same reason as the line above: force-stop
+    // prunes the package's services out of `enabled_notification_listeners`
+    // too, so granting first would be wiped microseconds later.
+    enable_notification_listener(&app, &serial);
     log::info!(
         "── launcher deployed in {}ms ──",
         deploy_started.elapsed().as_millis()
@@ -1687,6 +1732,129 @@ fn enable_caption_service(app: &tauri::AppHandle, serial: &str) {
     }
 }
 
+pub const NOTIFICATION_LISTENER_COMPONENT: &str = "com.ccrstech.openandroiddex.launcher/\
+     com.ccrstech.openandroiddex.launcher.DexNotifications";
+
+/// Let the launcher read the phone's notifications and its media sessions.
+///
+/// A CONVENIENCE, not a dependency, and the difference matters: the launcher
+/// runs standalone on the phone with no PC anywhere, and both surfaces this
+/// grant feeds — the taskbar's notification flyout and the quick-settings media
+/// card — say so and offer the phone's own notification-access screen when it
+/// is missing. All this does is save that trip on a cabled session. Nothing
+/// here is retried, escalated, or reported as a failure to the user.
+///
+/// Like the caption service it has to run after *every* install and after the
+/// force-stop: both wipe the package out of `enabled_notification_listeners`.
+/// It relies on the `ACCESS_RESTRICTED_SETTINGS` appop that
+/// [`enable_caption_service`] sets just before — Android 13+ gates notification
+/// access for a sideloaded package behind the same "restricted setting", and
+/// without it the write below is accepted and then quietly dropped.
+///
+/// `cmd notification allow_listener` first because it is the platform's own
+/// entry point and does the list merge itself; the `settings put` is the
+/// fallback for builds whose notification shell command does not carry that
+/// verb. Both append rather than overwrite — the user's own listeners (a
+/// smartwatch companion, a car head unit) live in the same list.
+fn enable_notification_listener(app: &tauri::AppHandle, serial: &str) {
+    let current = run_adb(
+        app,
+        &[
+            "-s",
+            serial,
+            "shell",
+            "settings get secure enabled_notification_listeners",
+        ],
+    )
+    .unwrap_or_default();
+
+    // Already on before we touched it: the user granted this themselves on the
+    // phone, for the standalone desktop, and it is not ours to take away when
+    // the cable comes out. Recorded so the exit path knows to leave it —
+    // without this, plugging in once and unplugging would revoke a grant we
+    // never gave, every time.
+    if current.contains("DexNotifications") {
+        remember_notification_grant(app, serial, false);
+        log::info!("notification access was already granted on {serial} — leaving it alone");
+        return;
+    }
+
+    let allowed = run_adb(
+        app,
+        &[
+            "-s",
+            serial,
+            "shell",
+            &format!("cmd notification allow_listener {NOTIFICATION_LISTENER_COMPONENT}"),
+        ],
+    )
+    .map(|o| {
+        let o = o.trim();
+        // The command prints nothing on success and a usage dump naming the
+        // unknown command on a build that does not carry that verb.
+        o.is_empty() || !o.to_ascii_lowercase().contains("unknown")
+    })
+    .unwrap_or(false);
+
+    if !allowed {
+        let wanted = with_component(&current, NOTIFICATION_LISTENER_COMPONENT);
+        let _ = run_adb(
+            app,
+            &[
+                "-s",
+                serial,
+                "shell",
+                &format!("settings put secure enabled_notification_listeners '{wanted}'"),
+            ],
+        );
+    }
+
+    // Read back and say so once. A value that will not stick is a device-policy
+    // allowlist or an OEM that gates this behind its own screen — policy, not a
+    // bug, and the phone-side surfaces already handle it. Worth one line so
+    // "the bell shows nothing" has an explanation in the log.
+    let stuck = run_adb(
+        app,
+        &[
+            "-s",
+            serial,
+            "shell",
+            "settings get secure enabled_notification_listeners",
+        ],
+    )
+    .map(|o| o.contains("DexNotifications"))
+    .unwrap_or(false);
+    remember_notification_grant(app, serial, stuck);
+    if stuck {
+        log::info!("notification access granted — the desktop can show the phone's notifications");
+    } else {
+        log::info!(
+            "notification access could not be granted over adb — the taskbar's bell will \
+             offer the phone's own screen for it instead"
+        );
+    }
+}
+
+/// Key in the per-serial restore map: "1" when THIS app turned notification
+/// access on, so the exit path knows whether it has anything to undo.
+const NOTIFICATION_GRANT_KEY: &str = "notification_listener_granted_by_us";
+
+fn remember_notification_grant(app: &tauri::AppHandle, serial: &str, ours: bool) {
+    let mut map = load_restore_map(app);
+    map.entry(serial.to_string()).or_default().insert(
+        NOTIFICATION_GRANT_KEY.to_string(),
+        if ours { "1" } else { "0" }.to_string(),
+    );
+    save_restore_map(app, &map);
+}
+
+fn notification_grant_is_ours(app: &tauri::AppHandle, serial: &str) -> bool {
+    load_restore_map(app)
+        .get(serial)
+        .and_then(|saved| saved.get(NOTIFICATION_GRANT_KEY))
+        .is_some_and(|v| v == "1")
+}
+
 /// Bring the daemon's loopback port to the PC so the host can drive windows
 /// directly. Without it only the device-side launcher can reach the daemon, and
 /// every host->device window command has to ride the `content query`
@@ -1871,6 +2039,36 @@ mod tests {
         assert_eq!(without_caption_service("null"), "");
         assert_eq!(without_caption_service("  "), "");
         assert_eq!(without_caption_service(theirs), theirs);
+    }
+
+    /// Same rule for the notification-listener list, which is shared with the
+    /// user's watch companion, their car head unit and anything else that reads
+    /// their notifications. The fallback path writes this list back verbatim.
+    #[test]
+    fn granting_notification_access_keeps_the_user_s_own_listeners() {
+        let theirs = "com.google.android.wearable.app/\
+                      com.google.android.clockwork.companion.NotificationListener";
+        assert_eq!(
+            with_component(theirs, NOTIFICATION_LISTENER_COMPONENT),
+            format!("{theirs}:{NOTIFICATION_LISTENER_COMPONENT}")
+        );
+        // Already there: the list must come back byte for byte, not doubled.
+        let both = format!("{theirs}:{NOTIFICATION_LISTENER_COMPONENT}");
+        assert_eq!(with_component(&both, NOTIFICATION_LISTENER_COMPONENT), both);
+        // `settings get` on an unset key, and on a phone that never had one.
+        assert_eq!(
+            with_component("null", NOTIFICATION_LISTENER_COMPONENT),
+            NOTIFICATION_LISTENER_COMPONENT
+        );
+        assert_eq!(
+            with_component("  ", NOTIFICATION_LISTENER_COMPONENT),
+            NOTIFICATION_LISTENER_COMPONENT
+        );
+        // …and the way back out leaves theirs standing.
+        assert_eq!(
+            without_component(&both, NOTIFICATION_LISTENER_COMPONENT),
+            theirs
+        );
     }
 
     /// The restore writes these values straight into `settings put global`, so

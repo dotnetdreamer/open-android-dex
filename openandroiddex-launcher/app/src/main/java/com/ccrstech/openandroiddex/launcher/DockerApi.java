@@ -48,6 +48,12 @@ final class DockerApi {
     private static final int LOG_TIMEOUT_MS = 20_000;
     /** An exec is someone else's command, and it runs under TCG. */
     private static final int EXEC_TIMEOUT_MS = 60_000;
+    /**
+     * Anything that walks a filesystem. Measured: the diff of a container with
+     * one npm install in it is 159 kB and takes 3.5 s to compute on this phone,
+     * which the four-second poll timeout lost every time the VM was busy.
+     */
+    private static final int FS_TIMEOUT_MS = 30_000;
 
     /**
      * Is the engine answering yet?
@@ -82,6 +88,26 @@ final class DockerApi {
         String image = "";
         String state = "";
         String status = "";
+        /**
+         * Named volumes this container has mounted, and where.
+         *
+         * The destination matters as much as the name: a volume is browsed by
+         * running ls inside a container that already holds it, and that needs
+         * the path it was mounted at.
+         */
+        final java.util.Map<String, String> volumes = new java.util.LinkedHashMap<>();
+        /** Published ports as host->guest, deduplicated across address families. */
+        final java.util.Map<Integer, Integer> ports = new java.util.LinkedHashMap<>();
+
+        /** "3000:3000, 8080:80" — what the list shows. */
+        String portText() {
+            StringBuilder sb = new StringBuilder();
+            for (java.util.Map.Entry<Integer, Integer> p : ports.entrySet()) {
+                if (sb.length() > 0) sb.append(", ");
+                sb.append(p.getKey()).append(':').append(p.getValue());
+            }
+            return sb.toString();
+        }
 
         boolean isRunning() {
             return "running".equals(state);
@@ -117,6 +143,24 @@ final class DockerApi {
                     c.name = names.optString(0, "").replaceFirst("^/", "");
                 }
                 if (c.name.isEmpty()) c.name = c.id.length() > 12 ? c.id.substring(0, 12) : c.id;
+                JSONArray ports = o.optJSONArray("Ports");
+                for (int p = 0; ports != null && p < ports.length(); p++) {
+                    JSONObject one = ports.optJSONObject(p);
+                    if (one == null) continue;
+                    int pub = one.optInt("PublicPort", 0);
+                    // Unpublished ports are noise here: the row is about what
+                    // can be reached, and the engine lists one entry per
+                    // address family, so the map also does the deduplicating.
+                    if (pub > 0) c.ports.put(pub, one.optInt("PrivatePort", pub));
+                }
+                JSONArray mounts = o.optJSONArray("Mounts");
+                for (int m = 0; mounts != null && m < mounts.length(); m++) {
+                    JSONObject mount = mounts.optJSONObject(m);
+                    // Only named volumes have a Name; a bind mount is a path on
+                    // the host and belongs to nothing the Volumes pane lists.
+                    String vol = mount == null ? "" : mount.optString("Name", "");
+                    if (!vol.isEmpty()) c.volumes.put(vol, mount.optString("Destination", ""));
+                }
                 out.add(c);
             }
         } catch (Exception e) {
@@ -329,11 +373,141 @@ final class DockerApi {
         }
     }
 
+    /**
+     * Start a throwaway container whose only job is to hold a volume open.
+     *
+     * A volume nothing is using cannot be listed: there is no process anywhere
+     * that can see it, and the engine will not read a file out of one. So we
+     * make the smallest thing that can — a container that sleeps with the
+     * volume mounted — and exec into that. It is what {@code docker run --rm -v
+     * vol:/data alpine ls} does, kept alive between listings so that walking a
+     * few folders is not a container start each time.
+     *
+     * @return the container id, or null if there was nothing to look with.
+     */
+    static String peek(int port, String image, String volume, String at) {
+        try {
+            JSONObject body = new JSONObject();
+            body.put("Image", image);
+            body.put("Cmd", new JSONArray().put("sh").put("-c").put("sleep 900"));
+            body.put("HostConfig", new JSONObject()
+                    .put("Binds", new JSONArray().put(volume + ":" + at))
+                    .put("AutoRemove", true));
+            Reply made = request(port, API + "/containers/create?name=oadx-peek",
+                    "POST", body.toString(), TIMEOUT_MS);
+            if (made.error != null) {
+                // A peek from a session that died still holds the name. Take it.
+                if (!made.error.contains("already in use")) return null;
+                request(port, API + "/containers/oadx-peek?force=1", "DELETE",
+                        null, TIMEOUT_MS);
+                made = request(port, API + "/containers/create?name=oadx-peek",
+                        "POST", body.toString(), TIMEOUT_MS);
+                if (made.error != null) return null;
+            }
+            String id = new JSONObject(made.body).optString("Id", "");
+            if (id.isEmpty()) return null;
+            if (request(port, API + "/containers/" + id + "/start", "POST",
+                    null, TIMEOUT_MS).error != null) {
+                return null;
+            }
+            return id;
+        } catch (Exception e) {
+            DexLog.warn("docker", "peek failed", e);
+            return null;
+        }
+    }
+
+    /** One entry in a container directory listing. */
+    static final class Entry {
+        String name = "";
+        String mode = "";
+        String when = "";
+        String link = "";
+        long size;
+        boolean dir;
+        boolean symlink;
+    }
+
+    /** What one {@code ls} came back with: rows, or the complaint. */
+    static final class Listing {
+        final List<Entry> entries = new ArrayList<>();
+        /** Non-null when ls said something that was not a listing. */
+        String error;
+    }
+
+    /**
+     * List one directory inside a running container.
+     *
+     * Through exec and ls, because the engine has no directory listing at all:
+     * the only endpoint that reaches a container's filesystem is /archive, and
+     * it answers with a tar of the entire subtree — a download, not a listing.
+     * Asking / for one would mean pulling the whole image back through the
+     * loopback port to draw ten rows. ls is already in there and answers in
+     * bytes.
+     *
+     * The cost is that this needs the container to be RUNNING. A stopped one
+     * has no process to exec into, which is why the Files tab falls back to the
+     * engine's own diff when it is down.
+     */
+    static Listing listDir(int port, String id, String path) {
+        Listing out = new Listing();
+        String text = exec(port, id, "ls -la " + shellQuote(path) + " 2>&1");
+        if (text == null) {
+            out.error = "";
+            return out;
+        }
+        for (String line : text.split("\n")) {
+            String t = line.trim();
+            if (t.isEmpty() || t.startsWith("total ")) continue;
+            String[] f = t.split("\\s+", 9);
+            // A real row starts with a ten-character mode. Anything else is ls
+            // telling us the path does not exist or cannot be read, and that
+            // sentence is more use than an empty folder would be.
+            if (f.length < 9 || f[0].length() < 10) {
+                if (out.entries.isEmpty()) out.error = t;
+                continue;
+            }
+            Entry e = new Entry();
+            e.mode = f[0];
+            e.dir = f[0].charAt(0) == 'd';
+            e.symlink = f[0].charAt(0) == 'l';
+            try {
+                e.size = Long.parseLong(f[4]);
+            } catch (Exception ignored) {
+                // a device node puts "5, 1" here; size is not the point of it
+            }
+            e.when = f[5] + " " + f[6] + " " + f[7];
+            String name = f[8];
+            int arrow = name.indexOf(" -> ");
+            if (arrow > 0) {
+                e.link = name.substring(arrow + 4);
+                name = name.substring(0, arrow);
+            }
+            if (".".equals(name) || "..".equals(name)) continue;
+            e.name = name;
+            out.entries.add(e);
+        }
+        if (!out.entries.isEmpty()) out.error = null;
+        return out;
+    }
+
+    /** The head of one file inside a running container. */
+    static String readFile(int port, String id, String path, int max) {
+        return exec(port, id, "head -c " + max + " " + shellQuote(path) + " 2>&1");
+    }
+
+    /** One argument, safe for the shell exec runs it in. */
+    private static String shellQuote(String s) {
+        return "'" + s.replace("'", "'\\''") + "'";
+    }
+
     /** What has changed in the container's filesystem since its image. */
     static String changes(int port, String id, int limit) {
         try {
-            String body = get(port, API + "/containers/" + id + "/changes");
-            if (body == null) return null;
+            byte[] out = raw(port, API + "/containers/" + id + "/changes",
+                    "GET", null, FS_TIMEOUT_MS);
+            if (out == null) return null;
+            String body = new String(out, "UTF-8");
             // The engine answers the JSON literal null, newline and all, when
             // nothing has changed — the commonest case, and not a failure.
             String trimmed = body.trim();
@@ -357,6 +531,98 @@ final class DockerApi {
             DexLog.warn("docker", "changes " + id + " failed", e);
             return null;
         }
+    }
+
+    /** What a container is costing right now. */
+    static final class Stats {
+        double cpu;
+        long memory;
+        long memoryLimit;
+    }
+
+    /**
+     * One sample of a container's CPU and memory.
+     *
+     * Slow on purpose: {@code stream=0} makes the engine take two readings a
+     * second apart, because a CPU percentage is a delta and there is no such
+     * thing as an instantaneous one. That is why this is asked for one
+     * container at a time, in the pane that is showing it, and never for a
+     * whole list on a two-second poll.
+     */
+    static Stats stats(int port, String id) {
+        try {
+            byte[] out = raw(port, API + "/containers/" + id + "/stats?stream=0",
+                    "GET", null, FS_TIMEOUT_MS);
+            if (out == null) return null;
+            JSONObject o = new JSONObject(new String(out, "UTF-8"));
+            JSONObject cpu = o.optJSONObject("cpu_stats");
+            JSONObject pre = o.optJSONObject("precpu_stats");
+            JSONObject mem = o.optJSONObject("memory_stats");
+            if (cpu == null || mem == null) return null;
+
+            Stats st = new Stats();
+            st.memoryLimit = mem.optLong("limit", 0);
+            long used = mem.optLong("usage", 0);
+            JSONObject detail = mem.optJSONObject("stats");
+            // The same subtraction docker stats does: page cache that the
+            // kernel would drop under pressure is not the container's cost.
+            if (detail != null) used -= detail.optLong("inactive_file", 0);
+            st.memory = Math.max(0, used);
+
+            if (pre != null) {
+                JSONObject usage = cpu.optJSONObject("cpu_usage");
+                JSONObject preUsage = pre.optJSONObject("cpu_usage");
+                if (usage != null && preUsage != null) {
+                    double delta = usage.optLong("total_usage", 0)
+                            - preUsage.optLong("total_usage", 0);
+                    double system = cpu.optLong("system_cpu_usage", 0)
+                            - pre.optLong("system_cpu_usage", 0);
+                    long cpus = cpu.optLong("online_cpus", 0);
+                    if (cpus <= 0) {
+                        JSONArray each = usage.optJSONArray("percpu_usage");
+                        cpus = each == null ? 1 : each.length();
+                    }
+                    if (delta > 0 && system > 0) st.cpu = (delta / system) * cpus * 100.0;
+                }
+            }
+            return st;
+        } catch (Exception e) {
+            DexLog.warn("docker", "stats " + id + " failed", e);
+            return null;
+        }
+    }
+
+    /**
+     * Sample every running container at once.
+     *
+     * In parallel because each one costs a second of the engine deliberately
+     * waiting, and doing five of those in a row would be five seconds of a list
+     * that is meant to refresh in two. They are independent reads; the engine
+     * does not mind being asked five things at the same time.
+     */
+    static java.util.Map<String, Stats> statsOf(int port, List<Container> cs) {
+        final java.util.Map<String, Stats> out = new java.util.concurrent.ConcurrentHashMap<>();
+        if (cs == null) return out;
+        List<Thread> threads = new ArrayList<>();
+        for (final Container c : cs) {
+            if (!c.isRunning()) continue;
+            Thread t = new Thread(() -> {
+                Stats st = stats(port, c.id);
+                if (st != null) out.put(c.id, st);
+            }, "docker-stats");
+            t.setDaemon(true);
+            t.start();
+            threads.add(t);
+        }
+        for (Thread t : threads) {
+            try {
+                t.join(FS_TIMEOUT_MS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                break;
+            }
+        }
+        return out;
     }
 
     /** Everything the container Details sheet shows. */
@@ -569,7 +835,81 @@ final class DockerApi {
         return s.indexOf(' ') < 0 ? s : "\"" + s + "\"";
     }
 
-    // ── image actions ──
+    // ── volumes ──
+
+    /** One row of the window's volume list. */
+    static final class Volume {
+        String name = "";
+        String driver = "";
+        String mountpoint = "";
+        String created = "";
+        String labels = "";
+        String options = "";
+    }
+
+    static List<Volume> volumes(int port) {
+        List<Volume> out = new ArrayList<>();
+        try {
+            String body = get(port, API + "/volumes");
+            if (body == null) return out;
+            JSONArray arr = new JSONObject(body).optJSONArray("Volumes");
+            for (int i = 0; arr != null && i < arr.length(); i++) {
+                JSONObject o = arr.getJSONObject(i);
+                Volume v = new Volume();
+                v.name = o.optString("Name", "");
+                v.driver = o.optString("Driver", "");
+                v.mountpoint = o.optString("Mountpoint", "");
+                v.created = o.optString("CreatedAt", "");
+                v.labels = pairs(o.optJSONObject("Labels"));
+                v.options = pairs(o.optJSONObject("Options"));
+                out.add(v);
+            }
+        } catch (Exception e) {
+            DexLog.warn("docker", "volume list failed", e);
+        }
+        return out;
+    }
+
+    static String createVolume(int port, String name) {
+        try {
+            return request(port, API + "/volumes/create", "POST",
+                    new JSONObject().put("Name", name).toString(), TIMEOUT_MS).error;
+        } catch (Exception e) {
+            return String.valueOf(e.getMessage());
+        }
+    }
+
+    /**
+     * Remove a volume.
+     *
+     * Not forced. force here is about the volume DRIVER, not about overruling a
+     * container that is using it — the engine answers 409 for that either way,
+     * and its sentence names the container, which is what the user needs.
+     */
+    static String removeVolume(int port, String name) {
+        return request(port, API + "/volumes/" + enc(name), "DELETE", null, TIMEOUT_MS).error;
+    }
+
+    /** The containers holding one volume, from a list already fetched. */
+    static List<Container> usersOf(List<Container> all, Volume v) {
+        List<Container> out = new ArrayList<>();
+        for (int i = 0; all != null && i < all.size(); i++) {
+            if (all.get(i).volumes.containsKey(v.name)) out.add(all.get(i));
+        }
+        return out;
+    }
+
+    /** A flat "key=value" per line, for the label and option blocks. */
+    private static String pairs(JSONObject o) {
+        if (o == null) return "";
+        StringBuilder sb = new StringBuilder();
+        for (java.util.Iterator<String> it = o.keys(); it.hasNext(); ) {
+            String k = it.next();
+            if (sb.length() > 0) sb.append('\n');
+            sb.append(k).append('=').append(o.optString(k, ""));
+        }
+        return sb.toString();
+    }
 
     // ── image actions ──
 

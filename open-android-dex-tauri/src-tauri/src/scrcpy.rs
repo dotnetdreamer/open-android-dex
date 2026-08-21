@@ -976,6 +976,21 @@ fn remember_config(app: &AppHandle, key: &str, value: &str) {
 /// caller owns its options. Runs BEFORE `apply_stored_density`, because a
 /// resolution change rewrites the `--new-display` base that the density is
 /// then appended to.
+/// The phone's API level, or None when it could not be asked.
+///
+/// None is deliberately NOT treated as "too old" by the one caller: a phone
+/// that did not answer is usually a phone that is still settling after being
+/// plugged in, and refusing a feature on that basis would make it depend on
+/// timing.
+fn device_sdk(app: &AppHandle, serial: &str) -> Option<u32> {
+    crate::adb::run_adb(
+        app,
+        &["-s", serial, "shell", "getprop ro.build.version.sdk"],
+    )
+    .ok()
+    .and_then(|out| out.trim().parse().ok())
+}
+
 fn apply_stored_config(app: &AppHandle, opts: &mut MirrorOptions) {
     if opts.app_package.is_some() || opts.new_display.is_none() {
         return;
@@ -1014,6 +1029,35 @@ fn apply_stored_config(app: &AppHandle, opts: &mut MirrorOptions) {
     }
     if let Some(audio) = map.get("audio") {
         opts.audio = audio != "off";
+    }
+    // "Where sound plays" (the taskbar's quick settings, and Settings ->
+    // Scrcpy Config). Off is scrcpy's own default, which DIVERTS the phone's
+    // audio to this computer and leaves the handset silent; on asks for
+    // --audio-source=playback --audio-dup, which duplicates it so both are
+    // audible. Only meaningful while `audio` is on -- with nothing being
+    // forwarded there is nothing to duplicate.
+    // Default ON, which is a deliberate reversal of scrcpy's own behaviour.
+    //
+    // scrcpy's default audio source DIVERTS the phone's output to this
+    // computer: the handset goes silent, and a video playing in a window on
+    // the desktop makes no sound on the phone sitting next to it. That is
+    // right for a desk with speakers and wrong for a phone in your hand, and
+    // it is the commonest "there is no sound" report this app gets. Playback
+    // capture duplicates instead, so both are audible and the volume on each
+    // side decides what you actually hear — which is a knob the user already
+    // has, on both devices, and which works without reconnecting anything.
+    opts.audio_playback = map.get("audiodup").map(|v| v != "off").unwrap_or(true);
+    // --audio-dup is Android 13+ (it needs playback capture). Asking for it on
+    // an older phone is not a degraded session, it is scrcpy exiting on the
+    // command line and no desktop at all, so the phone is asked before the
+    // argument is built.
+    if opts.audio_playback && device_sdk(app, &opts.serial).is_some_and(|sdk| sdk < 33) {
+        log::info!(
+            "{}: Android 12 or older — sound will move to this computer rather than \
+             playing on both, which is all scrcpy can do below 13",
+            opts.serial
+        );
+        opts.audio_playback = false;
     }
     if let Some(clipboard) = map.get("clipboard") {
         opts.clipboard_autosync = clipboard != "off";

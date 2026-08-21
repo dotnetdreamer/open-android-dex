@@ -168,6 +168,31 @@ final class Docker {
         return new File(root(ctx), "console.sock");
     }
 
+    /**
+     * The ports docker-rt.sh forwards out of the VM onto the phone.
+     *
+     * Read from the copy of the script that is actually on disk rather than
+     * hard-coded here, because that copy is what the running machine was
+     * started from: a build that changed the list does not make the VM someone
+     * booted yesterday agree with it, and a link offered for a port nothing
+     * forwards is worse than no link.
+     */
+    static java.util.List<Integer> forwardedPorts(Context ctx) {
+        java.util.List<Integer> out = new java.util.ArrayList<>();
+        java.util.regex.Matcher m = java.util.regex.Pattern
+                .compile("(?m)^FWD_PORTS=\"([^\"]*)\"")
+                .matcher(readFile(rtScript(ctx)));
+        if (!m.find()) return out;
+        for (String p : m.group(1).trim().split("\\s+")) {
+            try {
+                out.add(Integer.parseInt(p));
+            } catch (Exception ignored) {
+                // a stray token in the list is not worth failing a window over
+            }
+        }
+        return out;
+    }
+
     static File pidFile(Context ctx) {
         return new File(root(ctx), "rt.pid");
     }

@@ -638,7 +638,77 @@ public final class CaptionService extends AccessibilityService {
         // A task that closed while still waiting for a host never reaches the sweep above,
         // because it never had a caption to release.
         hostWaitSince.keySet().retainAll(tasks.keySet());
+        rememberGeometry(display, stack);
         return moved;
+    }
+
+    // ── remembering where each window was left ─────────────────────────────
+
+    /** Last rect seen for a live task, so a change can be told from a repeat. */
+    private final Map<Integer, int[]> geometrySeen = new HashMap<>();
+    /** When that rect was first seen — the settle clock. */
+    private final Map<Integer, Long> geometrySince = new HashMap<>();
+    /** Task ids whose current rect has already been written down. */
+    private final Set<Integer> geometrySaved = new HashSet<>();
+
+    /**
+     * How long a window has to hold still before its position is worth keeping.
+     *
+     * A drag arrives here as a stream of distinct rects at the busy poll rate,
+     * and a resize the same; writing each one would be a SharedPreferences
+     * commit every 60ms for the length of the gesture, and the intermediate
+     * positions are not what the user chose anyway. Comfortably longer than the
+     * busy poll and shorter than "did it save?" — the user lets go, and by the
+     * time they have moved the pointer it is recorded.
+     */
+    private static final long GEOMETRY_SETTLE_MS = 700L;
+
+    /**
+     * Write down where each window has come to rest, for
+     * {@link LauncherActivity#windowBoundsFor} to open it at next time.
+     *
+     * This is done from the reconcile poll rather than from the drag handler
+     * because the poll is the only place that sees ALL of it. Our own title bar
+     * is one of several things that move a window: One UI's edge-resize, the
+     * PC-side enforcer, the caption's own maximise and snap, and an app moving
+     * itself all bypass {@link #dragHandler} entirely, and a memory that only
+     * learned from our own drags would forget every one of them.
+     *
+     * Only tasks in {@code stack} are considered, which is already the right
+     * set: freeform, visible, and not the desktop itself. A minimised window is
+     * not in it, so a minimise cannot be mistaken for a move.
+     */
+    private void rememberGeometry(int display, List<WmClient.Task> stack) {
+        if (stack.isEmpty()) {
+            geometrySeen.clear();
+            geometrySince.clear();
+            geometrySaved.clear();
+            return;
+        }
+        if (!WindowMemory.enabled(this)) return;
+        long now = SystemClock.uptimeMillis();
+        for (WmClient.Task t : stack) {
+            int[] rect = {t.left, t.top, t.right, t.bottom};
+            int[] previous = geometrySeen.get(t.taskId);
+            if (previous == null || !java.util.Arrays.equals(previous, rect)) {
+                geometrySeen.put(t.taskId, rect);
+                geometrySince.put(t.taskId, now);
+                geometrySaved.remove(t.taskId);
+                continue;
+            }
+            if (geometrySaved.contains(t.taskId)) continue;
+            Long since = geometrySince.get(t.taskId);
+            if (since == null || now - since < GEOMETRY_SETTLE_MS) continue;
+            geometrySaved.add(t.taskId);
+            WindowMemory.remember(this, WindowMemory.keyFor(this, t.pkg, t.activity),
+                    new android.graphics.Rect(t.left, t.top, t.right, t.bottom),
+                    displaySize(display));
+        }
+        // A closed window's entries would otherwise be held for the life of the
+        // service, and its task id can be handed to a different app later.
+        geometrySeen.keySet().retainAll(tasks.keySet());
+        geometrySince.keySet().retainAll(tasks.keySet());
+        geometrySaved.retainAll(tasks.keySet());
     }
 
     /**

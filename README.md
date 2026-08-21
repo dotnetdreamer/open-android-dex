@@ -56,9 +56,19 @@ at your monitor's size, sitting next to your other windows.
   battery indicator, and quick switches for Wi-Fi, Bluetooth, mobile data,
   airplane mode, torch and rotation, plus one that turns the phone's own screen
   off while the desktop keeps running
+- **Your phone's notifications**, on the desktop. They pop up in the bottom
+  corner as they arrive, the way your computer's own do, and stay in a bell at
+  the far right of the taskbar with a count on it. Each one carries the same
+  buttons the phone would give you — reply, mark as read, whatever the app
+  offers. **A call comes in and a banner drops down across the top with Answer
+  and Decline**, so you never have to go and find the handset
+- **Volume and what's playing** in the quick settings panel. Sliders for media
+  and ringer, and play, pause and skip for whatever the phone is playing
 - **Proper windows.** Every app gets a title bar with close, minimise, maximise
   and snap left or right. Drag them where you want. Resize them from a corner.
   Put two apps side by side and get something done
+- **Windows stay where you put them.** Move an app or resize it, and that is
+  where it opens next time. Every app remembers its own spot
 - **An app drawer** you can search, and a desktop you can drop shortcuts onto
 - **Your home screen widgets**, the real ones, live and working, on the desktop.
   Your calendar, your music, your weather. Click inside one and the app opens in
@@ -174,6 +184,7 @@ switched on behind your back.
 | Needs root | ❌ never | ❌ | ❌ | ❌ | ❌ |
 | Resizable windows with title bars | ✅ | ✅ | ✅ | ❌ one mirror window | ❌ one mirror window |
 | Live home screen widgets on the desktop | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Phone notifications, and answering calls | ✅ | ✅ | ✅ | ❌ | ⚠️ paid tiers |
 | Full Ubuntu desktop included | ✅ | ❌ dropped in 2019 | ⚠️ separate terminal app | ❌ | ❌ |
 | Docker | ✅ | ❌ | ❌ | ❌ | ❌ |
 | Free and open source | ✅ GPL 3.0 | ❌ | part of the OS | ✅ Apache 2.0 | ❌ |
@@ -229,6 +240,26 @@ debugging, which is a normal Android setting.
 
 No. It switches a few display settings on while the desktop is running and puts
 them all back afterwards, including when you unplug without closing the app.
+</details>
+
+<details>
+<summary><b>Why does it want to read my notifications?</b></summary>
+
+Because that is the only way Android lets an app show them. It is the same
+permission your smartwatch asks for. It powers three things: the cards that pop
+up in the corner, the bell in the taskbar, and the play and pause buttons in
+quick settings.
+
+Nothing is sent anywhere. The notifications are read on the phone and drawn on
+the phone, and what you see on your monitor is the same video the rest of the
+desktop arrives in. When you press Answer, the desktop presses the button your
+dialler already put on the notification — the app itself holds no permission to
+make, answer or end a call.
+
+Plug in with a cable and the desktop app turns this on for you and turns it back
+off when you finish. Without a cable, tap the bell in the taskbar and it will
+show you the phone screen that switches it on. Either way you can turn it off
+for good in Settings → Notifications, and the bell disappears with it.
 </details>
 
 <details>

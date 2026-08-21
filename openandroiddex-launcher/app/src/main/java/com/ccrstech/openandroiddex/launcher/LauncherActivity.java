@@ -64,6 +64,7 @@ import android.widget.ProgressBar;
 import android.widget.LinearLayout;
 import android.widget.PopupWindow;
 import android.widget.ScrollView;
+import android.widget.SeekBar;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -283,6 +284,7 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
     private PopupWindow calendarPopup;
     private PopupWindow batteryPopup;
     private PopupWindow qsPopup;
+    private PopupWindow notifPopup;
     private PopupWindow exitPopup;
     private PopupWindow widgetPicker;
 
@@ -321,6 +323,68 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
     private boolean phoneScreenOn = true;
     /** Lazy: the one tray tile whose work is a daemon call rather than a shell command. */
     private WmClient qsWm;
+
+    // ── notifications ──
+    /** The flyout and the call banner both live in here — see {@link NotificationPanel}. */
+    private NotificationPanel notifications;
+    /** Tray bell, and the count drawn over it. Null while the tray is being rebuilt. */
+    private View bellButton;
+    private TextView bellBadge;
+
+    /**
+     * The desktop's ear on the phone's notifications.
+     *
+     * Registering REPLACES nothing — the registry is a set — so this is paired
+     * with an explicit clear in onDestroy. Without that pair a density-driven
+     * relaunch of the desktop leaves a listener pointing at a dead activity
+     * behind on every pass, exactly as {@link OwnWindows} warns.
+     */
+    private final DexNotifications.Listener notificationListener =
+            new DexNotifications.Listener() {
+                @Override
+                public void onNotificationsChanged() {
+                    // Off the binder thread and onto ours: this touches the
+                    // tray badge, and on a busy phone it arrives several times
+                    // a second.
+                    handler.post(() -> {
+                        updateBellBadge();
+                        // A flyout standing open while notifications arrive
+                        // behind it goes stale, and its rows would fire actions
+                        // for entries that have since been replaced. Rebuilding
+                        // in place is not worth it for a surface that is open
+                        // for seconds — but leaving it wrong is not an option
+                        // either, so it is rebuilt from the same code that
+                        // opened it.
+                        if (notifPopup != null && notifPopup.isShowing()) {
+                            dismissPopups();
+                            toggleNotificationsPopup();
+                        }
+                    });
+                }
+
+                @Override
+                public void onHeadsUp(DexNotifications.Item item) {
+                    handler.post(() -> {
+                        if (!DexNotifications.enabled(LauncherActivity.this)) return;
+                        notificationPanel().showHeadsUp(item);
+                    });
+                }
+
+                @Override
+                public void onIncomingCall(DexNotifications.Item call) {
+                    handler.post(() -> {
+                        if (!DexNotifications.enabled(LauncherActivity.this)) return;
+                        notificationPanel().showCall(call);
+                    });
+                }
+
+                @Override
+                public void onCallEnded(String key) {
+                    handler.post(() -> {
+                        if (notifications != null) notifications.hideCall(key);
+                    });
+                }
+            };
     private final Handler handler = new Handler(Looper.getMainLooper());
     private int cascade = 0;
     /** Last broadcast seq applied — the PC fires broadcasts without waiting,
@@ -395,8 +459,15 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
                 case "drawer":
                     toggleDrawer();
                     break;
+                // The wire value predates the notification centre and still
+                // means quick settings — renaming it would silently retarget
+                // every gesture already configured. The centre has a slot of
+                // its own below.
                 case "notifications":
                     toggleQuickSettingsPopup();
+                    break;
+                case "notifcentre":
+                    toggleNotificationsPopup();
                     break;
                 case "showdesktop":
                     // Owned by CaptionService: it holds the live window list
@@ -542,6 +613,13 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
                 recreate();
                 return;
             }
+            // The call banner and the pop-up cards are overlay WINDOWS, so a
+            // shell rebuild leaves them standing — in the old theme's colours,
+            // and in the case of a switch just turned off, with nothing left
+            // that would ever take them down. Both are transient by nature, so
+            // dropping them is the whole fix: the next notification builds new
+            // ones against the new palette.
+            if (notifications != null) notifications.detach();
             rebuildShell();
         }
     };
@@ -618,6 +696,12 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
         // in this very process. Registering REPLACES any earlier listener, so a
         // density-driven relaunch of the desktop cannot leave a dead one behind.
         OwnWindows.setListener(ownWindowsListener);
+        // Same again for the notification listener: it is a service in this
+        // very process, so it reports directly rather than over a broadcast.
+        // Registered whether or not the grant is in place — the service binds
+        // whenever the user (or the PC's deploy) turns access on, which can
+        // happen mid-session, and this is what picks it up without a relaunch.
+        DexNotifications.setListener(notificationListener);
         // Same process, so not exported.
         IntentFilter minimisedFilter = new IntentFilter(ACTION_MINIMISED);
         if (android.os.Build.VERSION.SDK_INT >= 33) {
@@ -690,6 +774,12 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
         } catch (Exception ignored) {
         }
         OwnWindows.clearListener(ownWindowsListener);
+        DexNotifications.clearListener(notificationListener);
+        // The call banner is an overlay window, so — like the taskbar and the
+        // transfer card — it outlives this activity unless it is taken down
+        // here. A banner left standing over a dead desktop cannot be dismissed
+        // by anything.
+        if (notifications != null) notifications.detach();
         try {
             unregisterReceiver(minimisedReceiver);
         } catch (Exception ignored) {
@@ -964,6 +1054,11 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
     }
 
     /** Logical width of this display in dp — the number the layout branches on. */
+    /** The shell's display width in px — what a flyout has to fit inside. */
+    int uiWidthPx() {
+        return uiWidthPx;
+    }
+
     int displayWidthDp() {
         return Math.round(uiWidthPx * 160f / Math.max(1, uiDensity));
     }
@@ -2392,7 +2487,8 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
         Intent intent = new Intent(this, TaskManagerActivity.class)
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
         ActivityOptions opts = shapeForDesktop(
-                ActivityOptions.makeBasic(), desktopWindowRect(dp(720), dp(560)));
+                ActivityOptions.makeBasic(),
+                desktopWindowRect(TaskManagerActivity.class, dp(720), dp(560)));
         try {
             startActivity(intent, opts.toBundle());
         } catch (Exception e) {
@@ -2479,7 +2575,8 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                 .putExtra(LinuxActivity.EXTRA_CHOOSE_APPS, true);
         ActivityOptions opts = shapeForDesktop(
-                ActivityOptions.makeBasic(), desktopWindowRect(dp(1100), dp(750)));
+                ActivityOptions.makeBasic(),
+                desktopWindowRect(LinuxActivity.class, dp(1100), dp(750)));
         try {
             startActivity(intent, opts.toBundle());
         } catch (Exception e) {
@@ -2673,7 +2770,8 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
         Intent intent = new Intent(this, LinuxActivity.class)
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
         ActivityOptions opts = shapeForDesktop(
-                ActivityOptions.makeBasic(), desktopWindowRect(dp(1100), dp(750)));
+                ActivityOptions.makeBasic(),
+                desktopWindowRect(LinuxActivity.class, dp(1100), dp(750)));
         try {
             startActivity(intent, opts.toBundle());
         } catch (Exception e) {
@@ -2748,8 +2846,8 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
         }
         Intent intent = new Intent(this, DockerActivity.class)
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-        ActivityOptions opts = shapeForDesktop(
-                ActivityOptions.makeBasic(), desktopWindowRect(dp(900), dp(640)));
+        ActivityOptions opts = shapeForDesktop(ActivityOptions.makeBasic(),
+                desktopWindowRect(DockerActivity.class, dp(900), dp(640)));
         try {
             startActivity(intent, opts.toBundle());
         } catch (Exception e) {
@@ -2805,7 +2903,8 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
         Intent intent = new Intent(this, WebActivity.class)
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
         ActivityOptions opts = shapeForDesktop(
-                ActivityOptions.makeBasic(), desktopWindowRect(dp(760), dp(720)));
+                ActivityOptions.makeBasic(),
+                desktopWindowRect(WebActivity.class, dp(760), dp(720)));
         try {
             startActivity(intent, opts.toBundle());
         } catch (Exception e) {
@@ -3105,6 +3204,44 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
         gearLp.setMargins(0, 0, gap, 0);
         tray.addView(gear, gearLp);
 
+        // PC-window fullscreen toggle; executed by the PC via the request
+        // queue, icon confirmed by the running broadcast's "fs" extra
+        fsButton = navButton("⛶", getString(R.string.lx_fullscreen), v -> {
+            RequestProvider.enqueue("fullscreen", "toggle");
+            setPcFullscreen(!pcFullscreen); // optimistic — broadcast re-syncs
+        });
+        tray.addView(fsButton, new LinearLayout.LayoutParams(square, square));
+        setPcFullscreen(pcFullscreen);
+
+        // Leaving DeX is the one taskbar action that ends the whole session, so
+        // it wears the danger colour and asks first — nothing else here is
+        // irreversible.
+        //
+        // It used to sit at the very corner. The bell has that slot now: the
+        // corner is the easiest target on the whole display (you can throw the
+        // pointer at it without aiming), and the easiest target should not be
+        // "end the session". It is also where every desktop this one dresses as
+        // keeps its notifications.
+        //
+        // The framework's power-off drawable rather than a ⏻ glyph: this is the
+        // shape people already read as "off", and it does not depend on the
+        // device's fonts carrying U+23FB.
+        ImageView exit = new ImageView(this);
+        exit.setImageResource(android.R.drawable.ic_lock_power_off);
+        exit.setColorFilter(theme.danger);
+        int exitPad = dp(compact ? 7 : 8);
+        exit.setPadding(exitPad, exitPad, exitPad, exitPad);
+        exit.setBackground(tapBackground(0x00000000, theme.hover, 10));
+        exit.setContentDescription(getString(R.string.lx_exit_dex));
+        exit.setOnClickListener(v -> toggleExitPopup());
+        LinearLayout.LayoutParams exitLp = new LinearLayout.LayoutParams(square, square);
+        exitLp.leftMargin = dp(2);
+        tray.addView(exit, exitLp);
+
+        // The clock and the bell are the last two, in that order, and they are
+        // a pair: the calendar and the notification list are the two surfaces
+        // people reach for by throwing the pointer at the corner of the screen,
+        // and every desktop this one dresses as keeps them side by side there.
         LinearLayout clockWrap = new LinearLayout(this);
         clockWrap.setOrientation(LinearLayout.VERTICAL);
         clockWrap.setGravity(Gravity.CENTER_VERTICAL | Gravity.END);
@@ -3128,37 +3265,114 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
         clockWrap.setOnClickListener(v -> toggleCalendarPopup());
         LinearLayout.LayoutParams clockLp = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        clockLp.setMargins(0, 0, gap, 0);
+        clockLp.setMargins(dp(2), 0, 0, 0);
         tray.addView(clockWrap, clockLp);
 
-        // PC-window fullscreen toggle; executed by the PC via the request
-        // queue, icon confirmed by the running broadcast's "fs" extra
-        fsButton = navButton("⛶", getString(R.string.lx_fullscreen), v -> {
-            RequestProvider.enqueue("fullscreen", "toggle");
-            setPcFullscreen(!pcFullscreen); // optimistic — broadcast re-syncs
-        });
-        tray.addView(fsButton, new LinearLayout.LayoutParams(square, square));
-        setPcFullscreen(pcFullscreen);
-
-        // Leaving DeX is the one taskbar action that ends the whole session, so
-        // it sits at the far end of the tray in the danger colour and asks
-        // first — nothing else here is irreversible.
+        // Last, so it lands in the corner — see the note on the exit button.
         //
-        // The framework's power-off drawable rather than a ⏻ glyph: this is the
-        // shape people already read as "off", and it does not depend on the
-        // device's fonts carrying U+23FB.
-        ImageView exit = new ImageView(this);
-        exit.setImageResource(android.R.drawable.ic_lock_power_off);
-        exit.setColorFilter(theme.danger);
-        int exitPad = dp(compact ? 7 : 8);
-        exit.setPadding(exitPad, exitPad, exitPad, exitPad);
-        exit.setBackground(tapBackground(0x00000000, theme.hover, 10));
-        exit.setContentDescription(getString(R.string.lx_exit_dex));
-        exit.setOnClickListener(v -> toggleExitPopup());
-        LinearLayout.LayoutParams exitLp = new LinearLayout.LayoutParams(square, square);
-        exitLp.leftMargin = dp(2);
-        tray.addView(exit, exitLp);
+        // Absent entirely when the setting is off, rather than present and
+        // inert: "Show notifications on the desktop" is the whole feature, and
+        // a bell that opens a panel explaining it has been turned off is not
+        // what off means. The switch lives in Settings → Notifications, which
+        // is where it goes back on. The stale references are cleared here
+        // because this method also runs on every shell rebuild.
+        bellButton = null;
+        bellBadge = null;
+        if (DexNotifications.enabled(this)) {
+            LinearLayout.LayoutParams bellLp = new LinearLayout.LayoutParams(square, square);
+            bellLp.leftMargin = dp(2);
+            tray.addView(buildBell(square), bellLp);
+        }
         return tray;
+    }
+
+    // ── Tray: notifications ────────────────────────────────────────────────
+
+    /**
+     * The tray's bell, with the count of what is waiting drawn over its
+     * shoulder.
+     *
+     * A glyph rather than a framework drawable, unlike the gear and the power
+     * button beside it: there is no public bell in android.R, and the internal
+     * quick-settings art {@link #sysIcon} finds elsewhere is inconsistently
+     * named across OEM builds — a tray icon that is a bell on one phone and
+     * nothing on the next is worse than a glyph that is the same everywhere.
+     *
+     * Always built, even with no notification access: the button is how the
+     * user FINDS the grant (the flyout explains it and opens the phone's
+     * screen), so hiding it until the grant exists would hide the way in.
+     */
+    private View buildBell(int square) {
+        FrameLayout wrap = new FrameLayout(this);
+        wrap.setBackground(tapBackground(0x00000000, theme.hover, 10));
+        wrap.setContentDescription(getString(R.string.lx_notifications));
+        wrap.setOnClickListener(v -> toggleNotificationsPopup());
+
+        TextView glyph = new TextView(this);
+        glyph.setText("🔔");
+        glyph.setTextColor(theme.textDim);
+        glyph.setTextSize(TypedValue.COMPLEX_UNIT_PX, sp(compact ? 12.5f : 14));
+        glyph.setGravity(Gravity.CENTER);
+        wrap.addView(glyph, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+
+        bellBadge = new TextView(this);
+        bellBadge.setTextColor(0xFFFFFFFF);
+        bellBadge.setTextSize(TypedValue.COMPLEX_UNIT_PX, sp(8.5f));
+        bellBadge.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        bellBadge.setGravity(Gravity.CENTER);
+        bellBadge.setIncludeFontPadding(false);
+        bellBadge.setBackground(roundedFill(theme.danger, 8));
+        bellBadge.setVisibility(View.GONE);
+        FrameLayout.LayoutParams badgeLp = new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, dp(14), Gravity.TOP | Gravity.END);
+        badgeLp.setMargins(0, dp(compact ? 2 : 4), dp(compact ? 1 : 3), 0);
+        wrap.addView(bellBadge, badgeLp);
+
+        bellButton = wrap;
+        updateBellBadge();
+        wrap.setLayoutParams(new LinearLayout.LayoutParams(square, square));
+        return wrap;
+    }
+
+    /**
+     * Redraw the count. Cheap enough to call on every posted notification,
+     * which is what the listener does.
+     *
+     * Hidden rather than zeroed when there is nothing waiting: a permanent "0"
+     * over a bell reads as a broken badge. Capped at 9+ because past that the
+     * pill is wider than the button it sits on.
+     */
+    private void updateBellBadge() {
+        if (bellBadge == null) return;
+        int count = DexNotifications.enabled(this) ? DexNotifications.badgeCount() : 0;
+        if (count <= 0) {
+            bellBadge.setVisibility(View.GONE);
+            return;
+        }
+        bellBadge.setText(count > 9 ? "9+" : String.valueOf(count));
+        bellBadge.setPadding(dp(count > 9 ? 3 : 4), 0, dp(count > 9 ? 3 : 4), 0);
+        bellBadge.setMinWidth(dp(14));
+        bellBadge.setVisibility(View.VISIBLE);
+    }
+
+    /** Built on first use — a session may never see a notification. */
+    private NotificationPanel notificationPanel() {
+        if (notifications == null) notifications = new NotificationPanel(this);
+        return notifications;
+    }
+
+    void toggleNotificationsPopup() {
+        // The gesture reaches this too, and a gesture must not resurrect a
+        // surface the setting has taken off the taskbar.
+        if (!DexNotifications.enabled(this)) return;
+        if (notifPopup != null && notifPopup.isShowing()) {
+            dismissPopups();
+            return;
+        }
+        dismissPopups();
+        notifPopup = makePopup(notificationPanel().build());
+        showTrayPopup(notifPopup, Gravity.END);
     }
 
     /** Bring the desktop surface above the app windows. */
@@ -3329,17 +3543,19 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
         if (searchField != null) searchField.requestFocus();
     }
 
-    private void dismissPopups() {
+    void dismissPopups() {
         if (recentsPopup != null && recentsPopup.isShowing()) recentsPopup.dismiss();
         if (calendarPopup != null && calendarPopup.isShowing()) calendarPopup.dismiss();
         if (batteryPopup != null && batteryPopup.isShowing()) batteryPopup.dismiss();
         if (qsPopup != null && qsPopup.isShowing()) qsPopup.dismiss();
+        if (notifPopup != null && notifPopup.isShowing()) notifPopup.dismiss();
         if (exitPopup != null && exitPopup.isShowing()) exitPopup.dismiss();
         if (widgetPicker != null && widgetPicker.isShowing()) widgetPicker.dismiss();
         recentsPopup = null;
         calendarPopup = null;
         batteryPopup = null;
         qsPopup = null;
+        notifPopup = null;
         exitPopup = null;
         widgetPicker = null;
     }
@@ -3362,6 +3578,12 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
      * screen — see {@link Glass#apply(Context, PopupWindow, float)}.
      */
     private void showTrayPopup(PopupWindow popup, int horizontalGravity) {
+        // A flyout is anchored to the taskbar, and the taskbar is momentarily
+        // absent while the shell rebuilds (a theme change, a density change).
+        // Every OTHER caller here is a click on that very bar and cannot see
+        // that window — but the notification flyout is also re-opened from a
+        // posted notification, which arrives whenever the phone says so.
+        if (taskbarView == null || taskbarView.getWindowToken() == null) return;
         popup.showAtLocation(taskbarView, Gravity.BOTTOM | horizontalGravity,
                 dp(8), dp(TASKBAR_DP + 8));
         Glass.apply(this, popup, uiDensity);
@@ -3854,6 +4076,265 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
         showTrayPopup(qsPopup, Gravity.END);
     }
 
+    /**
+     * What the phone is playing, with the buttons to drive it — the card at the
+     * top of the quick-settings panel.
+     *
+     * Null when nothing is playing OR when the notification grant is missing,
+     * and the panel treats those the same on purpose: both mean there is no
+     * transport to offer, and a card explaining a grant here would be the
+     * second copy of an explanation the notification flyout already gives
+     * properly.
+     */
+    private View buildMediaCard(int panelWidth) {
+        DexMedia.Now now = DexMedia.now(this);
+        if (now == null) return null;
+
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.HORIZONTAL);
+        card.setGravity(Gravity.CENTER_VERTICAL);
+        card.setBackground(roundedFill(theme.field, 12));
+        card.setPadding(dp(10), dp(8), dp(6), dp(8));
+
+        ImageView art = new ImageView(this);
+        art.setScaleType(ImageView.ScaleType.CENTER_CROP);
+        if (now.art != null) {
+            art.setImageBitmap(now.art);
+        } else {
+            // No album art is normal — a podcast app, a browser tab. The
+            // playing app's own icon says as much as a grey square would.
+            try {
+                art.setImageDrawable(getPackageManager().getApplicationIcon(now.pkg));
+            } catch (Exception ignored) {
+            }
+        }
+        art.setClipToOutline(true);
+        art.setBackground(roundedFill(theme.hover, 8));
+        LinearLayout.LayoutParams artLp = new LinearLayout.LayoutParams(dp(38), dp(38));
+        artLp.rightMargin = dp(10);
+        card.addView(art, artLp);
+
+        LinearLayout texts = new LinearLayout(this);
+        texts.setOrientation(LinearLayout.VERTICAL);
+        TextView title = new TextView(this);
+        title.setText(now.title);
+        title.setTextColor(theme.text);
+        title.setTextSize(TypedValue.COMPLEX_UNIT_PX, sp(12.5f));
+        title.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        title.setSingleLine(true);
+        title.setEllipsize(TextUtils.TruncateAt.MARQUEE);
+        title.setSelected(true);   // what makes the marquee actually run
+        texts.addView(title);
+        TextView artist = new TextView(this);
+        artist.setText(now.artist.isEmpty()
+                ? getString(R.string.lx_media_playing) : now.artist);
+        artist.setTextColor(theme.textFaint);
+        artist.setTextSize(TypedValue.COMPLEX_UNIT_PX, sp(10.5f));
+        artist.setSingleLine(true);
+        artist.setEllipsize(TextUtils.TruncateAt.END);
+        texts.addView(artist);
+        card.addView(texts, new LinearLayout.LayoutParams(0,
+                ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+        // Skip buttons are drawn only where the session says it can take them:
+        // a podcast on a live stream has no next track, and an inert button is
+        // worse than an absent one.
+        if (now.canSkipPrevious) {
+            card.addView(mediaButton("⏮", getString(R.string.lx_media_previous),
+                    () -> DexMedia.previous(this)));
+        }
+        final TextView play = mediaButton(now.playing ? "⏸" : "▶",
+                getString(now.playing ? R.string.lx_media_pause : R.string.lx_media_play), null);
+        play.setOnClickListener(v -> {
+            boolean playing = DexMedia.togglePlay(this);
+            play.setText(playing ? "⏸" : "▶");
+            play.setContentDescription(getString(
+                    playing ? R.string.lx_media_pause : R.string.lx_media_play));
+        });
+        card.addView(play);
+        if (now.canSkipNext) {
+            card.addView(mediaButton("⏭", getString(R.string.lx_media_next),
+                    () -> DexMedia.next(this)));
+        }
+
+        LinearLayout.LayoutParams cardLp = new LinearLayout.LayoutParams(panelWidth,
+                ViewGroup.LayoutParams.WRAP_CONTENT);
+        cardLp.bottomMargin = dp(10);
+        card.setLayoutParams(cardLp);
+        return card;
+    }
+
+    /** One transport glyph. Carries its own LayoutParams — every caller is the same row. */
+    private TextView mediaButton(String glyph, String description, Runnable onClick) {
+        TextView button = new TextView(this);
+        button.setText(glyph);
+        button.setTextColor(theme.text);
+        button.setTextSize(TypedValue.COMPLEX_UNIT_PX, sp(14));
+        button.setGravity(Gravity.CENTER);
+        button.setContentDescription(description);
+        button.setBackground(tapBackground(0x00000000, theme.hover, 14));
+        if (onClick != null) button.setOnClickListener(v -> onClick.run());
+        button.setLayoutParams(new LinearLayout.LayoutParams(dp(32), dp(32)));
+        return button;
+    }
+
+    /**
+     * One volume slider.
+     *
+     * Committed live rather than on release, unlike the sliders in the Settings
+     * window: those repaint the whole shell on every value, this one moves a
+     * number in AudioManager, and a volume control that only takes effect when
+     * you let go is a volume control you cannot aim.
+     */
+    private View buildVolumeRow(int stream, String label, int panelWidth) {
+        LinearLayout wrap = new LinearLayout(this);
+        wrap.setOrientation(LinearLayout.VERTICAL);
+        wrap.setPadding(dp(4), dp(2), dp(4), dp(2));
+
+        TextView name = new TextView(this);
+        name.setText(label);
+        name.setTextColor(theme.textDim);
+        name.setTextSize(TypedValue.COMPLEX_UNIT_PX, sp(10.5f));
+        name.setPadding(dp(6), 0, 0, 0);
+        wrap.addView(name);
+
+        SeekBar bar = new SeekBar(this);
+        bar.setMax(DexMedia.max(this, stream));
+        bar.setProgress(DexMedia.volume(this, stream));
+        // Tinted to the shell's accent so the slider belongs to this panel
+        // rather than to the phone's own theme. Null-checked because the track
+        // and thumb come from the platform's SeekBar style, which an OEM
+        // framework is free to have replaced with something that supplies
+        // neither — and a crash here would take the whole tray down.
+        android.graphics.PorterDuffColorFilter tint = new android.graphics.PorterDuffColorFilter(
+                theme.accent, android.graphics.PorterDuff.Mode.SRC_IN);
+        if (bar.getProgressDrawable() != null) bar.getProgressDrawable().setColorFilter(tint);
+        if (bar.getThumb() != null) bar.getThumb().setColorFilter(tint);
+        bar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            /** Said once per drag, not once per pixel, when the phone refuses. */
+            private boolean complained;
+
+            @Override
+            public void onProgressChanged(SeekBar seekBar, int value, boolean fromUser) {
+                if (!fromUser) return;
+                if (DexMedia.setVolume(LauncherActivity.this, stream, value) || complained) return;
+                complained = true;
+                Toast.makeText(LauncherActivity.this,
+                        getString(R.string.lx_volume_refused), Toast.LENGTH_LONG).show();
+                // Put the thumb back where the phone actually is, so the slider
+                // is not left showing a level that was never applied.
+                seekBar.setProgress(DexMedia.volume(LauncherActivity.this, stream));
+            }
+
+            @Override
+            public void onStartTrackingTouch(SeekBar seekBar) {
+                complained = false;
+            }
+
+            @Override
+            public void onStopTrackingTouch(SeekBar seekBar) {
+            }
+        });
+        wrap.addView(bar, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        wrap.setLayoutParams(new LinearLayout.LayoutParams(panelWidth,
+                ViewGroup.LayoutParams.WRAP_CONTENT));
+        return wrap;
+    }
+
+    /**
+     * A quick-settings row: a label on the left, the current value and a chevron
+     * on the right. The shape a setting takes when it has more than two states,
+     * or when tapping it leads somewhere.
+     */
+    private View qsValueRow(String label, String value, int panelWidth, Runnable onClick) {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(dp(10), dp(9), dp(10), dp(9));
+        row.setBackground(tapBackground(0x00000000, theme.hover, 10));
+        row.setOnClickListener(v -> onClick.run());
+
+        TextView name = new TextView(this);
+        name.setText(label);
+        name.setTextColor(theme.text);
+        name.setTextSize(TypedValue.COMPLEX_UNIT_PX, sp(12.5f));
+        row.addView(name, new LinearLayout.LayoutParams(0,
+                ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+        TextView current = new TextView(this);
+        current.setText(value);
+        current.setTextColor(theme.textFaint);
+        current.setTextSize(TypedValue.COMPLEX_UNIT_PX, sp(11.5f));
+        current.setSingleLine(true);
+        current.setEllipsize(TextUtils.TruncateAt.END);
+        current.setGravity(Gravity.END);
+        row.addView(current, new LinearLayout.LayoutParams(dp(130),
+                ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        TextView chevron = new TextView(this);
+        chevron.setText("›");
+        chevron.setTextColor(theme.textFaint);
+        chevron.setTextSize(TypedValue.COMPLEX_UNIT_PX, sp(13));
+        chevron.setPadding(dp(6), 0, 0, 0);
+        row.addView(chevron);
+
+        row.setLayoutParams(new LinearLayout.LayoutParams(panelWidth,
+                ViewGroup.LayoutParams.WRAP_CONTENT));
+        return row;
+    }
+
+    /**
+     * Sound output: where the phone's audio goes, and which of the phone's own
+     * outputs it comes out of.
+     *
+     * Two rows because they are two different reasons for "there is no sound",
+     * and the first one is the one this desktop causes. scrcpy's default audio
+     * source DIVERTS the phone's output to the computer rather than copying it,
+     * so a video playing in a window here is silent on the handset — which
+     * looks like a bug in the phone and is actually a choice nobody was ever
+     * offered.
+     *
+     * The first row cycles rather than opening a submenu: three values, all of
+     * them one word, in a flyout that is already the height of the display.
+     */
+    private void addSoundOutput(LinearLayout panel, int panelWidth) {
+        View divider = new View(this);
+        divider.setBackgroundColor(theme.divider);
+        LinearLayout.LayoutParams divLp = new LinearLayout.LayoutParams(panelWidth, dp(1));
+        divLp.topMargin = dp(8);
+        divLp.bottomMargin = dp(4);
+        panel.addView(divider, divLp);
+
+        TextView header = new TextView(this);
+        header.setText(getString(R.string.lx_sound_output));
+        header.setTextColor(theme.textFaint);
+        header.setTextSize(TypedValue.COMPLEX_UNIT_PX, sp(10));
+        header.setPadding(dp(10), dp(2), dp(10), dp(4));
+        panel.addView(header, new LinearLayout.LayoutParams(panelWidth,
+                ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        // ONE row, and it opens the phone's own media-output panel.
+        //
+        // Not a switcher of our own, and not a pair of rows splitting the
+        // question in two, which is what this replaced. Android will not let an
+        // ordinary app SELECT a route — that is MODIFY_AUDIO_ROUTING, a
+        // signature permission — so anything we drew ourselves would be a list
+        // of buttons that do nothing. The platform's panel is the real control:
+        // it lists the phone's speaker, every paired headset AND the computers
+        // the phone can cast to, it switches the moment a row is tapped, and it
+        // needs no reconnection because none of it goes through scrcpy.
+        panel.addView(qsValueRow(getString(R.string.lx_media_output),
+                DexMedia.outputName(this), panelWidth, () -> {
+                    dismissPopups();
+                    if (!DexMedia.openOutputSwitcher(this,
+                            desktopWindowOptions(desktopWindowRect(dp(560), dp(620))))) {
+                        Toast.makeText(this, getString(R.string.lx_output_no_switcher),
+                                Toast.LENGTH_LONG).show();
+                    }
+                }));
+    }
+
     private View buildQuickSettingsView() {
         LinearLayout panel = new LinearLayout(this);
         panel.setOrientation(LinearLayout.VERTICAL);
@@ -3925,7 +4406,17 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
         // Every child gets an explicit width: a MATCH_PARENT plain View in a
         // wrap-content panel measures to the whole available width and used
         // to blow the popup up ~120dp wider than the tile grid.
-        int panelWidth = dp(92) * 3;
+        // Clamped to the display for the same reason NotificationPanel.fit
+        // exists: the tile grid was sized against a 1920dp desktop, and the
+        // phone's own screen is 381dp.
+        int panelWidth = Math.min(dp(92) * 3, Math.max(dp(220), uiWidthPx - dp(24)));
+
+        // What is playing goes ABOVE the toggles, where every shell this one
+        // dresses as puts it — and because it is the one control here that is
+        // about right now rather than about a setting.
+        View media = buildMediaCard(panelWidth);
+        if (media != null) panel.addView(media);
+
         LinearLayout row = null;
         for (int i = 0; i < tiles.size(); i++) {
             if (i % 3 == 0) {
@@ -3937,6 +4428,19 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
             row.addView(tiles.get(i), new LinearLayout.LayoutParams(dp(92),
                     ViewGroup.LayoutParams.WRAP_CONTENT));
         }
+
+        // Volume under the toggles: two sliders, not the platform's eight
+        // streams — see DexMedia.STREAMS. Unlike everything above them these
+        // need no grant and no PC, so they are the one part of this panel that
+        // works on a phone with nothing plugged into it.
+        panel.addView(buildVolumeRow(AudioManager.STREAM_MUSIC,
+                getString(R.string.lx_volume_media), panelWidth));
+        panel.addView(buildVolumeRow(AudioManager.STREAM_RING,
+                getString(R.string.lx_volume_ring), panelWidth));
+
+        // Under the sliders, because it answers the question a slider that
+        // changed nothing audible leaves behind.
+        addSoundOutput(panel, panelWidth);
 
         View divider = new View(this);
         divider.setBackgroundColor(theme.divider);
@@ -4595,14 +5099,35 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
     }
 
     /** Centered rect for a desktop window of this size, clamped to the display. */
-    private Rect desktopWindowRect(int wPx, int hPx) {
-        Point size = new Point();
-        getWindowManager().getDefaultDisplay().getRealSize(size);
+    Rect desktopWindowRect(int wPx, int hPx) {
+        Point size = displaySize();
         int w = Math.min(wPx, size.x * 9 / 10);
         int h = Math.min(hPx, size.y * 9 / 10);
         int x = (size.x - w) / 2;
         int y = (size.y - h) / 2;
         return new Rect(x, y, x + w, y + h);
+    }
+
+    /**
+     * The same rect for one of OUR windows, but put back where that window was
+     * last left.
+     *
+     * Our own windows are keyed on the activity rather than the package,
+     * because five of them share one package name — see
+     * {@link WindowMemory#keyFor(Context, String, String)}. The centred default
+     * below is what a window that has never been moved still gets.
+     */
+    private Rect desktopWindowRect(Class<?> own, int wPx, int hPx) {
+        Rect remembered = WindowMemory.recall(this, WindowMemory.keyFor(this, own),
+                displaySize(), dp(TASKBAR_DP));
+        return remembered != null ? remembered : desktopWindowRect(wPx, hPx);
+    }
+
+    /** The desktop display in pixels — what every launch rect is clamped against. */
+    private Point displaySize() {
+        Point size = new Point();
+        getWindowManager().getDefaultDisplay().getRealSize(size);
+        return size;
     }
 
     /**
@@ -4647,6 +5172,31 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
         return shapeForDesktop(opts, bounds, displayId());
     }
 
+    /**
+     * Launch options for a window opened by clicking a notification, or null
+     * when no desktop is live.
+     *
+     * Static, and reached through the live-desktop reference, because the
+     * caller is {@link DexNotifications} — a Service, which has no display of
+     * its own and would otherwise open the app on the phone's screen. See the
+     * note on its {@code send}.
+     *
+     * The app's remembered rect, so a notification opens its app in the same
+     * place the drawer or a taskbar icon would. The cascade is the fallback for
+     * an app that has never been moved, exactly as it is for every other
+     * launch — a notification is not a special kind of window.
+     */
+    static Bundle notificationLaunchOptions(String pkg) {
+        LauncherActivity desktop = liveDesktop();
+        if (desktop == null || pkg == null || pkg.isEmpty()) return null;
+        try {
+            return desktop.desktopWindowOptions(desktop.windowBoundsFor(pkg));
+        } catch (Exception e) {
+            DexLog.warn("notifications", "cannot shape a window for " + pkg, e);
+            return null;
+        }
+    }
+
     /** Never -1 in practice; a caller holding a detached view gets "leave it unset". */
     @Override
     public int displayId() {
@@ -4681,7 +5231,7 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
             Rect from = new Rect(at[0], at[1],
                     at[0] + tapped.getWidth(), at[1] + tapped.getHeight());
             apps.startMainActivity(target.getComponentName(), target.getUser(), from,
-                    desktopWindowOptions(nextWindowBounds()));
+                    desktopWindowOptions(windowBoundsFor(info.provider.getPackageName())));
         } catch (Exception e) {
             DexLog.warn("widgets", "cannot open the app behind "
                     + info.provider.flattenToShortString(), e);
@@ -4823,8 +5373,11 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
      *
      * Advances the cascade counter, so the two paths interleave instead of
      * dealing two windows onto the same spot.
+     *
+     * The FALLBACK, not the first answer: {@link #windowBoundsFor} asks the
+     * window memory before it comes here, and only reaches this when the app
+     * has never been moved.
      */
-    @Override
     public Rect nextWindowBounds() {
         Point size = new Point();
         getWindowManager().getDefaultDisplay().getRealSize(size);
@@ -4861,10 +5414,27 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
         return new Rect(x, y, x + w, y + h);
     }
 
+    /**
+     * Where this app's window goes: back where the user last left it, or onto
+     * the launch mode when it has never been moved.
+     *
+     * Asked per app rather than per launch, which is the whole difference
+     * between this and {@link #nextWindowBounds()} — and why the fallback is
+     * only reached when there is no record: {@code nextWindowBounds} advances
+     * the cascade counter, so calling it speculatively would deal an empty slot
+     * on every remembered launch and walk the cascade across the display.
+     */
+    @Override
+    public Rect windowBoundsFor(String pkg) {
+        Rect remembered = WindowMemory.recall(this, WindowMemory.keyFor(this, pkg, null),
+                displaySize(), dp(TASKBAR_DP));
+        return remembered != null ? remembered : nextWindowBounds();
+    }
+
     /** Start an app in a freeform window on the desktop display. */
     private void startWindowed(AppEntry app) {
         final String pkg = app.component.getPackageName();
-        Rect bounds = nextWindowBounds();
+        Rect bounds = windowBoundsFor(pkg);
 
         Intent intent = new Intent(Intent.ACTION_MAIN)
                 .addCategory(Intent.CATEGORY_LAUNCHER)

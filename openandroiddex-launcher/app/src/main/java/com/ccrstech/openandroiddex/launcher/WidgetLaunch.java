@@ -49,8 +49,16 @@ final class WidgetLaunch implements InvocationHandler {
 
     /** What the desktop shell must answer for a widget launch to be placed. */
     interface Desktop {
-        /** The rect the next desktop window gets — the same one the drawer uses. */
-        Rect nextWindowBounds();
+        /**
+         * The rect this app's window gets — the same one the drawer would give
+         * it: back where the user last left that app, or onto the launch mode
+         * when it has never been moved.
+         *
+         * Asked per package rather than for "the next window" so a widget
+         * click lands where the app belongs. A null or unknown package is
+         * answered with the launch mode, which is what this used to always do.
+         */
+        Rect windowBoundsFor(String pkg);
 
         /** Display to fall back on when the clicked view is already detached. */
         int displayId();
@@ -231,7 +239,11 @@ final class WidgetLaunch implements InvocationHandler {
             return;
         }
         Display display = view.getDisplay();
-        desktop.shapeForDesktop(opts, desktop.nextWindowBounds(),
+        // The creator is the app whose widget this is, which is the app the
+        // click opens in every case that reaches here — a widget PendingIntent
+        // is built by the provider's own process. Null on a send we cannot
+        // attribute, and the desktop answers that with the launch mode.
+        desktop.shapeForDesktop(opts, desktop.windowBoundsFor(pi.getCreatorPackage()),
                 display != null ? display.getDisplayId() : desktop.displayId());
     }
 
