@@ -4853,6 +4853,15 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
                     RequestProvider.enqueue("qs", "lock.on");
                     dismissPopups();
                 }));
+        // Not a toggle and not a PC request: the whole desktop display, captured
+        // in this process (see DexShot) and saved to the phone's own screenshot
+        // folder. Beside Lock because they are the two tiles here that DO
+        // something rather than turning something on.
+        tiles.add(qsTile(getString(R.string.lx_screenshot),
+                sysIcon(new String[]{"ic_qs_screenshot", "ic_screenshot"},
+                        android.R.drawable.ic_menu_camera), "📷",
+                false, false,
+                on -> takeDesktopShot()));
 
         // Every child gets an explicit width: a MATCH_PARENT plain View in a
         // wrap-content panel measures to the whole available width and used
@@ -4927,6 +4936,20 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
         panel.addView(foot, new LinearLayout.LayoutParams(panelWidth,
                 ViewGroup.LayoutParams.WRAP_CONTENT));
         return panel;
+    }
+
+    /**
+     * Photograph the desktop.
+     *
+     * <p>The panel goes first and the capture waits for it: a tap on this tile
+     * lands while the popup is still on screen, and a screenshot of the desktop
+     * with the screenshot button in it is not what was asked for. One frame is
+     * not enough — dismissing animates — so this is a short delay rather than a
+     * post, and it is deliberately longer than the popup's own fade.
+     */
+    private void takeDesktopShot() {
+        dismissPopups();
+        handler.postDelayed(() -> DexShot.take(this), 320);
     }
 
     // ── Dock: the phone's touchpad ──

@@ -18,6 +18,10 @@
 #
 # Inside the guest (loopback only, no root anywhere):
 #   Xvnc :1     tcp 5901 — VncAuth against /root/.vnc/passwd
+#   pulseaudio  tcp 4713 — the control protocol, for pavucontrol and the panel
+#               tcp 6081 — the raw s16le/48k/stereo tap the APP reads and plays
+#               through AudioTrack. There is no audio device in the guest; see
+#               /etc/pulse/dex.pa, written by linux-setup.sh.
 #   websockify  tcp 6080 — serves the noVNC web root; the launcher's WebView
 #               loads OUR page from it, staged in there by LinuxService:
 #               http://127.0.0.1:6080/dex.html?password=<vncpass>&v=<rtpid>
@@ -162,8 +166,33 @@ sleep 1
 # Idempotent: it adds only what is not already on the panel.
 [ -f /usr/local/share/openandroiddex/dock.py ] && \
   python3 /usr/local/share/openandroiddex/dock.py >/dev/null 2>&1
+# Sound, when the guest has been through a setup pass that installs it -- an
+# older container simply has no audio, exactly as before. There is no audio
+# device in here: the desktop plays into a null sink and the APP reads that
+# sink monitor off 127.0.0.1:6081. See /etc/pulse/dex.pa.
+#
+# NOT daemonised, which is the dbus-daemon rule again rather than a style
+# choice: pulseaudio -D calls setsid and leaves this script process group,
+# which is the one escape hatch the group kill cannot follow. Its log goes to
+# stderr and so into rt.log with everything else.
+#
+# The runtime dir is cleared first because /tmp SURVIVES a session: pulseaudio
+# writes a pid file in there, and a session that was killed rather than logged
+# out leaves that file behind pointing at a pid Android has since handed to
+# somebody else -- at which point the next daemon refuses to start, saying one
+# is already running. Nothing in that directory is worth keeping: with no unix
+# socket and no cookie in this configuration, it holds only the pid file.
+PULSE=
+if [ -x /usr/bin/pulseaudio ] && [ -f /etc/pulse/dex.pa ]; then
+  rm -rf /tmp/runtime-root/pulse
+  XDG_RUNTIME_DIR=/tmp/runtime-root pulseaudio -n --file=/etc/pulse/dex.pa \
+    --exit-idle-time=-1 --disallow-exit=1 --disable-shm=1 &
+  PULSE=$!
+  sleep 1
+fi
 env DISPLAY=:1 DBUS_SESSION_BUS_ADDRESS=unix:abstract=dex-session-bus \
   XDG_RUNTIME_DIR=/tmp/runtime-root XDG_SESSION_TYPE=x11 \
+  PULSE_SERVER=tcp:127.0.0.1:4713 \
   MOZ_DISABLE_CONTENT_SANDBOX=1 MOZ_DISABLE_GMP_SANDBOX=1 \
   MOZ_DISABLE_RDD_SANDBOX=1 MOZ_DISABLE_SOCKET_PROCESS_SANDBOX=1 \
   MOZ_DISABLE_UTILITY_SANDBOX=1 MOZ_DISABLE_GPU_SANDBOX=1 \
@@ -180,7 +209,7 @@ WS=$!
 # in, and reading that as a crash is exactly what this used to do.
 wait $XFCE
 RC=$?
-kill -9 $WS $DBUS $XVNC 2>/dev/null
+kill -9 $WS $DBUS $XVNC $PULSE 2>/dev/null
 exit $RC'
 
 # $GEO is host-side; substitute it rather than letting the guest shell see it.

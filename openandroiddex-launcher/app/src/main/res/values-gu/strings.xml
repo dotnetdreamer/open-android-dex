@@ -292,6 +292,10 @@
     <string name="lx_torch">ટોર્ચ</string>
     <string name="lx_phone_screen">ફોન સ્ક્રીન</string>
     <string name="lx_lock">લોક</string>
+    <string name="lx_screenshot">સ્ક્રીનશૉટ</string>
+    <string name="lx_shot_saved">Pictures/Screenshots માં સાચવ્યું</string>
+    <string name="lx_shot_failed">ડેસ્કટૉપ કૅપ્ચર થઈ શક્યું નહીં</string>
+    <string name="lx_shot_unavailable">અત્યારે ડેસ્કટૉપ કૅપ્ચર થઈ શકતું નથી — વિન્ડો સેવા ચાલુ નથી</string>
     <string name="lx_all_settings">બધી સેટિંગ્સ</string>
     <string name="lx_qs_footer">ટૉગલ જોડાયેલા ફોન પર લાગુ પડે છે</string>
     <string name="lx_maximize_restore">મહત્તમ / પુનઃસ્થાપિત</string>

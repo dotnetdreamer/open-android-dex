@@ -292,6 +292,10 @@
     <string name="lx_torch">Taschenlampe</string>
     <string name="lx_phone_screen">Telefonbildschirm</string>
     <string name="lx_lock">Sperren</string>
+    <string name="lx_screenshot">Screenshot</string>
+    <string name="lx_shot_saved">In Pictures/Screenshots gespeichert</string>
+    <string name="lx_shot_failed">Der Desktop konnte nicht aufgenommen werden</string>
+    <string name="lx_shot_unavailable">Der Desktop lässt sich gerade nicht aufnehmen — der Fensterdienst läuft nicht</string>
     <string name="lx_all_settings">Alle Einstellungen</string>
     <string name="lx_qs_footer">Die Schalter wirken auf das verbundene Telefon</string>
     <string name="lx_maximize_restore">Maximieren / wiederherstellen</string>

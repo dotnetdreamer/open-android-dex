@@ -12,7 +12,14 @@
      another app's window, so it is what a click in the browser becomes (see
      WebInput). INJECT_EVENTS is signature-only and uid 2000 does not help —
      injected input never lands on the desktop's virtual display. Without this
-     attribute the whole control half of the viewer is impossible. -->
+     attribute the whole control half of the viewer is impossible.
+
+     canTakeScreenshot is for the quick-settings Screenshot tile (DexShot).
+     takeScreenshot(displayId, …) is the only public API that captures a NAMED
+     display, and the desktop is a secondary one — a MediaProjection mirrors
+     the phone's own panel and cannot be pointed at it. The capability is read
+     from this file rather than granted, so a service the PC already enabled
+     picks it up on the next install. -->
 <accessibility-service
     xmlns:android="http://schemas.android.com/apk/res/android"
     android:accessibilityEventTypes="typeWindowsChanged|typeWindowStateChanged"
@@ -20,5 +27,6 @@
     android:accessibilityFlags="flagRetrieveInteractiveWindows|flagIncludeNotImportantViews"
     android:canRetrieveWindowContent="true"
     android:canPerformGestures="true"
+    android:canTakeScreenshot="true"
     android:notificationTimeout="0"
     android:description="@string/caption_service_description" />

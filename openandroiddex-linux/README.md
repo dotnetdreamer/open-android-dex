@@ -281,6 +281,26 @@ every other phase sends a plain dash-separated token and reads unchanged.
 |---|---|
 | 5901 | Xvnc `:1` (VncAuth, password in `$ROOT/vncpass`) |
 | 6080 | websockify + noVNC http — `http://127.0.0.1:6080/dex.html?password=<vncpass>&v=<rtpid>`, our viewer page (`doc/linux-viewer.md`), staged into the web root beside Ubuntu's own `vnc.html` and `vnc_lite.html` |
+| 6081 | the PulseAudio tap — raw s16le/48k/stereo, read by `LinuxAudio` in the app (`doc/linux-audio.md`) |
+| 4713 | the PulseAudio control protocol, for `pavucontrol`, the panel plugin and anything linking libpulse |
+
+## Sound
+
+There is no audio device in the container — Android's `/dev` is bound in, but
+its audio nodes belong to the media uid — so the guest gets a PulseAudio
+**null sink** and the app drains that sink's **monitor** over loopback TCP into
+an `AudioTrack`. `setup_audio` installs pulseaudio, pavucontrol and the panel
+plugin and writes `/etc/pulse/dex.pa`; `linux-rt.sh` starts the daemon with
+`-n --file=` that, in its own process group, and kills it with the session.
+Design record: `doc/linux-audio.md`.
+
+Two consequences worth knowing before changing any of it. The control protocol
+is on **TCP**, not a unix socket, for the same SELinux reason dbus takes an
+abstract address — and because of that `/etc/pulse/client.conf.d/dex.conf` must
+keep `autospawn = no`, or a client that cannot find a socket starts a second
+daemon off the stock `default.pa`. And `module-suspend-on-idle` must stay
+unloaded: a suspended null sink stops its monitor, which is the whole audio
+path.
 
 ## Diagnosing a failed phase
 

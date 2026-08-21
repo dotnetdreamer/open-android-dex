@@ -419,6 +419,10 @@
     <string name="lx_torch">Torch</string>
     <string name="lx_phone_screen">Phone screen</string>
     <string name="lx_lock">Lock</string>
+    <string name="lx_screenshot">Screenshot</string>
+    <string name="lx_shot_saved">Saved to Pictures/Screenshots</string>
+    <string name="lx_shot_failed">The desktop could not be captured</string>
+    <string name="lx_shot_unavailable">Nothing can capture the desktop right now — the window service is not running</string>
     <string name="lx_all_settings">All settings</string>
     <string name="lx_qs_footer">Toggles apply to the connected phone</string>
     <string name="lx_volume_media">Media</string>

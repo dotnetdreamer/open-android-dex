@@ -64,6 +64,10 @@ final class Linux {
      * and no npm, since Ubuntu splits npm out — whenever one apt-get update
      * hiccuped, and then held that forever. The bump carries the pinned
      * NodeSource repo and the retake into every guest that asked for Node.
+     * 13 = sound: there is no audio device in the container, so PulseAudio
+     * gets a null sink and the app drains its monitor over loopback — see
+     * {@link LinuxAudio}. Carries pavucontrol with it, which is what the panel
+     * volume plugin was already trying and failing to open.
      *
      * The app CHOOSER (see {@link #apps}) is deliberately NOT a feature level.
      * A feature bump exists to carry something new INTO guests that are
@@ -74,7 +78,7 @@ final class Linux {
      * brings the script back when a selection CHANGES is {@code apps.done} —
      * see {@link #needsProvision}.
      */
-    static final int FEATURE_LEVEL = 12;
+    static final int FEATURE_LEVEL = 13;
 
     /**
      * Guest binaries whose presence the setup log reports, as

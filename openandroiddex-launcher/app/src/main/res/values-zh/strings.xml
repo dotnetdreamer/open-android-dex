@@ -292,6 +292,10 @@
     <string name="lx_torch">手电筒</string>
     <string name="lx_phone_screen">手机屏幕</string>
     <string name="lx_lock">锁屏</string>
+    <string name="lx_screenshot">截图</string>
+    <string name="lx_shot_saved">已保存到 Pictures/Screenshots</string>
+    <string name="lx_shot_failed">无法捕获桌面</string>
+    <string name="lx_shot_unavailable">现在无法捕获桌面 — 窗口服务未运行</string>
     <string name="lx_all_settings">全部设置</string>
     <string name="lx_qs_footer">这些开关作用于已连接的手机</string>
     <string name="lx_maximize_restore">最大化 / 还原</string>

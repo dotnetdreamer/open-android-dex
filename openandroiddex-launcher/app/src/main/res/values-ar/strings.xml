@@ -292,6 +292,10 @@
     <string name="lx_torch">المصباح</string>
     <string name="lx_phone_screen">شاشة الهاتف</string>
     <string name="lx_lock">قفل</string>
+    <string name="lx_screenshot">لقطة شاشة</string>
+    <string name="lx_shot_saved">تم الحفظ في Pictures/Screenshots</string>
+    <string name="lx_shot_failed">تعذّر التقاط سطح المكتب</string>
+    <string name="lx_shot_unavailable">لا يمكن التقاط سطح المكتب الآن — خدمة النوافذ لا تعمل</string>
     <string name="lx_all_settings">كل الإعدادات</string>
     <string name="lx_qs_footer">تنطبق المفاتيح على الهاتف المتصل</string>
     <string name="lx_maximize_restore">تكبير / استعادة</string>

@@ -292,6 +292,10 @@
     <string name="lx_torch">Lampe</string>
     <string name="lx_phone_screen">Écran du téléphone</string>
     <string name="lx_lock">Verrouiller</string>
+    <string name="lx_screenshot">Capture</string>
+    <string name="lx_shot_saved">Enregistrée dans Pictures/Screenshots</string>
+    <string name="lx_shot_failed">Impossible de capturer le bureau</string>
+    <string name="lx_shot_unavailable">Impossible de capturer le bureau pour l\'instant : le service de fenêtres n\'est pas actif</string>
     <string name="lx_all_settings">Tous les paramètres</string>
     <string name="lx_qs_footer">Les interrupteurs agissent sur le téléphone connecté</string>
     <string name="lx_maximize_restore">Agrandir / restaurer</string>

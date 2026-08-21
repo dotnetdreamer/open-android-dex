@@ -292,6 +292,10 @@
     <string name="lx_torch">Linterna</string>
     <string name="lx_phone_screen">Pantalla del teléfono</string>
     <string name="lx_lock">Bloquear</string>
+    <string name="lx_screenshot">Captura</string>
+    <string name="lx_shot_saved">Guardada en Pictures/Screenshots</string>
+    <string name="lx_shot_failed">No se pudo capturar el escritorio</string>
+    <string name="lx_shot_unavailable">Ahora mismo no se puede capturar el escritorio: el servicio de ventanas no está en marcha</string>
     <string name="lx_all_settings">Todos los ajustes</string>
     <string name="lx_qs_footer">Los interruptores afectan al teléfono conectado</string>
     <string name="lx_maximize_restore">Maximizar / restaurar</string>

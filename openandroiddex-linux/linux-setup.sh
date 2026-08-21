@@ -906,6 +906,120 @@ if wants gimp; then
   setup_gimp || note "gimp: phase failed, continuing"
 fi
 
+# -- phase: sound ----------------------------------------------------------
+# There is no audio device in here to find. Android's /dev is bound into the
+# guest, but its audio nodes belong to the media uid and an app may not open
+# them, so ALSA sees nothing at all -- which is why the panel showed a crossed
+# out speaker and its Audio mixer item answered "Failed to execute command
+# pavucontrol".
+#
+# So the guest gets a sound card that is not hardware: PulseAudio's
+# module-null-sink. The desktop plays into it, and the APP drains that sink's
+# MONITOR over loopback TCP and writes it into an AudioTrack (LinuxAudio.java).
+# proot is a ptrace chroot and creates no network namespace, so the guest's
+# 127.0.0.1 is this app's own loopback -- the same fact websockify on 6080 has
+# always stood on.
+#
+# Two ports, both bound to 127.0.0.1 only:
+#   4713  the pulse control protocol -- pavucontrol, the panel plugin, and
+#         every app that links libpulse
+#   6081  the raw s16le / 48 kHz / stereo tap the app reads
+#
+# The control port is TCP rather than the usual unix socket, and that is the
+# one decision here that is not a preference: the guest's /tmp lives on /data,
+# where SELinux denies binding a FILESYSTEM unix socket -- the same measurement
+# that made dbus-daemon take an ABSTRACT address in linux-rt.sh.
+# module-native-protocol-unix has no abstract-address option, so it would fail
+# to bind and every client would then AUTOSPAWN a daemon of its own off the
+# stock default.pa. That is why client.conf below turns autospawn off as well
+# as naming the server: a second daemon finds no card, dies, and takes the
+# client's audio with it while the real one sits there working.
+#
+# Deliberately UNSTAMPED and guarded on the binaries, like setup_git and for
+# the same reason: `rm -f .stamp-*` only fires on a VERSION change, so a
+# touch-stamp would freeze this implementation forever on guests that already
+# exist. The guard costs two stats once the packages are in.
+setup_audio() {
+  if [ ! -x rootfs/usr/bin/pulseaudio ] || [ ! -x rootfs/usr/bin/pavucontrol ]; then
+    # pavucontrol is not padding: it is what the panel volume plugin runs for
+    # "Audio mixer", and it is the only per-application volume control in the
+    # guest. pulseaudio-utils is pactl, which is the only way to ask this setup
+    # a question from a terminal -- it is a Recommends, so
+    # --no-install-recommends drops it unless it is named.
+    guest_or_note "sound" "apt-get install -y --no-install-recommends \
+      pulseaudio pulseaudio-utils pavucontrol xfce4-pulseaudio-plugin" || return 1
+  fi
+  if [ ! -x rootfs/usr/bin/pulseaudio ]; then
+    note "sound: pulseaudio MISSING after install"
+    return 1
+  fi
+
+  # The daemon script. linux-rt.sh starts pulseaudio with `-n --file=` this, so
+  # NOTHING is loaded that is not named in it: no module-udev-detect hunting
+  # for cards that cannot exist, and no module-alsa-card to fail on them.
+  mkdir -p rootfs/etc/pulse || return 1
+  cat > rootfs/etc/pulse/dex.pa <<'EOF' || return 1
+# Open Android DeX -- the guest's entire audio stack.
+#
+# Loaded by `pulseaudio -n --file=/etc/pulse/dex.pa` from linux-rt.sh, where -n
+# is what keeps the stock default.pa (and its hunt for hardware that does not
+# exist in here) out of it. WRITTEN BY linux-setup.sh: edit it there, because a
+# later provisioning pass overwrites this file.
+#
+# A failed load is fatal by default, and that is wanted: a daemon that came up
+# without its sink, or without its tap, has no audio path at all, and dying
+# says so in rt.log instead of pretending to work.
+#
+# Deliberately NOT loaded: module-suspend-on-idle. A suspended null sink stops
+# its monitor, and that monitor is the whole audio path -- the tap would go
+# silent whenever the desktop was quiet and would not necessarily come back.
+
+# Clients: pavucontrol, the panel volume plugin, and anything linking libpulse.
+# TCP rather than a unix socket because /tmp is on /data, where SELinux refuses
+# to bind a filesystem unix socket -- see setup_audio in linux-setup.sh.
+# auth-anonymous because the only thing that can reach this loopback is the app
+# whose uid already owns the whole container: a cookie would guard a door that
+# is inside the house.
+load-module module-native-protocol-tcp listen=127.0.0.1 port=4713 auth-anonymous=1
+
+# The sound card, backed by nothing. Its monitor is the tap below.
+load-module module-null-sink sink_name=dex rate=48000 channels=2 format=s16le sink_properties="device.description='Android output'"
+set-default-sink dex
+
+# The tap. Raw PCM, no header and no handshake: the app connects, reads, and
+# writes what it read into an AudioTrack. 48 kHz stereo 16-bit is what
+# AudioTrack takes natively on every device this runs on, so nothing resamples
+# on either side of the socket.
+load-module module-simple-protocol-tcp record=true source=dex.monitor rate=48000 channels=2 format=s16le listen=127.0.0.1 port=6081
+EOF
+
+  # A drop-in rather than an edit of client.conf: that file belongs to the
+  # pulseaudio package, and a modified conffile turns every future apt upgrade
+  # of it into a prompt no one is there to answer.
+  mkdir -p rootfs/etc/pulse/client.conf.d || return 1
+  cat > rootfs/etc/pulse/client.conf.d/dex.conf <<'EOF' || return 1
+; Open Android DeX. Written by linux-setup.sh (setup_audio).
+;
+; There is no unix socket for a client to find -- see /etc/pulse/dex.pa -- so
+; the server has to be named, and autospawn has to be off. Left on, a client
+; that looked for the socket first would start a SECOND daemon from the stock
+; default.pa: it finds no card, exits, and the client is silent while the real
+; daemon sits next to it working.
+default-server = tcp:127.0.0.1:4713
+autospawn = no
+EOF
+
+  note "sound: pulseaudio null sink + tap on 6081 configured"
+  return 0
+}
+
+# Before the browsers, like git and Node.js: this is a handful of megabytes and
+# they are hundreds. It also has to land before them for a reason of its own --
+# a browser that starts while there is no server to talk to gets no sound until
+# it is restarted.
+state installing-desktop 93 sound
+setup_audio || note "sound: phase failed, continuing"
+
 # Guarded on the selection AND the binaries, not on a stamp: the chooser can
 # come back with a browser ticked that the stamped pass was never asked for,
 # and a plain .stamp-browsers would skip past that request forever. A wanted

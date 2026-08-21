@@ -199,6 +199,9 @@ public class LinuxService extends Service {
     public void onDestroy() {
         super.onDestroy();
         io.shutdownNow();
+        // The pump is a daemon thread, so the process usually takes it with it.
+        // This is for the case where the service goes and the process does not.
+        LinuxAudio.stop();
     }
 
     // ── provisioning ──
@@ -471,6 +474,12 @@ public class LinuxService extends Service {
             // service staying foreground is what keeps it alive until then.
             runtimeUp = true;
             runtimeProc = pb.start();
+            // The guest has no audio device: it plays into a null sink and this
+            // drains that sink's monitor into an AudioTrack. Started here rather
+            // than when the window opens, because the container is what produces
+            // the sound — a session put in the background with "keep running" is
+            // still allowed to make noise. It retries while the guest boots.
+            LinuxAudio.start();
             goForeground(getString(R.string.ln_label));
             DexLog.step("linux", "runtime started " + w + "x" + h);
         } catch (Exception e) {
@@ -498,6 +507,9 @@ public class LinuxService extends Service {
      * and the bracket keeps each pattern from matching this command line.
      */
     private void stopRuntime() {
+        // Before the kill, so the pump's socket dies with the guest that feeds
+        // it rather than a second later, on a read of a container that is gone.
+        LinuxAudio.stop();
         File dir = Linux.root(this);
         // /system/bin/kill, not the builtin: toybox sh's own kill rejects a
         // negative pid outright ("arguments must be jobs or process IDs"), so
@@ -510,6 +522,7 @@ public class LinuxService extends Service {
                         + "rm -f " + q(dir) + "/rt.pid " + q(dir) + "/rt.exit; "
                         + "pkill -l KILL -f '[X]vnc :1' 2>/dev/null; "
                         + "pkill -l KILL -f '[w]ebsockify --web' 2>/dev/null; "
+                        + "pkill -l KILL -f '[p]ulseaudio -n' 2>/dev/null; "
                         + "pkill -l KILL -f '[d]ex-session-bus' 2>/dev/null; "
                         + "pkill -l KILL -f '[x]fce' 2>/dev/null; true";
         try {

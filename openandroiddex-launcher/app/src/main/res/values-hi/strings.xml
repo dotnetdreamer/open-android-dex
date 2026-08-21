@@ -292,6 +292,10 @@
     <string name="lx_torch">टॉर्च</string>
     <string name="lx_phone_screen">फ़ोन स्क्रीन</string>
     <string name="lx_lock">लॉक</string>
+    <string name="lx_screenshot">स्क्रीनशॉट</string>
+    <string name="lx_shot_saved">Pictures/Screenshots में सहेजा गया</string>
+    <string name="lx_shot_failed">डेस्कटॉप कैप्चर नहीं हो सका</string>
+    <string name="lx_shot_unavailable">अभी डेस्कटॉप कैप्चर नहीं हो सकता — विंडो सेवा चालू नहीं है</string>
     <string name="lx_all_settings">सभी सेटिंग्स</string>
     <string name="lx_qs_footer">टॉगल जुड़े हुए फ़ोन पर लागू होते हैं</string>
     <string name="lx_maximize_restore">अधिकतम / पुनर्स्थापित</string>

@@ -292,6 +292,10 @@
     <string name="lx_torch">Lanterna</string>
     <string name="lx_phone_screen">Ecrã do telefone</string>
     <string name="lx_lock">Bloquear</string>
+    <string name="lx_screenshot">Captura</string>
+    <string name="lx_shot_saved">Guardada em Pictures/Screenshots</string>
+    <string name="lx_shot_failed">Não foi possível capturar o ambiente de trabalho</string>
+    <string name="lx_shot_unavailable">Neste momento não é possível capturar o ambiente de trabalho: o serviço de janelas não está a correr</string>
     <string name="lx_all_settings">Todas as configurações</string>
     <string name="lx_qs_footer">Os botões valem para o telefone conectado</string>
     <string name="lx_maximize_restore">Maximizar / restaurar</string>
