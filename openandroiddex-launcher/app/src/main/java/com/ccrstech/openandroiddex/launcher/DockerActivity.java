@@ -75,6 +75,23 @@ public class DockerActivity extends Activity {
     private static final int PANE_CONTAINERS = 0;
     private static final int PANE_IMAGES = 1;
     private static final int PANE_CONSOLE = 2;
+    /**
+     * One container, opened by clicking its row.
+     *
+     * Not a fourth tab: it is a place you go INTO from the list and come back
+     * out of, and the tab strip stays showing where the list is. Everything in
+     * here is the answer to "it is not working and I want to know why", which
+     * a row two lines high cannot be.
+     */
+    private static final int PANE_DETAIL = 3;
+
+    private static final int TAB_LOGS = 0;
+    private static final int TAB_INSPECT = 1;
+    private static final int TAB_FILES = 2;
+    private static final int TAB_EXEC = 3;
+
+    /** How much of a container's output the Logs tab asks for. */
+    private static final int LOG_TAIL = 500;
 
     private DexTheme theme;
     private final Handler main = new Handler(Looper.getMainLooper());
@@ -95,6 +112,21 @@ public class DockerActivity extends Activity {
     private ScrollView consoleScroll;
     private EditText consoleInput;
 
+    /** The container the detail pane is showing, and what it last knew of it. */
+    private String detailId;
+    private DockerApi.Container detailC;
+    private int detailTab = TAB_LOGS;
+    private TextView detailBody;
+    private ScrollView detailScroll;
+    private TextView detailStatus;
+    private LinearLayout detailActions;
+    private final Button[] detailTabs = new Button[4];
+    private EditText execInput;
+    /** Last painted header state, so a poll that changed nothing repaints nothing. */
+    private String detailSig = "";
+    /** True while the log view is pinned to the bottom, so a refresh follows. */
+    private boolean logFollow = true;
+
     /** Volatile: written by the poll thread, read by {@link #render} on main. */
     private volatile long startSentAt;
     private long provisionSentAt;
@@ -105,10 +137,26 @@ public class DockerActivity extends Activity {
     private String lastSignature = "";
 
     private ConsoleLink console;
+    /**
+     * A link that has been told to go but has not stopped yet.
+     *
+     * A connect that is queued behind another client cannot be cancelled — the
+     * thread is inside connect() with no socket to close — so the only safe
+     * thing is to refuse to start a second one on top of it. Stacking them is
+     * what turned one busy handoff into a queue of them.
+     */
+    private ConsoleLink zombie;
     /** Earliest elapsed-time we may try to attach again; see {@link #attachConsole}. */
     private long consoleRetryAt;
     /** So a console that simply is not there says so once, not once per poll. */
     private boolean saidDetached;
+    /**
+     * The console scrollback, kept here rather than in the TextView.
+     *
+     * The link now outlives the pane, so something that is not a view has to
+     * hold what it says while the user is looking at Containers.
+     */
+    private final StringBuilder consoleBuffer = new StringBuilder();
 
     /**
      * The caption's ✕ arrives here rather than removing the task, so the
@@ -175,7 +223,9 @@ public class DockerActivity extends Activity {
         if (pollThread != null) pollThread.quitSafely();
         pollThread = null;
         poll = null;
-        closeConsole();
+        // The console is NOT dropped here. Minimising is the case this window
+        // is built around, and every detach costs a handoff of the one client
+        // slot QEMU serves — the buffer keeps filling meanwhile.
     }
 
     @Override
@@ -271,15 +321,36 @@ public class DockerActivity extends Activity {
     private void setPane(int which) {
         pane = which;
         for (int i = 0; i < tabs.length; i++) {
-            tabs[i].setTextColor(i == which ? theme.accent : theme.textDim);
+            // The detail pane is entered FROM the container list and returns to
+            // it, so the strip keeps pointing there while you are inside one.
+            int lit = which == PANE_DETAIL ? PANE_CONTAINERS : which;
+            tabs[i].setTextColor(i == lit ? theme.accent : theme.textDim);
         }
         paneHost.removeAllViews();
+        if (which == PANE_DETAIL) {
+            consoleView = null;
+            consoleScroll = null;
+            consoleInput = null;
+            showDetail();
+            lastSignature = "";
+            if (poll != null) poll.post(this::tick);
+            return;
+        }
+        detailId = null;
+        detailC = null;
+        detailBody = null;
+        detailScroll = null;
+        execInput = null;
         if (which == PANE_CONSOLE) {
             paneHost.addView(buildConsolePane(), new LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
             openConsole();
         } else {
-            closeConsole();
+            // The link deliberately stays up — see openConsole. Only the views
+            // go, and appendConsole keeps filling the buffer behind them.
+            consoleView = null;
+            consoleScroll = null;
+            consoleInput = null;
             lastSignature = ""; // force a repaint of the list we just switched to
             if (poll != null) poll.post(this::tick);
         }
@@ -323,8 +394,15 @@ public class DockerActivity extends Activity {
         if (st.running && "ready".equals(st.phase)) {
             engineVersion = DockerApi.version(port);
             if (engineVersion != null) {
-                if (pane == PANE_CONTAINERS) containers = DockerApi.containers(port);
-                else if (pane == PANE_IMAGES) images = DockerApi.images(port);
+                if (pane == PANE_CONTAINERS || pane == PANE_DETAIL) {
+                    containers = DockerApi.containers(port);
+                } else if (pane == PANE_IMAGES) {
+                    images = DockerApi.images(port);
+                    // Also the containers: which images are in use, and what is
+                    // holding the one you just tried to delete, is half of what
+                    // this pane is for. One more GET on loopback.
+                    containers = DockerApi.containers(port);
+                }
             }
         }
 
@@ -469,7 +547,8 @@ public class DockerActivity extends Activity {
         lastSignature = sig;
 
         if (pane == PANE_CONTAINERS) showContainers(containers, up);
-        else if (pane == PANE_IMAGES) showImages(images, up);
+        else if (pane == PANE_IMAGES) showImages(images, containers, up);
+        else if (pane == PANE_DETAIL) refreshDetail(containers);
     }
 
     private static String signature(List<DockerApi.Container> cs) {
@@ -539,22 +618,23 @@ public class DockerActivity extends Activity {
         row.addView(text, new LinearLayout.LayoutParams(0,
                 ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
 
-        Button toggle = flatButton(getString(
-                c.isRunning() ? R.string.dk_container_stop : R.string.dk_container_start));
-        toggle.setOnClickListener(v -> engineCall(() ->
-                c.isRunning() ? DockerApi.stopContainer(port, c.id)
-                        : DockerApi.startContainer(port, c.id)));
+        // The row itself opens the container, the way the list in Docker
+        // Desktop does: the buttons are the two verbs worth one click, and
+        // everything you would want when it is misbehaving is inside.
+        row.setOnClickListener(v -> openDetail(c));
+        DexCursors.apply(row, DexCursors.ROLE_HAND);
+
+        Button toggle = flatButton(toggleLabel(c));
+        toggle.setOnClickListener(v -> act(R.string.dk_action_failed, () -> toggle(c)));
         row.addView(toggle);
+
+        Button more = flatButton(getString(R.string.dk_image_more));
+        more.setOnClickListener(v -> containerMenu(c));
+        row.addView(more);
 
         Button rm = flatButton(getString(R.string.dk_container_remove));
         rm.setTextColor(theme.danger);
-        rm.setOnClickListener(v -> new AlertDialog.Builder(this)
-                .setTitle(getString(R.string.dk_remove_title, c.name))
-                .setMessage(R.string.dk_remove_body)
-                .setNegativeButton(R.string.dk_cancel, null)
-                .setPositiveButton(R.string.dk_container_remove, (d, w) ->
-                        engineCall(() -> DockerApi.removeContainer(port, c.id)))
-                .show());
+        rm.setOnClickListener(v -> confirmRemoveContainer(c, false));
         row.addView(rm);
 
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
@@ -564,7 +644,416 @@ public class DockerActivity extends Activity {
         return row;
     }
 
-    private void showImages(List<DockerApi.Image> is, boolean up) {
+    private String toggleLabel(DockerApi.Container c) {
+        return getString(c.isPaused() ? R.string.dk_container_resume
+                : c.isRunning() ? R.string.dk_container_stop : R.string.dk_container_start);
+    }
+
+    private String toggle(DockerApi.Container c) {
+        if (c.isPaused()) return DockerApi.unpauseContainer(port, c.id);
+        return c.isRunning() ? DockerApi.stopContainer(port, c.id)
+                : DockerApi.startContainer(port, c.id);
+    }
+
+    private void containerMenu(DockerApi.Container c) {
+        String[] items = {
+                getString(R.string.dk_c_open),
+                getString(R.string.dk_c_restart),
+                getString(c.isPaused() ? R.string.dk_container_resume : R.string.dk_c_pause),
+                getString(R.string.dk_c_copy_run),
+                getString(R.string.dk_c_console),
+                getString(R.string.dk_c_rename),
+                getString(R.string.dk_image_copy_id),
+        };
+        new AlertDialog.Builder(this)
+                .setTitle(c.name)
+                .setItems(items, (d, which) -> {
+                    switch (which) {
+                        case 0: openDetail(c); break;
+                        case 1:
+                            act(R.string.dk_action_failed,
+                                    () -> DockerApi.restartContainer(port, c.id));
+                            break;
+                        case 2:
+                            act(R.string.dk_action_failed, () -> c.isPaused()
+                                    ? DockerApi.unpauseContainer(port, c.id)
+                                    : DockerApi.pauseContainer(port, c.id));
+                            break;
+                        case 3: copyRunLine(c); break;
+                        case 4: execInConsole(c); break;
+                        case 5: renameSheet(c); break;
+                        default: copy(c.shortId()); break;
+                    }
+                })
+                .show();
+    }
+
+    private void confirmRemoveContainer(DockerApi.Container c, boolean thenBack) {
+        new AlertDialog.Builder(this)
+                .setTitle(getString(R.string.dk_remove_title, c.name))
+                .setMessage(R.string.dk_remove_body)
+                .setNegativeButton(R.string.dk_cancel, null)
+                .setPositiveButton(R.string.dk_container_remove, (d, w) -> {
+                    if (thenBack) setPane(PANE_CONTAINERS);
+                    act(R.string.dk_action_failed, () -> DockerApi.removeContainer(port, c.id));
+                })
+                .show();
+    }
+
+    private void renameSheet(DockerApi.Container c) {
+        EditText field = sheetField(R.string.dk_c_rename_hint, false);
+        field.setText(c.name);
+        LinearLayout box = new LinearLayout(this);
+        box.setPadding(dp(20), dp(8), dp(20), dp(4));
+        box.addView(field, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        new AlertDialog.Builder(this)
+                .setTitle(c.name)
+                .setView(box)
+                .setNegativeButton(R.string.dk_cancel, null)
+                .setPositiveButton(R.string.dk_c_rename_go, (d, w) -> {
+                    String name = field.getText().toString().trim();
+                    if (name.isEmpty()) return;
+                    act(R.string.dk_action_failed,
+                            () -> DockerApi.renameContainer(port, c.id, name));
+                })
+                .show();
+    }
+
+    /** Hand the VM console an exec line for this container, caret waiting. */
+    private void execInConsole(DockerApi.Container c) {
+        setPane(PANE_CONSOLE);
+        if (consoleInput == null) return;
+        consoleInput.setText("docker exec -it " + c.name + " sh");
+        consoleInput.setSelection(consoleInput.getText().length());
+        consoleInput.requestFocus();
+    }
+
+    private void copyRunLine(DockerApi.Container c) {
+        new Thread(() -> {
+            DockerApi.ContainerInfo info = DockerApi.inspectContainer(port, c.id);
+            main.post(() -> {
+                if (isFinishing() || isDestroyed()) return;
+                if (info == null) say(c.name, getString(R.string.dk_c_details_failed));
+                else copy(info.runLine);
+            });
+        }, "docker-runline").start();
+    }
+
+    // ── one container, from the inside ──
+
+    private void openDetail(DockerApi.Container c) {
+        detailId = c.id;
+        detailC = c;
+        detailTab = TAB_LOGS;
+        logFollow = true;
+        detailSig = "";
+        setPane(PANE_DETAIL);
+    }
+
+    /**
+     * The detail pane: a header that stays put and one of four views under it.
+     *
+     * Logs first and by default, because "it is not working" is what brings
+     * anyone here. Files is the engine's own diff against the image rather than
+     * a file browser — the API hands out whole subtrees as tar archives, which
+     * is a download, not a listing. Exec runs one command at a time for the
+     * same kind of reason: an interactive session is a hijacked socket, and
+     * there is already a real terminal one tab away.
+     */
+    private void showDetail() {
+        paneHost.removeAllViews();
+        if (detailC == null) {
+            paneHost.addView(hint(getString(R.string.dk_c_gone)));
+            return;
+        }
+        LinearLayout wrap = new LinearLayout(this);
+        wrap.setOrientation(LinearLayout.VERTICAL);
+        paneHost.addView(wrap, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+
+        LinearLayout head = new LinearLayout(this);
+        head.setOrientation(LinearLayout.HORIZONTAL);
+        head.setGravity(Gravity.CENTER_VERTICAL);
+        head.setPadding(dp(10), dp(6), dp(8), dp(6));
+
+        Button back = flatButton(getString(R.string.dk_c_back));
+        back.setTextColor(theme.accent);
+        back.setOnClickListener(v -> setPane(PANE_CONTAINERS));
+        head.addView(back);
+
+        LinearLayout titles = new LinearLayout(this);
+        titles.setOrientation(LinearLayout.VERTICAL);
+        titles.setPadding(dp(6), 0, 0, 0);
+
+        TextView name = new TextView(this);
+        name.setText(detailC.name);
+        name.setTextColor(theme.text);
+        name.setTextSize(TypedValue.COMPLEX_UNIT_PX, sp(14));
+        name.setSingleLine(true);
+        name.setEllipsize(TextUtils.TruncateAt.MIDDLE);
+        titles.addView(name);
+
+        detailStatus = new TextView(this);
+        detailStatus.setTextSize(TypedValue.COMPLEX_UNIT_PX, sp(11));
+        detailStatus.setSingleLine(true);
+        detailStatus.setEllipsize(TextUtils.TruncateAt.END);
+        titles.addView(detailStatus);
+
+        head.addView(titles, new LinearLayout.LayoutParams(0,
+                ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+        detailActions = new LinearLayout(this);
+        detailActions.setOrientation(LinearLayout.HORIZONTAL);
+        head.addView(detailActions);
+        wrap.addView(head);
+
+        LinearLayout tabRow = new LinearLayout(this);
+        tabRow.setOrientation(LinearLayout.HORIZONTAL);
+        tabRow.setPadding(dp(10), 0, dp(10), dp(4));
+        String[] labels = {
+                getString(R.string.dk_c_logs),
+                getString(R.string.dk_c_inspect),
+                getString(R.string.dk_c_files),
+                getString(R.string.dk_c_exec),
+        };
+        for (int i = 0; i < detailTabs.length; i++) {
+            final int which = i;
+            detailTabs[i] = flatButton(labels[i]);
+            detailTabs[i].setTextColor(i == detailTab ? theme.accent : theme.textDim);
+            detailTabs[i].setOnClickListener(v -> {
+                detailTab = which;
+                logFollow = true;
+                detailSig = "";
+                showDetail();
+            });
+            tabRow.addView(detailTabs[i]);
+        }
+        wrap.addView(tabRow);
+
+        View rule = new View(this);
+        rule.setBackgroundColor(theme.divider);
+        wrap.addView(rule, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, Math.max(1, dp(0.5f))));
+
+        detailScroll = new ScrollView(this);
+        detailBody = new TextView(this);
+        detailBody.setTypeface(Typeface.MONOSPACE);
+        detailBody.setTextColor(theme.text);
+        detailBody.setTextSize(TypedValue.COMPLEX_UNIT_PX, sp(11));
+        detailBody.setPadding(dp(12), dp(8), dp(12), dp(8));
+        detailBody.setTextIsSelectable(true);
+        detailBody.setText(R.string.dk_c_loading);
+        detailScroll.addView(detailBody);
+        wrap.addView(detailScroll, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
+
+        if (detailTab == TAB_EXEC) wrap.addView(buildExecEntry());
+
+        renderDetailHeader();
+        loadDetailBody();
+    }
+
+    private View buildExecEntry() {
+        LinearLayout entry = new LinearLayout(this);
+        entry.setOrientation(LinearLayout.HORIZONTAL);
+        entry.setPadding(dp(10), dp(6), dp(10), dp(10));
+
+        execInput = new EditText(this);
+        execInput.setHint(R.string.dk_c_exec_hint);
+        execInput.setInputType(InputType.TYPE_CLASS_TEXT
+                | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
+        execInput.setSingleLine(true);
+        execInput.setImeOptions(EditorInfo.IME_ACTION_SEND);
+        execInput.setTypeface(Typeface.MONOSPACE);
+        execInput.setTextColor(theme.text);
+        execInput.setHintTextColor(theme.textFaint);
+        execInput.setBackground(theme.surface(theme.field, dp(8)));
+        execInput.setPadding(dp(10), dp(8), dp(10), dp(8));
+        execInput.setOnKeyListener((v, code, ev) -> {
+            if (ev.getAction() == KeyEvent.ACTION_DOWN
+                    && (code == KeyEvent.KEYCODE_ENTER
+                        || code == KeyEvent.KEYCODE_NUMPAD_ENTER)) {
+                runExec();
+                return true;
+            }
+            return false;
+        });
+        execInput.setOnEditorActionListener((v, action, ev) -> {
+            if (action == EditorInfo.IME_ACTION_SEND || action == EditorInfo.IME_ACTION_DONE
+                    || action == EditorInfo.IME_NULL) {
+                runExec();
+                return true;
+            }
+            return false;
+        });
+        entry.addView(execInput, new LinearLayout.LayoutParams(0,
+                ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+        Button go = flatButton(getString(R.string.dk_console_send));
+        go.setOnClickListener(v -> runExec());
+        entry.addView(go);
+        execInput.post(execInput::requestFocus);
+        return entry;
+    }
+
+    /** The header line and buttons, repainted from every poll. */
+    private void renderDetailHeader() {
+        if (detailC == null || detailStatus == null) return;
+        // Rebuilding four buttons every two seconds costs a pressed button its
+        // press, and the status line its selection.
+        String sig = detailC.state + '/' + detailC.status;
+        if (sig.equals(detailSig) && detailActions.getChildCount() > 0) return;
+        detailSig = sig;
+
+        detailStatus.setText(detailC.image + " · " + detailC.status);
+        detailStatus.setTextColor(detailC.isRunning() ? theme.positive : theme.textFaint);
+
+        detailActions.removeAllViews();
+        DockerApi.Container c = detailC;
+
+        Button toggle = flatButton(toggleLabel(c));
+        toggle.setOnClickListener(v -> act(R.string.dk_action_failed, () -> toggle(c)));
+        detailActions.addView(toggle);
+
+        Button restart = flatButton(getString(R.string.dk_c_restart));
+        restart.setOnClickListener(v -> act(R.string.dk_action_failed,
+                () -> DockerApi.restartContainer(port, c.id)));
+        detailActions.addView(restart);
+
+        Button more = flatButton(getString(R.string.dk_image_more));
+        more.setOnClickListener(v -> containerMenu(c));
+        detailActions.addView(more);
+
+        Button rm = flatButton(getString(R.string.dk_container_remove));
+        rm.setTextColor(theme.danger);
+        rm.setOnClickListener(v -> confirmRemoveContainer(c, true));
+        detailActions.addView(rm);
+    }
+
+    /**
+     * The poll found the container again — or did not.
+     *
+     * A container that has been removed elsewhere leaves this pane pointing at
+     * nothing, and the honest thing is to say so rather than keep showing a
+     * status that stopped being true.
+     */
+    private void refreshDetail(List<DockerApi.Container> cs) {
+        if (detailId == null) return;
+        DockerApi.Container found = null;
+        for (int i = 0; cs != null && i < cs.size(); i++) {
+            if (detailId.equals(cs.get(i).id)) {
+                found = cs.get(i);
+                break;
+            }
+        }
+        if (found == null) {
+            if (detailC == null) return; // already said so
+            detailC = null;
+            showDetail();
+            return;
+        }
+        detailC = found;
+        renderDetailHeader();
+        if (detailTab == TAB_LOGS) loadDetailBody();
+    }
+
+    /** Fill the body for whichever tab is showing, off the main thread. */
+    private void loadDetailBody() {
+        if (detailC == null || detailBody == null) return;
+        final int tab = detailTab;
+        final String id = detailId;
+        if (tab == TAB_EXEC) {
+            detailBody.setText(""); // filled by what the user runs
+            return;
+        }
+        // Follow the tail only while the reader is already at the bottom, so a
+        // refresh cannot yank the view away from something being read.
+        logFollow = detailScroll == null || !detailScroll.canScrollVertically(1);
+        new Thread(() -> {
+            final String text;
+            if (tab == TAB_LOGS) {
+                String out = DockerApi.logs(port, id, LOG_TAIL);
+                text = out == null ? getString(R.string.dk_c_logs_failed)
+                        : out.trim().isEmpty() ? getString(R.string.dk_c_logs_empty) : out;
+            } else if (tab == TAB_FILES) {
+                String out = DockerApi.changes(port, id, 400);
+                text = out == null ? getString(R.string.dk_c_files_failed)
+                        : out.trim().isEmpty() ? getString(R.string.dk_c_files_none) : out;
+            } else {
+                DockerApi.ContainerInfo info = DockerApi.inspectContainer(port, id);
+                text = info == null ? getString(R.string.dk_c_details_failed) : inspectText(info);
+            }
+            main.post(() -> {
+                if (detailBody == null || tab != detailTab || !id.equals(detailId)) return;
+                // Only when it actually moved: setText on every poll drops any
+                // selection mid-drag, which is exactly what someone copying an
+                // error out of a log is doing.
+                if (text.contentEquals(detailBody.getText())) return;
+                detailBody.setText(text);
+                if (tab == TAB_LOGS && logFollow && detailScroll != null) {
+                    detailScroll.post(() -> detailScroll.fullScroll(View.FOCUS_DOWN));
+                }
+            });
+        }, "docker-detail").start();
+    }
+
+    private void runExec() {
+        if (execInput == null || detailC == null) return;
+        String command = execInput.getText().toString().trim();
+        if (command.isEmpty()) return;
+        final String id = detailId;
+        execInput.setText("");
+        appendExec("$ " + command + "\n");
+        new Thread(() -> {
+            String out = DockerApi.exec(port, id, command);
+            main.post(() -> {
+                if (!id.equals(detailId) || detailTab != TAB_EXEC) return;
+                appendExec(out == null || out.isEmpty()
+                        ? getString(R.string.dk_c_exec_silent) + "\n" : out);
+            });
+        }, "docker-exec").start();
+    }
+
+    private void appendExec(String text) {
+        if (detailBody == null) return;
+        CharSequence had = detailBody.getText();
+        if (had == null || getString(R.string.dk_c_loading).contentEquals(had)) {
+            detailBody.setText(text);
+        } else {
+            detailBody.append(text);
+        }
+        if (detailScroll != null) {
+            detailScroll.post(() -> detailScroll.fullScroll(View.FOCUS_DOWN));
+        }
+    }
+
+    private String inspectText(DockerApi.ContainerInfo info) {
+        StringBuilder sb = new StringBuilder();
+        field(sb, R.string.dk_d_name, info.name);
+        field(sb, R.string.dk_d_id, info.id);
+        field(sb, R.string.dk_d_image, info.image);
+        field(sb, R.string.dk_d_state, info.state);
+        field(sb, R.string.dk_d_exit, info.exit);
+        field(sb, R.string.dk_d_error, info.error);
+        field(sb, R.string.dk_d_created, info.created);
+        field(sb, R.string.dk_d_started, info.started);
+        field(sb, R.string.dk_d_finished, info.finished);
+        field(sb, R.string.dk_d_command, info.command);
+        field(sb, R.string.dk_d_entrypoint, info.entrypoint);
+        field(sb, R.string.dk_d_workdir, info.workdir);
+        field(sb, R.string.dk_d_restart, info.restart);
+        field(sb, R.string.dk_d_ports, info.ports);
+        field(sb, R.string.dk_d_mounts, info.mounts);
+        field(sb, R.string.dk_d_networks, info.networks);
+        field(sb, R.string.dk_d_ip, info.ip);
+        field(sb, R.string.dk_d_env, info.env);
+        field(sb, R.string.dk_d_run, info.runLine);
+        return sb.toString().trim();
+    }
+
+    private void showImages(List<DockerApi.Image> is, List<DockerApi.Container> cs,
+                            boolean up) {
         if (pane != PANE_IMAGES) return;
         paneHost.removeAllViews();
         ScrollView sv = new ScrollView(this);
@@ -583,31 +1072,363 @@ public class DockerActivity extends Activity {
             list.addView(hint(getString(R.string.dk_no_images)));
             return;
         }
-        for (DockerApi.Image im : is) {
-            LinearLayout row = new LinearLayout(this);
-            row.setOrientation(LinearLayout.VERTICAL);
-            row.setBackground(theme.surface(theme.card(), dp(10)));
-            row.setPadding(dp(12), dp(10), dp(12), dp(10));
+        for (DockerApi.Image im : is) list.addView(imageRow(im, cs));
+    }
 
-            TextView tag = new TextView(this);
-            tag.setText(im.tag);
-            tag.setTextColor(theme.text);
-            tag.setTextSize(TypedValue.COMPLEX_UNIT_PX, sp(13));
-            tag.setSingleLine(true);
-            tag.setEllipsize(TextUtils.TruncateAt.MIDDLE);
-            row.addView(tag);
+    /**
+     * One image, with the things a Docker host is actually asked to do to one.
+     *
+     * Run and Remove are on the row because they are the two anyone came here
+     * for; the rest is behind More, which keeps a row readable at the width a
+     * freeform window is usually dragged to. What is NOT here is the pair
+     * Docker Desktop puts in the same menu — vulnerability scanning is Docker
+     * Scout, an online service, and pushing needs Hub credentials this window
+     * has nowhere to keep. Both would be buttons that apologise when pressed.
+     */
+    private View imageRow(DockerApi.Image im, List<DockerApi.Container> cs) {
+        List<DockerApi.Container> users = DockerApi.containersOf(cs, im);
 
-            TextView size = new TextView(this);
-            size.setText(android.text.format.Formatter.formatShortFileSize(this, im.size));
-            size.setTextColor(theme.textFaint);
-            size.setTextSize(TypedValue.COMPLEX_UNIT_PX, sp(11));
-            row.addView(size);
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setBackground(theme.surface(theme.card(), dp(10)));
+        row.setPadding(dp(12), dp(10), dp(8), dp(10));
 
-            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-            lp.bottomMargin = dp(6);
-            list.addView(row, lp);
+        LinearLayout text = new LinearLayout(this);
+        text.setOrientation(LinearLayout.VERTICAL);
+
+        TextView tag = new TextView(this);
+        tag.setText(im.tag);
+        tag.setTextColor(theme.text);
+        tag.setTextSize(TypedValue.COMPLEX_UNIT_PX, sp(13));
+        tag.setSingleLine(true);
+        tag.setEllipsize(TextUtils.TruncateAt.MIDDLE);
+        text.addView(tag);
+
+        StringBuilder sub = new StringBuilder(im.shortId());
+        sub.append(" · ").append(
+                android.text.format.Formatter.formatShortFileSize(this, im.size));
+        if (im.created > 0) {
+            sub.append(" · ").append(android.text.format.DateUtils.getRelativeTimeSpanString(
+                    im.created * 1000L, System.currentTimeMillis(),
+                    android.text.format.DateUtils.MINUTE_IN_MILLIS));
         }
+        if (!users.isEmpty()) {
+            sub.append(" · ").append(getResources().getQuantityString(
+                    R.plurals.dk_image_in_use, users.size(), users.size()));
+        }
+
+        TextView meta = new TextView(this);
+        meta.setText(sub);
+        meta.setTextColor(users.isEmpty() ? theme.textFaint : theme.positive);
+        meta.setTextSize(TypedValue.COMPLEX_UNIT_PX, sp(11));
+        meta.setSingleLine(true);
+        meta.setEllipsize(TextUtils.TruncateAt.END);
+        text.addView(meta);
+
+        row.addView(text, new LinearLayout.LayoutParams(0,
+                ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+        Button run = flatButton(getString(R.string.dk_image_run));
+        run.setTextColor(theme.accent);
+        run.setOnClickListener(v -> runSheet(im));
+        row.addView(run);
+
+        Button more = flatButton(getString(R.string.dk_image_more));
+        more.setOnClickListener(v -> imageMenu(im, users));
+        row.addView(more);
+
+        Button rm = flatButton(getString(R.string.dk_image_remove));
+        rm.setTextColor(theme.danger);
+        rm.setOnClickListener(v -> removeImage(im, users));
+        row.addView(rm);
+
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        lp.bottomMargin = dp(6);
+        row.setLayoutParams(lp);
+        return row;
+    }
+
+    private void imageMenu(DockerApi.Image im, List<DockerApi.Container> users) {
+        String[] items = {
+                getString(R.string.dk_image_details),
+                getString(R.string.dk_image_usage),
+                getString(R.string.dk_image_pull),
+                getString(R.string.dk_image_copy_id),
+                getString(R.string.dk_image_console),
+        };
+        new AlertDialog.Builder(this)
+                .setTitle(im.tag)
+                .setItems(items, (d, which) -> {
+                    switch (which) {
+                        case 0: detailsSheet(im); break;
+                        case 1: usageSheet(im, users); break;
+                        case 2: pullAgain(im); break;
+                        case 3: copy(im.shortId()); break;
+                        default: runInConsole(im); break;
+                    }
+                })
+                .show();
+    }
+
+    // ── image actions ──
+
+    /**
+     * The Run sheet: everything optional except the image.
+     *
+     * Detached, always — {@code docker run -d}. The window has no terminal to
+     * attach a container to, and the console it does have belongs to the VM.
+     * The port note is not a disclaimer for its own sake: QEMU forwards exactly
+     * one port out of this machine and it is the engine's own, so a published
+     * port is reachable from inside the VM and nowhere else, and finding that
+     * out after writing a server is a bad afternoon.
+     */
+    private void runSheet(DockerApi.Image im) {
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setPadding(dp(20), dp(8), dp(20), dp(4));
+
+        EditText name = sheetField(R.string.dk_run_name, false);
+        EditText ports = sheetField(R.string.dk_run_ports, false);
+        EditText volumes = sheetField(R.string.dk_run_volumes, false);
+        EditText env = sheetField(R.string.dk_run_env, true);
+        EditText command = sheetField(R.string.dk_run_command, false);
+        box.addView(name);
+        box.addView(ports);
+        box.addView(volumes);
+        box.addView(env);
+        box.addView(command);
+
+        TextView note = new TextView(this);
+        note.setText(R.string.dk_run_note);
+        note.setTextSize(TypedValue.COMPLEX_UNIT_PX, sp(11));
+        note.setPadding(0, dp(8), 0, 0);
+        box.addView(note);
+
+        ScrollView scroll = new ScrollView(this);
+        scroll.addView(box);
+
+        new AlertDialog.Builder(this)
+                .setTitle(getString(R.string.dk_run_title, im.tag))
+                .setView(scroll)
+                .setNegativeButton(R.string.dk_cancel, null)
+                .setPositiveButton(R.string.dk_image_run, (d, w) -> {
+                    DockerApi.RunSpec spec = new DockerApi.RunSpec();
+                    spec.image = im.ref();
+                    spec.name = name.getText().toString().trim();
+                    spec.command = command.getText().toString().trim();
+                    spec.ports.addAll(splitList(ports.getText().toString()));
+                    spec.volumes.addAll(splitList(volumes.getText().toString()));
+                    for (String line : env.getText().toString().split("\n")) {
+                        String e = line.trim();
+                        if (!e.isEmpty()) spec.env.add(e);
+                    }
+                    runContainer(spec);
+                })
+                .show();
+    }
+
+    private void runContainer(DockerApi.RunSpec spec) {
+        new Thread(() -> {
+            String why = DockerApi.run(port, spec);
+            main.post(() -> {
+                lastSignature = "";
+                if (isFinishing() || isDestroyed()) return;
+                if (why != null && !why.isEmpty()) {
+                    say(getString(R.string.dk_run_failed), why);
+                    return;
+                }
+                // Straight to the list it just appeared in: a container that
+                // starts and exits — which is most of them, run with no command
+                // — has already happened by the time anyone switches tabs, and
+                // its status is the only place that shows.
+                setPane(PANE_CONTAINERS);
+            });
+        }, "docker-run").start();
+    }
+
+    private void detailsSheet(DockerApi.Image im) {
+        new Thread(() -> {
+            DockerApi.ImageInfo info = DockerApi.inspect(port, im.ref());
+            main.post(() -> {
+                if (isFinishing() || isDestroyed()) return;
+                if (info == null) {
+                    say(im.tag, getString(R.string.dk_details_failed));
+                    return;
+                }
+                String body = detailsText(info);
+                TextView view = new TextView(this);
+                view.setText(body);
+                view.setTypeface(Typeface.MONOSPACE);
+                view.setTextSize(TypedValue.COMPLEX_UNIT_PX, sp(11));
+                view.setTextIsSelectable(true);
+                view.setPadding(dp(20), dp(8), dp(20), dp(8));
+                ScrollView scroll = new ScrollView(this);
+                scroll.addView(view);
+                new AlertDialog.Builder(this)
+                        .setTitle(im.tag)
+                        .setView(scroll)
+                        .setNegativeButton(R.string.dk_copy, (d, w) -> copy(body))
+                        .setPositiveButton(android.R.string.ok, null)
+                        .show();
+            });
+        }, "docker-inspect").start();
+    }
+
+    private String detailsText(DockerApi.ImageInfo info) {
+        StringBuilder sb = new StringBuilder();
+        field(sb, R.string.dk_d_tags, info.tags);
+        field(sb, R.string.dk_d_id, info.id);
+        field(sb, R.string.dk_d_digest, info.digest);
+        field(sb, R.string.dk_d_created, info.created);
+        field(sb, R.string.dk_d_platform, info.platform);
+        field(sb, R.string.dk_d_size,
+                android.text.format.Formatter.formatShortFileSize(this, info.size));
+        field(sb, R.string.dk_d_layers, String.valueOf(info.layers));
+        field(sb, R.string.dk_d_entrypoint, info.entrypoint);
+        field(sb, R.string.dk_d_command, info.command);
+        field(sb, R.string.dk_d_workdir, info.workdir);
+        field(sb, R.string.dk_d_ports, info.ports);
+        field(sb, R.string.dk_d_env, info.env);
+        return sb.toString().trim();
+    }
+
+    /** One labelled line, skipped entirely when the engine had nothing to say. */
+    private void field(StringBuilder sb, int label, String value) {
+        if (value == null || value.trim().isEmpty()) return;
+        sb.append(getString(label)).append('\n').append(value.trim()).append("\n\n");
+    }
+
+    private void usageSheet(DockerApi.Image im, List<DockerApi.Container> users) {
+        StringBuilder sb = new StringBuilder();
+        for (DockerApi.Container c : users) {
+            sb.append(c.name).append('\n').append(c.status).append("\n\n");
+        }
+        new AlertDialog.Builder(this)
+                .setTitle(getString(R.string.dk_usage_title, im.tag))
+                .setMessage(users.isEmpty() ? getString(R.string.dk_usage_none)
+                        : sb.toString().trim())
+                .setPositiveButton(android.R.string.ok, null)
+                .show();
+    }
+
+    private void pullAgain(DockerApi.Image im) {
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.HORIZONTAL);
+        box.setGravity(Gravity.CENTER_VERTICAL);
+        box.setPadding(dp(24), dp(12), dp(24), dp(12));
+        box.addView(new ProgressBar(this));
+        TextView msg = new TextView(this);
+        msg.setText(R.string.dk_pull_body);
+        msg.setPadding(dp(16), 0, 0, 0);
+        box.addView(msg);
+
+        AlertDialog dialog = new AlertDialog.Builder(this)
+                .setTitle(getString(R.string.dk_pull_title, im.ref()))
+                .setView(box)
+                .create();
+        dialog.show();
+
+        new Thread(() -> {
+            String why = DockerApi.pull(port, im.ref());
+            main.post(() -> {
+                try {
+                    dialog.dismiss();
+                } catch (Exception ignored) {
+                    // dismissed by the user, or the window went away under us
+                }
+                lastSignature = "";
+                if (isFinishing() || isDestroyed()) return;
+                if (why != null && !why.isEmpty()) say(getString(R.string.dk_pull_failed), why);
+                else Toast.makeText(this, R.string.dk_pull_done, Toast.LENGTH_SHORT).show();
+            });
+        }, "docker-pull").start();
+    }
+
+    private void removeImage(DockerApi.Image im, List<DockerApi.Container> users) {
+        new AlertDialog.Builder(this)
+                .setTitle(getString(R.string.dk_remove_title, im.tag))
+                .setMessage(users.isEmpty() ? getString(R.string.dk_image_remove_body)
+                        : getString(R.string.dk_image_remove_used, users.size()))
+                .setNegativeButton(R.string.dk_cancel, null)
+                .setPositiveButton(R.string.dk_image_remove, (d, w) -> new Thread(() -> {
+                    String why = DockerApi.removeImage(port, im.ref());
+                    main.post(() -> {
+                        lastSignature = "";
+                        if (isFinishing() || isDestroyed()) return;
+                        if (why != null && !why.isEmpty()) {
+                            say(getString(R.string.dk_image_remove_failed), why);
+                        }
+                    });
+                }, "docker-rmi").start())
+                .show();
+    }
+
+    /** Hand the console the command and the caret, and let the user finish it. */
+    private void runInConsole(DockerApi.Image im) {
+        setPane(PANE_CONSOLE);
+        if (consoleInput == null) return;
+        consoleInput.setText("docker run --rm " + im.ref() + " ");
+        consoleInput.setSelection(consoleInput.getText().length());
+        consoleInput.requestFocus();
+    }
+
+    // ── sheet plumbing ──
+
+    /**
+     * A field for a dialog, deliberately unstyled.
+     *
+     * Everything in the window proper is painted from {@link DexTheme}, but a
+     * dialog is drawn by the platform in whatever light or dark the phone is
+     * set to. Colouring its contents ourselves is how you get white text on a
+     * white sheet the first time someone turns dark mode off.
+     */
+    private EditText sheetField(int hint, boolean multiline) {
+        EditText f = new EditText(this);
+        f.setHint(hint);
+        f.setTextSize(TypedValue.COMPLEX_UNIT_PX, sp(13));
+        f.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+                | (multiline ? InputType.TYPE_TEXT_FLAG_MULTI_LINE : 0));
+        if (!multiline) f.setSingleLine(true);
+        f.setMaxLines(multiline ? 4 : 1);
+        return f;
+    }
+
+    /** Split a comma- or newline-separated list, dropping the empties. */
+    private static List<String> splitList(String text) {
+        List<String> out = new java.util.ArrayList<>();
+        if (text == null) return out;
+        for (String part : text.split("[,\n]")) {
+            String p = part.trim();
+            if (!p.isEmpty()) out.add(p);
+        }
+        return out;
+    }
+
+    private void copy(String text) {
+        android.content.ClipboardManager cb = (android.content.ClipboardManager)
+                getSystemService(CLIPBOARD_SERVICE);
+        if (cb != null) {
+            cb.setPrimaryClip(android.content.ClipData.newPlainText("docker", text));
+        }
+        Toast.makeText(this, R.string.dk_copied, Toast.LENGTH_SHORT).show();
+    }
+
+    /**
+     * Say something that matters in a dialog rather than a Toast.
+     *
+     * "Port is already allocated" and "image is in use by a stopped container"
+     * are the whole answer to what just happened, and this window lives on the
+     * desktop display where a text Toast is not reliably drawn at all.
+     */
+    private void say(String title, String message) {
+        if (isFinishing() || isDestroyed()) return;
+        new AlertDialog.Builder(this)
+                .setTitle(title)
+                .setMessage(message)
+                .setPositiveButton(android.R.string.ok, null)
+                .show();
     }
 
     /**
@@ -729,6 +1550,8 @@ public class DockerActivity extends Activity {
         private volatile LocalSocket sock;
         /** Set by the first byte the guest sends back; see {@link #probe}. */
         private volatile boolean heard;
+        /** Whether we have already said this console looks dead. */
+        private volatile boolean complained;
 
         @Override
         public void run() {
@@ -743,7 +1566,16 @@ public class DockerActivity extends Activity {
                 byte[] buf = new byte[4096];
                 int n;
                 while (!closed && (n = s.getInputStream().read(buf)) > 0) {
-                    heard = true;
+                    if (!heard) {
+                        heard = true;
+                        // Take back the verdict if it turns out to be wrong: a
+                        // stale "this is dead" over a console that is plainly
+                        // answering is worse than never having said it.
+                        if (complained) {
+                            main.post(() -> appendConsole(
+                                    "[" + getString(R.string.dk_console_awake) + "]\n"));
+                        }
+                    }
                     final String chunk = new String(buf, 0, n,
                             java.nio.charset.StandardCharsets.UTF_8);
                     main.post(() -> appendConsole(chunk));
@@ -785,16 +1617,27 @@ public class DockerActivity extends Activity {
          */
         private void probe() {
             write("");
+            // Two chances and eight seconds before saying anything. The first
+            // window was two, which called a perfectly live console dead every
+            // time the pane was reopened: this VM runs on TCG with four busy
+            // vCPUs, and the QEMU I/O thread that has to accept our connection
+            // and carry the echo back does not always get a turn inside a
+            // second or two.
             main.postDelayed(() -> {
                 if (closed || heard || console != this) return;
-                appendConsole("\n[" + getString(R.string.dk_console_silent) + "]\n");
-            }, 2000);
+                write("");
+                main.postDelayed(() -> {
+                    if (closed || heard || console != this) return;
+                    complained = true;
+                    appendConsole("\n[" + getString(R.string.dk_console_silent) + "]\n");
+                }, 5000);
+            }, 3000);
         }
 
         /** @return null when the line left, else why it did not. */
         String write(String line) {
             LocalSocket s = sock;
-            if (s == null) return getString(R.string.dk_console_detached);
+            if (s == null) return getString(R.string.dk_console_connecting);
             try {
                 OutputStream out = s.getOutputStream();
                 out.write((line + "\n").getBytes(java.nio.charset.StandardCharsets.UTF_8));
@@ -817,15 +1660,26 @@ public class DockerActivity extends Activity {
         }
     }
 
+    /**
+     * Show the console pane, over a link that is very probably already up.
+     *
+     * Reopening no longer means reconnecting. QEMU serves ONE client on this
+     * chardev and stops accepting while it has one, so every detach/attach is a
+     * handoff — and under TCG, with four vCPUs busy, the I/O thread can take
+     * seconds to notice the old client left. Tearing the link down on every tab
+     * switch turned that into a queue of connects blocked in the listen
+     * backlog, each of which looked, from in here, exactly like a console that
+     * was not attached.
+     */
     private void openConsole() {
-        closeConsole();
-        // Seed with the tail of the log so the pane is never blank.
-        String log = Docker.readFile(Docker.consoleLog(this));
-        if (log.length() > 16000) log = log.substring(log.length() - 16000);
-        consoleView.setText(log);
+        if (consoleBuffer.length() == 0) {
+            // First look: seed with the tail of the log so it is never blank.
+            String log = Docker.readFile(Docker.consoleLog(this));
+            if (log.length() > 16000) log = log.substring(log.length() - 16000);
+            consoleBuffer.append(log);
+        }
+        consoleView.setText(consoleBuffer);
         scrollConsoleDown();
-        saidDetached = false;
-        consoleRetryAt = 0;
         attachConsole();
     }
 
@@ -838,7 +1692,11 @@ public class DockerActivity extends Activity {
      * everything typed into it, for as long as the window stayed open.
      */
     private void attachConsole() {
-        if (console != null || consoleView == null) return;
+        if (console != null) return;
+        if (zombie != null) {
+            if (zombie.isAlive()) return; // still inside connect(); do not stack
+            zombie = null;
+        }
         long now = android.os.SystemClock.elapsedRealtime();
         if (now < consoleRetryAt) return;
         consoleRetryAt = now + CONSOLE_RETRY_MS;
@@ -860,17 +1718,22 @@ public class DockerActivity extends Activity {
         ConsoleLink c = console;
         console = null;
         consoleRetryAt = 0;
-        if (c != null) c.close();
+        if (c == null) return;
+        c.close();
+        // Kept until the thread actually ends: close() cannot interrupt a
+        // connect that is still waiting its turn in the backlog.
+        zombie = c.isAlive() ? c : null;
     }
 
     private void appendConsole(String chunk) {
-        if (consoleView == null) return;
-        consoleView.append(chunk);
+        consoleBuffer.append(chunk);
         // Bounded scrollback: a compose build can print megabytes, and a
         // TextView that keeps all of it stops laying out.
-        CharSequence all = consoleView.getText();
-        if (all.length() > 40000) {
-            consoleView.setText(all.subSequence(all.length() - 24000, all.length()));
+        if (consoleBuffer.length() > 40000) {
+            consoleBuffer.delete(0, consoleBuffer.length() - 24000);
+            if (consoleView != null) consoleView.setText(consoleBuffer);
+        } else if (consoleView != null) {
+            consoleView.append(chunk);
         }
         scrollConsoleDown();
     }
@@ -952,18 +1815,27 @@ public class DockerActivity extends Activity {
         DexCursors.apply(powerBtn, DexCursors.ROLE_HAND);
     }
 
-    private void engineCall(java.util.concurrent.Callable<Boolean> call) {
+    /**
+     * Run one engine verb off the main thread and show what it said if it said
+     * no.
+     *
+     * The message is the point. "Container is paused", "port is already
+     * allocated", "you cannot remove a running container" each tell you what to
+     * do next, and every one of them used to arrive as the same six words.
+     */
+    private void act(int failTitle, java.util.concurrent.Callable<String> call) {
         new Thread(() -> {
-            boolean ok;
+            String why;
             try {
-                ok = Boolean.TRUE.equals(call.call());
+                why = call.call();
             } catch (Exception e) {
-                ok = false;
+                why = String.valueOf(e.getMessage());
             }
-            final boolean fok = ok;
+            final String fwhy = why;
             main.post(() -> {
-                if (!fok) Toast.makeText(this, R.string.dk_action_failed, Toast.LENGTH_SHORT).show();
                 lastSignature = ""; // repaint on the next poll either way
+                if (fwhy == null || fwhy.isEmpty()) return;
+                say(getString(failTitle), fwhy);
             });
         }, "docker-action").start();
     }
