@@ -261,6 +261,7 @@
     <string name="lx_rotate">ફેરવો</string>
     <string name="lx_location">સ્થાન</string>
     <string name="lx_torch">ટોર્ચ</string>
+    <string name="lx_phone_screen">ફોન સ્ક્રીન</string>
     <string name="lx_lock">લોક</string>
     <string name="lx_all_settings">બધી સેટિંગ્સ</string>
     <string name="lx_qs_footer">ટૉગલ જોડાયેલા ફોન પર લાગુ પડે છે</string>
@@ -275,6 +276,7 @@
     <string name="lx_no_flash">આ ઉપકરણમાં ફ્લેશ નથી</string>
     <string name="lx_torch_unavailable">ટોર્ચ ઉપલબ્ધ નથી</string>
     <string name="lx_cannot_volume">વોલ્યુમ બદલી શકાયું નહીં</string>
+    <string name="lx_cannot_screen">ફોન સ્ક્રીન બદલી શકાઈ નહીં</string>
     <string name="lx_open">ખોલો</string>
     <string name="lx_remove_from_desktop">ડેસ્કટોપમાંથી કાઢો</string>
     <string name="lx_desktop_hint">એપ્સમાં કોઈ એપ દબાવી રાખો, પછી તેને અહીં ખેંચો · વિજેટ માટે રાઇટ-ક્લિક કરો</string>

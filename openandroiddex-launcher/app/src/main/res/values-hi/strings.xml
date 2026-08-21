@@ -261,6 +261,7 @@
     <string name="lx_rotate">घुमाएँ</string>
     <string name="lx_location">लोकेशन</string>
     <string name="lx_torch">टॉर्च</string>
+    <string name="lx_phone_screen">फ़ोन स्क्रीन</string>
     <string name="lx_lock">लॉक</string>
     <string name="lx_all_settings">सभी सेटिंग्स</string>
     <string name="lx_qs_footer">टॉगल जुड़े हुए फ़ोन पर लागू होते हैं</string>
@@ -275,6 +276,7 @@
     <string name="lx_no_flash">इस डिवाइस में फ़्लैश नहीं है</string>
     <string name="lx_torch_unavailable">टॉर्च उपलब्ध नहीं</string>
     <string name="lx_cannot_volume">वॉल्यूम नहीं बदल सका</string>
+    <string name="lx_cannot_screen">फ़ोन स्क्रीन नहीं बदल सकी</string>
     <string name="lx_open">खोलें</string>
     <string name="lx_remove_from_desktop">डेस्कटॉप से हटाएँ</string>
     <string name="lx_desktop_hint">ऐप्स में किसी ऐप को दबाकर रखें, फिर उसे यहाँ खींचें · विजेट के लिए राइट-क्लिक करें</string>

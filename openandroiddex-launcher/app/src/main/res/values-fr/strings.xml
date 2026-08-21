@@ -261,6 +261,7 @@
     <string name="lx_rotate">Rotation</string>
     <string name="lx_location">Localisation</string>
     <string name="lx_torch">Lampe</string>
+    <string name="lx_phone_screen">Écran du téléphone</string>
     <string name="lx_lock">Verrouiller</string>
     <string name="lx_all_settings">Tous les paramètres</string>
     <string name="lx_qs_footer">Les interrupteurs agissent sur le téléphone connecté</string>
@@ -275,6 +276,7 @@
     <string name="lx_no_flash">Cet appareil n\'a pas de flash</string>
     <string name="lx_torch_unavailable">Lampe indisponible</string>
     <string name="lx_cannot_volume">Impossible de changer le volume</string>
+    <string name="lx_cannot_screen">Impossible de changer l’écran du téléphone</string>
     <string name="lx_open">Ouvrir</string>
     <string name="lx_remove_from_desktop">Retirer du bureau</string>
     <string name="lx_desktop_hint">Maintenez une appli dans Applis, puis glissez-la ici · Clic droit pour les widgets</string>

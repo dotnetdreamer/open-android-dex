@@ -1015,6 +1015,15 @@ pub fn arm_perf_globals(app: &tauri::AppHandle, serial: &str) -> String {
 pub fn restore_phone(app: &tauri::AppHandle, serial: &str) {
     log::info!("── exiting DeX on {serial}: putting the phone back ──");
 
+    // 0. the phone's own panel, if the taskbar's tile left it dark. Ahead of everything
+    //    else because step 4 kills the daemon, the call needs the daemon's authority, and
+    //    ART does not run shutdown hooks on SIGTERM — once that process is gone nothing on
+    //    the device can undo it, and the user is left pressing power twice at a phone that
+    //    looks broken.
+    if crate::wm::WmClient::new().restore_screen() {
+        log::info!("{serial}: the phone's own screen was off — turned back on");
+    }
+
     let services = run_adb_timeout(
         app,
         &[

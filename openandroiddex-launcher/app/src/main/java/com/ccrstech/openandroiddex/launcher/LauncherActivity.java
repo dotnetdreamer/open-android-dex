@@ -317,6 +317,10 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
     private Intent lastBattery;
     private boolean torchOn = false;
     private CameraManager.TorchCallback torchCallback;
+    /** Tray "Phone screen" tile — lit while the phone's own panel is lit. */
+    private boolean phoneScreenOn = true;
+    /** Lazy: the one tray tile whose work is a daemon call rather than a shell command. */
+    private WmClient qsWm;
     private final Handler handler = new Handler(Looper.getMainLooper());
     private int cascade = 0;
     /** Last broadcast seq applied — the PC fires broadcasts without waiting,
@@ -670,6 +674,7 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
         // Drops the sampler's view references. The gauge lives in the
         // activity's own view tree now, so it goes with the window either way.
         detachPerfGauge();
+        if (qsWm != null) qsWm.shutdown();
         try {
             if (widgetHost != null) widgetHost.stopListening();
         } catch (Exception ignored) {
@@ -3669,6 +3674,33 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
     }
 
     /**
+     * The phone's own panel, on or off, without disturbing the desktop.
+     *
+     * The desktop is on a virtual display with a power state of its own and no keyguard,
+     * so darkening the phone costs the session nothing — no pause, no reconnect, and none
+     * of what the Lock tile beside it brings with it (sleep, keyguard, always-on clock).
+     *
+     * Straight to the window daemon rather than through the PC's request queue: the work
+     * is a framework call the daemon already holds the authority for, and 7191 answers in
+     * well under a millisecond. The panel comes back by itself if anything wakes the
+     * device, and the daemon restores it if the session ends while it is dark.
+     */
+    private void setPhoneScreen(boolean on) {
+        if (qsWm == null) qsWm = new WmClient();
+        final WmClient client = qsWm;
+        phoneScreenOn = on;
+        client.post(() -> {
+            if (client.screen(on)) return;
+            runOnUiThread(() -> {
+                // Nothing moved, so the next tray build must not claim it did.
+                phoneScreenOn = !on;
+                Toast.makeText(this, getString(R.string.lx_cannot_screen),
+                        Toast.LENGTH_SHORT).show();
+            });
+        });
+    }
+
+    /**
      * Framework icon by internal name(s) with a public-resource fallback —
      * quick-settings art (wifi/signal/flashlight) is not in android.R, but
      * loading it by name works on every device tried; tiles fall back to a
@@ -3830,6 +3862,9 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
                 sysIcon(new String[]{"ic_qs_flashlight", "ic_signal_flashlight"}, 0), "🔦",
                 torchOn, true,
                 this::setTorch));
+        tiles.add(qsTile(getString(R.string.lx_phone_screen), null, "📱",
+                phoneScreenOn, true,
+                this::setPhoneScreen));
         tiles.add(qsTile(getString(R.string.lx_lock),
                 sysIcon(new String[0], android.R.drawable.ic_lock_idle_lock), "🔒",
                 false, false,

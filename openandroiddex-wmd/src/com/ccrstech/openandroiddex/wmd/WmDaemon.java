@@ -35,6 +35,7 @@ import java.util.List;
  *   FOCUSABLE <display> <task> <0|1>          -> OK
  *   ALWAYSONTOP <display> <task> <0|1>        -> OK
  *   CLOSE <task>                              -> OK
+ *   SCREEN [0|1]                              -> OK [<0|1>]  the phone's own panel
  *   CPUSTAT                                   -> OK <busy> <total>  processor jiffies
  *   PROCS <pkg…>                              -> TOTAL <busy> <total> /
  *                                                PROC <pkg> <rssKb> <jiffies> … / END
@@ -296,6 +297,20 @@ public final class WmDaemon {
                 out.println("OK");
                 return;
 
+            // The phone's own panel, which is not the desktop's display: the desktop
+            // has a power state of its own and keeps running while this is dark. No
+            // argument reads back what we last set, since nothing else reports it — the
+            // framework still believes a panel we blanked this way is lit.
+            case "SCREEN": {
+                if (a.length < 2) {
+                    out.println("OK " + (Screen.isOff() ? "0" : "1"));
+                    return;
+                }
+                Screen.power(!"0".equals(a[1]));
+                out.println("OK");
+                return;
+            }
+
             // Raw processor jiffies for the taskbar's performance gauge, as
             // "OK <busy> <total>". It lives here for one reason: /proc/stat is
             // labelled proc_stat, which untrusted_app has not been allowed to
@@ -499,6 +514,25 @@ public final class WmDaemon {
             } catch (InterruptedException e) {
                 return;
             }
+            // A panel we blanked must not outlive the desktop that asked for it, and
+            // this tick is the only thing that can notice: a shutdown hook was tried and
+            // does not fire — ART leaves SIGTERM to the kernel, so `pkill` takes this
+            // process with the panel still dark. Ahead of the ARM guard because a session
+            // that never armed can still have blanked the phone, and the task-tree read
+            // costs nothing while the panel is lit.
+            if (Screen.isOff()) {
+                boolean desktopGone = false;
+                try {
+                    desktopGone = Wm.displayHosting(LAUNCHER) <= 0;
+                } catch (Throwable t) {
+                    // A framework hiccup is not evidence that anything went away.
+                }
+                if (desktopGone) {
+                    System.out.println("watchdog: desktop gone with the panel dark — restoring it");
+                    Screen.restore();
+                }
+            }
+
             String globals = undoGlobals;
             if (globals == null) continue;                                  // never armed
             long silent = System.currentTimeMillis() - lastArmMs;
@@ -533,6 +567,10 @@ public final class WmDaemon {
      * cable attached. Ordered so this process is the last thing standing.
      */
     private static void cleanup(String globals) {
+        // Before anything else: the undo below ends in force-stopping the launcher, and a
+        // dark phone with no desktop left to turn it back on is the worst state to leave.
+        Screen.restore();
+
         sh(globals);
 
         // Read the accessibility list NOW rather than taking it from the ARM: a session

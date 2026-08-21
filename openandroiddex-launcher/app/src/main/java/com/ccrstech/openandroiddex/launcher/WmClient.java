@@ -108,6 +108,18 @@ final class WmClient {
     }
 
     /**
+     * The phone's own panel, on or off. False if the daemon could not be reached.
+     *
+     * Not the desktop's display: scrcpy gives that one a power state of its own, so it
+     * keeps running at full speed while the panel is dark. The call belongs on the other
+     * end of this socket because SurfaceControl takes a power mode only from the shell's
+     * uid, which this app will never have — see the daemon's Screen.
+     */
+    boolean screen(boolean on) {
+        return ok(request("SCREEN " + (on ? 1 : 0)));
+    }
+
+    /**
      * Root tasks on {@code displayId}, topmost first — or null if the daemon could not be
      * reached or the reply was truncated.
      *

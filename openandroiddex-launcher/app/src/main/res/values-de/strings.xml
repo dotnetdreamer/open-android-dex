@@ -261,6 +261,7 @@
     <string name="lx_rotate">Drehen</string>
     <string name="lx_location">Standort</string>
     <string name="lx_torch">Taschenlampe</string>
+    <string name="lx_phone_screen">Telefonbildschirm</string>
     <string name="lx_lock">Sperren</string>
     <string name="lx_all_settings">Alle Einstellungen</string>
     <string name="lx_qs_footer">Die Schalter wirken auf das verbundene Telefon</string>
@@ -275,6 +276,7 @@
     <string name="lx_no_flash">Dieses Gerät hat kein Blitzlicht</string>
     <string name="lx_torch_unavailable">Taschenlampe nicht verfügbar</string>
     <string name="lx_cannot_volume">Lautstärke lässt sich nicht ändern</string>
+    <string name="lx_cannot_screen">Telefonbildschirm lässt sich nicht ändern</string>
     <string name="lx_open">Öffnen</string>
     <string name="lx_remove_from_desktop">Vom Desktop entfernen</string>
     <string name="lx_desktop_hint">Halte eine App in Apps gedrückt und ziehe sie hierher · Rechtsklick für Widgets</string>

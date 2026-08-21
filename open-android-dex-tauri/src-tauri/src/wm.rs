@@ -178,6 +178,18 @@ impl WmClient {
         self.ok("PING")
     }
 
+    /// Put the phone's own panel back, if the desktop is what left it dark.
+    ///
+    /// Unconditional would be wrong: `SCREEN 1` on a phone the user put to sleep with the
+    /// power button lights a panel the framework has stopped drawing to. Only the daemon
+    /// knows whether the darkness is ours, so it is asked before it is told.
+    pub fn restore_screen(&self) -> bool {
+        if !matches!(self.request("SCREEN"), Some(r) if r.trim() == "OK 0") {
+            return false;
+        }
+        self.ok("SCREEN 1")
+    }
+
     /// Arm (and keep alive) the daemon's dead-man switch.
     ///
     /// Every other undo in this project runs from the PC. This one cannot: when the cable

@@ -261,6 +261,7 @@
     <string name="lx_rotate">تدوير</string>
     <string name="lx_location">الموقع</string>
     <string name="lx_torch">المصباح</string>
+    <string name="lx_phone_screen">شاشة الهاتف</string>
     <string name="lx_lock">قفل</string>
     <string name="lx_all_settings">كل الإعدادات</string>
     <string name="lx_qs_footer">تنطبق المفاتيح على الهاتف المتصل</string>
@@ -275,6 +276,7 @@
     <string name="lx_no_flash">لا يوجد فلاش في هذا الجهاز</string>
     <string name="lx_torch_unavailable">المصباح غير متاح</string>
     <string name="lx_cannot_volume">تعذّر تغيير مستوى الصوت</string>
+    <string name="lx_cannot_screen">تعذّر تغيير شاشة الهاتف</string>
     <string name="lx_open">فتح</string>
     <string name="lx_remove_from_desktop">إزالة من سطح المكتب</string>
     <string name="lx_desktop_hint">اضغط مطوّلاً على تطبيق في التطبيقات ثم اسحبه إلى هنا · انقر بزر الفأرة الأيمن لإضافة الودجات</string>

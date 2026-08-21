@@ -261,6 +261,7 @@
     <string name="lx_rotate">旋转</string>
     <string name="lx_location">定位</string>
     <string name="lx_torch">手电筒</string>
+    <string name="lx_phone_screen">手机屏幕</string>
     <string name="lx_lock">锁屏</string>
     <string name="lx_all_settings">全部设置</string>
     <string name="lx_qs_footer">这些开关作用于已连接的手机</string>
@@ -275,6 +276,7 @@
     <string name="lx_no_flash">此设备没有闪光灯</string>
     <string name="lx_torch_unavailable">手电筒不可用</string>
     <string name="lx_cannot_volume">无法调整音量</string>
+    <string name="lx_cannot_screen">无法切换手机屏幕</string>
     <string name="lx_open">打开</string>
     <string name="lx_remove_from_desktop">从桌面移除</string>
     <string name="lx_desktop_hint">在“应用”里长按一个应用，然后拖到这里 · 右键添加小组件</string>

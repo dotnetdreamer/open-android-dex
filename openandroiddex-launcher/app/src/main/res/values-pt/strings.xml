@@ -261,6 +261,7 @@
     <string name="lx_rotate">Girar</string>
     <string name="lx_location">Localização</string>
     <string name="lx_torch">Lanterna</string>
+    <string name="lx_phone_screen">Ecrã do telefone</string>
     <string name="lx_lock">Bloquear</string>
     <string name="lx_all_settings">Todas as configurações</string>
     <string name="lx_qs_footer">Os botões valem para o telefone conectado</string>
@@ -275,6 +276,7 @@
     <string name="lx_no_flash">Este aparelho não tem flash</string>
     <string name="lx_torch_unavailable">Lanterna indisponível</string>
     <string name="lx_cannot_volume">Não foi possível mudar o volume</string>
+    <string name="lx_cannot_screen">Não foi possível mudar o ecrã do telefone</string>
     <string name="lx_open">Abrir</string>
     <string name="lx_remove_from_desktop">Remover do desktop</string>
     <string name="lx_desktop_hint">Segure um app em Apps e arraste-o para cá · Clique com o botão direito para widgets</string>

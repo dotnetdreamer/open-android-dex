@@ -364,6 +364,7 @@
     <string name="lx_rotate">Rotate</string>
     <string name="lx_location">Location</string>
     <string name="lx_torch">Torch</string>
+    <string name="lx_phone_screen">Phone screen</string>
     <string name="lx_lock">Lock</string>
     <string name="lx_all_settings">All settings</string>
     <string name="lx_qs_footer">Toggles apply to the connected phone</string>
@@ -378,6 +379,7 @@
     <string name="lx_no_flash">No flash on this device</string>
     <string name="lx_torch_unavailable">Torch unavailable</string>
     <string name="lx_cannot_volume">Cannot change volume</string>
+    <string name="lx_cannot_screen">Cannot change the phone screen</string>
     <string name="lx_open">Open</string>
     <string name="lx_remove_from_desktop">Remove from desktop</string>
     <string name="lx_desktop_hint">Hold an app in Apps, then drag it here · Right-click for widgets</string>
