@@ -164,8 +164,18 @@ sleep 1
 # out -- which is why the launchers added at provision time never appeared.
 # Doing it here, a moment before the session starts, is what makes them stick.
 # Idempotent: it adds only what is not already on the panel.
+# The geometry is passed because the LENGTH of the dock is computed from it:
+# the panel stops exactly where the top bar ends, which needs the screen height
+# and is knowable only here. Substituted by the same sed that fills the one on
+# the Xvnc line -- that sed rewrites the first match on each line, and these
+# are two separate lines.
+#
+# NO APOSTROPHES ANYWHERE IN THIS STRING -- not even in prose. It is
+# single-quoted shell, so a lone one closes it early and every $VAR after that
+# expands on the HOST instead of inside the guest, silently. sh -n does not
+# catch it, because the quotes still balance overall.
 [ -f /usr/local/share/openandroiddex/dock.py ] && \
-  python3 /usr/local/share/openandroiddex/dock.py >/dev/null 2>&1
+  python3 /usr/local/share/openandroiddex/dock.py GEOMETRY >/dev/null 2>&1
 # The theme, for the same reason and in the same window. Our defaults live in
 # /etc/xdg and cannot be clobbered, but a guest provisioned before that existed
 # already has the whole xfwm4 defaults block written into its OWN channel, and

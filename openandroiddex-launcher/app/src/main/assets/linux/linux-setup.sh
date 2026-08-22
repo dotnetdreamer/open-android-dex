@@ -1321,31 +1321,96 @@ for candidate in candidates:
 if panel is None:
     panel = candidates[-1]
 
-# THE DOCK ON THE LEFT. Vertical, snapped to the middle of the left edge, and
-# no longer than its own contents -- the GNOME dash shape rather than a
-# full-height bar. Every number here is xfce4-panel's own, not a guess:
+# THE DOCK ON THE LEFT, below the top bar, with the desktop icons pushed clear
+# of it -- the Ubuntu arrangement. Every number is xfce4-panel's or xfwm4's
+# own, not a guess:
 #   mode=1         XFCE_PANEL_PLUGIN_MODE_VERTICAL. 0 is horizontal, 2 is
 #                  deskbar (vertical panel, horizontal plugins) which is the
 #                  wrong one -- it lays the launchers out in rows.
-#   position       "p=<snap>;x=;y=". Snap 7 is SNAP_POSITION_WC, the left edge
-#                  centred; 5 is plain left, and 12 is the bottom this
-#                  replaces. x and y are ignored for a snapped panel, which
-#                  recomputes them itself.
-#   length=1       a PERCENT of the edge, range 1-100 and typed DOUBLE (it was
-#                  an int before 4.18). With length-adjust true the panel then
-#                  grows to fit its plugins, so 1 means "no bigger than it has
-#                  to be".
-#   size=44        thickness in px, range 16-128.
+#   position       "p=<snap>;x=;y=". Snap 8 is SNAP_POSITION_SW, the BOTTOM of
+#                  the left edge, so the panel grows upward from the bottom and
+#                  stops short of the top bar instead of running under it. 5 is
+#                  the whole left edge, and is the fallback when there is no
+#                  top bar to keep clear of.
+#   length         a PERCENT of the edge, range 1-100, typed DOUBLE since 4.18.
+#                  Computed, not fixed: the screen height less the top bar's
+#                  own height, so the dock's top edge lands exactly on the top
+#                  bar's bottom edge -- no overlap, and no gap either.
+#   size=48        thickness in px, range 16-128.
+#   autohide       0 = AUTOHIDE_BEHAVIOR_NEVER, and this is what makes the
+#                  icons move at all. See below.
+#   enable-struts  a panel reserves space by publishing _NET_WM_STRUT_PARTIAL.
+#                  Necessary, not sufficient.
 #
-# ONCE, and the marker is what makes it once. Dragging the dock back to the
-# bottom is a thing a person may reasonably do, and re-imposing this at every
-# launch would leave them no way to make it stick. Adding LAUNCHERS below stays
-# per-boot, because an app that installs later still has to get one.
+# AUTOHIDE IS WHY THE ICONS SAT UNDER THE DOCK.
+# panel_window_screen_struts_edge opens with
+#
+#     if (window->autohide_behavior != AUTOHIDE_BEHAVIOR_NEVER
+#         || ! window->struts_enabled)
+#       return STRUTS_EDGE_NONE;
+#
+# so a panel that autohides publishes NO strut at all -- whatever its edge, its
+# length, or enable-struts. Ubuntu ships this panel with autohide on, which is
+# also why it looked fine: with no window open there is nothing to hide from,
+# so it stayed visible while reserving nothing, and xfdesktop went on laying
+# icons from x=0 with the dock drawn straight over them.
+#
+# A SHORTER PANEL STILL RESERVES THE WHOLE EDGE, which is what lets the dock
+# stop below the top bar without giving anything up. xfwm4's workspaceUpdateArea
+# does
+#
+#     screen_info->margins[STRUTS_LEFT] =
+#         MAX(screen_info->margins[STRUTS_LEFT], c->struts[STRUTS_LEFT]);
+#
+# and the start/end y of the strut reach that line only through
+# strutsToRectangles, whose rectangle is used for ONE thing: testing that the
+# strut intersects the primary monitor at all. The margin itself is the full
+# strut value. So a partial-height left panel takes the same 48px off the work
+# area as a full-height one, and xfdesktop -- which filters PropertyNotify for
+# _NET_WORKAREA on the root window and re-runs its grid resize -- moves the
+# icons across either way.
+#
+# ONCE, and the marker is what makes it once. Dragging the dock somewhere else
+# is a thing a person may reasonably do, and re-imposing this at every launch
+# would leave them no way to make that stick. The marker holds a LAYOUT NUMBER
+# rather than merely existing, for the same reason FEATURE_LEVEL does: earlier
+# layouts were the short centred strip, and the full-height bar that ran under
+# the top panel, and a bare "already done" marker would have left every guest
+# that got one of them stuck there forever.
+#
+# Needs the SCREEN GEOMETRY, so it happens only on the linux-rt.sh pass, which
+# is handed it. The provisioning pass has no session and no geometry; it still
+# adds launchers, and the first session positions them.
 #
 # Skipped entirely when there is only ONE panel: then it is not a dock beside a
 # top bar, it is the whole desktop's only strip, and moving that is not what
 # anyone asked for.
 DOCKPOS = "/root/.config/openandroiddex/dock-positioned"
+DOCK_LAYOUT = 4
+
+# "1280x720" from linux-rt.sh, absent at provision time.
+SCREEN_H = 0
+if len(sys.argv) > 1:
+    try:
+        SCREEN_H = int(sys.argv[1].lower().split("x")[1])
+    except (IndexError, ValueError):
+        SCREEN_H = 0
+
+
+def dock_layout_done():
+    """True when this guest already has THIS layout, not merely some layout."""
+    try:
+        with open(DOCKPOS) as f:
+            return int(f.read().strip() or 0) >= DOCK_LAYOUT
+    except (OSError, ValueError):
+        return False
+
+
+def get_prop(parent, name):
+    for child in parent.findall("property"):
+        if child.get("name") == name:
+            return child.get("value")
+    return None
 
 
 def set_prop(parent, name, ptype, value):
@@ -1359,13 +1424,49 @@ def set_prop(parent, name, ptype, value):
                   {"name": name, "type": ptype, "value": value})
 
 
+def top_bar_height(dock):
+    """Height in px of a horizontal panel snapped along the TOP, 0 if none.
+
+    Only such a panel is in the dock's way. size is the thickness and nrows the
+    number of plugin rows, and 48 is xfce4-panel's own default for a size it
+    was never told.
+    """
+    for other in candidates:
+        if other is dock:
+            continue
+        if (get_prop(other, "mode") or "0") != "0":
+            continue
+        pos = get_prop(other, "position") or ""
+        if not pos.startswith("p="):
+            continue
+        try:
+            snap = int(pos[2:].split(";")[0])
+        except ValueError:
+            continue
+        # NE, NW, NC, N -- the four that put a horizontal panel on top.
+        if snap not in (2, 6, 9, 11):
+            continue
+        try:
+            return int(get_prop(other, "size") or 48) * int(get_prop(other, "nrows") or 1)
+        except ValueError:
+            return 48
+    return 0
+
+
 moved = False
-if len(candidates) > 1 and not os.path.exists(DOCKPOS):
+if len(candidates) > 1 and SCREEN_H > 0 and not dock_layout_done():
+    _top = top_bar_height(panel)
+    if 0 < _top < SCREEN_H:
+        _snap, _len = "8", "%.2f" % (float(SCREEN_H - _top) * 100.0 / SCREEN_H)
+    else:
+        _snap, _len = "5", "100"
     for _name, _type, _value in (("mode", "uint", "1"),
-                                 ("position", "string", "p=7;x=0;y=0"),
-                                 ("length", "double", "1"),
-                                 ("length-adjust", "bool", "true"),
-                                 ("size", "uint", "44")):
+                                 ("position", "string", "p=%s;x=0;y=0" % _snap),
+                                 ("length", "double", _len),
+                                 ("length-adjust", "bool", "false"),
+                                 ("size", "uint", "48"),
+                                 ("autohide-behavior", "uint", "0"),
+                                 ("enable-struts", "bool", "true")):
         set_prop(panel, _name, _type, _value)
     moved = True
 
@@ -1438,8 +1539,9 @@ if moved:
     # would mean the dock never gets moved at all.
     os.makedirs(os.path.dirname(DOCKPOS), exist_ok=True)
     with open(DOCKPOS, "w") as f:
-        f.write("1\n")
-    print("moved %s to the left edge" % panel.get("name"))
+        f.write("%d\n" % DOCK_LAYOUT)
+    print("moved %s to the left edge (snap %s, length %s)"
+          % (panel.get("name"), _snap, _len))
 if added:
     print("added %d launcher(s) to %s" % (added, panel.get("name")))
 PYEOF

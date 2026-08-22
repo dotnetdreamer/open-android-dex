@@ -82,13 +82,32 @@ final class Linux {
      * xfconf directory the earlier desktop-icon and panel edits used
      * (.config/xfconf/xfconf-perchannel-xml, which xfconf has never read), so
      * the bump is what finally makes the dock launchers land as well.
-     * 15 = the dock moves to the LEFT edge — vertical, centred, sized to its
-     * own contents, which is the dash shape the whole look is modelled on.
-     * It has to be a bump rather than a quiet dock.py change because a guest
-     * that already settled at 14 would otherwise never run the script again.
-     * Applied ONCE per guest and marked: dragging the dock back to the bottom
-     * is a reasonable thing to do, and re-imposing the position at every
-     * launch would leave no way to make that stick.
+     * 15 = the dock moves to the LEFT edge, vertical. It has to be a bump
+     * rather than a quiet dock.py change because a guest that already settled
+     * at 14 would otherwise never run the script again. Applied ONCE per guest
+     * and marked: dragging the dock back to the bottom is a reasonable thing
+     * to do, and re-imposing the position at every launch would leave no way
+     * to make that stick.
+     * 16 = that dock made full height with struts on, which changed nothing.
+     * 17 = AUTOHIDE OFF, which is what actually made the icons move.
+     * panel_window_screen_struts_edge returns STRUTS_EDGE_NONE outright for
+     * any panel whose autohide-behavior is not NEVER — before it ever looks at
+     * the edge, the length or enable-struts — and Ubuntu ships this panel with
+     * autohide on. So it reserved nothing while still being visible (nothing
+     * open to hide from), xfdesktop kept laying icons from x=0, and both 15
+     * and 16 were downstream of a gate already returning NONE.
+     * 18 = the dock STOPS BELOW THE TOP BAR instead of running under it, which
+     * is what was hiding the Applications button: two dock-type windows both
+     * own the corner and struts do not arbitrate between panels, only between
+     * a panel and ordinary windows. Its length is computed from the screen
+     * height less the top bar's, so the two edges meet exactly — which needs
+     * the geometry, so linux-rt.sh passes it and the provisioning pass no
+     * longer positions anything. Costs nothing: xfwm4 takes MAX(margin,
+     * struts[LEFT]) and uses the strut's start/end y ONLY to test that it
+     * intersects the monitor, so a partial-height panel reserves the same full
+     * left margin a full-height one does.
+     * The marker dock-positioned holds a layout NUMBER rather than merely
+     * existing, so a guest carrying an older layout is lifted exactly once.
      *
      * The app CHOOSER (see {@link #apps}) is deliberately NOT a feature level.
      * A feature bump exists to carry something new INTO guests that are
@@ -99,7 +118,7 @@ final class Linux {
      * brings the script back when a selection CHANGES is {@code apps.done} —
      * see {@link #needsProvision}.
      */
-    static final int FEATURE_LEVEL = 15;
+    static final int FEATURE_LEVEL = 18;
 
     /**
      * Guest binaries whose presence the setup log reports, as

@@ -210,189 +210,77 @@ added may only have installed on this pass; everything it does is idempotent.
 
 ### The dock sits on the LEFT
 
-`dock.py` also moves that panel to the left edge — vertical, centred, and no
-longer than its own contents, which is the dash shape the rest of the look is
-modelled on. The numbers are xfce4-panel's own rather than guesses, and the
-types matter as much as the values:
+`dock.py` also moves that panel to the left edge — vertical, **full height**,
+with the desktop icons pushed clear of it, which is the Ubuntu arrangement. The
+numbers are xfce4-panel's own rather than guesses, and the types matter as much
+as the values:
 
 | property | type | value | meaning |
 | --- | --- | --- | --- |
 | `mode` | `uint` | `1` | `XFCE_PANEL_PLUGIN_MODE_VERTICAL`. `0` is horizontal; `2` is *deskbar* — a vertical panel with **horizontal** plugins, which lays the launchers out in rows and is the wrong one. |
-| `position` | `string` | `p=7;x=0;y=0` | `p` is a `SnapPosition`: `7` = `SNAP_POSITION_WC`, left edge centred. `5` is plain left, `12` the bottom this replaces. `x`/`y` are ignored for a snapped panel, which recomputes them. |
-| `length` | `double` | `1` | A **percent**, range 1–100 — and a `double` since 4.18, where it used to be an int. With `length-adjust` on, the panel then grows to fit its plugins, so `1` means "no bigger than it has to be". |
-| `length-adjust` | `bool` | `true` | The grow-to-fit half of the pair above. |
-| `size` | `uint` | `44` | Thickness in px, range 16–128. |
+| `position` | `string` | `p=8;x=0;y=0` | `p` is a `SnapPosition`: `8` = `SNAP_POSITION_SW`, the **bottom** of the left edge, so the panel grows upward and stops short of the top bar. `5` (`W`, the whole left edge) is the fallback when there is no top bar to keep clear of. |
+| `length` | `double` | computed | A **percent** of the edge, 1–100, a `double` since 4.18. Screen height less the top bar's height, so the two edges meet exactly — no overlap, no gap. |
+| `length-adjust` | `bool` | `false` | The length is deliberate; nothing should grow it. |
+| `size` | `uint` | `48` | Thickness in px, range 16–128. The panel's own default, and about what Ubuntu's launcher measures. |
+| `autohide-behavior` | `uint` | `0` | `AUTOHIDE_BEHAVIOR_NEVER`. **This is the one that makes the icons move** — see below. |
+| `enable-struts` | `bool` | `true` | A panel reserves its space by publishing `_NET_WM_STRUT_PARTIAL`, and xfdesktop lays icons out inside the work area that leaves. Necessary, not sufficient. |
+
+**Autohide is why the icons sat under the dock**, and it cost two wrong
+guesses to find. `panel_window_screen_struts_edge` opens with
+
+```c
+if (window->autohide_behavior != AUTOHIDE_BEHAVIOR_NEVER
+    || ! window->struts_enabled)
+  return STRUTS_EDGE_NONE;
+```
+
+so a panel that autohides publishes **no strut at all** — before the function
+ever looks at the edge, the length, or `enable-struts`. Ubuntu ships this panel
+with autohide on, which is also why it *looked* fine: with no window open there
+is nothing to hide from, so it stayed visible while reserving nothing, and
+xfdesktop went on laying icons from `x=0` with the dock drawn straight over
+them. Setting the position, the length and `enable-struts` changed the result
+not at all until `autohide-behavior` went in beside them.
+
+**A shorter panel still reserves the whole edge**, which is what lets the dock
+stop below the top bar without giving anything up. xfwm4's `workspaceUpdateArea`
+does
+
+```c
+screen_info->margins[STRUTS_LEFT] =
+    MAX(screen_info->margins[STRUTS_LEFT], c->struts[STRUTS_LEFT]);
+```
+
+and the strut's start/end y reach that line only through `strutsToRectangles`,
+whose rectangle is used for exactly one thing: testing that the strut
+intersects the primary monitor at all. The margin itself is the full strut
+value. So a partial-height left panel takes the same 48px off the work area as
+a full-height one. (An earlier note here claimed the opposite — that a partial
+strut could not shrink a rectangular work area. That was wrong; autohide was
+always the only blocker.)
+
+**The top-left corner needs the dock to yield.** Struts do not arbitrate
+between panels — only between a panel and ordinary windows — so a full-height
+dock and a full-width top bar simply both own the corner, and the later-mapped
+one wins, which is how the Applications button ended up underneath. The dock
+stopping at the top bar's bottom edge is the fix, and the reason its length is
+computed from the geometry rather than fixed.
+
+Nothing has to be reset for the icons to move: xfdesktop filters
+`PropertyNotify` for `_NET_WORKAREA` on the root window and re-runs its grid
+resize, so they reflow as soon as the strut lands.
 
 Two guards decide whether it happens at all. It is applied **once** per guest,
 marked at `/root/.config/openandroiddex/dock-positioned` — dragging the dock
 back to the bottom is a reasonable thing to do, and re-imposing the position at
-every launch would leave no way to make that stick. And it is skipped entirely
+every launch would leave no way to make that stick. That marker holds a **layout
+number**, not merely existing, for the same reason `FEATURE_LEVEL` does:
+layouts 1 and 2 were the short centred strip and the strutless full-height bar,
+and a bare "already done" marker would have left every guest that got one of
+them stuck there forever. And the move is skipped entirely
 when the layout has only **one** panel: that is not a dock beside a top bar, it
-is the desktop's only strip, and moving it is not what anyone asked for. Adding
-*launchers* stays per-boot either way, because an app installed later still has
-to get one.
-
-**VS Code** comes from Microsoft's own APT repo, the only source of a real
-`code` .deb for arm64. Its phase is non-fatal and — unlike the browsers —
-deliberately *not* stamped on failure, so a failed install is retried on the
-next launch rather than hidden forever. Electron is Chromium, so it gets the
-same `--no-sandbox` wrapper, doubly required here: no user namespaces, and VS
-Code refuses to start as root without it, which is what everything in this
-container is.
-
-Neither browser's sandbox can work here — both want user namespaces — so the
-whole `MOZ_DISABLE_*_SANDBOX` family is set, not just the content one, and
-`security.sandbox.content.level` is forced to 0 through Firefox's **AutoConfig**
-mechanism (a pref cannot come from the environment, and AutoConfig reaches
-profiles that do not exist yet). Chromium's permanent *"You are using an
-unsupported command-line flag: --no-sandbox"* banner is silenced with the
-supported enterprise policy `CommandLineFlagSecurityWarningsEnabled` in
-`/etc/chromium/policies/managed/`, rather than with `--test-type`, an
-undocumented test switch that quietly changes other behaviour too.
-
-**Chromium is the default browser** when it is installed — it is the one
-verified working on a real phone under this container, and Firefox asks far
-more of the kernel than proot has to give. One word in `tune_browsers` flips it.
-
-Neither runs unwrapped. `/usr/local/bin/dex-firefox` and `dex-chromium` drop
-the sandboxes (both want user namespaces, which a ptrace chroot cannot provide)
-and, for Chromium, `/dev/shm` and GL, which Xvnc does not have. The installed
-`.desktop` entries are rewritten to call the wrappers, because a `.desktop`
-names its binary by absolute path and would never see `/usr/local/bin` on PATH.
-XFCE's default-browser lookup goes through **exo's helper table**, not `$BROWSER`
-or `update-alternatives`, so a helper of our own is installed and selected in
-`helpers.rc`; the other two are set as well, as a belt.
-
-## The look
-
-Stock XFCE on stock Ubuntu is Greybird over Adwaita icons over DejaVu, which on
-a phone-sized noVNC canvas reads as a desktop from 2011. `setup_theme` installs
-`arc-theme`, `adwaita-icon-theme`, `gtk-update-icon-cache` and `fonts-cantarell`
-— all `Architecture: all`, so the arm64 phone and the x86_64 emulator get
-identical bytes — and picks **Arc-Dark / Adwaita / Cantarell**, falling back
-through Materia-dark and Greybird-dark depending on what actually landed.
-Nothing is assumed present: a guest whose apt declined still comes out with a
-working desktop, and still gets every setting in the second table below.
-
-Arc is picked over `materia-gtk-theme`, which is equally capable, for one
-concrete reason: Arc's xfwm4 decoration assets are **PNG** and Materia's are
-**SVG-only**, so Arc draws titlebars with no pixbuf loader in the picture at
-all. Materia stays in the detection ladder and is honoured if something
-installs it — and `theme.py` treats it as a *default* rather than a choice,
-because it was our own pick for one build before Arc replaced it.
-
-The window-manager theme is chosen by a **different** test from the GTK theme —
-the presence of `xfwm4/themerc` inside it. xfwm4 silently falls back to its
-built-in `Default` when the named theme has no `xfwm4/` directory, and Adwaita
-is exactly that case, so asking for the GTK directory and assuming the
-decorations follow gives themed widgets under stock titlebars.
-
-**Papirus was tried and rejected**, and the reason is worth keeping. It looks
-better than Adwaita and covers far more apps, but it is ~82,000 SVG files:
-dpkg unpacks every one through proot's ptrace, and then its postinst builds an
-icon cache over the lot. On a phone that is a multi-minute stall on a progress
-bar that cannot say why it is stalled — measured on device, sitting at *"setting
-up papirus-icon-theme"* long enough to look wedged. 200 MB and that wait is the
-wrong trade for an icon set, and Adwaita is what the GNOME desktop this look is
-modelled on actually ships anyway.
-
-`gtk-update-icon-cache` is still named on the apt line even though
-`adwaita-icon-theme` depends on it, because the failure without it is **silent**:
-the icon postinsts test for the binary and, finding nothing, do nothing at all
-and report no error. With no cache every GTK process rescans the theme directory
-to resolve an icon, and under proot each of those path syscalls is
-ptrace-mediated.
-
-### Where the settings go, and why it is /etc/xdg
-
-xfconf reads a channel from the system directories **first** and the user's own
-file **last**, and it only ever writes the user's file back. So the channels go
-in a system directory, which means they are applied to every guest that has not
-chosen otherwise, can never be clobbered — xfconfd's five-second debounced flush
-and its flush-on-session-exit both target `$XDG_CONFIG_HOME` only — and are
-still overridable, because the moment the user picks a theme in the Appearance
-dialog it lands in their file and wins.
-
-That directory is **`/usr/local/etc/xdg/xfce4/xfconf/xfce-perchannel-xml/`**,
-prepended to `XDG_CONFIG_DIRS` by `linux-rt.sh` — deliberately **not**
-`/etc/xdg`. Three of these channel files are dpkg **conffiles**: `xsettings.xml`
-belongs to `xfce4-settings`, `xfce4-power-manager.xml` to
-`xfce4-power-manager`, and `xfce4-session.xml` to `xfce4-session`. xfconf merges
-per *property* across directories, but two files at the *same path* are not a
-merge — the second replaces the first. Writing ours over the packaged
-`xfce4-session.xml` would have deleted `/general/FailsafeSessionName` and the
-whole `/sessions/Failsafe` client list (xfwm4, xfsettingsd, xfce4-panel, Thunar,
-xfdesktop), and a guest with no saved session reaches failsafe *by definition* —
-so `xfce4-session` would have found no failsafe to load, put up **"Unable to
-load a failsafe session"** and called `exit(EXIT_FAILURE)`. No desktop at all,
-on every fresh install. A separate directory keeps every packaged property
-intact, layers ours on top per property, and leaves dpkg's conffile untouched so
-an upgrade never prompts about it.
-
-`XDG_CONFIG_DIRS` is set on the **proot** env in `linux-rt.sh`, not on the env
-that runs `startxfce4` — which looks like the obvious place and is the wrong
-one. `xfconfd` is D-Bus *activated*, so it is spawned by `dbus-daemon` and
-inherits `dbus-daemon`'s environment rather than the session command's, and
-`dbus-daemon` is started from inside `$SESSION`. The proot env is the only one
-both of them share.
-
-That path is **`xfce4/xfconf/xfce-perchannel-xml`**, built by xfconf as
-`CONFIG_DIR_STEM` (`"xfce4/xfconf/"`) joined with `XFCONF_BACKEND_PERCHANNEL_XML_TYPE_ID`
-(`"xfce-perchannel-xml"`). It used to be written here as
-`.config/xfconf/xfconf-perchannel-xml` — wrong on both counts, the missing
-`xfce4/` level and `xfconf-` for `xfce-` — so the desktop-icon channel and every
-panel edit `dock.py` made landed in a directory xfconf has never read. That is
-why the dock launchers did not appear no matter when the script ran, and fixing
-it is part of feature level 14.
-
-`theme.py` covers the one case a system default cannot. A guest provisioned
-before this phase has already run a session, and xfwm4 writes its **entire**
-defaults block into the user's channel on first start — so that file holds a
-`Default` theme and `use_compositing=true`, and the user file beats a system
-default forever. It rewrites exactly those properties, in the user's own file,
-**once**, and a marker at `/root/.config/openandroiddex/theme-migrated` is what
-enforces the once.
-
-The marker, not the value test, is what protects a deliberate choice. The test —
-"only rewrite a value that is still one a distro wrote" — reads as though it
-would do that on every pass, and for the *string* properties it does. For a
-**boolean** it cannot: a bool has two values, ours is one, so the other is by
-construction "a default", and a user who re-enabled compositing in Window
-Manager Tweaks would have had it switched off again at every launch, forever,
-with no supported way to make it stick. The same holds for the small enums
-(`HintStyle`, `RGBA`, `vblank_mode`) whose overwrite set covers every value we
-do not want. Running once is all a migration was ever meant to do; afterwards
-the user owns these settings.
-
-Like `dock.py` it runs from `linux-rt.sh` a moment before the session, for the
-same reason: xfconfd caches a channel in memory on first read and **never**
-re-reads it, so an edit made under a live session is not merely late — the next
-thing that dirties the channel rewrites the whole file from the stale in-memory
-tree.
-
-The phase is deliberately **unstamped** and guarded on artifacts rather than a
-`.stamp-theme`: a `FEATURE_LEVEL` bump keeps every existing stamp, so a stamped
-phase would reach fresh installs only and no guest already out there would ever
-be themed.
-
-### The settings that are not about looks
-
-The same channels hold the switches that decide what this display costs, and
-with no GPU behind Xvnc every effect XFCE enables by default is rasterised by
-llvmpipe on the phone's CPU, re-encoded by TigerVNC and pushed through
-websockify into a WebView. None of them buy anything at this end.
-
-| Setting | Why |
-| --- | --- |
-| `xfwm4/use_compositing=false` | xfwm4's compositor is XRender and never gets acceleration here — xfwm4 blacklists the software renderers itself. Also removes the shadow band around every window, which is a soft gradient and so the worst thing this stack can ask TigerVNC to compress. |
-| `xfwm4/box_move`, `box_resize` | Outline drags: four thin lines per frame instead of a full repaint and re-encode of the window and everything it uncovers. The cheapest remaining win, and the one the user feels, because dragging is what they do most. |
-| `Gtk/EnableAnimations=false` | The largest GTK-side win, and **not** in xfce4-settings' shipped defaults, so it has to be created. |
-| `Net/CursorBlink=false` | The largest **idle** win: a blinking caret in any focused entry wakes the encoder, the websocket and the WebView twice a second forever — on a phone that is battery, not lag. |
-| `Xft/RGBA=none` | A transport decision, not a taste one. Subpixel AA paints coloured fringes on every glyph edge, which pushes a text rect past the distinct-colour threshold TigerVNC uses to keep a rect lossless, so the whole line goes out as JPEG. |
-| `Gdk/WindowScalingFactor=1` | Pinned. Scaling to 2 makes every app render four times the pixels for content the WebView then scales back down. When text is too small raise `Gtk/FontName`, never this. |
-| `xfce4-desktop` backdrop, solid | A photographic wallpaper is the most expensive single thing on this display: the first paint JPEG-encodes a full screen of high-entropy image, and every window move re-encodes the strip it uncovered. A solid colour is one uniform block. Not a gradient, for the same reason. |
-| `xfce4-screensaver` off, `dpms-enabled=false` | Blanking sends a full-screen update to blank and another to wake, saves nothing — there is no panel behind this framebuffer — and on a WebView that has already slept the wake half sometimes does not arrive, which is the black-screen-after-idle failure. |
-| `xfce4-session/SaveOnExit=false` | Serialises every client's state through proot's ptrace-mediated file I/O at exactly the moment `linux-rt.sh` is tearing the container down, then re-launches all of it next start. |
+is the desktop's only strip. Adding *launchers* stays per-boot either way,
+because an app installed later still has to get one.
 
 ## Device-measured constraints (do not regress)
 
