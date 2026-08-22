@@ -1247,6 +1247,68 @@ fn is_version_downgrade(err: &str) -> bool {
     err.to_uppercase().contains("INSTALL_FAILED_VERSION_DOWNGRADE")
 }
 
+/// True when the PHONE refused the install outright, rather than the framework
+/// rejecting anything about the APK: an OEM policy that blocks whatever
+/// arrives over USB.
+///
+/// MIUI is the one people actually hit. Its PackageManagerServiceInjector
+/// answers uid 2000 -- the adb shell user -- with INSTALL_FAILED_USER_RESTRICTED,
+/// and it does so by launching its own confirmation dialog
+/// (com.miui.permcenter.install.AdbInstallActivity) and then dismissing it
+/// again about 80 ms later. So the failure reads "Install canceled by user"
+/// with nobody having touched the phone, which is the single most misleading
+/// error in this whole path: measured on a Redmi Note 7, MIUI 12.5.1.
+///
+/// INSTALL_CANCELED_BY_USER is grouped in deliberately. It is what a real
+/// person pressing "Cancel" produces too, and the guidance -- allow the
+/// install on the phone -- is the same either way.
+///
+/// Nothing on this side can override it. No install flag, no uninstall-first
+/// retry: the switch is on the phone, so the only useful thing to do is say
+/// which switch.
+fn is_install_restricted(err: &str) -> bool {
+    let e = err.to_uppercase();
+    e.contains("INSTALL_FAILED_USER_RESTRICTED") || e.contains("INSTALL_CANCELED_BY_USER")
+}
+
+/// What to tell someone whose phone refused the install.
+///
+/// The FIRST LINE has to stand on its own: the UI puts it in a one-line status
+/// row and only the rest goes to the block underneath, which is a `<pre>` and
+/// keeps the line breaks. Hence the blank line after it, and hence no wrapping
+/// mid-sentence in the opening.
+///
+/// Both vendors are named without probing the phone for its brand. This is an
+/// error path, an extra `getprop` round trip is one more thing to fail, and a
+/// person reading it can tell which half is theirs.
+///
+/// The raw error is kept at the end, like the other guidance messages here:
+/// the guidance is for the user, the tail is for the bug report.
+fn install_restricted_help(err: &str) -> String {
+    format!(
+        "The phone refused to install the DeX launcher.\n\
+         \n\
+         This is the phone's own security policy blocking apps that arrive over USB — \
+         not a problem with this app, the APK or the cable. Allow it on the phone:\n\
+         \n\
+         Xiaomi / Redmi / POCO (MIUI)\n\
+         \x20 Settings → Additional settings → Developer options\n\
+         \x20   • Install via USB — turn ON\n\
+         \x20   • USB debugging (Security settings) — turn ON\n\
+         \x20 Both are greyed out until a Mi account is signed in on the phone\n\
+         \x20 (Settings → Mi Account), with internet available to verify it.\n\
+         \n\
+         Huawei / Honor\n\
+         \x20 Settings → System → Developer options → Allow ADB install\n\
+         \n\
+         If a dialog flashed up on the phone and closed by itself, that is exactly \
+         this setting — the phone cancelled on your behalf. Turn it on and reconnect; \
+         no reboot needed.\n\
+         \n\
+         {err}"
+    )
+}
+
 /// `adb install -r -d`, normalising the two ways adb reports a rejected install.
 ///
 /// `-d` is INSTALL_ALLOW_DOWNGRADE. The desktop always deploys the launcher it
@@ -1289,6 +1351,15 @@ fn install_launcher(app: &tauri::AppHandle, serial: &str, apk: &str) -> Result<(
         Ok(()) => return Ok(()),
         Err(e) => e,
     };
+
+    // Checked before the recoverable ones because it is NOT recoverable: the
+    // package is not the problem, so uninstalling it and trying again just
+    // reaches the same failure more slowly, having lost the user's settings on
+    // the way.
+    if is_install_restricted(&err) {
+        return Err(install_restricted_help(&err));
+    }
+
     let reason = if is_signature_conflict(&err) {
         "signed with a different key"
     } else if is_version_downgrade(&err) {
@@ -2008,6 +2079,68 @@ mod tests {
         ] {
             assert!(!is_version_downgrade(other), "not a downgrade: {other}");
         }
+    }
+
+    /// Verbatim from a Redmi Note 7 on MIUI 12.5.1 / Android 10, captured
+    /// 2026-08-22. The wording is the whole trap: MIUI opens its own
+    /// AdbInstallActivity and dismisses it again ~80 ms later, so the phone
+    /// reports a cancellation that nobody made.
+    const REAL_RESTRICTED: &str = "adb: failed to install \
+        /Users/ik/Documents/GitHub/open-android-dex/open-android-dex-tauri/src-tauri/target/debug/resources/bin/openandroiddex-launcher.apk: \
+        Failure [INSTALL_FAILED_USER_RESTRICTED: Install canceled by user]";
+
+    /// This one is NOT recoverable — the switch is on the phone — so it must
+    /// be told apart from the two that are, in both directions. Claiming it as
+    /// a key mismatch would uninstall the launcher and lose its settings to
+    /// reach the identical failure a second time.
+    #[test]
+    fn detects_oem_install_restriction() {
+        assert!(is_install_restricted(REAL_RESTRICTED));
+        assert!(is_install_restricted("Failure [INSTALL_FAILED_USER_RESTRICTED]"));
+        // What a person actually pressing Cancel produces. Same guidance.
+        assert!(is_install_restricted("Failure [INSTALL_CANCELED_BY_USER]"));
+
+        // Must not swallow the recoverable ones.
+        assert!(!is_install_restricted(REAL_FAILURE));
+        assert!(!is_install_restricted(
+            "Failure [INSTALL_FAILED_VERSION_DOWNGRADE]"
+        ));
+        assert!(!is_install_restricted("adb: device offline"));
+
+        // ...and they must not claim this one.
+        assert!(!is_signature_conflict(REAL_RESTRICTED));
+        assert!(!is_version_downgrade(REAL_RESTRICTED));
+    }
+
+    /// The UI splits this message in two — first line into a one-line status
+    /// row, whole text into a <pre> below — so the first line has to read as a
+    /// complete sentence on its own, and the guidance has to survive intact.
+    #[test]
+    fn restricted_help_reads_correctly_split() {
+        let help = install_restricted_help(REAL_RESTRICTED);
+        let first = help.lines().next().unwrap();
+
+        assert_eq!(first, "The phone refused to install the DeX launcher.");
+        // A status row cannot scroll; anything long enough to be clipped there
+        // belongs in the block instead.
+        assert!(first.len() < 60, "status line too long: {} chars", first.len());
+        assert!(help.lines().nth(1).unwrap().is_empty(), "blank line must follow");
+
+        // The actionable part, and the bit that is actually load-bearing.
+        assert!(help.contains("Install via USB"));
+        assert!(help.contains("USB debugging (Security settings)"));
+        assert!(help.contains("Mi account"));
+        assert!(help.contains("Allow ADB install"));
+        // Leading spaces on the indented steps must survive the line
+        // continuations -- \x20 is there precisely because a trailing \ eats
+        // the newline AND the next line's indentation. Two levels: headings
+        // flush left, their steps at 2, the toggles under them at 4.
+        assert!(help.contains("\nXiaomi / Redmi / POCO (MIUI)\n  Settings →"), "indent lost:\n{help}");
+        assert!(help.contains("\n    • Install via USB"), "indent lost:\n{help}");
+        assert!(help.contains("\n    • USB debugging (Security settings)"), "indent lost:\n{help}");
+        assert!(help.contains("\nHuawei / Honor\n  Settings →"), "indent lost:\n{help}");
+        // The raw failure is kept for bug reports.
+        assert!(help.ends_with(REAL_RESTRICTED));
     }
 
     /// A false positive here uninstalls the launcher and takes its settings

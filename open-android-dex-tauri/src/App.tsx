@@ -316,8 +316,14 @@ export default function App() {
       .catch((e) => {
         logError(`launch: launcher deployment failed — ${String(e)}`);
         invoke("stop_mirror", { sessionKey: key }).catch(() => {});
-        setDexStep({ state: "error", text: String(e) });
-        setPhase({ kind: "connect", error: String(e) });
+        // The stage row is one line in a fixed-width span; the guidance errors
+        // out of install_launcher are paragraphs, and dropping a whole one in
+        // there renders as a smear. Their first line is written to stand on its
+        // own, so it becomes the status and the full text goes to the block
+        // below, which is a <pre> and keeps the line breaks.
+        const full = String(e);
+        setDexStep({ state: "error", text: full.split("\n")[0] });
+        setPhase({ kind: "connect", error: full });
       });
   }, [phase, sessions]);
 
