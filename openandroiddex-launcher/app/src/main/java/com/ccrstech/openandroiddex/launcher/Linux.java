@@ -68,6 +68,27 @@ final class Linux {
      * gets a null sink and the app drains its monitor over loopback — see
      * {@link LinuxAudio}. Carries pavucontrol with it, which is what the panel
      * volume plugin was already trying and failing to open.
+     * 14 = the look: a dark flat GTK/xfwm4 theme, Adwaita icons and Cantarell,
+     * written into the guest's /usr/local/etc/xdg as xfconf SYSTEM defaults —
+     * a directory of our own, prepended to XDG_CONFIG_DIRS, because three of
+     * those channel files are dpkg conffiles and replacing the xfce4-session
+     * one deletes the failsafe session list, which leaves xfce4-session with
+     * nothing to start. They apply everywhere the user has not chosen
+     * otherwise and cannot be clobbered by a session writing its own channel
+     * out. The same phase carries the settings that make this display cheap —
+     * no compositing, no GTK animations, outline window drags, no wallpaper,
+     * no DPMS blanking — none of which buy anything with no GPU behind Xvnc.
+     * It also corrects the
+     * xfconf directory the earlier desktop-icon and panel edits used
+     * (.config/xfconf/xfconf-perchannel-xml, which xfconf has never read), so
+     * the bump is what finally makes the dock launchers land as well.
+     * 15 = the dock moves to the LEFT edge — vertical, centred, sized to its
+     * own contents, which is the dash shape the whole look is modelled on.
+     * It has to be a bump rather than a quiet dock.py change because a guest
+     * that already settled at 14 would otherwise never run the script again.
+     * Applied ONCE per guest and marked: dragging the dock back to the bottom
+     * is a reasonable thing to do, and re-imposing the position at every
+     * launch would leave no way to make that stick.
      *
      * The app CHOOSER (see {@link #apps}) is deliberately NOT a feature level.
      * A feature bump exists to carry something new INTO guests that are
@@ -78,7 +99,7 @@ final class Linux {
      * brings the script back when a selection CHANGES is {@code apps.done} —
      * see {@link #needsProvision}.
      */
-    static final int FEATURE_LEVEL = 13;
+    static final int FEATURE_LEVEL = 15;
 
     /**
      * Guest binaries whose presence the setup log reports, as

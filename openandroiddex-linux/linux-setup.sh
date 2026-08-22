@@ -410,7 +410,38 @@ if [ ! -f .stamp-desktop ]; then
   # repair_dpkg — `dpkg --configure -a` alone, which is all this used to do,
   # cannot.
   repair_dpkg
-  run_guest "apt-get install -y --no-install-recommends xfce4 xfce4-terminal dbus-x11 x11-xserver-utils xfonts-base tigervnc-standalone-server tigervnc-tools novnc websockify sudo ca-certificates librsvg2-common" \
+  # The theme packages ride the SAME line as xfce4 so a fresh install is themed
+  # in one pass rather than pulling a second apt round after the desktop is
+  # already on disk. setup_theme installs them again for a guest that predates
+  # this, and is a no-op once they are here. All four are Architecture: all, so
+  # the arm64 phone and the x86_64 emulator get identical bytes.
+  #   arc-theme          8 MB — GTK2/3/4 AND an xfwm4/themerc per variant, so
+  #                      the titlebars match the widgets. A GTK theme without
+  #                      xfwm4 support leaves stock decorations on themed
+  #                      windows, which looks worse than not theming at all.
+  #                      Chosen over materia-gtk-theme, which is equally
+  #                      capable, because Arc's decoration assets are PNG and
+  #                      Materia's are SVG-only: PNG titlebars draw with no
+  #                      pixbuf loader in the picture at all.
+  #   adwaita-icon-theme 12 MB — the icon set, and deliberately NOT Papirus.
+  #                      Papirus looks better and covers more apps, but it is
+  #                      82,000 SVG files: dpkg unpacks every one of them
+  #                      through proot's ptrace, and then its postinst builds
+  #                      an icon cache over the lot, which on a phone is a
+  #                      visible multi-minute stall on a progress bar that
+  #                      cannot say why. 200 MB and that wait is the wrong
+  #                      trade for an icon set. Adwaita is also what the GNOME
+  #                      desktop this look is modelled on actually ships.
+  #   gtk-update-icon-cache — pulled in by adwaita-icon-theme anyway, named
+  #                      here because the failure without it is silent: the
+  #                      icon postinsts test for this binary and do nothing at
+  #                      all, with no error, when it is missing. No cache means
+  #                      every GTK process rescans the theme directory to
+  #                      resolve an icon, and under proot every one of those
+  #                      path syscalls is ptrace-mediated.
+  #   fonts-cantarell    0.6 MB — GNOME's UI face. DejaVu reads noticeably
+  #                      heavier at the small sizes this desktop runs at.
+  run_guest "apt-get install -y --no-install-recommends xfce4 xfce4-terminal dbus-x11 x11-xserver-utils xfonts-base tigervnc-standalone-server tigervnc-tools novnc websockify sudo ca-certificates librsvg2-common arc-theme adwaita-icon-theme gtk-update-icon-cache fonts-cantarell" \
     || { apt_note installing-desktop; fail installing-desktop; }
   kill "$TICKER" 2>/dev/null
   TICKER=
@@ -1095,9 +1126,16 @@ setup_share() {
   # overwrite a desktop layout they chose. The show-* entries keep the desktop
   # to the shared folder and our launchers instead of adding Home, Filesystem
   # and Trash icons the user never asked for.
-  _xfd=rootfs/root/.config/xfconf/xfconf-perchannel-xml/xfce4-desktop.xml
+  # THE PATH: xfconf builds it as $XDG_CONFIG_HOME + "xfce4/xfconf/" +
+  # "xfce-perchannel-xml" (xfconfd/xfconf-backend-perchannel-xml.c's
+  # CONFIG_DIR_STEM, joined with the TYPE_ID from the matching header). This
+  # used to say .config/xfconf/xfconf-perchannel-xml — wrong on both counts,
+  # the missing xfce4/ level and xfconf- for xfce-, so every channel written
+  # here landed in a directory xfconf has never read. See also dock.py, which
+  # had the same path.
+  _xfd=rootfs/root/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-desktop.xml
   if [ ! -f "$_xfd" ]; then
-    mkdir -p rootfs/root/.config/xfconf/xfconf-perchannel-xml || return 1
+    mkdir -p rootfs/root/.config/xfce4/xfconf/xfce-perchannel-xml || return 1
     cat > "$_xfd" <<'EOF' || return 1
 <?xml version="1.0" encoding="UTF-8"?>
 <channel name="xfce4-desktop" version="1.0">
@@ -1221,7 +1259,13 @@ import os
 import sys
 import xml.etree.ElementTree as ET
 
-USER = "/root/.config/xfconf/xfconf-perchannel-xml/xfce4-panel.xml"
+# xfconf's own directory stem, not a guess: CONFIG_DIR_STEM in
+# xfconfd/xfconf-backend-perchannel-xml.c is "xfce4/xfconf/" + the TYPE_ID
+# "xfce-perchannel-xml". Writing to .config/xfconf/xfconf-perchannel-xml, as
+# this did, put the edited panel config somewhere xfconf never looks — so the
+# launchers were appended to a file nothing read, which is why they never
+# appeared no matter when this ran.
+USER = "/root/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-panel.xml"
 SYSTEM = "/etc/xdg/xfce4/panel/default.xml"
 APPS = "/usr/local/share/openandroiddex/launchers"
 
@@ -1276,6 +1320,54 @@ for candidate in candidates:
         break
 if panel is None:
     panel = candidates[-1]
+
+# THE DOCK ON THE LEFT. Vertical, snapped to the middle of the left edge, and
+# no longer than its own contents -- the GNOME dash shape rather than a
+# full-height bar. Every number here is xfce4-panel's own, not a guess:
+#   mode=1         XFCE_PANEL_PLUGIN_MODE_VERTICAL. 0 is horizontal, 2 is
+#                  deskbar (vertical panel, horizontal plugins) which is the
+#                  wrong one -- it lays the launchers out in rows.
+#   position       "p=<snap>;x=;y=". Snap 7 is SNAP_POSITION_WC, the left edge
+#                  centred; 5 is plain left, and 12 is the bottom this
+#                  replaces. x and y are ignored for a snapped panel, which
+#                  recomputes them itself.
+#   length=1       a PERCENT of the edge, range 1-100 and typed DOUBLE (it was
+#                  an int before 4.18). With length-adjust true the panel then
+#                  grows to fit its plugins, so 1 means "no bigger than it has
+#                  to be".
+#   size=44        thickness in px, range 16-128.
+#
+# ONCE, and the marker is what makes it once. Dragging the dock back to the
+# bottom is a thing a person may reasonably do, and re-imposing this at every
+# launch would leave them no way to make it stick. Adding LAUNCHERS below stays
+# per-boot, because an app that installs later still has to get one.
+#
+# Skipped entirely when there is only ONE panel: then it is not a dock beside a
+# top bar, it is the whole desktop's only strip, and moving that is not what
+# anyone asked for.
+DOCKPOS = "/root/.config/openandroiddex/dock-positioned"
+
+
+def set_prop(parent, name, ptype, value):
+    """Set a direct child property, replacing type as well as value."""
+    for child in parent.findall("property"):
+        if child.get("name") == name:
+            child.set("type", ptype)
+            child.set("value", value)
+            return
+    ET.SubElement(parent, "property",
+                  {"name": name, "type": ptype, "value": value})
+
+
+moved = False
+if len(candidates) > 1 and not os.path.exists(DOCKPOS):
+    for _name, _type, _value in (("mode", "uint", "1"),
+                                 ("position", "string", "p=7;x=0;y=0"),
+                                 ("length", "double", "1"),
+                                 ("length-adjust", "bool", "true"),
+                                 ("size", "uint", "44")):
+        set_prop(panel, _name, _type, _value)
+    moved = True
 
 plugin_ids = panel.find("./property[@name='plugin-ids']")
 if plugin_ids is None:
@@ -1336,12 +1428,20 @@ for app in ids:
     at += 1
     added += 1
 
-if not added:
+if not added and not moved:
     sys.exit(0)
 
 os.makedirs(os.path.dirname(USER), exist_ok=True)
 tree.write(USER, encoding="UTF-8", xml_declaration=True)
-print("added %d launcher(s) to %s" % (added, panel.get("name")))
+if moved:
+    # After the write, never before: a marker dropped ahead of a failed write
+    # would mean the dock never gets moved at all.
+    os.makedirs(os.path.dirname(DOCKPOS), exist_ok=True)
+    with open(DOCKPOS, "w") as f:
+        f.write("1\n")
+    print("moved %s to the left edge" % panel.get("name"))
+if added:
+    print("added %d launcher(s) to %s" % (added, panel.get("name")))
 PYEOF
 
   # Run it here too, for the case where no session is up — but linux-rt.sh is
@@ -1612,6 +1712,485 @@ state installing-desktop 99 dock
 setup_dock || true
 # After setup_dock, which is what installs python3.
 tune_vscode || true
+
+# -- phase: the look -------------------------------------------------------
+# Stock XFCE on stock Ubuntu is Greybird over Adwaita icons over DejaVu, and on
+# a phone-sized noVNC canvas that reads as a desktop from 2011. This phase is
+# what makes the guest look like something built this decade — and, because the
+# same xfconf channels hold the compositing and animation switches, it is also
+# the single biggest RESPONSIVENESS win available here. Both halves matter:
+# there is no GPU behind Xvnc, so every effect XFCE turns on by default is
+# rasterised by llvmpipe on the phone's CPU and then re-encoded by TigerVNC and
+# pushed through websockify into a WebView. Shadows, opacity fades and opaque
+# window drags cost real frames; none of them buy anything at this end.
+#
+# WHERE THE SETTINGS GO is the whole design. xfconf reads a channel from the
+# system directories FIRST and the user's own file LAST, and it only ever
+# writes the user's file back. So a channel dropped into /etc/xdg is:
+#
+#   * applied to every guest that has not chosen otherwise,
+#   * never clobbered — xfconfd rewrites only $XDG_CONFIG_HOME, so the five
+#     second debounced flush and the flush-on-session-exit cannot touch it,
+#   * still overridable — the moment the user picks a theme in the Appearance
+#     dialog that lands in their file, which is merged after ours and wins.
+#
+# That is the opposite of hand-editing the user's file, which is what the panel
+# code next door has to do and pays for: xfconfd caches a channel in memory on
+# first read and never re-reads it, so an edit made under a live session is not
+# merely late, it is erased in full the next time anything dirties the channel.
+#
+# theme.py handles the one case /etc/xdg cannot: a guest provisioned before
+# this phase existed has already run a session, and xfwm4 writes its ENTIRE
+# defaults block into the user's channel on first start — so that file already
+# holds a Default theme and use_compositing=true, and those beat our system
+# defaults forever. It rewrites only properties still sitting on a known distro
+# default, so a theme the user actually chose is left alone. Like dock.py it
+# runs from linux-rt.sh a moment before the session, when no xfconfd is alive
+# to cache over it.
+#
+# Deliberately UNSTAMPED and guarded on artifacts, not on a .stamp-theme: a
+# FEATURE_LEVEL bump keeps every existing stamp, so a stamped phase would reach
+# fresh installs only and no guest already out there would ever be themed.
+theme_dir() { # parent name... — first NAME that exists under PARENT
+  _tp=$1
+  shift
+  for _tn in "$@"; do
+    if [ -d "rootfs$_tp/$_tn" ]; then printf '%s\n' "$_tn"; return 0; fi
+  done
+  return 1
+}
+
+theme_wm() { # name... — first NAME that carries an xfwm4/themerc
+  # Not the same question as theme_dir: xfwm4 falls back to its built-in
+  # Default when the named theme has no xfwm4 directory, and Adwaita is exactly
+  # that case. Asking for the GTK directory and assuming the decorations follow
+  # is how you get themed widgets under stock titlebars.
+  for _tn in "$@"; do
+    if [ -f "rootfs/usr/share/themes/$_tn/xfwm4/themerc" ]; then
+      printf '%s\n' "$_tn"
+      return 0
+    fi
+  done
+  return 1
+}
+
+setup_theme() {
+  # A guest from before this phase never saw the theme packages on the desktop
+  # apt line, so offer them once. Guarded on the artifact rather than a stamp,
+  # so a settled guest costs no network round trip, and non-fatal throughout:
+  # every choice below degrades to something that ships with the desktop.
+  # python3 rides this line rather than the desktop one because setup_dock is
+  # the only other thing that installs it and it returns early, before doing
+  # so, on a guest whose chooser asked for no apps at all. Such a guest is
+  # `ready` with no python3 and would never get the theme.py pass below.
+  if [ ! -d rootfs/usr/share/themes/Arc-Dark ] \
+     || [ ! -f rootfs/usr/share/fonts/opentype/cantarell/Cantarell-Regular.otf ] \
+     || [ ! -x rootfs/usr/bin/python3 ]; then
+    guest_or_note "theme-pkgs" "apt-get install -y --no-install-recommends \
+      arc-theme adwaita-icon-theme gtk-update-icon-cache fonts-cantarell \
+      librsvg2-common python3" || true
+  fi
+
+  # What actually landed, in preference order. Nothing here is assumed: the
+  # arm64 archive can be missing a package the emulator got, and a guest that
+  # declined the apt above still has to come out of this with a working desktop.
+  _gtk=$(theme_dir /usr/share/themes Arc-Dark Materia-dark Greybird-dark Adwaita-dark Adwaita) || _gtk=Adwaita
+  _wm=$(theme_wm Arc-Dark Materia-dark Greybird-dark) || _wm=Default
+  _icons=$(theme_dir /usr/share/icons Adwaita Papirus-Dark Papirus) || _icons=Adwaita
+  _cursor=$(theme_dir /usr/share/icons Adwaita default) || _cursor=Adwaita
+  if ls rootfs/usr/share/fonts/opentype/cantarell/*.otf >/dev/null 2>&1; then
+    _font="Cantarell 11"
+    _wmfont="Cantarell Bold 10"
+  else
+    _font="Sans 11"
+    _wmfont="Sans Bold 10"
+  fi
+
+  # A system channel directory OF OUR OWN, prepended to XDG_CONFIG_DIRS by
+  # linux-rt.sh — not /etc/xdg, and that distinction is load-bearing rather
+  # than tidiness. Three of the channels below are shipped as dpkg CONFFILES
+  # at /etc/xdg/xfce4/xfconf/xfce-perchannel-xml: xsettings.xml belongs to
+  # xfce4-settings, xfce4-power-manager.xml to xfce4-power-manager, and
+  # xfce4-session.xml to xfce4-session. xfconf merges per PROPERTY across
+  # directories, but two files at the SAME path are not a merge — the second
+  # simply replaces the first. Writing our xfce4-session.xml over the packaged
+  # one would have deleted /general/FailsafeSessionName and the whole
+  # /sessions/Failsafe client list (xfwm4, xfsettingsd, xfce4-panel, Thunar,
+  # xfdesktop), and a guest with no saved session falls back to failsafe by
+  # definition: xfce4-session would have found no failsafe to load, put up
+  # "Unable to load a failsafe session" and exited. No desktop at all, on every
+  # fresh install.
+  #
+  # A separate directory earlier in XDG_CONFIG_DIRS keeps every property of
+  # those packaged files intact, layers ours on top per property, and leaves
+  # dpkg's conffile untouched so an apt upgrade never prompts about it. Removing
+  # this whole feature is `rm -rf` on one directory.
+  _xdg=rootfs/usr/local/etc/xdg/xfce4/xfconf/xfce-perchannel-xml
+  mkdir -p "$_xdg" || return 1
+
+  # xsettings — the widget theme, the icons, the font, and the two GTK switches
+  # that cost the most over a VNC transport.
+  #
+  # Xft/RGBA is none, NOT rgb, and that is a transport decision rather than a
+  # taste one: subpixel antialiasing paints every glyph edge in coloured
+  # fringes, which multiplies the distinct-colour count of a text rect past the
+  # threshold TigerVNC uses to keep a rect lossless, so the whole line of text
+  # goes out as JPEG instead. Greyscale AA keeps text in the lossless path and
+  # looks better after the WebView scales the canvas anyway.
+  #
+  # Gtk/EnableAnimations false is the largest GTK-side win and is not in
+  # xfce4-settings' shipped defaults, so it has to be created: every revealer,
+  # stack transition and kinetic overshoot is a burst of framebuffer updates
+  # for motion nobody can see at this end. Net/CursorBlink false is the largest
+  # IDLE win — a blinking caret in any focused entry wakes the encoder, the
+  # websocket and the WebView twice a second forever, which on a phone is
+  # battery rather than lag.
+  #
+  # Gdk/WindowScalingFactor is pinned at 1 on purpose. Scaling to 2 makes every
+  # app render four times the pixels for llvmpipe to touch and TigerVNC to
+  # encode, for content the WebView then scales back down. When text is too
+  # small, raise Gtk/FontName — never this.
+  cat > "$_xdg/xsettings.xml" <<EOF || return 1
+<?xml version="1.0" encoding="UTF-8"?>
+
+<channel name="xsettings" version="1.0">
+  <property name="Net" type="empty">
+    <property name="ThemeName" type="string" value="$_gtk"/>
+    <property name="IconThemeName" type="string" value="$_icons"/>
+    <property name="CursorBlink" type="bool" value="false"/>
+    <property name="EnableEventSounds" type="bool" value="false"/>
+    <property name="EnableInputFeedbackSounds" type="bool" value="false"/>
+  </property>
+  <property name="Gtk" type="empty">
+    <property name="FontName" type="string" value="$_font"/>
+    <property name="MonospaceFontName" type="string" value="Monospace 11"/>
+    <property name="CursorThemeName" type="string" value="$_cursor"/>
+    <property name="EnableAnimations" type="bool" value="false"/>
+    <property name="DialogsUseHeader" type="bool" value="false"/>
+  </property>
+  <property name="Xft" type="empty">
+    <property name="Antialias" type="int" value="1"/>
+    <property name="Hinting" type="int" value="1"/>
+    <property name="HintStyle" type="string" value="hintslight"/>
+    <property name="RGBA" type="string" value="none"/>
+    <property name="Lcdfilter" type="string" value="lcdnone"/>
+    <property name="DPI" type="int" value="96"/>
+  </property>
+  <property name="Gdk" type="empty">
+    <property name="WindowScalingFactor" type="int" value="1"/>
+  </property>
+</channel>
+EOF
+
+  # xfwm4 — the decorations, and the compositor.
+  #
+  # use_compositing false is the headline. xfwm4's compositor is XRender, and
+  # on Xvnc it never gets hardware acceleration — xfwm4 itself blacklists the
+  # software renderers it would find — so every shadow and every translucent
+  # surface is composited by the CPU and then re-encoded. Turning it off also
+  # removes the shadow band around each window, which is a soft gradient and so
+  # the single worst thing this stack can ask TigerVNC to compress.
+  #
+  # box_move/box_resize draw an outline while dragging instead of the live
+  # window: four thin lines per frame instead of a full repaint and re-encode
+  # of the window and everything it uncovers. This is the cheapest remaining
+  # win after compositing, and on a touch-driven viewer it is the one the user
+  # feels, because dragging is what they do most.
+  #
+  # button_layout drops the menu button from the left so the titlebar reads
+  # like a modern one: nothing on the left, hide/maximise/close on the right.
+  cat > "$_xdg/xfwm4.xml" <<EOF || return 1
+<?xml version="1.0" encoding="UTF-8"?>
+
+<channel name="xfwm4" version="1.0">
+  <property name="general" type="empty">
+    <property name="theme" type="string" value="$_wm"/>
+    <property name="title_font" type="string" value="$_wmfont"/>
+    <property name="button_layout" type="string" value="|HMC"/>
+    <property name="use_compositing" type="bool" value="false"/>
+    <property name="vblank_mode" type="string" value="off"/>
+    <property name="box_move" type="bool" value="true"/>
+    <property name="box_resize" type="bool" value="true"/>
+    <property name="cycle_preview" type="bool" value="false"/>
+    <property name="cycle_draw_frame" type="bool" value="false"/>
+    <property name="show_frame_shadow" type="bool" value="false"/>
+    <property name="show_dock_shadow" type="bool" value="false"/>
+    <property name="show_popup_shadow" type="bool" value="false"/>
+    <property name="urgent_blink" type="bool" value="false"/>
+  </property>
+</channel>
+EOF
+
+  # xfce4-desktop — a flat dark backdrop and no wallpaper.
+  #
+  # A photographic wallpaper is the most expensive single thing on this
+  # display: the first paint JPEG-encodes a full screen of high-entropy image,
+  # and from then on every window move and every menu close re-encodes the
+  # strip it uncovered as JPEG too. A solid colour makes the whole desktop one
+  # uniform block, which TigerVNC sends as a single rectangle for almost
+  # nothing. Not a gradient, for the same reason — no 16px block of a gradient
+  # is uniform.
+  #
+  # The monitor name is part of the property path and depends on the RandR
+  # output, which is VNC-0 under Xvnc; monitor0 is written beside it so an
+  # X server that names its output differently still gets the backdrop. An
+  # unused subtree is inert. desktop-icons/style stays 2 (file and launcher
+  # icons) to agree with setup_share, which is what makes the shared folder and
+  # our launchers visible on the desktop.
+  cat > "$_xdg/xfce4-desktop.xml" <<'EOF' || return 1
+<?xml version="1.0" encoding="UTF-8"?>
+
+<channel name="xfce4-desktop" version="1.0">
+  <property name="backdrop" type="empty">
+    <property name="single-workspace-mode" type="bool" value="true"/>
+    <property name="single-workspace-number" type="int" value="0"/>
+    <property name="screen0" type="empty">
+      <property name="monitorVNC-0" type="empty">
+        <property name="workspace0" type="empty">
+          <property name="image-style" type="int" value="0"/>
+          <property name="color-style" type="int" value="0"/>
+          <property name="rgba1" type="array">
+            <value type="double" value="0.129"/>
+            <value type="double" value="0.141"/>
+            <value type="double" value="0.169"/>
+            <value type="double" value="1.0"/>
+          </property>
+        </property>
+      </property>
+      <property name="monitor0" type="empty">
+        <property name="workspace0" type="empty">
+          <property name="image-style" type="int" value="0"/>
+          <property name="color-style" type="int" value="0"/>
+          <property name="rgba1" type="array">
+            <value type="double" value="0.129"/>
+            <value type="double" value="0.141"/>
+            <value type="double" value="0.169"/>
+            <value type="double" value="1.0"/>
+          </property>
+        </property>
+      </property>
+    </property>
+  </property>
+  <property name="desktop-icons" type="empty">
+    <property name="style" type="int" value="2"/>
+  </property>
+</channel>
+EOF
+
+  # xfce4-session — SaveOnExit off, and no agents.
+  #
+  # Saving the session serialises every client's state at exactly the moment
+  # linux-rt.sh is tearing the container down, through proot's ptrace-mediated
+  # file I/O, and then re-launches all of it on the next start — which turns
+  # "restart the desktop" into a slow and non-deterministic operation. The ssh
+  # and gpg agents are two processes and a chunk of startup latency for a
+  # desktop that has neither key.
+  cat > "$_xdg/xfce4-session.xml" <<'EOF' || return 1
+<?xml version="1.0" encoding="UTF-8"?>
+
+<channel name="xfce4-session" version="1.0">
+  <property name="general" type="empty">
+    <property name="SaveOnExit" type="bool" value="false"/>
+  </property>
+  <property name="startup" type="empty">
+    <property name="ssh-agent" type="empty">
+      <property name="enabled" type="bool" value="false"/>
+    </property>
+    <property name="gpg-agent" type="empty">
+      <property name="enabled" type="bool" value="false"/>
+    </property>
+  </property>
+</channel>
+EOF
+
+  # No blanking, ever. A screensaver or a DPMS timeout on a virtual X server
+  # sends a full-screen update to blank and another to wake, neither of which
+  # saves anything — there is no panel behind this framebuffer — and on a
+  # WebView that has already slept on its own the wake half sometimes does not
+  # arrive at all, which is the black-screen-after-idle failure. Written even
+  # when the packages are absent: an unread channel costs nothing.
+  cat > "$_xdg/xfce4-screensaver.xml" <<'EOF' || return 1
+<?xml version="1.0" encoding="UTF-8"?>
+
+<channel name="xfce4-screensaver" version="1.0">
+  <property name="saver" type="empty">
+    <property name="enabled" type="bool" value="false"/>
+    <property name="idle-activation" type="empty">
+      <property name="enabled" type="bool" value="false"/>
+    </property>
+  </property>
+  <property name="lock" type="empty">
+    <property name="enabled" type="bool" value="false"/>
+  </property>
+</channel>
+EOF
+  cat > "$_xdg/xfce4-power-manager.xml" <<'EOF' || return 1
+<?xml version="1.0" encoding="UTF-8"?>
+
+<channel name="xfce4-power-manager" version="1.0">
+  <property name="xfce4-power-manager" type="empty">
+    <property name="dpms-enabled" type="bool" value="false"/>
+  </property>
+</channel>
+EOF
+
+  # The upgrade path for guests that already ran a session. Needs python3 for
+  # the same reason dock.py does — regex on an XML config is how you hand
+  # someone a desktop that will not start — and setup_dock, which runs just
+  # before this, is what installs it. No python3 means a fresh guest, and a
+  # fresh guest is already covered by /etc/xdg above.
+  [ -x rootfs/usr/bin/python3 ] || {
+    note "theme: $_gtk / $_icons / $_wm (system defaults only, no python3)"
+    return 0
+  }
+  mkdir -p rootfs/usr/local/share/openandroiddex || return 1
+  cat > rootfs/usr/local/share/openandroiddex/theme.py <<PYEOF
+"""ONE-SHOT migration for a guest that predates the theme phase.
+
+/usr/local/etc/xdg carries the defaults for every fresh guest and cannot be
+clobbered. But xfwm4 writes its whole defaults block into the USER channel the
+first time it starts, and the user file is merged after every system one -- so
+on any guest that has already run a session, a stale Default theme and
+use_compositing=true sit in front of ours permanently. This rewrites exactly
+those properties, in the user's own file, once.
+
+ONCE is the important word, and it is enforced by a marker rather than by the
+value test below. The test -- "only rewrite a value that is still one a distro
+wrote" -- reads like it would protect a deliberate choice on every pass, and
+for the string properties it does. For a BOOLEAN it cannot: a bool has two
+values, ours is one, so the other is by construction "a default" and a user who
+turns compositing back on in Window Manager Tweaks would have it turned off
+again at the next launch, forever, with no way to make it stick. The same holds
+for the small enums (HintStyle, RGBA, vblank_mode) where the set covers every
+value we do not want. So this runs once per guest and then never again, which
+is all a migration was ever supposed to do; afterwards the user owns these
+settings and xfconf's own layering keeps our values only where they have not
+been overridden.
+
+Runs from linux-rt.sh with no session up. xfconfd caches a channel in memory on
+first read and never re-reads it, so an edit made while the desktop is live is
+erased wholesale the next time anything dirties the channel.
+"""
+import os
+import xml.etree.ElementTree as ET
+
+D = "/root/.config/xfce4/xfconf/xfce-perchannel-xml"
+DONE = "/root/.config/openandroiddex/theme-migrated"
+
+if os.path.exists(DONE):
+    raise SystemExit(0)
+
+# channel -> [(path, type, value, {values we may overwrite})]
+WANT = {
+    "xfwm4": [
+        ("/general/theme", "string", "$_wm",
+         {"Default", "Default-4.0", "Default-hdpi", "Default-xhdpi",
+          "Greybird", "Greybird-dark", "Daloa", "Kokodi", "Moheli", "Sassandra",
+          "Materia", "Materia-dark"}),
+        ("/general/title_font", "string", "$_wmfont",
+         {"Sans Bold 9", "Sans Bold 10", "Noto Sans Bold 9", "Cantarell Bold 9"}),
+        ("/general/button_layout", "string", "|HMC", {"O|SHMC", "O|HMC", "|SHMC"}),
+        ("/general/use_compositing", "bool", "false", {"true"}),
+        ("/general/box_move", "bool", "true", {"false"}),
+        ("/general/box_resize", "bool", "true", {"false"}),
+        ("/general/cycle_preview", "bool", "false", {"true"}),
+        ("/general/cycle_draw_frame", "bool", "false", {"true"}),
+        ("/general/show_frame_shadow", "bool", "false", {"true"}),
+        ("/general/show_dock_shadow", "bool", "false", {"true"}),
+        ("/general/urgent_blink", "bool", "false", {"true"}),
+        ("/general/vblank_mode", "string", "off", {"auto", "glx", "xpresent"}),
+    ],
+    "xsettings": [
+        # Materia counts as a default too: it was our own pick for one build
+        # before Arc replaced it, so a guest wearing it has not CHOSEN it.
+        ("/Net/ThemeName", "string", "$_gtk",
+         {"Adwaita", "Default", "Greybird", "Greybird-dark", "Raleigh", "Xfce",
+          "Materia", "Materia-dark"}),
+        ("/Net/IconThemeName", "string", "$_icons",
+         {"Adwaita", "hicolor", "elementary-xfce", "elementary-xfce-dark", "Tango"}),
+        ("/Net/CursorBlink", "bool", "false", {"true"}),
+        ("/Gtk/FontName", "string", "$_font",
+         {"Sans 10", "Sans 11", "DejaVu Sans 10", "Noto Sans 10", "Cantarell 10"}),
+        ("/Gtk/EnableAnimations", "bool", "false", {"true"}),
+        ("/Gtk/DialogsUseHeader", "bool", "false", {"true"}),
+        ("/Xft/Antialias", "int", "1", {"-1", "0"}),
+        ("/Xft/Hinting", "int", "1", {"-1", "0"}),
+        ("/Xft/HintStyle", "string", "hintslight", {"hintnone", "hintmedium", "hintfull"}),
+        ("/Xft/RGBA", "string", "none", {"rgb", "bgr", "vrgb", "vbgr"}),
+        ("/Gdk/WindowScalingFactor", "int", "1", {"0", "2"}),
+    ],
+    "xfce4-session": [
+        ("/general/SaveOnExit", "bool", "false", {"true"}),
+    ],
+}
+
+
+def leaf(root, path, make):
+    """Walk /a/b/c as nested <property> elements. make=False to only look."""
+    node = root
+    for part in path.strip("/").split("/"):
+        nxt = None
+        for child in node.findall("property"):
+            if child.get("name") == part:
+                nxt = child
+                break
+        if nxt is None:
+            if not make:
+                return None
+            nxt = ET.SubElement(node, "property", {"name": part, "type": "empty"})
+        node = nxt
+    return node
+
+
+for channel, wants in WANT.items():
+    path = os.path.join(D, channel + ".xml")
+    if not os.path.exists(path):
+        # No user file: /etc/xdg is already in charge of this channel.
+        continue
+    try:
+        tree = ET.parse(path)
+    except ET.ParseError:
+        continue
+    root = tree.getroot()
+    if root.tag != "channel":
+        continue
+    changed = 0
+    for prop, ptype, value, defaults in wants:
+        node = leaf(root, prop, False)
+        if node is None:
+            # Absent means the system default answers for it. Leave it absent.
+            continue
+        have = node.get("value")
+        if node.get("type") == "empty" and have is None:
+            # An explicit "unset" leaf, which also defers to the system file.
+            continue
+        if have == value:
+            continue
+        if have not in defaults:
+            # A real choice. Not ours to touch.
+            continue
+        node.set("type", ptype)
+        node.set("value", value)
+        changed += 1
+    if changed:
+        tree.write(path, encoding="UTF-8", xml_declaration=True)
+        print("theme: %d propert%s updated in %s"
+              % (changed, "y" if changed == 1 else "ies", channel))
+
+# Written whether or not anything changed: "no user channel to migrate" is a
+# finished migration too, and re-testing it on every launch is exactly the
+# per-boot enforcement this must not become.
+os.makedirs(os.path.dirname(DONE), exist_ok=True)
+with open(DONE, "w") as f:
+    f.write("1\n")
+PYEOF
+  guest_or_note "theme" "python3 /usr/local/share/openandroiddex/theme.py" || true
+  note "theme: $_gtk / $_icons / $_wm / $_font"
+  return 0
+}
+
+state installing-desktop 99 theme
+setup_theme || true
 
 # The selection this guest was built from, echoed back VERBATIM:
 # Linux.needsProvision compares it byte-for-byte against the stored tick list,

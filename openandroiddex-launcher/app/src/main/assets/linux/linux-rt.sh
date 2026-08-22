@@ -166,6 +166,17 @@ sleep 1
 # Idempotent: it adds only what is not already on the panel.
 [ -f /usr/local/share/openandroiddex/dock.py ] && \
   python3 /usr/local/share/openandroiddex/dock.py >/dev/null 2>&1
+# The theme, for the same reason and in the same window. Our defaults live in
+# /etc/xdg and cannot be clobbered, but a guest provisioned before that existed
+# already has the whole xfwm4 defaults block written into its OWN channel, and
+# the user file is merged after the system one -- so a stale Default theme and
+# use_compositing=true would win forever. This rewrites those, and only those:
+# a setting the user actually chose is left alone. It has to happen with no
+# xfconfd alive, because xfconfd caches a channel on first read and never
+# re-reads it, so an edit under a live session is erased wholesale the next
+# time anything dirties the channel. No-op on a guest that has no user file.
+[ -f /usr/local/share/openandroiddex/theme.py ] && \
+  python3 /usr/local/share/openandroiddex/theme.py >/dev/null 2>&1
 # Sound, when the guest has been through a setup pass that installs it -- an
 # older container simply has no audio, exactly as before. There is no audio
 # device in here: the desktop plays into a null sink and the APP reads that
@@ -217,11 +228,25 @@ SESSION=$(echo "$SESSION" | sed "s/GEOMETRY/$GEO/")
 
 # NOT exec'd: proot runs as a child so this script outlives it by exactly long
 # enough to clear rt.pid, which is how the app learns the session is over.
+#
+# XDG_CONFIG_DIRS is what puts our theme defaults in front of the distro's.
+# linux-setup.sh writes them to /usr/local/etc/xdg rather than /etc/xdg,
+# because three of those channel files are dpkg conffiles owned by
+# xfce4-settings, xfce4-power-manager and xfce4-session, and overwriting the
+# last of those deletes the failsafe session list and leaves xfce4-session with
+# nothing to start. Two directories, merged per property, collide with nothing.
+#
+# It goes HERE, on the proot env, and NOT on the env that runs startxfce4 --
+# which looks like the obvious place and is the wrong one. xfconfd is D-Bus
+# ACTIVATED, so it is spawned by dbus-daemon and inherits dbus-daemon's
+# environment, not the session command's. dbus-daemon is started from inside
+# $SESSION, so the only environment both of them share is this one.
 "$PROOT" -0 --link2symlink --kill-on-exit -r "$ROOT/rootfs" \
   -b /dev -b /proc -b /sys -b "$ROOT/tmp:/tmp" -b "$ROOT/shm:/dev/shm" \
   $STORAGE_BIND $SHARED_BIND \
   -w /root /usr/bin/env -i HOME=/root TERM=xterm-256color DEBIAN_FRONTEND=noninteractive \
   PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+  XDG_CONFIG_DIRS=/usr/local/etc/xdg:/etc/xdg \
   /bin/sh -c "$SESSION" &
 PROOT_PID=$!
 wait "$PROOT_PID"
