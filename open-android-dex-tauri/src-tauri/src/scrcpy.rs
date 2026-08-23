@@ -535,6 +535,10 @@ fn spawn_output_reader<R: Read + Send + 'static>(
                         "mirror:display",
                         serde_json::json!({ "sessionKey": key, "serial": serial, "displayId": id }),
                     );
+                    // Off this thread: it is reading scrcpy's output, and a dumpsys
+                    // takes long enough to stall the lines behind it.
+                    let (a2, s2, k2) = (app.clone(), serial.clone(), key.clone());
+                    thread::spawn(move || warn_if_display_untrusted(&a2, &s2, &k2, id));
                 }
             }
         }
@@ -739,6 +743,10 @@ fn spawn_display_watchdog(
                             "sessionKey": key, "serial": serial, "displayId": id
                         }),
                     );
+                    // Same question as the announced path asks, and the answer
+                    // outlives this thread, which returns on the next line.
+                    let (a2, s2, k2) = (app.clone(), serial.clone(), key.clone());
+                    thread::spawn(move || warn_if_display_untrusted(&a2, &s2, &k2, id));
                     return;
                 }
                 log::debug!(
@@ -3363,6 +3371,178 @@ fn sweep_orphan_servers(app: &AppHandle, serial: &str) {
     }
 }
 
+/// A banner on the launch screen, which is where the desktop's own status
+/// already lives.
+fn notice(app: &AppHandle, session_key: &str, text: &str) {
+    let _ = app.emit(
+        "mirror:notice",
+        serde_json::json!({ "sessionKey": session_key, "text": text }),
+    );
+}
+
+/// The two ways a phone hands back a desktop that streams perfectly and
+/// ignores every click.
+///
+/// Neither one makes scrcpy exit, so neither reaches `explain_failure`: by
+/// every measure we have the session is healthy, and what the user is left
+/// holding is a dead desktop that reads as our bug. Both are knowable BEFORE
+/// the session exists, which is the only moment at which saying so is useful.
+///
+/// ONE adb round trip for all of it. `input` boots a JVM (~0.5 s, and slowest
+/// on exactly the phones that fail this) while the two getprops are free
+/// beside it, so they ride the same shell rather than paying for three.
+///
+/// Err = nothing will ever work, and refusing to start is kinder than
+/// starting. A notice = it MIGHT work, and taking the session away on a guess
+/// is worse than a banner.
+/// Whether the display the phone just made can hold input focus.
+///
+/// `FLAG_TRUSTED` is the bit that decides it. Without it the desktop still
+/// paints and the launcher still runs, and the display reports
+/// `mCurrentFocus=null` for as long as it exists — a desktop that streams
+/// beautifully and ignores you.
+///
+/// Asked OF THE DISPLAY rather than inferred from an API level, because the
+/// answer is a property of the build: shell can only request a trusted
+/// display where the platform has `ADD_TRUSTED_DISPLAY`, which does not exist
+/// at all before Android 11 and which a manufacturer is free to withhold
+/// after it. A version number is wrong in both directions — it condemns
+/// builds that work and clears builds that do not.
+fn display_is_trusted(dump: &str) -> bool {
+    dump.contains("FLAG_TRUSTED")
+}
+
+/// One dumpsys, once per session, off the thread that reads scrcpy's output.
+fn warn_if_display_untrusted(app: &AppHandle, serial: &str, session_key: &str, id: i32) {
+    // The logical display's own line: `DisplayInfo{"scrcpy, displayId 11", …}`.
+    // The closing quote is part of the pattern on purpose — without it,
+    // display 1 matches display 11's question.
+    let query = format!("dumpsys display | grep -m1 'displayId {id}\"'");
+    let Ok(dump) = adb::run_adb(app, &["-s", serial, "shell", &query]) else {
+        log::warn!("{serial}: could not read the flags of display {id}");
+        return;
+    };
+    if dump.trim().is_empty() {
+        log::warn!("{serial}: display {id} is not in dumpsys — cannot tell if it is trusted");
+        return;
+    }
+    if display_is_trusted(&dump) {
+        log::info!("{serial}: display {id} is trusted — windows on it can take focus");
+        return;
+    }
+    log::warn!("{serial}: display {id} is NOT trusted: {}", dump.trim());
+    notice(
+        app,
+        session_key,
+        concat!(
+            "The desktop opened, but this phone will not let windows on it take focus, ",
+            "so clicks and typing may be ignored. Phones on Android 10 or older cannot ",
+            "do this at all; on newer ones it is up to the manufacturer.",
+        ),
+    );
+}
+
+/// What the phone said, whichever of adb's two paths it came back on.
+struct Probe {
+    release: String,
+    sdk: Option<u32>,
+    refused: bool,
+}
+
+/// The first two lines are the getprops, in the order they were asked for;
+/// anything after them is `input` complaining.
+///
+/// Two spellings, because the refusal is worded differently across Android
+/// versions and OEM skins — the permission's own name appears in all of them,
+/// the exception class in most. Neither string can occur in a version number,
+/// so a phone that simply answered cannot trip this.
+fn read_probe(out: &str) -> Probe {
+    let mut lines = out.lines();
+    let release = lines.next().unwrap_or("").trim().to_string();
+    let sdk = lines.next().and_then(|l| l.trim().parse().ok());
+    let lowered = out.to_lowercase();
+    Probe {
+        release,
+        sdk,
+        refused: lowered.contains("inject_events") || lowered.contains("securityexception"),
+    }
+}
+
+fn preflight_input(app: &AppHandle, opts: &MirrorOptions) -> Result<(), String> {
+    // The audio companion is a second scrcpy on the same phone that carries no
+    // input at all. It would fail this check for nothing, and pay a JVM for
+    // the privilege.
+    if opts.audio_only {
+        return Ok(());
+    }
+    // KEYCODE_UNKNOWN: injected exactly like any other key, ignored by every
+    // app that receives it. So a phone that permits injection prints NOTHING
+    // and one that does not prints its refusal — there is no third answer, and
+    // nothing on screen moves either way.
+    let probe = adb::run_adb(
+        app,
+        &[
+            "-s",
+            opts.serial.as_str(),
+            "shell",
+            "getprop ro.build.version.release; getprop ro.build.version.sdk; \
+             input keyevent 0 2>&1",
+        ],
+    );
+    // A REFUSAL EXITS NON-ZERO, so the case this whole function exists for
+    // arrives as Err, not Ok. The text is identical either way — the `2>&1`
+    // above folded the phone's complaint into its stdout, and run_adb hands
+    // back stdout when there is no stderr. What genuinely-absent looks like
+    // is adb's own "stopped responding": no version line and no refusal in
+    // it, which falls through every test below and starts the session. That
+    // is deliberate — a phone that did not answer is usually one still
+    // settling after being plugged in, the same reason `device_sdk` reads
+    // silence as able rather than unable.
+    let out = match probe {
+        Ok(out) => out,
+        Err(err) => err,
+    };
+    let Probe {
+        release,
+        sdk,
+        refused,
+    } = read_probe(&out);
+
+    if refused {
+        log::error!(
+            "{}: the phone refuses input injected from this computer",
+            opts.serial
+        );
+        // uhid does not use the API being blocked — it asks the kernel for a
+        // HID mouse instead, so the POINTER survives. The keyboard does not:
+        // there is no uhid keyboard in this session.
+        if opts.mouse_mode.as_deref() == Some("uhid") {
+            notice(
+                app,
+                &opts.session_key(),
+                "This phone is blocking keystrokes sent from a computer, so typing will not \
+                 reach it. The mouse still works. To fix the keyboard, open Developer options \
+                 on the phone, turn on \"USB debugging (Security settings)\", and restart it.",
+            );
+        } else {
+            return Err("This phone is blocking clicks and keystrokes sent from a computer. \
+                 The desktop would open and then ignore everything you do in it.\n\n\
+                 On Xiaomi, Redmi and POCO phones this is a setting: open Developer options, \
+                 turn on \"USB debugging (Security settings)\", and restart the phone. A few \
+                 other brands have the same switch under a slightly different name."
+                .into());
+        }
+    }
+
+    // Deliberately NOT a version check. Whether the desktop can be clicked
+    // turns on whether the display comes back TRUSTED, and that is a property
+    // of the build rather than of the API level - `warn_if_display_untrusted`
+    // asks the display itself, once it exists. This line only puts the version
+    // in the log beside that answer, so the two can be read together.
+    log::info!("{}: Android {release} (SDK {sdk:?})", opts.serial);
+    Ok(())
+}
+
 #[tauri::command(async)]
 pub fn start_mirror(app: AppHandle, mut options: MirrorOptions) -> Result<SessionInfo, String> {
     if options.serial.trim().is_empty() {
@@ -3406,6 +3586,11 @@ pub fn start_mirror(app: AppHandle, mut options: MirrorOptions) -> Result<Sessio
             map.remove(&key);
         }
     }
+
+    // Before anything is spawned: a phone that will not take input gives
+    // back a desktop that streams and ignores you, which is worse than a
+    // desktop that never started.
+    preflight_input(&app, &options)?;
 
     sweep_orphan_servers(&app, &options.serial);
 
@@ -3800,5 +3985,72 @@ mod tests {
     fn survives_a_dump_with_no_displays() {
         assert!(parse_all_display_tasks("").is_empty());
         assert!(parse_all_display_tasks("nothing useful here\n").is_empty());
+    }
+
+    /// The two real answers, captured from the phones themselves: a Redmi
+    /// Note 7 on MIUI 12.5, which blocks injected input, and an S25 Ultra,
+    /// which does not. The refusal reaches us through run_adb's Err path —
+    /// `input` exits non-zero — which is why preflight_input reads both.
+    const REFUSED: &str = concat!(
+        "10
+29
+",
+        "java.lang.SecurityException: Injecting to another application requires ",
+        "INJECT_EVENTS permission
+",
+        "	at android.os.Parcel.createException(Parcel.java:2074)
+",
+    );
+    const ALLOWED: &str = "16
+36";
+
+    #[test]
+    fn probe_spots_a_phone_that_refuses_input() {
+        let p = read_probe(REFUSED);
+        assert!(p.refused);
+        assert_eq!(p.release, "10");
+        assert_eq!(p.sdk, Some(29));
+    }
+
+    #[test]
+    fn probe_lets_a_healthy_phone_through() {
+        let p = read_probe(ALLOWED);
+        assert!(!p.refused);
+        assert_eq!(p.release, "16");
+        assert_eq!(p.sdk, Some(36));
+    }
+
+    #[test]
+    fn probe_reads_silence_as_neither() {
+        // adb's own giving-up text. No version and no refusal in it, so every
+        // test in preflight_input falls through and the session starts: a
+        // phone that did not answer is usually one still settling.
+        let p = read_probe("adb stopped responding after 12s: adb -s X shell getprop");
+        assert!(!p.refused);
+        assert_eq!(p.sdk, None);
+    }
+
+    /// Verbatim from the Redmi Note 7 (Android 10) that started all this: the
+    /// display exists, the launcher renders into it, and no window on it can
+    /// ever take focus. FLAG_PRESENTATION is present, FLAG_TRUSTED is not.
+    const UNTRUSTED: &str = concat!(
+        r#"    mBaseDisplayInfo=DisplayInfo{"scrcpy, displayId 11", uniqueId "#,
+        r#""virtual:com.android.shell,2000,scrcpy,0", app 1920 x 1080, real 1920 x 1080, "#,
+        "type VIRTUAL, state ON, owner com.android.shell (uid 2000), FLAG_PRESENTATION, ",
+        "removeMode 1}",
+    );
+
+    #[test]
+    fn an_untrusted_display_is_spotted() {
+        assert!(!display_is_trusted(UNTRUSTED));
+    }
+
+    #[test]
+    fn a_trusted_display_is_left_alone() {
+        // CONSTRUCTED, not captured: the phone that produces the real thing
+        // was off Wi-Fi when this was written. The flag's spelling is
+        // DisplayInfo.flagsToString's own, which is what dumpsys prints.
+        let trusted = UNTRUSTED.replace("FLAG_PRESENTATION", "FLAG_PRESENTATION, FLAG_TRUSTED");
+        assert!(display_is_trusted(&trusted));
     }
 }
