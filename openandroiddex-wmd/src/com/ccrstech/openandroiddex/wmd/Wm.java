@@ -336,6 +336,16 @@ final class Wm {
                 new Class<?>[]{int.class, wctClass()}, TRANSIT_CHANGE, wct);
     }
 
+    /**
+     * Whether this platform moves TASKS between displays, or still moves STACKS.
+     *
+     * The two take a different id for the same window, so a caller that has both
+     * has to know which one to hand over.
+     */
+    static boolean hasRootTaskMove() {
+        return Refl.hasMethod(atm().getClass(), "moveRootTaskToDisplay", int.class, int.class);
+    }
+
     static boolean hasStartNewTransition() {
         try {
             return Refl.hasMethod(organizer().getClass(), "startNewTransition",

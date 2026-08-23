@@ -308,7 +308,14 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
     /** The phone dock's Mouse button, so it can show the touchpad's state. */
     private TextView padButton;
     /** The phone's touchpad and pointer; null until asked for. See {@link DexPointer}. */
+    /** How long a click may wait on the daemon before it is called a failure. */
+    /** The geometry of the most recent shapeForDesktop, for the launch path that loses it. */
+    private Rect lastShapedBounds;
+
+    private static final long DAEMON_LAUNCH_TIMEOUT_MS = 2500L;
+
     private DexPointer pointer;
+    /** Back/Home/Close over the apps, on phones that get no titlebars. Null above API 34. */
     private PopupWindow padPopup;
     private PopupWindow homePopup;
     private PopupWindow recentsPopup;
@@ -802,6 +809,147 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
                 + (taskbarOverlay ? "as an overlay window" : "inside the activity"));
     }
 
+
+    /**
+     * Every activity this desktop starts passes through here, and the display may
+     * refuse it.
+     *
+     * On a display that cannot be TRUSTED — every Android below 11, and any later one
+     * whose manufacturer withholds it — ActivityTaskManager refuses a start that names
+     * a display when the caller is an ordinary app uid, and says so in the log as
+     * "Permission Denial: … with launchDisplayId=N". Nothing about the ActivityOptions
+     * can satisfy it. Only a system-level caller may put an activity on such a display,
+     * and the daemon at uid 2000 is one.
+     *
+     * OVERRIDDEN here rather than repaired at each call site because there are ten of
+     * them — every installed app, and every one of our own screens: Task Manager,
+     * Settings, Linux, Docker, the web viewer — and the eleventh would otherwise be
+     * written without the fallback and fail only on the phones nobody tests on.
+     *
+     * A failure the daemon cannot undo is rethrown untouched, so each caller still
+     * shows the message it was going to show.
+     */
+    @Override
+    public void startActivity(Intent intent, Bundle options) {
+        try {
+            super.startActivity(intent, options);
+            return;
+        } catch (SecurityException e) {
+            if (!refusedByDisplay(e)) throw e;
+            // THE DAEMON FIRST, because it is the only one of the two ways below that
+            // keeps the window where the launcher put it. It starts the activity ON
+            // this display, so the bounds and the freeform mode in the options are
+            // still the ones that apply.
+            if (launchViaDaemon(intent)) {
+                DexLog.step("launch", intent.getComponent() + " — opened by the daemon");
+                // …which is not the same as "opened HERE". `am start --display` is a
+                // request, not a guarantee: an app whose task already exists elsewhere
+                // is brought to the front where it already was, and one that answers
+                // with a trampoline (Chrome's first-run screen) lands wherever that
+                // activity's task belongs. Both end up on the phone. The reclaim is
+                // what makes the display stick, and it is a no-op when the window is
+                // already in the right place.
+                reclaimOntoDesktop(intent);
+                return;
+            }
+            // AND ONLY THEN without naming the display, which is all that is left for
+            // our own screens: they are not exported, and an activity that is not
+            // exported may be started by its own app and by nobody else, uid 2000
+            // included ("not exported from uid 10225").
+            //
+            // This way costs something, which is why it is second. Unnamed, the
+            // platform may put the activity on the DEFAULT display instead of ours,
+            // and it arrives without the geometry the click chose — so it is followed
+            // by a reclaim, and the bounds are re-applied from the ones the caller
+            // last asked for.
+            try {
+                super.startActivity(intent, withoutLaunchDisplay(options));
+                DexLog.step("launch", intent.getComponent()
+                        + " — this display refuses a named launch, opened without one");
+                reclaimOntoDesktop(intent);
+                return;
+            } catch (SecurityException ignored) {
+                // Nothing left to try; the caller's own message is the honest answer.
+            }
+            throw e;
+        }
+    }
+
+    /**
+     * Ask the daemon to move a just-started activity onto the desktop.
+     *
+     * Fire and forget, off the main thread: the daemon waits for the task to appear and
+     * the answer changes nothing here — if it never turns up, the window is on the phone
+     * and saying so in a toast would be noise about something the user can see.
+     */
+    private void reclaimOntoDesktop(Intent intent) {
+        final ComponentName component = intent.getComponent();
+        final int display = displayId();
+        if (component == null || display < 0) return;
+        if (qsWm == null) qsWm = new WmClient();
+        final WmClient client = qsWm;
+        client.post(() -> {
+            boolean moved = client.reclaim(display, component.flattenToShortString());
+            DexLog.step("launch", component.flattenToShortString()
+                    + (moved ? " — pulled onto the desktop" : " — stayed on the phone"));
+        });
+    }
+
+    /**
+     * The same options minus the display id, which is the only part being refused.
+     *
+     * Rebuilt rather than edited: setLaunchDisplayId(-1) does not mean "unset" to the
+     * framework, it means display -1, and the launch would then have nowhere to go.
+     */
+    private Bundle withoutLaunchDisplay(Bundle options) {
+        // The bounds come from the last shapeForDesktop rather than from this bundle,
+        // because ActivityOptions.fromBundle is hidden and there is no other way to
+        // read them back. Every caller shapes its options immediately before starting,
+        // on this one thread, so "the last ones asked for" and "this call's" are the
+        // same thing — and without them the window opens wherever the platform feels
+        // like putting it, which is what a person reports as apps appearing in the
+        // corner of the screen.
+        return shapeForDesktop(ActivityOptions.makeBasic(), lastShapedBounds, -1).toBundle();
+    }
+
+    /** The one refusal the daemon can undo: this display will not take our launches. */
+    private static boolean refusedByDisplay(SecurityException e) {
+        return String.valueOf(e.getMessage()).contains("launchDisplayId");
+    }
+
+    /**
+     * Hand the start to the daemon and wait for its answer.
+     *
+     * Blocking on purpose: the caller has to know whether to report a failure, and this
+     * is a tap someone is already waiting on. The socket may not be touched from the
+     * main thread, so the round trip happens on a thread of its own — with a bound on
+     * it, because a daemon that has gone away must turn a click into a message rather
+     * than into a frozen desktop.
+     *
+     * An intent with no component cannot be handed over: `am` needs a name, and an
+     * implicit intent has none. Those keep the platform's answer.
+     */
+    private boolean launchViaDaemon(Intent intent) {
+        final ComponentName component = intent.getComponent();
+        final int display = displayId();
+        if (component == null || display < 0) return false;
+        final boolean[] done = {false};
+        Thread worker = new Thread(() -> {
+            WmClient client = new WmClient();
+            try {
+                done[0] = client.launch(display, component.flattenToShortString());
+            } finally {
+                client.shutdown();
+            }
+        }, "wmd-launch");
+        worker.start();
+        try {
+            worker.join(DAEMON_LAUNCH_TIMEOUT_MS);
+        } catch (InterruptedException ignored) {
+            Thread.currentThread().interrupt();
+        }
+        return done[0];
+    }
     @Override
     protected void onDestroy() {
         super.onDestroy();
@@ -6084,6 +6232,10 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
         // lets a click from an already-detached view inherit ours instead.
         if (displayId >= 0) opts.setLaunchDisplayId(displayId);
         if (bounds != null) opts.setLaunchBounds(bounds);
+        // Kept for withoutLaunchDisplay: the retry there cannot read the bounds back
+        // off a Bundle (ActivityOptions.fromBundle is hidden), and a window that opens
+        // in the corner of the screen instead of where it was asked for reads as a bug.
+        if (bounds != null) lastShapedBounds = new Rect(bounds);
         try {
             ActivityOptions.class
                     .getMethod("setLaunchWindowingMode", int.class)
@@ -6415,27 +6567,39 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
         }
         ActivityOptions opts = shapeForDesktop(ActivityOptions.makeBasic(), bounds);
         try {
+            // startActivity is overridden below: a display that refuses launches from
+            // our uid is dealt with there, once, for every screen this desktop opens.
             startActivity(intent, opts.toBundle());
-            // The flags are in here on purpose: when a window turns up on the wrong
-            // screen, the first question is whether this launch asked for a task of its
-            // own or was content to adopt one that already existed somewhere.
-            DexLog.step("launch", app.component.flattenToShortString()
-                    + " → display " + getDisplay().getDisplayId()
-                    + " at " + bounds.left + "," + bounds.top
-                    + " " + bounds.width() + "x" + bounds.height()
-                    + (ownTask ? " [NEW_TASK|MULTIPLE_TASK — no window here yet]"
-                               : " [NEW_TASK — refocusing the window already here]"));
-            noteRecent(app.component);
-            // Show the taskbar icon immediately — the running broadcast would only
-            // confirm it a poll later; the titlebar appears the moment the tracker sees
-            // the real window. This also closes the MULTIPLE_TASK decision above for the
-            // next click: from here on the app counts as "open here", so a second tap
-            // refocuses this window instead of minting a second one.
-            if (runningPkgs.add(pkg)) refreshOpenApps();
         } catch (Exception e) {
             DexLog.warn("launch", "cannot open " + app.component.flattenToShortString(), e);
             Toast.makeText(this, getString(R.string.lx_cannot_open, app.label),
                     Toast.LENGTH_SHORT).show();
+            return;
         }
+        noteLaunched(app, pkg, bounds, ownTask);
+    }
+
+    /**
+     * What both launch paths owe the desktop once an app is actually starting.
+     *
+     * The flags are in the log line on purpose: when a window turns up on the wrong
+     * screen, the first question is whether this launch asked for a task of its own or
+     * was content to adopt one that already existed somewhere.
+     */
+    private void noteLaunched(AppEntry app, String pkg, Rect bounds, boolean ownTask) {
+        DexLog.step("launch", app.component.flattenToShortString()
+                + " → display " + getDisplay().getDisplayId()
+                + " at " + bounds.left + "," + bounds.top
+                + " " + bounds.width() + "x" + bounds.height()
+                + (ownTask ? " [NEW_TASK|MULTIPLE_TASK — no window here yet]"
+                           : " [NEW_TASK — refocusing the window already here]"));
+        noteRecent(app.component);
+        // Show the taskbar icon immediately — the running broadcast would only confirm
+        // it a poll later; the titlebar appears the moment the tracker sees the real
+        // window. This also closes the MULTIPLE_TASK decision above for the next click:
+        // from here on the app counts as "open here", so a second tap refocuses this
+        // window instead of minting a second one.
+        if (runningPkgs.add(pkg)) refreshOpenApps();
     }
 }
+

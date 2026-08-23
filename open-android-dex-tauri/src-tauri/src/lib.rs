@@ -48,6 +48,10 @@ pub fn run() {
             adb::adb_reboot,
             adb::adb_connect,
             adb::adb_start_launcher,
+            // The way back out of a fullscreen window on a phone that cannot
+            // draw a titlebar to close it with.
+            wm::desktop_home,
+            wm::desktop_close_top,
             wireless::wireless_support,
             wireless::wireless_go_wireless,
             wireless::wireless_discover,

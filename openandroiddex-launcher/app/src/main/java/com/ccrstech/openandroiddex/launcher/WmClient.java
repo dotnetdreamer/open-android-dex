@@ -341,6 +341,29 @@ final class WmClient {
         return ok(request("AUDIOROUTE CLEAR"));
     }
 
+    /**
+     * Open an app on the desktop display, from a uid that is allowed to.
+     *
+     * The launcher's own {@code startActivity} is refused on an untrusted display —
+     * see the daemon's LAUNCH case — and this is the way through. Called only after
+     * that refusal, so a phone whose display is trusted never pays for it.
+     */
+    boolean launch(int displayId, String component) {
+        return ok(request("LAUNCH " + displayId + " " + component));
+    }
+
+    /**
+     * Take a window that opened on the phone and put it on the desktop.
+     *
+     * The other half of a start this display refused to be named in: the activity is
+     * allowed to land wherever the platform puts it, and the daemon then moves the task
+     * across. Only MANAGE_ACTIVITY_TASKS is needed for that, which is why it works on
+     * screens of ours that nothing is allowed to START on this display.
+     */
+    boolean reclaim(int displayId, String component) {
+        return ok(request("RECLAIM " + displayId + " " + component));
+    }
+
     private static boolean ok(String reply) {
         return reply != null && reply.startsWith("OK");
     }

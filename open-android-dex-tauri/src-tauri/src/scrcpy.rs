@@ -3435,9 +3435,9 @@ fn warn_if_display_untrusted(app: &AppHandle, serial: &str, session_key: &str, i
         app,
         session_key,
         concat!(
-            "The desktop opened, but this phone will not let windows on it take focus, ",
-            "so clicks and typing may be ignored. Phones on Android 10 or older cannot ",
-            "do this at all; on newer ones it is up to the manufacturer.",
+            "This phone is too old to give apps their own windows here, so they open ",
+            "full-screen, without title bars, and typing does not reach this screen. ",
+            "The taskbar still works — use it to switch between apps and close them.",
         ),
     );
 }

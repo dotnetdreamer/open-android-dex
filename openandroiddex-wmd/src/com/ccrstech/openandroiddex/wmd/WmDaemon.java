@@ -57,6 +57,13 @@ public final class WmDaemon {
     static final String LAUNCHER = "com.ccrstech.openandroiddex.launcher";
     static final String CAPTION_SERVICE = LAUNCHER + "/" + LAUNCHER + ".CaptionService";
 
+    /** How long RECLAIM waits for an activity that is still starting. */
+    static final long RECLAIM_WAIT_MS = 2000L;
+
+    /** A component name and nothing else: the LAUNCH verb's only input check. */
+    static final java.util.regex.Pattern COMPONENT =
+            java.util.regex.Pattern.compile("[A-Za-z0-9_.$]+/[A-Za-z0-9_.$]+");
+
     public static void main(String[] args) {
         int port = args.length > 0 ? Integer.parseInt(args[0]) : PORT;
         try {
@@ -109,6 +116,151 @@ public final class WmDaemon {
                 // accessibility: dead scrcpy sessions leave their virtual displays
                 // behind, and only the live one is running our launcher.
                 out.println("OK " + Wm.displayHosting(a.length > 1 ? a[1] : LAUNCHER));
+                return;
+            }
+
+            case "LAUNCH": {
+                // "LAUNCH <displayId> <pkg/cls>" — put an activity on a display the
+                // launcher itself is not allowed to put one on.
+                //
+                // An UNTRUSTED virtual display refuses a launch from an app uid:
+                // ActivityTaskManager logs "Permission Denial: … with launchDisplayId=N"
+                // and the tap dies there, whatever the ActivityOptions say. Only a
+                // system-level caller may do it, which is exactly what this process is.
+                // Every virtual display before Android 11 is untrusted — there was no
+                // such thing as a trusted one — and a manufacturer may withhold it
+                // after. On a phone whose display IS trusted the launcher never asks.
+                //
+                // `am` rather than a reflected startActivityAsUser: that signature
+                // gained and lost parameters across the releases this daemon runs on,
+                // and the cost of a fork — once, on a click a human made and is already
+                // waiting on — buys immunity from all of it. Nothing else in here can
+                // afford this and nothing else does it.
+                int display = i(a, 1);
+                String comp = a.length > 2 ? a[2] : "";
+                // This socket is reachable by any app on the phone, so the component is
+                // held to the character set of a real one before it goes near a shell.
+                // No quote can get through, so the quoting below cannot be escaped out of.
+                if (!COMPONENT.matcher(comp).matches()) {
+                    out.println("ERR not a component: " + comp);
+                    return;
+                }
+                String reply = sh("am start --display " + display + " -n '" + comp + "'");
+                // `am` reports a refusal on stdout and still exits 0, so the text is the
+                // only answer there is.
+                boolean failed = reply.contains("Error") || reply.contains("Exception");
+                out.println(failed ? "ERR " + reply.replace('\n', ' ') : "OK");
+                return;
+            }
+
+            case "HOME": {
+                // "HOME [displayId]" — raise the desktop's own launcher over whatever is
+                // covering it. THE WAY OUT, and the reason it exists twice:
+                //
+                // FRONT is the right verb and cannot be used on an old phone. It reorders
+                // through getAllRootTaskInfosOnDisplay (Android 12) and a
+                // WindowContainerTransaction (Android 11), neither of which exists on 10 —
+                // and 10 is exactly where this matters, because a phone that cannot make a
+                // trusted display gets no freeform, so every app opens fullscreen over the
+                // launcher and takes the taskbar with it. There is then nothing left on
+                // screen to press.
+                //
+                // `am start` on the launcher does the same job with an API that has been
+                // there since the beginning. It is a no-op on a launcher already in front.
+                int d = a.length > 1 ? i(a, 1) : displayFromDump(LAUNCHER);
+                if (d < 0) {
+                    out.println("ERR no desktop display");
+                    return;
+                }
+                String r = sh("am start --display " + d
+                        + " -n " + LAUNCHER + "/" + LAUNCHER + ".LauncherActivity");
+                out.println(r.contains("Error") || r.contains("Exception")
+                        ? "ERR " + r.replace('\n', ' ') : "OK " + d);
+                return;
+            }
+
+            case "CLOSETOP": {
+                // "CLOSETOP [displayId]" — close the front-most app window, launcher
+                // excepted: it is the desktop itself, and removing it leaves a black
+                // display with no way to bring anything back.
+                //
+                // removeTask is old enough to work everywhere (verified answering OK on
+                // Android 10); only FINDING the task needed the 12+ API, and the dump
+                // gives the same answer on every version.
+                int d = a.length > 1 ? i(a, 1) : displayFromDump(LAUNCHER);
+                if (d < 0) {
+                    out.println("ERR no desktop display");
+                    return;
+                }
+                int task = topTaskFromDump(d, LAUNCHER);
+                if (task < 0) {
+                    out.println("OK none");     // an empty desktop is not a failure
+                    return;
+                }
+                Wm.removeTask(task);
+                out.println("OK " + task);
+                return;
+            }
+
+            case "RECLAIM": {
+                // "RECLAIM <displayId> <pkg/cls>" — take a window the phone kept and put
+                // it on the desktop.
+                //
+                // Our own screens cannot be started onto an untrusted display by anyone.
+                // The launcher may not name the display (an app uid is refused), and
+                // unnamed the platform puts the activity on the DEFAULT display instead
+                // of the caller's. This process may not start them either — they are not
+                // exported, and "not exported from uid 10225" applies to uid 2000 like
+                // anyone else.
+                //
+                // So the activity is allowed to open wherever it lands, and then MOVED,
+                // which needs only MANAGE_ACTIVITY_TASKS and no cooperation from the
+                // activity at all. It is the same reclaim the PC already does for windows
+                // the phone steals back mid-session.
+                //
+                // POLLED, because the caller asks the instant it starts the activity and
+                // the task does not exist yet — a few hundred milliseconds of nothing is
+                // the normal case, not a failure.
+                int want = i(a, 1);
+                String comp = a.length > 2 ? a[2] : "";
+                if (want < 0 || !COMPONENT.matcher(comp).matches()) {
+                    out.println("ERR bad arguments");
+                    return;
+                }
+                long deadline = System.currentTimeMillis() + RECLAIM_WAIT_MS;
+                int[] found = null;
+                while (found == null && System.currentTimeMillis() < deadline) {
+                    found = strayTask(comp, want);
+                    if (found == null) sleep(120);
+                }
+                if (found == null) {
+                    out.println("OK none");     // never appeared, or already where it belongs
+                    return;
+                }
+                // moveStackToDisplay (below Android 12) wants the STACK, its replacement
+                // wants the task. On the releases where they overlap the two ids are the
+                // same number; where they are not, this is the difference between moving
+                // the window and moving nothing.
+                Wm.moveTaskToDisplay(Wm.hasRootTaskMove() ? found[0] : found[1], want);
+                out.println("OK " + found[0]);
+                return;
+            }
+
+            case "KEYBACK": {
+                // "KEYBACK <displayId>" — the Back KEY (the verb BACK is taken: it sends a
+                // task behind the others). Aimed at a display rather than at, aimed at a display rather than at
+                // whatever the phone thinks is focused.
+                //
+                // An app cannot do this: INJECT_EVENTS is a system permission and the
+                // launcher does not have it. This process does, which is the only reason
+                // the desktop's own Back button can exist at all.
+                int d = i(a, 1);
+                if (d < 0) {
+                    out.println("ERR no display");
+                    return;
+                }
+                String r = sh("input -d " + d + " keyevent 4 2>&1");
+                out.println(r.contains("Exception") ? "ERR " + r.replace('\n', ' ') : "OK");
                 return;
             }
 
@@ -412,7 +564,19 @@ public final class WmDaemon {
                 // Take a task back. Deliberately addressed by task id and NOT routed
                 // through taskById: the whole point is that the task is no longer on the
                 // display it belongs to, so a display-scoped lookup would fail.
-                Wm.moveTaskToDisplay(i(a, 1), i(a, 2));
+                //
+                // TRANSLATED FIRST on anything below Android 12, where the call behind
+                // this is moveStackToDisplay and wants the STACK. A task id handed to it
+                // is not rejected — it is a different window's stack, or nobody's, so the
+                // move silently does nothing or moves the wrong thing. Caught on a Redmi
+                // on Android 10, where "reclaim this window" moved the desktop's own
+                // launcher onto the phone.
+                int target = i(a, 1);
+                if (!Wm.hasRootTaskMove()) {
+                    int stack = stackForTask(target);
+                    if (stack >= 0) target = stack;
+                }
+                Wm.moveTaskToDisplay(target, i(a, 2));
                 out.println("OK");
                 return;
             }
@@ -655,6 +819,144 @@ public final class WmDaemon {
         return out.toString();
     }
 
+
+
+    /**
+     * The stack a task belongs to, or -1 — the id moveStackToDisplay wants when the
+     * platform is too old to take a task id.
+     */
+    private static int stackForTask(int taskId) {
+        for (String raw : sh("dumpsys activity activities").split("\n")) {
+            String line = raw.trim();
+            if (!isTaskLine(line) || intAfter(line, " #") != taskId) continue;
+            return intAfter(line, "StackId=");
+        }
+        return -1;
+    }
+
+    /**
+     * A task running {@code component} on some display other than {@code want}.
+     *
+     * Returns {task id, stack id} or null. Read from the dump rather than the task API
+     * for the reason spelled out on displayFromDump: the API is Android 12, and the
+     * phones that need any of this are older.
+     *
+     * Matched on the ACTIVITY, never on the package: the launcher's own task carries the
+     * same package name, and a package match would cheerfully move the desktop itself
+     * onto the desktop.
+     */
+    private static int[] strayTask(String component, int want) {
+        int display = -1;
+        int task = -1;
+        int stack = -1;
+        for (String raw : sh("dumpsys activity activities").split("\n")) {
+            String line = raw.trim();
+            if (line.startsWith("Display #")) {
+                display = intAfter(line, "Display #");
+                task = -1;
+                continue;
+            }
+            if (isTaskLine(line) && line.startsWith("* ")) {
+                task = intAfter(line, " #");
+                stack = intAfter(line, "StackId=");
+                continue;
+            }
+            // The activity lives on the Hist line under its task, so the ids above are
+            // still the ones this line belongs to.
+            if (task >= 0 && display != want && display >= 0
+                    && line.contains("ActivityRecord{") && matches(line, component)) {
+                return new int[]{task, stack >= 0 ? stack : task};
+            }
+        }
+        return null;
+    }
+
+    /** Uninterruptible enough for a poll; a spurious wake just polls again. */
+    private static void sleep(long ms) {
+        try {
+            Thread.sleep(ms);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+    }
+    /**
+     * Which display is hosting {@code pkg}, read from `dumpsys activity activities`.
+     *
+     * The task-API twin of this (Wm.displayHosting) needs getAllRootTaskInfos, which
+     * arrived in Android 12. The dump has said the same thing since long before that
+     * and says it on every version, which is the whole point: this path is only ever
+     * taken by phones too old for the other one.
+     */
+    private static int displayFromDump(String pkg) {
+        int display = -1;
+        for (String raw : sh("dumpsys activity activities").split("\n")) {
+            String line = raw.trim();
+            if (line.startsWith("Display #")) {
+                display = intAfter(line, "Display #");
+            } else if (display >= 0 && isTaskLine(line) && line.contains(pkg)) {
+                return display;
+            }
+        }
+        return -1;
+    }
+
+    /**
+     * Task id of the front-most task on {@code displayId} that is not {@code skipPkg},
+     * or -1. The dump prints each display's tasks top to bottom, so the first match is
+     * the window a person would call the one in front.
+     */
+    private static int topTaskFromDump(int displayId, String skipPkg) {
+        boolean here = false;
+        for (String raw : sh("dumpsys activity activities").split("\n")) {
+            String line = raw.trim();
+            if (line.startsWith("Display #")) {
+                here = intAfter(line, "Display #") == displayId;
+                continue;
+            }
+            if (!here || !line.startsWith("* ") || !isTaskLine(line)) continue;
+            if (line.contains(skipPkg)) continue;
+            return intAfter(line, " #");
+        }
+        return -1;
+    }
+
+    /**
+     * Whether an ActivityRecord line belongs to the app we are reclaiming.
+     *
+     * BY PACKAGE, not by the exact activity: an app rarely lands on the activity that
+     * was asked for. Chrome answers a launch with its first-run screen, and plenty of
+     * apps answer with a trampoline — the task is the app's either way, and the task is
+     * what moves.
+     *
+     * OUR OWN package is the exception and must match in full. The desktop's launcher
+     * carries the same package as its Settings and Task Manager, and a package match
+     * would move the desktop itself onto the desktop, which ends with an empty display.
+     */
+    private static boolean matches(String line, String component) {
+        int slash = component.indexOf('/');
+        String pkg = slash > 0 ? component.substring(0, slash) : component;
+        if (LAUNCHER.equals(pkg)) return line.contains(component);
+        return line.contains(pkg + "/");
+    }
+
+    /** Both spellings: Android 10 prints TaskRecord{…}, later versions Task{…}. */
+    private static boolean isTaskLine(String line) {
+        return line.contains("TaskRecord{") || line.contains("Task{");
+    }
+
+    /** The run of digits following {@code marker}, or -1. */
+    private static int intAfter(String line, String marker) {
+        int at = line.indexOf(marker);
+        if (at < 0) return -1;
+        int i = at + marker.length();
+        int start = i;
+        while (i < line.length() && Character.isDigit(line.charAt(i))) i++;
+        try {
+            return i > start ? Integer.parseInt(line.substring(start, i)) : -1;
+        } catch (NumberFormatException e) {
+            return -1;
+        }
+    }
     /** Run a shell command with this process's own authority, stdout back. */
     private static String sh(String cmd) {
         if (cmd == null || cmd.trim().isEmpty()) return "";

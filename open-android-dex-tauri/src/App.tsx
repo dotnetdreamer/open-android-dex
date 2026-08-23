@@ -84,6 +84,40 @@ function StageRow({ tag, step }: { tag: string; step: Step }) {
   );
 }
 
+/**
+ * The way out of a fullscreen app, on a phone that cannot draw a titlebar to
+ * close it with.
+ *
+ * Rendered on BOTH screens on purpose. The desktop keeps running when this app
+ * restarts or loses track of its session — a rebuild, a reconnect, a scrcpy that
+ * outlived its launch — and the moment a person needs these is exactly the moment
+ * the "Desktop is live" screen may not be the one in front of them. The commands
+ * ask the phone what is running rather than trusting this window's own idea of it,
+ * so an escape hatch behind a stale state is no escape hatch at all.
+ */
+function EscapeButtons({ onHome, onClose }: { onHome: () => void; onClose: () => void }) {
+  return (
+    <>
+      <button
+        className="btn-ghost"
+        onClick={onHome}
+        title="Bring the DeX launcher back in front of whatever is covering it"
+      >
+        <span aria-hidden="true">🏠</span>
+        Back to launcher
+      </button>
+      <button
+        className="btn-ghost"
+        onClick={onClose}
+        title="Close the front-most app window on the desktop"
+      >
+        <span aria-hidden="true">✕</span>
+        Close top window
+      </button>
+    </>
+  );
+}
+
 function Wordmark() {
   return (
     <div className="wordmark">
@@ -403,6 +437,9 @@ export default function App() {
       const requested = exiting.current;
       exiting.current = false;
       setDexStep({ state: "idle", text: requested ? "DeX closed" : "Desktop session ended" });
+      // The desktop's own warnings go with it: a banner about how windows behave
+      // on a display that no longer exists is read as a complaint about the app.
+      setNotice("");
       setPhase({ kind: "ended", device: phase.device, requested });
       // However the session ended, the phone is left with a desktop profile on
       // it — freeform windowing, a relaxed hidden-API policy, our accessibility
@@ -487,6 +524,32 @@ export default function App() {
 
   const showDesktop = useCallback((device: DeviceInfo) => {
     invoke("focus_session", { sessionKey: `${device.serial}|desktop` }).catch(() => {});
+  }, []);
+
+  /**
+   * The way back out of a fullscreen app, and the way to close it.
+   *
+   * On a phone that draws titlebars these are the caption's own buttons and the
+   * taskbar underneath. On a phone that cannot — an untrusted display gets no
+   * system decorations, so no freeform, so every app covers the launcher whole —
+   * there is nothing left on screen to press, and these are the only way back.
+   * Both go through the uid-2000 daemon, which needs neither a trusted display
+   * nor a focused window. See wm.rs.
+   */
+  const backToLauncher = useCallback(() => {
+    invoke<boolean>("desktop_home")
+      .then((done) => {
+        if (!done) setNotice("The phone would not bring the launcher forward");
+      })
+      .catch((e) => setNotice(String(e)));
+  }, []);
+
+  const closeTopWindow = useCallback(() => {
+    invoke<boolean>("desktop_close_top")
+      .then((done) => {
+        if (!done) setNotice("There is no app window open on the desktop");
+      })
+      .catch((e) => setNotice(String(e)));
   }, []);
 
   // ── Screens ──
@@ -592,6 +655,7 @@ export default function App() {
                   <span aria-hidden="true">🩺</span>
                   {diagBusy ? "Collecting…" : "Diagnostics"}
                 </button>
+                <EscapeButtons onHome={backToLauncher} onClose={closeTopWindow} />
               </div>
               <span className="text-[11.5px] text-slate-500">scanning in the background…</span>
             </div>
@@ -621,6 +685,7 @@ export default function App() {
                 <button className="btn-ghost" onClick={() => showDesktop(phase.device)}>
                   Show desktop
                 </button>
+                <EscapeButtons onHome={backToLauncher} onClose={closeTopWindow} />
                 {/* Only offered on a cable: the point is to get rid of it. */}
                 {phase.device.connection === "usb" && (
                   <button

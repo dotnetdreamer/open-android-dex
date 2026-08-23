@@ -174,6 +174,21 @@ impl WmClient {
         self.ok(&format!("CLOSE {task}"))
     }
 
+    /// Raise the launcher, without the task API.
+    ///
+    /// The daemon does it with `am start`, which every Android version has. Its
+    /// twin `front` is better — it reorders the existing task instead of
+    /// re-delivering an intent — and it is unavailable below Android 12, so this
+    /// is the one that runs on the phones that need it most.
+    pub fn home(&self) -> bool {
+        self.ok("HOME")
+    }
+
+    /// Close the front-most app window, launcher excepted, without the task API.
+    pub fn close_top(&self) -> bool {
+        self.ok("CLOSETOP")
+    }
+
     pub fn ping(&self) -> bool {
         self.ok("PING")
     }
@@ -308,6 +323,64 @@ fn parse_task(line: &str) -> Option<Task> {
         package: f[15].to_string(),
         activity: f[16].to_string(),
     })
+}
+
+
+/// The package whose task IS the desktop, rather than a window on it.
+const LAUNCHER: &str = "com.ccrstech.openandroiddex.launcher";
+
+/// Bring the desktop's own launcher back in front of whatever is covering it.
+///
+/// THE WAY OUT. On a phone that can draw titlebars this is a convenience — the
+/// window has a close button and the taskbar is always there beside it. On a
+/// phone that cannot, it is the only way back: an app opens fullscreen over the
+/// launcher, the taskbar goes with it, and there is nothing left on screen to
+/// press.
+///
+/// It works there because it asks for none of what such a phone lacks. The
+/// daemon reorders the task with `MANAGE_ACTIVITY_TASKS` at uid 2000, which
+/// needs no trusted display, no freeform mode, no system decorations and no
+/// focused window.
+#[tauri::command(async)]
+pub fn desktop_home() -> Result<bool, String> {
+    let wm = WmClient::new();
+    // The good path, where the platform has the task API: reorder the launcher's
+    // existing task, which keeps its state and skips the intent entirely.
+    if let Some(display) = wm.desktop_display() {
+        if let Some(task) = wm.list(display).into_iter().find(|t| t.package == LAUNCHER) {
+            if wm.front(display, task.task_id) {
+                return Ok(true);
+            }
+        }
+    }
+    // …and the path for everything older. `desktop_display` and `list` both go
+    // through getAllRootTaskInfos, which is Android 12 — on a phone below that
+    // they answer ERR and we land here, which is exactly where such a phone
+    // needs the most help: no trusted display means no freeform, so an app
+    // covers the launcher whole and nothing on screen can bring it back.
+    Ok(wm.home())
+}
+
+/// Close the topmost app window on the desktop.
+///
+/// The launcher is skipped rather than closed: it is the desktop itself, and
+/// removing its task leaves a black display with nothing left to bring anything
+/// back. A desktop with no app on it answers false, which is not an error.
+#[tauri::command(async)]
+pub fn desktop_close_top() -> Result<bool, String> {
+    let wm = WmClient::new();
+    if let Some(display) = wm.desktop_display() {
+        // LIST is topmost-first, so the first task that is not the desktop
+        // itself is the window a person would call the one in front.
+        if let Some(task) = wm.list(display).into_iter().find(|t| t.package != LAUNCHER) {
+            return Ok(wm.close(task.task_id));
+        }
+        // The display answered and holds nothing but the launcher: an empty
+        // desktop, which is not a failure and must not fall through to a second
+        // attempt that would say the same thing more slowly.
+        return Ok(false);
+    }
+    Ok(wm.close_top())
 }
 
 #[cfg(test)]

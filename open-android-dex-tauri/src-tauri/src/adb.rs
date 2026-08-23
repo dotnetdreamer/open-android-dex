@@ -139,6 +139,11 @@ pub fn adb_command(app: &tauri::AppHandle) -> Command {
 /// a `settings put` is milliseconds once the phone answers. The timeout exists
 /// for the case where the phone stops answering at all — an adb that hangs
 /// used to hang the launch with it, silently and forever.
+/// How many times a SYSTEM_ALERT_WINDOW grant is re-applied before giving up.
+///
+/// One is enough on a stock phone. The rest are for skins that undo it behind us.
+const OVERLAY_GRANT_TRIES: u32 = 4;
+
 const ADB_TIMEOUT: Duration = Duration::from_secs(25);
 /// `adb install` really can take a minute on a slow phone.
 const INSTALL_TIMEOUT: Duration = Duration::from_secs(240);
@@ -1448,34 +1453,58 @@ pub fn adb_start_launcher(
     // app windows). The op only sticks because the APK *declares*
     // SYSTEM_ALERT_WINDOW — without the manifest entry `appops set` silently
     // stays "default", canDrawOverlays() returns false and the launcher falls
-    // back to an in-activity bar that every app window covers. Read it back
-    // so that failure is loud instead of silent.
-    let _ = run_adb(
-        &app,
-        &[
-            "-s",
-            &serial,
-            "shell",
-            &format!("appops set {LAUNCHER_PACKAGE} SYSTEM_ALERT_WINDOW allow"),
-        ],
-    );
-    let overlay_ok = run_adb(
-        &app,
-        &[
-            "-s",
-            &serial,
-            "shell",
-            &format!("appops get {LAUNCHER_PACKAGE} SYSTEM_ALERT_WINDOW"),
-        ],
-    )
-    .map(|o| o.contains("allow"))
-    .unwrap_or(false);
+    // back to an in-activity bar that every app window covers.
+    //
+    // SET, READ BACK, AND SET AGAIN, because on some skins the first one does
+    // not take. MIUI runs its own permission pass over a package after it is
+    // installed and puts floating-window rights back to "ignore" — landing
+    // AFTER our grant, which was sent a millisecond behind `install`. The
+    // symptom is this exact op reading "ignore" seconds later on a phone where
+    // the identical command, typed by hand a minute afterwards, works.
+    //
+    // So the grant is not a fire-and-forget: it is retried until the phone
+    // agrees, which on a skin that never interferes costs exactly one extra
+    // `appops get` and is done.
+    let mut overlay_ok = false;
+    for attempt in 1..=OVERLAY_GRANT_TRIES {
+        let _ = run_adb(
+            &app,
+            &[
+                "-s",
+                &serial,
+                "shell",
+                &format!("appops set {LAUNCHER_PACKAGE} SYSTEM_ALERT_WINDOW allow"),
+            ],
+        );
+        overlay_ok = run_adb(
+            &app,
+            &[
+                "-s",
+                &serial,
+                "shell",
+                &format!("appops get {LAUNCHER_PACKAGE} SYSTEM_ALERT_WINDOW"),
+            ],
+        )
+        .map(|o| o.contains("allow"))
+        .unwrap_or(false);
+        if overlay_ok {
+            if attempt > 1 {
+                log::info!("SYSTEM_ALERT_WINDOW took {attempt} attempts — the phone was undoing it");
+            }
+            break;
+        }
+        // Long enough for the skin's own pass to finish rather than to race it
+        // again, short enough that a phone which will never grant it does not
+        // hold the launch for long: the whole loop is under a second and a half.
+        std::thread::sleep(Duration::from_millis(400));
+    }
     if overlay_ok {
         log::info!("SYSTEM_ALERT_WINDOW granted — taskbar can float above app windows");
     } else {
         log::warn!(
-            "openandroiddex-launcher: SYSTEM_ALERT_WINDOW not granted — the taskbar will \
-             fall back to an in-activity bar that app windows can cover"
+            "openandroiddex-launcher: SYSTEM_ALERT_WINDOW not granted after \
+             {OVERLAY_GRANT_TRIES} attempts — the taskbar will fall back to an in-activity \
+             bar that app windows can cover, and the desktop's escape bar will not appear"
         );
     }
     // Shared-folder permission, for the Linux feature's /sdcard/LinuxOnDeX.
