@@ -78,6 +78,16 @@ android {
         }
         release {
             minifyEnabled false
+
+            // Signed by release-signing.gradle at the bottom of this file, from
+            // a key that is not in the repository — this is the build that goes
+            // to Play, where a debug-signed upload is rejected outright.
+            //
+            // NOTE the consequence for anyone holding both: this APK and the
+            // debug one built beside it are the same applicationId under two
+            // different keys, so a phone will take one or the other and refuse
+            // to update across. Install the Play build, or the sideloaded
+            // build, not both.
         }
     }
 
@@ -120,3 +130,7 @@ dependencies {
     // reuses and they must still compile.
     implementation 'io.github.webrtc-sdk:android:144.7559.12'
 }
+
+// Same key as :app — see release-signing.gradle. Applied last, because it
+// configures the android {} extension above.
+apply from: rootProject.file('release-signing.gradle')

@@ -46,9 +46,9 @@ android {
     //
     // These are the well-known Android debug credentials, public by design and
     // identical on every Android developer's machine. This is not a release key
-    // and must never become one: Play rejects debug-signed APKs outright, so
-    // shipping there would mean adding a separate release signingConfig backed
-    // by a private key.
+    // and must never become one: Play rejects debug-signed APKs outright. The
+    // release key lives outside the repository and is wired in by
+    // release-signing.gradle, applied at the bottom of this file.
     signingConfigs {
         debug {
             storeFile file('debug.keystore')
@@ -62,8 +62,9 @@ android {
         debug {
             signingConfig signingConfigs.debug
 
-            // assembleDebug is what SHIPS (release is unsigned, see above), so
-            // a debuggable APK would put a debug build in every user's hands.
+            // assembleDebug is what the desktop app ships and pushes over
+            // adb, so a debuggable APK would put a debug build in every user's
+            // hands.
             // Android then shows the "Android App Compatibility" dialog on
             // launch — it fires only for debuggable apps — complaining that the
             // proot jniLibs are not 16 KB page aligned (they are prebuilts
@@ -79,6 +80,29 @@ android {
         }
         release {
             minifyEnabled false
+
+            // signingConfig is set by release-signing.gradle at the bottom of
+            // this file, from a key that is NOT in the repository. This build
+            // type is what goes to Play and what a person downloads from the
+            // releases page for a phone that has no PC behind it; the debug
+            // build above is what the desktop app pushes over adb. They are two
+            // distribution channels, and Play will not take the debug one.
+            //
+            // ONE PHONE CANNOT HOLD BOTH. Same applicationId, two keys, so
+            // Android refuses to update across them: a phone with the Play
+            // build on it makes the desktop app's `install -r` fail with
+            // INSTALL_FAILED_UPDATE_INCOMPATIBLE, and adb.rs answers that by
+            // uninstalling the Play copy — settings and all — to put the
+            // bundled one in its place. Unifying the two channels means
+            // signing the desktop payload with this key too, which is a
+            // one-time break for every phone that already has the debug-signed
+            // launcher, so it is a decision and not a tidy-up.
+            //
+            // minifyEnabled stays false. The launcher reflects into hidden
+            // framework classes and names components by string from the wmd
+            // daemon's wire protocol, so R8 would have to be taught every one
+            // of those by hand — for an APK whose size is dominated by
+            // prebuilt native code R8 cannot touch anyway.
         }
     }
 
@@ -119,3 +143,9 @@ android {
 dependencies {
     implementation 'io.github.webrtc-sdk:android:144.7559.12'
 }
+
+// Turns `release` above into a signable build type when the release key is in
+// the environment, and fails assembleRelease/bundleRelease with a message that
+// names the missing variable when it is not. Debug builds never touch it.
+// Applied last, because it configures the android {} extension above.
+apply from: rootProject.file('release-signing.gradle')

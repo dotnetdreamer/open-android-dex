@@ -224,6 +224,7 @@ screen already in front of you, for nothing.
 | Windows | `..._x64-setup.exe` (installer) or `..._x64_portable.zip` |
 | Mac, Apple Silicon (M1 to M4) | `..._aarch64.dmg` |
 | Mac, Intel | `..._x64.dmg` |
+| **The desktop, phone only** (HDMI to a monitor, or Samsung DeX) | `OpenAndroidDeX-Launcher-v<version>.apk` |
 | **Just Ubuntu, phone only** | `LinuxOnDroid-v<version>.apk` |
 
 ---
@@ -359,8 +360,14 @@ npm run tauri build     # Windows -> bundle/nsis/ ; macOS -> bundle/{macos,dmg}/
 npm run apk             # phone side payloads only
 cargo test              # from src-tauri/
 
-# The standalone LinuxOnDroid APK, from openandroiddex-launcher/
-./gradlew :linuxapp:assembleDebug
+# The two phone apps on their own, from openandroiddex-launcher/
+./gradlew :app:assembleDebug          # the launcher, sideloadable
+./gradlew :linuxapp:assembleDebug     # LinuxOnDroid
+
+# The Play builds of the same two. Needs the release key — see
+# openandroiddex-launcher/release-signing.gradle for the four variables, and
+# .github/workflows/android.yml for the workflow that does this in CI.
+./gradlew :app:bundleRelease :linuxapp:bundleRelease
 
 # Frontend only work, no JDK or Android SDK needed:
 SKIP_LAUNCHER_APK=1 SKIP_WMD_DEX=1 npm run tauri dev

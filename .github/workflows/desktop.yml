@@ -209,22 +209,42 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
-      - name: Stage LinuxOnDroid under its download name
-        # Named for the version because this one is downloaded BY HAND from the
-        # releases page — the launcher APK inside the desktop app never is.
+      - name: Stage the two phone apps under their download names
+        # The SAME two APKs the steps above already built, copied a second time
+        # under a version-stamped name because these copies are downloaded BY
+        # HAND from the releases page. The one staged into payloads/ is a build
+        # input for the installer; these are the thing being published.
+        #
+        # The launcher is here for the phone that never meets the PC app: on a
+        # monitor over HDMI, or in Samsung DeX, the launcher IS the desktop —
+        # taskbar, app drawer, freeform windows, Linux. The only part that wants
+        # the cable is the wmd daemon behind the custom titlebars, and without
+        # it One UI's own window chrome takes over rather than nothing working.
+        #
+        # Both carry the committed debug key (app/debug.keystore), which is
+        # deliberate and is what makes this channel coherent: sideload the
+        # launcher from here, plug in the desktop app later, and its `install -r`
+        # is a plain update instead of a signature conflict that uninstalls the
+        # copy you had. The Play channel is release-signed and is built by
+        # .github/workflows/android.yml — never mix a build from there with one
+        # from here on the same phone.
         run: |
-          mkdir -p linuxondroid
+          mkdir -p standalone
+          V="${{ needs.version.outputs.version }}"
+          cp openandroiddex-launcher/app/build/outputs/apk/debug/app-debug.apk \
+             "standalone/OpenAndroidDeX-Launcher-v$V.apk"
           cp openandroiddex-launcher/linuxapp/build/outputs/apk/debug/linuxapp-debug.apk \
-             "linuxondroid/LinuxOnDroid-v${{ needs.version.outputs.version }}.apk"
+             "standalone/LinuxOnDroid-v$V.apk"
+          ls -l standalone
 
       - uses: actions/upload-artifact@v4
         with:
-          # release-* is exactly what the release job globs, so attaching this
+          # release-* is exactly what the release job globs, so attaching these
           # to the GitHub release takes no change there at all. Not retention-
-          # limited like phone-payloads: that one is a build input, this one is
-          # the thing being published.
-          name: release-linuxondroid
-          path: linuxondroid/*
+          # limited like phone-payloads: that one is a build input, these are
+          # the things being published.
+          name: release-android
+          path: standalone/*
           if-no-files-found: error
 
   build-windows:
@@ -583,9 +603,10 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: dist
-          # release-windows, release-macos-aarch64, release-macos-x64.
-          # merge-multiple flattens them into dist/ rather than one directory
-          # each; the file names do not collide.
+          # release-windows, release-macos-aarch64, release-macos-x64 and
+          # release-android (the two sideloadable phone APKs). merge-multiple
+          # flattens them into dist/ rather than one directory each; the file
+          # names do not collide.
           pattern: release-*
           merge-multiple: true
 

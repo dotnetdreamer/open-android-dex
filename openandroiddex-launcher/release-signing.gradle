@@ -1,0 +1,99 @@
+// Release signing for the two APKs a person installs THEMSELVES — :app (the
+// launcher, on its own) and :linuxapp (LinuxOnDroid) — as opposed to the debug
+// build the desktop app pushes over adb.
+//
+// This exists because Play rejects a debug-signed upload outright, and the
+// committed debug.keystore is the well-known Android debug key: public by
+// design, held by every Android developer on earth, and therefore worth
+// nothing as a statement about who built the APK. See app/build.gradle's
+// signingConfigs note for why the debug key is committed and must stay so.
+//
+// NOTHING ABOUT THE RELEASE KEY IS COMMITTED. It arrives from the environment,
+// which is what lets CI keep it as a repository secret and a developer keep it
+// in ~/.gradle/gradle.properties (never the project's own gradle.properties —
+// that one is tracked):
+//
+//   env var                    gradle property            what it is
+//   OADEX_KEYSTORE             oadexKeystore              path to the .jks
+//   OADEX_KEYSTORE_PASSWORD    oadexKeystorePassword      its store password
+//   OADEX_KEY_ALIAS            oadexKeyAlias              the alias inside it
+//   OADEX_KEY_PASSWORD         oadexKeyPassword           that alias's password
+//
+// Applied from the BOTTOM of each module's build.gradle, after android {} has
+// been configured — this script reaches into that extension, so it cannot run
+// before it exists.
+//
+// One key for both modules on purpose. They are separate Play listings with
+// separate applicationIds, so nothing forces it, but two keys means two things
+// to lose, and a key that is lost cannot be replaced without Play's key-reset
+// process and a new upload key for every future release.
+
+def secret = { String envName, String propName ->
+    def v = System.getenv(envName)
+    if (v == null || v.trim().isEmpty()) v = project.findProperty(propName)
+    (v == null || v.toString().trim().isEmpty()) ? null : v.toString().trim()
+}
+
+def storePath = secret('OADEX_KEYSTORE', 'oadexKeystore')
+def storePass = secret('OADEX_KEYSTORE_PASSWORD', 'oadexKeystorePassword')
+def aliasName = secret('OADEX_KEY_ALIAS', 'oadexKeyAlias')
+def keyPass   = secret('OADEX_KEY_PASSWORD', 'oadexKeyPassword')
+
+if (storePath && storePass && aliasName && keyPass) {
+    // An absolute path passes through; a relative one resolves against the
+    // module directory, which is what a developer typing -PoadexKeystore=key.jks
+    // means. CI passes an absolute path under RUNNER_TEMP.
+    def store = file(storePath)
+    if (!store.exists()) {
+        throw new GradleException(
+            "OADEX_KEYSTORE / -PoadexKeystore points at ${store.absolutePath}, which does not exist")
+    }
+
+    android.signingConfigs {
+        // Created here rather than in the module, so a module that has not been
+        // taught about release signing cannot silently ship an unsigned build.
+        release {
+            storeFile store
+            storePassword storePass
+            keyAlias aliasName
+            keyPassword keyPass
+            // The signature SCHEMES are left to AGP, which picks them from
+            // minSdk: 26 here, so v2 (APK Signature Scheme v2, API 24+) and no
+            // v1 JAR signature. That is what Play requires and what every phone
+            // this APK can install on verifies — pinning them by hand here only
+            // creates something that can drift out of step with minSdk.
+        }
+    }
+    android.buildTypes.release.signingConfig = android.signingConfigs.release
+
+    logger.lifecycle(
+        "[release-signing] ${project.path}: release builds sign with ${store.name} (alias ${aliasName})")
+} else {
+    // No key present. Debug builds — the desktop payload, `npm run apk`, every
+    // local run — are unaffected and must stay that way: requiring the release
+    // key to build at all would mean nobody without it could work on this repo.
+    //
+    // But an unsigned assembleRelease is a trap: Gradle reports success and
+    // emits app-release-unsigned.apk, which `adb install` and Play both refuse,
+    // and the failure then surfaces minutes later somewhere that does not name
+    // the cause. So the release tasks — and only those — fail here, where the
+    // message can say exactly which variable is missing.
+    gradle.taskGraph.whenReady { graph ->
+        def releaseTasks = ['assembleRelease', 'bundleRelease'] as Set
+        def asked = graph.allTasks.any { it.project == project && releaseTasks.contains(it.name) }
+        if (asked) {
+            def missing = []
+            if (!storePath) missing << 'OADEX_KEYSTORE'
+            if (!storePass) missing << 'OADEX_KEYSTORE_PASSWORD'
+            if (!aliasName) missing << 'OADEX_KEY_ALIAS'
+            if (!keyPass) missing << 'OADEX_KEY_PASSWORD'
+            def what = missing.size() == 1 ? "${missing[0]} is not set" : "${missing.join(', ')} are not set"
+            throw new GradleException(
+                "${project.path}: a release build needs the release key, and ${what}.\n" +
+                "  CI: .github/workflows/android.yml reads it from the ANDROID_KEYSTORE_* secrets.\n" +
+                "  Locally: put oadexKeystore/oadexKeystorePassword/oadexKeyAlias/oadexKeyPassword\n" +
+                "           in ~/.gradle/gradle.properties, or export the OADEX_* variables.\n" +
+                "  Only building for a phone? `${project.path}:assembleDebug` needs none of this.")
+        }
+    }
+}

@@ -54,3 +54,14 @@ local.properties
 
 # One-off machine setup with a hardcoded per-user path; not portable.
 /_install_buildtools.cmd
+
+# Release signing keys. The one exception, openandroiddex-launcher/app/
+# debug.keystore, is the well-known public Android debug key and is already
+# tracked — a rule added after the fact does not untrack it. Everything else
+# matching these is a private key: the one that signs the Play uploads (see
+# openandroiddex-launcher/release-signing.gradle), which lives in a repository
+# secret and an offline backup, and must never reach a commit. Losing it means
+# Play's key-reset process; publishing it means anyone can ship an "update" to
+# both apps.
+*.jks
+*.keystore

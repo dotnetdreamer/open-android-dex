@@ -8,6 +8,20 @@
 
 Not sure which Mac you have?  → About This Mac, and read the "Chip" line.
 
+### No computer? The phone apps are here too
+
+Both install straight onto the phone and need no PC at all.
+
+| What you want | File |
+| --- | --- |
+| The DeX desktop on a monitor over HDMI, or in Samsung DeX | `OpenAndroidDeX-Launcher-v<version>.apk` |
+| Just Ubuntu, on the phone | `LinuxOnDroid-v<version>.apk` |
+
+The launcher APK is the same one the desktop app installs for you, so having
+one does not stop you using the other. Custom titlebars are the one thing that
+wants the computer — without it, your phone's own window chrome is used
+instead.
+
 ### macOS: opening it the first time
 
 Open Android DeX is not notarized — that needs a paid Apple Developer account

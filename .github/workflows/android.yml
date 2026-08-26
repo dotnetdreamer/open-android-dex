@@ -1,0 +1,359 @@
+# The two phone apps, built and shipped WITHOUT the desktop.
+#
+# desktop.yml builds the same two modules, but for the desktop's purposes: a
+# debug-signed launcher that goes inside the installer and is pushed over adb,
+# and a debug-signed LinuxOnDroid attached to the desktop release for
+# sideloading. That channel is not a distribution channel Play will accept —
+# Play rejects a debug-signed upload outright, and the debug key here is the
+# well-known Android one (see app/build.gradle).
+#
+# So this workflow is the OTHER channel, and it exists because the launcher is
+# worth having on a phone that never meets the PC app: plug the phone into a
+# monitor over HDMI (or open Samsung DeX), and the launcher is the desktop —
+# taskbar, app drawer, freeform windows, Linux, the lot. Nothing in it needs a
+# cable to a computer except the wmd daemon, and the features that need wmd
+# degrade to One UI's own window chrome rather than failing.
+#
+# What it produces, per app:
+#   .aab  — the Play upload. Required for anything new on Play since 2021.
+#   .apk  — the same build as an installable file, so the exact bytes that went
+#           to Play can be put on a phone and tried before the review starts.
+# Both release-signed with a key held as a repository secret, never committed.
+#
+# ── one-time setup, without which every run of this fails ───────────────────
+#
+# Secrets (Settings → Secrets and variables → Actions):
+#   ANDROID_KEYSTORE_BASE64     base64 of the .jks — `base64 -i key.jks | pbcopy`
+#   ANDROID_KEYSTORE_PASSWORD   its store password
+#   ANDROID_KEY_ALIAS           the alias inside it
+#   ANDROID_KEY_PASSWORD        that alias's password
+#   PLAY_SERVICE_ACCOUNT_JSON   optional; a Google Play service-account key with
+#                               "Release apps to testing tracks" (and, for the
+#                               production track, "Release to production").
+#                               Absent → the build still runs, the upload does not.
+#
+# KEEP THE KEYSTORE. Losing it means Play's key-reset process and a new upload
+# key for every future release. Keep an offline copy somewhere that is not this
+# repository and not the runner.
+#
+# Play will not accept an API upload for a package it has never seen: the FIRST
+# release of each app has to be created and uploaded by hand in the Play
+# Console. After that this workflow takes over.
+name: Publish Android apps
+
+on:
+  workflow_dispatch:
+    inputs:
+      apps:
+        description: "Which app(s) to build"
+        type: choice
+        options:
+          - both
+          - launcher
+          - linuxondroid
+        default: both
+      version:
+        description: "Version (e.g. 0.3.19) — blank uses what app/build.gradle already says"
+        type: string
+        default: ""
+      version_code:
+        description: "versionCode override — blank derives it from the version"
+        type: string
+        default: ""
+      play_track:
+        description: "Play track to upload to (none = build only)"
+        type: choice
+        options:
+          - none
+          - internal
+          - alpha
+          - beta
+          - production
+        default: internal
+      play_status:
+        description: "Play release status"
+        type: choice
+        options:
+          - draft
+          - completed
+        default: draft
+
+concurrency:
+  # Its own group, not desktop-build's. The two workflows share source but not
+  # artifacts, and cancelling a Play upload because a desktop build started
+  # would leave the track half-updated.
+  group: android-publish
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          # android-36 is compileSdk for both modules; build-tools carries the
+          # apksigner and aapt2 the verification step below uses.
+          packages: "platforms;android-36 build-tools;35.0.0"
+
+      - name: Setup Gradle
+        # Version comes from the committed wrapper, same as desktop.yml. Here
+        # for the dependency cache.
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Resolve version
+        id: v
+        run: |
+          set -euo pipefail
+          GRADLE=openandroiddex-launcher/app/build.gradle
+
+          # Blank input means "whatever the repository already says", which is
+          # what desktop.yml stamped when it cut the last release. That is the
+          # normal case: publish to Play the version that already shipped.
+          VERSION="${{ inputs.version }}"
+          if [ -z "$VERSION" ]; then
+            VERSION="$(sed -n 's/^ *versionName "\(.*\)"/\1/p' "$GRADLE" | head -1)"
+          fi
+          if [[ ! "$VERSION" =~ ^[0-9]+[.][0-9]+[.][0-9]+$ ]]; then
+            echo "::error::version '$VERSION' is not MAJOR.MINOR.PATCH"
+            exit 1
+          fi
+
+          # Same mapping as desktop.yml — MAJOR*10000 + MINOR*100 + PATCH — so
+          # a phone cannot end up thinking the Play build and the sideloaded
+          # build of the same version are different versions.
+          #
+          # The override exists for the one case that mapping cannot serve: Play
+          # refuses a versionCode it has already seen, so a rejected review that
+          # has to be answered without a product version bump needs a number of
+          # its own. Pick one ABOVE the derived value and BELOW the next
+          # version's, e.g. 319 -> 320 is taken by 0.3.20, so use 0.3.19 -> 319
+          # and bump the product version instead where you can.
+          VCODE="${{ inputs.version_code }}"
+          if [ -z "$VCODE" ]; then
+            IFS='.' read -r MAJ MIN PAT <<< "$VERSION"
+            VCODE=$((MAJ * 10000 + MIN * 100 + PAT))
+          fi
+          if [[ ! "$VCODE" =~ ^[0-9]+$ ]]; then
+            echo "::error::version_code '$VCODE' is not a plain number"
+            exit 1
+          fi
+
+          # The working tree only — nothing is committed or tagged here.
+          # desktop.yml owns the version in git; this workflow publishes it.
+          # :linuxapp reads its version out of :app, so this one file covers
+          # both APKs.
+          sed -i "s/^ *versionCode .*/        versionCode $VCODE/" "$GRADLE"
+          sed -i "s/^ *versionName \".*\"/        versionName \"$VERSION\"/" "$GRADLE"
+          grep -E '^ *version(Code|Name) ' "$GRADLE"
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "version_code=$VCODE" >> "$GITHUB_OUTPUT"
+
+      - name: Unpack the release key
+        id: key
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+        run: |
+          set -euo pipefail
+          if [ -z "${KEYSTORE_BASE64:-}" ]; then
+            echo "::error title=No release key::ANDROID_KEYSTORE_BASE64 is not set. Play rejects debug-signed uploads, so there is nothing this workflow can produce without it — see the header of .github/workflows/android.yml."
+            exit 1
+          fi
+          # RUNNER_TEMP, not the workspace: the workspace is what gets archived
+          # by actions/upload-artifact if a path glob ever widens, and a private
+          # key must not be one keystroke away from being published.
+          KS="$RUNNER_TEMP/oadex-release.jks"
+          echo "$KEYSTORE_BASE64" | base64 -d > "$KS"
+
+          # Prove the four secrets agree with each other HERE, where the message
+          # can say so, rather than several minutes into Gradle. Naming the
+          # alias is what makes this worth running: `keytool -list` exits 0 on a
+          # keystore it cannot verify, but asking for one entry fails on all
+          # three things that actually go wrong — a base64 blob that decoded to
+          # rubbish, a wrong store password, and an ANDROID_KEY_ALIAS that is
+          # not in the keystore.
+          #
+          # The password goes in on stdin, not as -storepass: a command line is
+          # readable from any other process on the machine, and this one holds
+          # the key to every future update of both apps.
+          if ! keytool -list -keystore "$KS" -alias "$KEY_ALIAS" <<< "$KEYSTORE_PASSWORD" > /dev/null 2>&1; then
+            echo "::error title=Release key unusable::The keystore did not open with alias '$KEY_ALIAS'. One of ANDROID_KEYSTORE_BASE64 (not a keystore, or truncated), ANDROID_KEYSTORE_PASSWORD (wrong) or ANDROID_KEY_ALIAS (not in this keystore) is wrong."
+            exit 1
+          fi
+          echo "path=$KS" >> "$GITHUB_OUTPUT"
+
+      - name: Build signed AAB + APK
+        working-directory: openandroiddex-launcher
+        env:
+          # Read by release-signing.gradle, which both modules apply.
+          OADEX_KEYSTORE: ${{ steps.key.outputs.path }}
+          OADEX_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          OADEX_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          OADEX_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          APPS: ${{ inputs.apps }}
+        run: |
+          set -euo pipefail
+          TASKS=""
+          case "$APPS" in
+            both|launcher)     TASKS="$TASKS :app:bundleRelease :app:assembleRelease" ;;
+          esac
+          case "$APPS" in
+            both|linuxondroid) TASKS="$TASKS :linuxapp:bundleRelease :linuxapp:assembleRelease" ;;
+          esac
+          echo "gradle tasks:$TASKS"
+          ./gradlew --no-daemon --console=plain $TASKS
+
+      - name: Verify what was built
+        working-directory: openandroiddex-launcher
+        env:
+          APPS: ${{ inputs.apps }}
+          EXPECT_CODE: ${{ steps.v.outputs.version_code }}
+          EXPECT_NAME: ${{ steps.v.outputs.version }}
+        run: |
+          set -euo pipefail
+          BT="$ANDROID_HOME/build-tools/35.0.0"
+
+          check() {
+            local apk="$1" expect_pkg="$2"
+            echo "── $apk"
+
+            # Signed, and signed with the release key rather than left as
+            # app-release-unsigned.apk. apksigner exits non-zero on an unsigned
+            # or broken APK, which is the assertion.
+            "$BT/apksigner" verify --print-certs "$apk" | grep -E 'certificate (DN|SHA-256 digest)'
+
+            local badging
+            badging="$("$BT/aapt2" dump badging "$apk")"
+            echo "$badging" | grep -E "^package:|^application-label:"
+
+            # The three ways a release build can be wrong in a way Play notices
+            # only after you have burned a review cycle on it.
+            echo "$badging" | grep -q "name='$expect_pkg'" \
+              || { echo "::error::$apk is not $expect_pkg"; exit 1; }
+            echo "$badging" | grep -q "versionCode='$EXPECT_CODE' versionName='$EXPECT_NAME'" \
+              || { echo "::error::$apk is not $EXPECT_NAME ($EXPECT_CODE)"; exit 1; }
+            if echo "$badging" | grep -q "application-debuggable"; then
+              echo "::error::$apk is debuggable — Play refuses debuggable uploads"
+              exit 1
+            fi
+          }
+
+          case "${APPS}" in
+            both|launcher)
+              check app/build/outputs/apk/release/app-release.apk \
+                    com.ccrstech.openandroiddex.launcher ;;
+          esac
+          case "${APPS}" in
+            both|linuxondroid)
+              check linuxapp/build/outputs/apk/release/linuxapp-release.apk \
+                    com.ccrstech.linuxondroid ;;
+          esac
+
+      - name: Stage artifacts under their download names
+        env:
+          APPS: ${{ inputs.apps }}
+          V: ${{ steps.v.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          O=openandroiddex-launcher
+          # cp, not cp -f with a wildcard: a missing build must fail the job
+          # here rather than produce an upload with one app quietly absent.
+          case "$APPS" in
+            both|launcher)
+              cp "$O/app/build/outputs/bundle/release/app-release.aab" "dist/OpenAndroidDeX-Launcher-v$V.aab"
+              cp "$O/app/build/outputs/apk/release/app-release.apk"    "dist/OpenAndroidDeX-Launcher-v$V.apk" ;;
+          esac
+          case "$APPS" in
+            both|linuxondroid)
+              cp "$O/linuxapp/build/outputs/bundle/release/linuxapp-release.aab" "dist/LinuxOnDroid-v$V.aab"
+              cp "$O/linuxapp/build/outputs/apk/release/linuxapp-release.apk"    "dist/LinuxOnDroid-v$V.apk" ;;
+          esac
+          ls -l dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android-play-v${{ steps.v.outputs.version }}
+          path: dist/*
+          if-no-files-found: error
+
+      # `secrets` is not a context `if:` can read, so the decision is made in a
+      # step that can and handed on as an output.
+      - name: Can we upload to Play?
+        id: gate
+        env:
+          SA: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON }}
+          TRACK: ${{ inputs.play_track }}
+        run: |
+          set -euo pipefail
+          if [ "$TRACK" = "none" ]; then
+            echo "play=no" >> "$GITHUB_OUTPUT"
+            echo "Track is 'none' — built only, nothing uploaded."
+          elif [ -z "${SA:-}" ]; then
+            echo "play=no" >> "$GITHUB_OUTPUT"
+            echo "::warning title=Not uploaded::PLAY_SERVICE_ACCOUNT_JSON is not set, so the signed artifacts were built but not sent to Play. They are attached to this run."
+          else
+            echo "play=yes" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Upload the launcher to Play
+        if: ${{ steps.gate.outputs.play == 'yes' && inputs.apps != 'linuxondroid' }}
+        # Pinned to a commit, not the mutable @v1 tag. This is the only
+        # third-party action in this repository that is handed a
+        # long-lived credential — a Play service-account key that can
+        # publish to both listings — and a tag can be repointed at new
+        # code by anyone who controls that repository. A SHA cannot.
+        # (= v1, 2026-04-21. Re-resolve and bump deliberately when
+        # updating: `gh api repos/r0adkll/upload-google-play/git/ref/tags/v1`.)
+        uses: r0adkll/upload-google-play@e738b9dd8f2476ea806d921b64aacd24f34515a5
+        with:
+          serviceAccountJsonPlainText: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON }}
+          packageName: com.ccrstech.openandroiddex.launcher
+          # The AAB, not the APK. Play splits it per ABI and per density, which
+          # matters more here than anywhere: this app carries two ABIs of
+          # prebuilt native code and a device needs exactly one of them.
+          releaseFiles: dist/OpenAndroidDeX-Launcher-v${{ steps.v.outputs.version }}.aab
+          track: ${{ inputs.play_track }}
+          status: ${{ inputs.play_status }}
+
+      - name: Upload LinuxOnDroid to Play
+        if: ${{ steps.gate.outputs.play == 'yes' && inputs.apps != 'launcher' }}
+        # Same pinned commit as the launcher upload above.
+        uses: r0adkll/upload-google-play@e738b9dd8f2476ea806d921b64aacd24f34515a5
+        with:
+          serviceAccountJsonPlainText: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON }}
+          packageName: com.ccrstech.linuxondroid
+          releaseFiles: dist/LinuxOnDroid-v${{ steps.v.outputs.version }}.aab
+          track: ${{ inputs.play_track }}
+          status: ${{ inputs.play_status }}
+
+      - name: Summary
+        if: always()
+        env:
+          V: ${{ steps.v.outputs.version }}
+          VC: ${{ steps.v.outputs.version_code }}
+        run: |
+          {
+            echo "## Android publish — v$V ($VC)"
+            echo
+            echo "| App | Package | Play |"
+            echo "| --- | --- | --- |"
+            echo "| Open Android DeX (launcher) | \`com.ccrstech.openandroiddex.launcher\` | ${{ steps.gate.outputs.play == 'yes' && inputs.apps != 'linuxondroid' && inputs.play_track || '—' }} |"
+            echo "| LinuxOnDroid | \`com.ccrstech.linuxondroid\` | ${{ steps.gate.outputs.play == 'yes' && inputs.apps != 'launcher' && inputs.play_track || '—' }} |"
+            echo
+            echo "Signed .aab and .apk for both are attached to this run as \`android-play-v$V\`."
+          } >> "$GITHUB_STEP_SUMMARY"
