@@ -61,6 +61,45 @@ windows-sys = { version = "0.60", features = [
     "Win32_UI_Input_KeyboardAndMouse",
 ] }
 
+# Wireless DeX without adb (dexcast/). The `windows` crate rather than more
+# windows-sys features: Windows.Graphics.Capture is WinRT, which windows-sys
+# does not model at all, and the D3D11/D2D plumbing around it is COM that the
+# `windows` crate's generated wrappers make survivable. Kept alongside
+# windows-sys deliberately — the existing modules stay on the lighter crate.
+[target.'cfg(windows)'.dependencies.windows]
+version = "0.62"
+features = [
+    # The capture pipeline: monitor → GraphicsCaptureItem → frame pool.
+    "Graphics_Capture",
+    "Graphics_DirectX",
+    "Graphics_DirectX_Direct3D11",
+    "Foundation",                          # TypedEventHandler for FrameArrived
+    "Win32_System_WinRT",                  # RoInitialize on the viewer thread
+    "Win32_System_WinRT_Direct3D11",       # DXGI ↔ WinRT surface bridging
+    "Win32_System_WinRT_Graphics_Capture", # IGraphicsCaptureItemInterop
+    # Rendering the captured frames into the viewer window.
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Graphics_Direct2D",             # scaling/letterboxing DrawBitmap
+    "Win32_Graphics_Direct2D_Common",
+    "Win32_Graphics_DirectWrite",          # the "Esc releases input" hint
+    # The virtual monitor: find the VDD adapter, attach/detach it from the
+    # desktop, and place the receiver window onto it.
+    "Win32_Graphics_Gdi",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Input_KeyboardAndMouse",     # the portal's Esc hook + clicks
+    "Win32_System_Diagnostics_ToolHelp",   # find Receiver.exe by pid
+    "Win32_System_Threading",
+    "Win32_System_LibraryLoader",
+    "Win32_Storage_FileSystem",            # CreateFileW on the driver's pipe
+    "Win32_Security",                      # …whose signature names SECURITY_ATTRIBUTES
+    "Win32_System_IO",                     # …and whose Read/WriteFile name OVERLAPPED
+    "Win32_Foundation",
+]
+
 # Native window control for the spawned scrcpy windows (embed/macos.rs).
 # Both crates are already in the tree — tao and wry build on them — so this
 # adds resolution, not compilation. The Accessibility API needs no crate: it is

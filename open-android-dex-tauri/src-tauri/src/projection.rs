@@ -5,7 +5,8 @@
 //! third parties, and AirPlay — the thing a Mac *can* receive — is not a
 //! protocol Samsung DeX can send. There is no adapter to write here, so on
 //! macOS every command in this module reports the route as unavailable and the
-//! UI hides the tab entirely (see `hostPlatform` in App.tsx). The adb route,
+//! UI hides the tab entirely (see `IS_MAC` in lib/host.ts, gating the tab in
+//! WirelessPanel.tsx). The adb route,
 //! which is the whole rest of this app, is unaffected.
 //!
 //! This is the one route in the app that does **not** end in a device this

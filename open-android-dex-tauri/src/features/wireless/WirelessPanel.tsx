@@ -5,6 +5,7 @@ import { error as logError, info as logInfo } from "@tauri-apps/plugin-log";
 import { IS_MAC, MDNS_HINT, THIS_COMPUTER, THIS_COMPUTER_CAP } from "../../lib/host";
 import type {
   DeviceInfo,
+  DexcastStatus,
   KnownDevice,
   MdnsService,
   ProjectionSupport,
@@ -26,11 +27,14 @@ import type {
  * firewall rule was never created. The other two tabs are one click away and
  * say what they do.
  *
- * "project" is the odd one out: it hands the phone to Windows' own Miracast
- * receiver instead of connecting it here, so it ends in Samsung's DeX rather
- * than ours. It earns its place as the fallback for a PC where ADB cannot be
- * made to work at all — see projection.rs for why we cannot host that stream
- * ourselves.
+ * "project" is the odd one out: the phone casts to Windows' own Miracast
+ * receiver instead of connecting here, so it ends in Samsung's DeX rather
+ * than ours. We still cannot *be* the receiver (projection.rs), but dexcast.rs
+ * can now host it: the receiver is parked on a virtual monitor and mirrored
+ * into a window of this app, so the route no longer ends in another program
+ * owning a screen. It earns its place as the way in when ADB cannot be made
+ * to work at all — no cable, no Developer options, nothing installed on the
+ * phone.
  *
  * That tab is Windows-only, and hidden rather than disabled on macOS: there is
  * no Miracast receiver for a Mac and there cannot be one, so a greyed-out
@@ -116,6 +120,8 @@ export function WirelessPanel({
   const [manual, setManual] = useState("");
   const [showManual, setShowManual] = useState(false);
   const [projection, setProjection] = useState<ProjectionSupport | null>(null);
+  const [dexcast, setDexcast] = useState<DexcastStatus | null>(null);
+  const [dexBusy, setDexBusy] = useState("");
   const [installing, setInstalling] = useState(false);
   const [copied, setCopied] = useState(false);
 
@@ -247,6 +253,78 @@ export function WirelessPanel({
       })
       .catch(fail);
   }, [fail]);
+
+  // ── Hosted wireless DeX (dexcast) ──
+  // Polled while the tab is open: each probe is a file check, a pipe ping and
+  // two atomics, and it is how the panel notices the user closing the DeX
+  // window themselves (there is no event for that, by design — the viewer is
+  // a plain native window).
+  const refreshDexcast = useCallback(() => {
+    invoke<DexcastStatus>("dexcast_status").then(setDexcast).catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    if (tab !== "project") return;
+    refreshDexcast();
+    const timer = setInterval(refreshDexcast, 4000);
+    return () => clearInterval(timer);
+  }, [tab, refreshDexcast]);
+
+  // Dexcast has its own busy string, separate from the ADB flows' `busy`:
+  // the two live behind different tabs, and sharing one made a driver
+  // download's label ("Downloading the display driver…") show up on the Pair
+  // button of a tab the user then switched to.
+  const dexFail = useCallback((e: unknown) => {
+    logError(`dexcast: ${String(e)}`);
+    setDexBusy("");
+    setError(String(e));
+  }, []);
+
+  const installDriver = useCallback(() => {
+    setError("");
+    setDexBusy("Downloading the display driver…");
+    invoke<string>("dexcast_prepare")
+      .then(() => {
+        setDexBusy("Waiting for the administrator prompt…");
+        return invoke<string>("dexcast_install");
+      })
+      .then(() => {
+        setDexBusy("");
+        refreshDexcast();
+      })
+      .catch((e) => {
+        dexFail(e);
+        refreshDexcast();
+      });
+  }, [dexFail, refreshDexcast]);
+
+  const startDex = useCallback(() => {
+    setError("");
+    setDexBusy("Starting wireless DeX…");
+    invoke("dexcast_start")
+      .then(() => {
+        setDexBusy("");
+        refreshDexcast();
+      })
+      .catch((e) => {
+        dexFail(e);
+        refreshDexcast();
+      });
+  }, [dexFail, refreshDexcast]);
+
+  const stopDex = useCallback(() => {
+    setError("");
+    setDexBusy("Stopping…");
+    invoke("dexcast_stop")
+      .then(() => {
+        setDexBusy("");
+        refreshDexcast();
+      })
+      .catch((e) => {
+        dexFail(e);
+        refreshDexcast();
+      });
+  }, [dexFail, refreshDexcast]);
 
   const copyInstallCommand = useCallback(async () => {
     try {
@@ -488,10 +566,10 @@ export function WirelessPanel({
                 us, no widgets, no file drop — and finding that out afterwards
                 would be worse than being told now. */}
             <p className="text-[12.5px] leading-relaxed text-slate-300">
-              Samsung phones can cast DeX straight to Windows over Miracast, with no cable
-              and no ADB. This hands the phone to Windows —{" "}
+              Samsung phones can cast DeX straight to this PC over Miracast, with no cable
+              and no ADB — it arrives in a <em>Wireless DeX</em> window of this app. It is{" "}
               <span className="text-amber-300/90">
-                you get Samsung's own DeX, not this app's desktop
+                Samsung's own DeX, not this app's desktop
               </span>
               , so the taskbar, widgets and file drop here won't apply. Use it when ADB
               can't be made to work.
@@ -526,23 +604,41 @@ export function WirelessPanel({
                     and this is the step people miss.
                   </>,
                   <>
-                    Open the <em>Wireless Display</em> app from Start and leave it on screen,
-                    ready to accept the connection.
+                    Install the <em>virtual display</em> (a ~2 MB download that happens
+                    right then, plus one administrator prompt). It is the invisible screen
+                    the phone's desktop lands on, so it can be shown in a window here
+                    instead of taking over a monitor.
                   </>,
                 ]}
               />
               <div className="mt-2 flex flex-wrap gap-2">
-                <button className="btn-ghost" onClick={installReceiver} disabled={!!busy}>
-                  <span aria-hidden="true">➕</span>
-                  Install Wireless Display
+                <button
+                  className="btn-ghost"
+                  onClick={installReceiver}
+                  disabled={!!busy || dexcast?.receiverInstalled}
+                >
+                  <span aria-hidden="true">{dexcast?.receiverInstalled ? "✓" : "➕"}</span>
+                  {dexcast?.receiverInstalled ? "Wireless Display installed" : "Install Wireless Display"}
                 </button>
                 <button className="btn-ghost" onClick={copyInstallCommand}>
                   <span aria-hidden="true">📋</span>
                   {copied ? "Copied" : "Copy command"}
                 </button>
-                <button className="btn-accent" onClick={() => openSettings("project")}>
+                <button className="btn-ghost" onClick={() => openSettings("project")}>
                   <span aria-hidden="true">🖥️</span>
                   Projecting to this PC
+                </button>
+                <button
+                  className="btn-ghost"
+                  onClick={installDriver}
+                  disabled={!!dexBusy || dexcast?.driverReady}
+                >
+                  <span aria-hidden="true">{dexcast?.driverReady ? "✓" : "➕"}</span>
+                  {dexcast?.driverReady
+                    ? "Virtual display installed"
+                    : dexBusy && !dexcast?.driverReady
+                      ? dexBusy
+                      : "Install virtual display"}
                 </button>
               </div>
               {installing && (
@@ -560,6 +656,48 @@ export function WirelessPanel({
               </button>
             </div>
 
+            {/* The button, not a fourth setup step: everything above is done
+                once, this is the thing that gets pressed every time. */}
+            <div className="flex flex-col gap-1.5">
+              <div className="flex items-center gap-3">
+                {dexcast?.running ? (
+                  <>
+                    <p className="text-[12.5px] text-teal-300">
+                      The Wireless DeX window is open.
+                    </p>
+                    <button
+                      className="btn-ghost shrink-0"
+                      onClick={stopDex}
+                      disabled={!!dexBusy}
+                    >
+                      {dexBusy || "Stop"}
+                    </button>
+                  </>
+                ) : (
+                  <button
+                    className="btn-accent"
+                    onClick={startDex}
+                    disabled={
+                      !!dexBusy || !dexcast?.receiverInstalled || !dexcast?.driverReady
+                    }
+                  >
+                    <span aria-hidden="true">▶</span>
+                    {dexBusy || "Start wireless DeX"}
+                  </button>
+                )}
+              </div>
+              {/* Say the reason on screen, not only in a hover title — a
+                  disabled button with no visible cause reads as broken. */}
+              {dexcast && !dexcast.running && (!dexcast.receiverInstalled || !dexcast.driverReady) && (
+                <p className="text-[11.5px] text-amber-300/90">
+                  Finish setup first:{" "}
+                  {!dexcast.receiverInstalled && "install Wireless Display"}
+                  {!dexcast.receiverInstalled && !dexcast.driverReady && " and "}
+                  {!dexcast.driverReady && "install the virtual display"}.
+                </p>
+              )}
+            </div>
+
             <div>
               <p className="mb-1 text-[11.5px] font-semibold uppercase tracking-wide text-slate-500">
                 On the phone
@@ -567,11 +705,14 @@ export function WirelessPanel({
               <Steps
                 items={[
                   <>
-                    Swipe down the Quick Settings panel and tap <em>DeX</em> (or Settings →
-                    Connected devices → <em>Samsung DeX</em>).
+                    Swipe down the Quick Settings panel and tap <em>DeX</em>, then pick the{" "}
+                    <em>DeX on TV or monitor</em> tab.
                   </>,
                   <>Pick this PC from the list of nearby devices by its name.</>,
-                  <>Accept the connection prompt when it appears on this PC.</>,
+                  <>
+                    Accept the connection when Windows asks — it appears inside the{" "}
+                    <em>Wireless DeX</em> window.
+                  </>,
                 ]}
               />
             </div>
@@ -580,6 +721,15 @@ export function WirelessPanel({
               Both devices need Wi-Fi on. Miracast uses a direct phone-to-PC link, so it
               works without a router — but a VPN or a second active network adapter on this
               PC often stops the phone finding it.
+            </p>
+            <p className="text-[11px] text-slate-500">
+              In the DeX window, click to control and press Esc to release. Your keyboard
+              types into DeX; the mouse pointer is up to the phone —{" "}
+              <span className="text-slate-400">
+                many Samsung models ignore a PC mouse over Miracast
+              </span>
+              , in which case swipe down on the phone and tap{" "}
+              <em>Use your phone as a touchpad</em>.
             </p>
           </div>
         )}

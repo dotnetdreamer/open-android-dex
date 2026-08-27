@@ -146,6 +146,25 @@ phone. Not present in any release artifact.
 are downloaded from Alpine's repositories at first run, under their own licences
 (Docker Engine: Apache-2.0). Not redistributed by this project.
 
+### Virtual Display Driver 25.7.23
+
+Copyright © 2024 Virtual Display (MikeTheTech and contributors).
+Licensed under the **MIT License**.
+Source: https://github.com/VirtualDrivers/Virtual-Display-Driver
+
+Fetched (132 KB, SHA-256-pinned) when the user sets up the hosted wireless-DeX
+route on Windows, and installed as a display driver after an administrator
+prompt. Not present in any release artifact.
+
+### nefcon v1.14.0
+
+Copyright © 2022–2025 Nefarius Software Solutions e.U.
+Licensed under the **MIT License**.
+Source: https://github.com/nefarius/nefcon
+
+Fetched alongside the driver above and used only to install/remove its device
+node. Not present in any release artifact.
+
 ---
 
 ## Source availability

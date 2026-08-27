@@ -1,4 +1,5 @@
 mod adb;
+mod dexcast;
 mod diag;
 mod embed;
 mod gestures;
@@ -67,6 +68,12 @@ pub fn run() {
             projection::projection_open_settings,
             projection::projection_install_receiver,
             projection::projection_install_command,
+            dexcast::dexcast_status,
+            dexcast::dexcast_prepare,
+            dexcast::dexcast_install,
+            dexcast::dexcast_uninstall,
+            dexcast::dexcast_start,
+            dexcast::dexcast_stop,
             scrcpy::start_mirror,
             scrcpy::stop_mirror,
             scrcpy::focus_session,
@@ -93,6 +100,10 @@ pub fn run() {
             if let tauri::RunEvent::Exit = event {
                 log::info!("── application exiting ──");
                 scrcpy::kill_all(app);
+                // A dexcast session leaves machine-level state behind — the
+                // Wireless Display receiver running and an extra monitor on
+                // the desktop — and neither dies with this process.
+                dexcast::shutdown();
                 // The reader owns a host-wide subscription and, on Windows, a
                 // registry change: neither may outlive the process, and the
                 // session's stop flag alone would race us to the door.

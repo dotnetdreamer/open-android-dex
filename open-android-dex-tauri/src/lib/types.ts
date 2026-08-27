@@ -59,6 +59,20 @@ export interface ProjectionSupport {
   detail: string;
 }
 
+/**
+ * Where the hosted Miracast route stands: each field is one independently
+ * observable piece (receiver app, virtual display driver, staged download,
+ * live session), so the panel can point at the specific missing one.
+ */
+export interface DexcastStatus {
+  supported: boolean;
+  receiverInstalled: boolean;
+  driverReady: boolean;
+  staged: boolean;
+  running: boolean;
+  detail: string;
+}
+
 /** A pairing QR, as a matrix for the connect screen to draw itself. */
 export interface QrChallenge {
   /** Square side, in modules. */
