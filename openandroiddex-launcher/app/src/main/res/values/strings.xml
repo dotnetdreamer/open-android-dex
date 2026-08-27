@@ -373,6 +373,15 @@
     <string name="lx_quick_settings">Quick settings</string>
     <string name="lx_fullscreen">Full screen</string>
     <string name="lx_exit_fullscreen">Exit full screen</string>
+    <string name="lx_keyboard">On-screen keyboard</string>
+    <string name="lx_keyboard_off">Turn off on-screen keyboard</string>
+    <string name="lx_kb_move">Move the keyboard</string>
+    <string name="lx_kb_collapse">Collapse</string>
+    <string name="lx_kb_expand">Expand</string>
+    <string name="lx_kb_dock">Dock to the bottom</string>
+    <string name="lx_kb_float">Float</string>
+    <string name="lx_kb_close">Close the keyboard</string>
+    <string name="lx_osk_needs_service">The on-screen keyboard needs the Open Android DeX accessibility service, which is off. Turn it on in Settings → Accessibility.</string>
     <string name="lx_exit_dex">Exit DeX</string>
     <string name="lx_exit_title">Exit DeX?</string>
     <string name="lx_exit_body">The desktop closes and the phone goes back to normal. Apps still open here move to the phone.</string>

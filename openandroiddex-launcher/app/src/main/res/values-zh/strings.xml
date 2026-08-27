@@ -246,6 +246,15 @@
     <string name="lx_quick_settings">快捷设置</string>
     <string name="lx_fullscreen">全屏</string>
     <string name="lx_exit_fullscreen">退出全屏</string>
+    <string name="lx_keyboard">屏幕键盘</string>
+    <string name="lx_keyboard_off">关闭屏幕键盘</string>
+    <string name="lx_kb_move">移动键盘</string>
+    <string name="lx_kb_collapse">收起</string>
+    <string name="lx_kb_expand">展开</string>
+    <string name="lx_kb_dock">停靠到底部</string>
+    <string name="lx_kb_float">浮动</string>
+    <string name="lx_kb_close">关闭键盘</string>
+    <string name="lx_osk_needs_service">屏幕键盘需要 Open Android DeX 的无障碍服务，但它已关闭。请在“设置 → 无障碍”中开启。</string>
     <string name="lx_exit_dex">退出 DeX</string>
     <string name="lx_exit_title">退出 DeX？</string>
     <string name="lx_exit_body">桌面将关闭，手机恢复正常。仍在此处打开的应用会移回手机。</string>

@@ -246,6 +246,15 @@
     <string name="lx_quick_settings">Ajustes rápidos</string>
     <string name="lx_fullscreen">Pantalla completa</string>
     <string name="lx_exit_fullscreen">Salir de pantalla completa</string>
+    <string name="lx_keyboard">Teclado en pantalla</string>
+    <string name="lx_keyboard_off">Desactivar el teclado en pantalla</string>
+    <string name="lx_kb_move">Mover el teclado</string>
+    <string name="lx_kb_collapse">Contraer</string>
+    <string name="lx_kb_expand">Expandir</string>
+    <string name="lx_kb_dock">Anclar abajo</string>
+    <string name="lx_kb_float">Flotante</string>
+    <string name="lx_kb_close">Cerrar el teclado</string>
+    <string name="lx_osk_needs_service">El teclado en pantalla necesita el servicio de accesibilidad de Open Android DeX, que está desactivado. Actívalo en Ajustes → Accesibilidad.</string>
     <string name="lx_exit_dex">Salir de DeX</string>
     <string name="lx_exit_title">¿Salir de DeX?</string>
     <string name="lx_exit_body">El escritorio se cierra y el teléfono vuelve a la normalidad. Las apps que sigan abiertas aquí pasan al teléfono.</string>

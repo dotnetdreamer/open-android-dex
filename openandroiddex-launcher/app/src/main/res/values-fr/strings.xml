@@ -246,6 +246,15 @@
     <string name="lx_quick_settings">Réglages rapides</string>
     <string name="lx_fullscreen">Plein écran</string>
     <string name="lx_exit_fullscreen">Quitter le plein écran</string>
+    <string name="lx_keyboard">Clavier à l’écran</string>
+    <string name="lx_keyboard_off">Désactiver le clavier à l’écran</string>
+    <string name="lx_kb_move">Déplacer le clavier</string>
+    <string name="lx_kb_collapse">Réduire</string>
+    <string name="lx_kb_expand">Agrandir</string>
+    <string name="lx_kb_dock">Ancrer en bas</string>
+    <string name="lx_kb_float">Détacher</string>
+    <string name="lx_kb_close">Fermer le clavier</string>
+    <string name="lx_osk_needs_service">Le clavier à l’écran nécessite le service d’accessibilité d’Open Android DeX, qui est désactivé. Activez-le dans Paramètres → Accessibilité.</string>
     <string name="lx_exit_dex">Quitter DeX</string>
     <string name="lx_exit_title">Quitter DeX ?</string>
     <string name="lx_exit_body">Le bureau se ferme et le téléphone revient à la normale. Les applis encore ouvertes ici passent sur le téléphone.</string>

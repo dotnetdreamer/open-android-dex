@@ -342,6 +342,20 @@ final class WmClient {
     }
 
     /**
+     * Where the soft keyboard appears for apps on {@code displayId}: 0 on the
+     * display itself, 1 on the phone's screen (the platform default for every
+     * secondary display), 2 nowhere.
+     *
+     * Only the daemon can turn this knob — it is INTERNAL_SYSTEM_WINDOW-gated,
+     * which uid 2000 holds and an app never will. False means the daemon is
+     * gone, too old to know the verb, or the framework refused; the keyboard
+     * then simply keeps appearing on the phone, which is the stock behaviour.
+     */
+    boolean imePolicy(int displayId, int policy) {
+        return ok(request("IMEPOLICY " + displayId + " " + policy));
+    }
+
+    /**
      * Open an app on the desktop display, from a uid that is allowed to.
      *
      * The launcher's own {@code startActivity} is refused on an untrusted display —

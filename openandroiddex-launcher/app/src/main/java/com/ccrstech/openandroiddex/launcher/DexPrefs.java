@@ -119,6 +119,17 @@ final class DexPrefs {
      */
     static final String KEY_WINDOW_GEOMETRY = "window_geometry";
 
+    // ── On-screen keyboard ──
+    /**
+     * The taskbar's keyboard toggle: the phone's own keyboard opens on the
+     * desktop when a text box is clicked, instead of on the phone's screen —
+     * even while a hardware keyboard is attached. Two mechanisms serve it (the
+     * daemon's IMEPOLICY verb and the accessibility soft-keyboard mode, see
+     * CaptionService), which is why the state lives here and not in either.
+     */
+    static final String KEY_OSK = "osk_enabled";
+    static final boolean DEF_OSK = false;
+
     // ── Notifications ──
     // All three are read by the shell alone; the grant that makes any of them
     // possible is not stored here at all, because it is the platform's (see
@@ -390,7 +401,11 @@ final class DexPrefs {
                 // The phone's touchpad — see PAD_PREFIX.
                 && !key.startsWith(PAD_PREFIX)
                 // A note that a prompt has been shown. Nothing paints from it.
-                && !KEY_HOME_ASKED.equals(key);
+                && !KEY_HOME_ASKED.equals(key)
+                // The taskbar's keyboard toggle retints its own button; a full
+                // shell rebuild per press would dismiss the very flyouts and
+                // focus the press was aimed near.
+                && !KEY_OSK.equals(key);
     }
 
     static SharedPreferences prefs(Context ctx) {

@@ -354,6 +354,14 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
     /** Tray fullscreen toggle — glyph mirrors the PC window's state. */
     private TextView fsButton;
     private boolean pcFullscreen = false;
+    /** Tray on-screen keyboard toggle — lit while the keyboard mode is on. */
+    private ImageView oskButton;
+    /**
+     * The keyboard we draw ourselves, for displays the system IME is not
+     * allowed onto. Null until the first time one is needed — most sessions on
+     * a modern phone never build it. See {@link DexKeyboard}.
+     */
+    private DexKeyboard osk;
     /** Latest ACTION_BATTERY_CHANGED sticky intent — feeds pill + flyout. */
     private Intent lastBattery;
     private boolean torchOn = false;
@@ -956,6 +964,10 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
         // Drops the sampler's view references. The gauge lives in the
         // activity's own view tree now, so it goes with the window either way.
         detachPerfGauge();
+        // An overlay window outlives the activity that added it if nobody
+        // takes it down — a keyboard left floating over the next session —
+        // and its typing thread outlives it too.
+        if (osk != null) osk.release();
         if (qsWm != null) qsWm.shutdown();
         try {
             if (widgetHost != null) widgetHost.stopListening();
@@ -1158,6 +1170,10 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
         DexCursors.invalidate();
         dismissPopups();
         hideDrawer();
+        // A window of its own, in the old palette and at the old density. The
+        // tray's own restore puts it back at the end of this rebuild, so this
+        // is a repaint rather than a dismissal.
+        if (osk != null) osk.hide();
         // Built at the old density, in the old palette, and possibly parented
         // to the rootFrame that is about to be thrown away.
         if (transferHud != null) {
@@ -3599,12 +3615,14 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
     }
 
     /**
-     * Taskbar's right cluster, DeX style: battery · quick settings · clock/date
-     * · fullscreen · exit.
+     * Taskbar's right cluster, DeX style: keyboard · battery · quick settings
+     * · fullscreen · exit · clock/date · bell.
      *
      * Compact shaves each control rather than dropping any of them; measured
-     * against a 411dp phone screen the cluster costs ~200dp there against the
-     * nav cluster's ~110dp, which still leaves the open-apps strip real room.
+     * against a 411dp phone screen the cluster costs ~200dp there (~235dp with
+     * the keyboard toggle) against the nav cluster's ~110dp. That is thin, but
+     * compact lays the clusters out in a ROW where the open-apps strip is the
+     * part that shrinks and scrolls — see {@link #buildTaskbar}.
      */
     private View buildTrayCluster() {
         LinearLayout tray = new LinearLayout(this);
@@ -3614,6 +3632,31 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
 
         int square = dp(compact ? 32 : 36);
         int gap = dp(compact ? 3 : 6);
+
+        // The phone's own keyboard, called onto the desktop — see
+        // toggleOnScreenKeyboard. First in the tray, where DeX keeps it: it is
+        // a mode of the display, not a session control like the cluster's
+        // tail. A vector of ours rather than a glyph or framework drawable:
+        // android.R has no public keyboard, and the lit "on" state needs a
+        // tint, which the colour-emoji fallback ⌨ renders as would not take.
+        oskButton = new ImageView(this);
+        oskButton.setImageResource(R.drawable.ic_keyboard);
+        int oskPad = dp(compact ? 7 : 8);
+        oskButton.setPadding(oskPad, oskPad, oskPad, oskPad);
+        oskButton.setOnClickListener(v -> toggleOnScreenKeyboard());
+        // Tint, fill and description all come from styleOskButton, so the
+        // pressed state and the rebuilt state can never disagree.
+        boolean oskOn = DexPrefs.getBool(this, DexPrefs.KEY_OSK, DexPrefs.DEF_OSK);
+        styleOskButton(oskOn);
+        LinearLayout.LayoutParams oskLp = new LinearLayout.LayoutParams(square, square);
+        oskLp.setMargins(0, 0, gap, 0);
+        tray.addView(oskButton, oskLp);
+        // A saved "on" is re-asserted here: every session's desktop display is
+        // new and starts with the stock keyboard-on-the-phone policy, and our
+        // own board is a window that died with the last one — without this the
+        // button would come back lit over nothing at all. Idempotent, so the
+        // extra pass on a shell rebuild is free.
+        if (oskOn) applyOnScreenKeyboard(false);
 
         batteryPill = new TextView(this);
         batteryPill.setTextColor(theme.text);
@@ -3918,6 +3961,11 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
         }
         searchField.setText("");
         searchField.requestFocus();
+        // The drawer is an overlay too, and the newest window of a type is the
+        // highest one — so it has just landed on top of the keyboard. Search is
+        // the thing people most want to type into, so put the board back over
+        // it rather than leaving it buried under the panel it serves.
+        if (osk != null) osk.raise();
     }
 
     /**
@@ -4186,6 +4234,143 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
             row.addView(dayCell, new LinearLayout.LayoutParams(cell, cell));
         }
         return panel;
+    }
+
+    // ── Tray: on-screen keyboard ──
+
+    /**
+     * The taskbar's keyboard button: the phone's own keyboard, opened on the
+     * desktop.
+     *
+     * Two mechanisms serve one switch, and the pref is the single source of
+     * truth. The daemon's IMEPOLICY verb puts the keyboard on THIS display —
+     * stock Android sends every secondary display's keyboard to the phone's
+     * screen, which is exactly the phone lying dark next to the monitor. The
+     * accessibility service lifts the suppression a hardware keyboard imposes,
+     * and nudges the focused text box so the keyboard appears on the press
+     * rather than on the next click. Both halves re-assert themselves when a
+     * session brings a fresh display or a bounced service (see CaptionService);
+     * this is only the switch. Each half degrades alone: no daemon means the
+     * keyboard opens on the phone, no service means a physical keyboard still
+     * suppresses it — which is the one case worth a toast, because the button
+     * would otherwise sit lit while delivering nothing.
+     */
+    private void toggleOnScreenKeyboard() {
+        final boolean on = !DexPrefs.getBool(this, DexPrefs.KEY_OSK, DexPrefs.DEF_OSK);
+        final CaptionService service = CaptionService.live();
+        // Neither keyboard can deliver a keystroke without the accessibility
+        // service: the system one because nothing would lift the hardware
+        // keyboard's suppression or nudge the field, ours because the node is
+        // its only way in. Say so instead of lighting a button that types
+        // nothing.
+        if (on && service == null) {
+            Toast.makeText(this, getString(R.string.lx_osk_needs_service),
+                    Toast.LENGTH_LONG).show();
+            return;
+        }
+        DexPrefs.put(this, DexPrefs.KEY_OSK, on);
+        styleOskButton(on);
+        final int display = displayId();
+        if (!on) {
+            if (osk != null) osk.hide();
+            if (service != null) {
+                service.applyOskMode(false);
+                // Dismissal is not implied by either half of "off" — the show
+                // mode only matters while a hardware keyboard is attached, and
+                // the policy only governs future shows — so it is its own
+                // step. EXCEPT with a hardware keyboard attached: there the
+                // show-mode flip above already makes the keyboard hide itself,
+                // and racing that self-hide with a BACK can land the BACK in
+                // the app the user was typing in once the keyboard has gone.
+                if (display > 0 && !hardwareKeyboardPresent()) service.lowerKeyboard(display);
+            }
+            if (display > 0) {
+                if (qsWm == null) qsWm = new WmClient();
+                final WmClient client = qsWm;
+                client.post(() -> client.imePolicy(display, 1));
+            }
+            return;
+        }
+        applyOnScreenKeyboard(true);
+    }
+
+    /**
+     * Put the keyboard mode into effect on this display: the system's own
+     * where it is allowed there, ours where it is not.
+     *
+     * <p>Which one that is cannot be read off an API level — it is an answer
+     * the window manager gives. It refuses the IME outright on an untrusted
+     * virtual display, and a virtual display cannot be trusted at all before
+     * Android 13, so the daemon is asked to set the policy and the reply
+     * decides. {@code nudge} is false when this is a session restoring its
+     * saved state rather than someone pressing the key: nothing is focused
+     * yet, so there would be nothing to nudge.
+     */
+    private void applyOnScreenKeyboard(boolean nudge) {
+        final int display = displayId();
+        if (display <= 0) return;      // the tray only exists on the desktop
+        if (qsWm == null) qsWm = new WmClient();
+        final WmClient client = qsWm;
+        client.post(() -> {
+            final boolean systemIme = client.imePolicy(display, 0);
+            runOnUiThread(() -> {
+                // Re-checked against the pref, not the captured flag: with the
+                // daemon gone this lands seconds late, and a user who pressed
+                // off again meanwhile must not get a keyboard back.
+                if (!DexPrefs.getBool(LauncherActivity.this,
+                        DexPrefs.KEY_OSK, DexPrefs.DEF_OSK)) return;
+                CaptionService s = CaptionService.live();
+                if (systemIme && s != null) {
+                    s.applyOskMode(true);
+                    if (nudge) s.raiseKeyboard(display);
+                    return;
+                }
+                DexLog.step("osk", "this display will not take the system keyboard"
+                        + " — using the desktop's own");
+                showOwnKeyboard();
+            });
+        });
+    }
+
+    /** Our own board, built on first use. */
+    private void showOwnKeyboard() {
+        if (osk == null) osk = new DexKeyboard(this);
+        osk.show();
+    }
+
+    /**
+     * The board's own "hide" key, and anything else that closes it: the switch
+     * has to move with it, or the taskbar stays lit over a keyboard that is no
+     * longer there.
+     */
+    void dismissOnScreenKeyboard() {
+        if (osk != null) osk.hide();
+        DexPrefs.put(this, DexPrefs.KEY_OSK, false);
+        styleOskButton(false);
+    }
+
+    /**
+     * Lit while the keyboard mode is on. A fill as well as a tint: Paper's
+     * accent and textDim are two near-identical creams, so tint alone reads
+     * as no state at all there — the same reason the touchpad dock button
+     * wears accentSoft. The description carries the state too, for readers
+     * who cannot see the fill, matching setPcFullscreen next door.
+     */
+    private void styleOskButton(boolean on) {
+        if (oskButton == null) return;
+        oskButton.setColorFilter(on ? theme.accent : theme.textDim);
+        oskButton.setBackground(tapBackground(on ? theme.accentSoft : 0x00000000,
+                theme.hover, 10));
+        oskButton.setContentDescription(getString(
+                on ? R.string.lx_keyboard_off : R.string.lx_keyboard));
+    }
+
+    /** A physical keyboard is attached and open — the case that suppresses the IME. */
+    private boolean hardwareKeyboardPresent() {
+        android.content.res.Configuration c = getResources().getConfiguration();
+        return c.keyboard != android.content.res.Configuration.KEYBOARD_NOKEYS
+                && c.hardKeyboardHidden
+                != android.content.res.Configuration.HARDKEYBOARDHIDDEN_YES;
     }
 
     // ── Tray: battery pill + info flyout ──

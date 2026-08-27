@@ -246,6 +246,15 @@
     <string name="lx_quick_settings">Configurações rápidas</string>
     <string name="lx_fullscreen">Tela cheia</string>
     <string name="lx_exit_fullscreen">Sair da tela cheia</string>
+    <string name="lx_keyboard">Teclado na tela</string>
+    <string name="lx_keyboard_off">Desativar o teclado na tela</string>
+    <string name="lx_kb_move">Mover o teclado</string>
+    <string name="lx_kb_collapse">Recolher</string>
+    <string name="lx_kb_expand">Expandir</string>
+    <string name="lx_kb_dock">Fixar embaixo</string>
+    <string name="lx_kb_float">Flutuante</string>
+    <string name="lx_kb_close">Fechar o teclado</string>
+    <string name="lx_osk_needs_service">O teclado na tela precisa do serviço de acessibilidade do Open Android DeX, que está desligado. Ative-o em Configurações → Acessibilidade.</string>
     <string name="lx_exit_dex">Sair do DeX</string>
     <string name="lx_exit_title">Sair do DeX?</string>
     <string name="lx_exit_body">O desktop é fechado e o telefone volta ao normal. Os apps ainda abertos aqui vão para o telefone.</string>

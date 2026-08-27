@@ -246,6 +246,15 @@
     <string name="lx_quick_settings">Schnelleinstellungen</string>
     <string name="lx_fullscreen">Vollbild</string>
     <string name="lx_exit_fullscreen">Vollbild beenden</string>
+    <string name="lx_keyboard">Bildschirmtastatur</string>
+    <string name="lx_keyboard_off">Bildschirmtastatur ausschalten</string>
+    <string name="lx_kb_move">Tastatur bewegen</string>
+    <string name="lx_kb_collapse">Einklappen</string>
+    <string name="lx_kb_expand">Ausklappen</string>
+    <string name="lx_kb_dock">Unten andocken</string>
+    <string name="lx_kb_float">Lösen</string>
+    <string name="lx_kb_close">Tastatur schließen</string>
+    <string name="lx_osk_needs_service">Die Bildschirmtastatur benötigt den Bedienungshilfen-Dienst von Open Android DeX, der ausgeschaltet ist. Schalten Sie ihn unter Einstellungen → Bedienungshilfen ein.</string>
     <string name="lx_exit_dex">DeX beenden</string>
     <string name="lx_exit_title">DeX beenden?</string>
     <string name="lx_exit_body">Der Desktop wird geschlossen und das Telefon ist wieder normal. Hier noch geöffnete Apps wandern auf das Telefon.</string>

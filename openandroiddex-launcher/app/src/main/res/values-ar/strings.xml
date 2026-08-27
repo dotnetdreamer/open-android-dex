@@ -246,6 +246,15 @@
     <string name="lx_quick_settings">الإعدادات السريعة</string>
     <string name="lx_fullscreen">ملء الشاشة</string>
     <string name="lx_exit_fullscreen">إنهاء ملء الشاشة</string>
+    <string name="lx_keyboard">لوحة المفاتيح على الشاشة</string>
+    <string name="lx_keyboard_off">إيقاف لوحة المفاتيح على الشاشة</string>
+    <string name="lx_kb_move">تحريك لوحة المفاتيح</string>
+    <string name="lx_kb_collapse">طي</string>
+    <string name="lx_kb_expand">توسيع</string>
+    <string name="lx_kb_dock">إرساء بالأسفل</string>
+    <string name="lx_kb_float">تعويم</string>
+    <string name="lx_kb_close">إغلاق لوحة المفاتيح</string>
+    <string name="lx_osk_needs_service">تحتاج لوحة المفاتيح على الشاشة إلى خدمة إمكانية الوصول في Open Android DeX، وهي متوقفة. فعّلها من الإعدادات ← إمكانية الوصول.</string>
     <string name="lx_exit_dex">إنهاء DeX</string>
     <string name="lx_exit_title">إنهاء DeX؟</string>
     <string name="lx_exit_body">سيُغلق سطح المكتب ويعود الهاتف إلى وضعه الطبيعي. والتطبيقات المفتوحة هنا ستنتقل إلى الهاتف.</string>

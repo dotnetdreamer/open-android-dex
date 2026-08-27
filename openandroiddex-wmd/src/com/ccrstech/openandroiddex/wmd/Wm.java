@@ -418,6 +418,30 @@ final class Wm {
                 new Class<?>[]{int.class, boolean.class}, displayId, on);
     }
 
+    /**
+     * Which display the soft keyboard appears on for apps on {@code displayId}:
+     * 0 = that display itself, 1 = the phone's screen (the platform default for
+     * every secondary display), 2 = nowhere.
+     *
+     * Without this, typing into a desktop window raises the keyboard on the
+     * phone lying next to the monitor. The knob is INTERNAL_SYSTEM_WINDOW-gated
+     * like the decor pair above, and the framework additionally refuses it for
+     * untrusted virtual displays — scrcpy's is trusted, so it takes.
+     *
+     * Named {@code setDisplayImePolicy(int, int)} since Android 12;
+     * {@code setShouldShowIme(int, boolean)} on 10–11, where "nowhere" does not
+     * exist and maps to the phone.
+     */
+    static void setImePolicy(int displayId, int policy) {
+        if (Refl.hasMethod(windowManager().getClass(), "setDisplayImePolicy",
+                int.class, int.class)) {
+            Refl.callSig(windowManager(), "setDisplayImePolicy",
+                    new Class<?>[]{int.class, int.class}, displayId, policy);
+        } else {
+            setShouldShowIme(displayId, policy == 0);
+        }
+    }
+
     static int uid() {
         return (Integer) Refl.callStatic(Refl.cls("android.os.Process"), "myUid",
                 new Class<?>[]{});

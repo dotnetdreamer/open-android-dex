@@ -40,6 +40,7 @@ import java.util.List;
  *   PROCS <pkg…>                              -> TOTAL <busy> <total> /
  *                                                PROC <pkg> <rssKb> <jiffies> … / END
  *   MOVEDISPLAY <task> <display>              -> OK          take a claimed window back
+ *   IMEPOLICY <display> <0|1|2>               -> OK          keyboard on it / phone / nowhere
  *   AUDIOROUTE SET <type> <address|->         -> OK          pin media to a phone output
  *   AUDIOROUTE CLEAR                          -> OK          back to the phone's own policy
  *   ARM <ttlSeconds> <settings chain…>        -> OK          refresh the dead-man switch
@@ -577,6 +578,25 @@ public final class WmDaemon {
                     if (stack >= 0) target = stack;
                 }
                 Wm.moveTaskToDisplay(target, i(a, 2));
+                out.println("OK");
+                return;
+            }
+
+            case "IMEPOLICY": {
+                // "IMEPOLICY <display> <0|1|2>" — where the soft keyboard appears for
+                // apps on that display: on the display itself, on the phone's screen
+                // (the platform default for every secondary display), or nowhere.
+                //
+                // Only this process can turn the knob: it is the same
+                // INTERNAL_SYSTEM_WINDOW gate as the decor pair in Wm, which an app
+                // uid never passes. The launcher's keyboard button drives it.
+                int d = i(a, 1);
+                int policy = i(a, 2);
+                if (d < 0 || policy < 0 || policy > 2) {
+                    out.println("ERR imepolicy wants <display> <0|1|2>");
+                    return;
+                }
+                Wm.setImePolicy(d, policy);
                 out.println("OK");
                 return;
             }

@@ -246,6 +246,15 @@
     <string name="lx_quick_settings">क्विक सेटिंग्स</string>
     <string name="lx_fullscreen">पूर्ण स्क्रीन</string>
     <string name="lx_exit_fullscreen">पूर्ण स्क्रीन से बाहर</string>
+    <string name="lx_keyboard">ऑन-स्क्रीन कीबोर्ड</string>
+    <string name="lx_keyboard_off">ऑन-स्क्रीन कीबोर्ड बंद करें</string>
+    <string name="lx_kb_move">कीबोर्ड हिलाएँ</string>
+    <string name="lx_kb_collapse">छोटा करें</string>
+    <string name="lx_kb_expand">बड़ा करें</string>
+    <string name="lx_kb_dock">नीचे लगाएँ</string>
+    <string name="lx_kb_float">तैराएँ</string>
+    <string name="lx_kb_close">कीबोर्ड बंद करें</string>
+    <string name="lx_osk_needs_service">ऑन-स्क्रीन कीबोर्ड के लिए Open Android DeX की सुलभता सेवा चाहिए, जो बंद है। इसे सेटिंग्स → सुलभता में चालू करें।</string>
     <string name="lx_exit_dex">DeX बंद करें</string>
     <string name="lx_exit_title">DeX बंद करें?</string>
     <string name="lx_exit_body">डेस्कटॉप बंद हो जाएगा और फ़ोन सामान्य हो जाएगा। यहाँ खुले ऐप फ़ोन पर चले जाएंगे।</string>

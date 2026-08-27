@@ -2,11 +2,14 @@ package com.ccrstech.openandroiddex.launcher;
 
 import android.accessibilityservice.AccessibilityService;
 import android.accessibilityservice.AccessibilityServiceInfo;
+import android.accessibilityservice.GestureDescription;
 
 import android.content.ComponentName;
 import android.content.pm.PackageManager;
 import android.content.res.ColorStateList;
+import android.graphics.Path;
 import android.graphics.PixelFormat;
+import android.graphics.Rect;
 import android.graphics.drawable.ColorDrawable;
 import android.graphics.drawable.GradientDrawable;
 import android.graphics.drawable.StateListDrawable;
@@ -23,6 +26,7 @@ import android.view.SurfaceControlViewHost;
 import android.view.View;
 import android.view.WindowManager;
 import android.view.accessibility.AccessibilityEvent;
+import android.view.accessibility.AccessibilityNodeInfo;
 import android.view.accessibility.AccessibilityWindowInfo;
 import android.widget.LinearLayout;
 import android.widget.TextView;
@@ -298,6 +302,15 @@ public final class CaptionService extends AccessibilityService {
         // gesture dispatch has no such floor, so the Web viewer's control
         // still works on a phone this service can draw nothing on.
         live = this;
+        // Ahead of the API-34 gate too: the soft-keyboard override has no such
+        // floor either, and this service is bounced on every session connect —
+        // the framework forgets the mode when a service goes away, so a saved
+        // "on" has to be re-asserted here or the toggle silently decays to off.
+        // Only ever "on": asserting AUTO for a pref that is off would write a
+        // shared per-user setting nothing here has a claim on, clobbering any
+        // other service's mode — and the framework already resets to AUTO by
+        // itself when the claiming service goes away.
+        if (DexPrefs.getBool(this, DexPrefs.KEY_OSK, DexPrefs.DEF_OSK)) applyOskMode(true);
         if (android.os.Build.VERSION.SDK_INT < 34) {
             // attachAccessibilityOverlayToWindow is API 34. Below that there is no way to
             // get a surface into another app's window, so the service is inert rather
@@ -420,6 +433,14 @@ public final class CaptionService extends AccessibilityService {
                         desktopDisplayId = display;
                         dropAnchor();               // the anchor belongs to the old display
                         hostWaitSince.clear();      // those task ids are on the old display
+                        // The IME policy died with the old display — every session is
+                        // a fresh virtual display with the stock fallback-to-phone
+                        // policy, so a saved "keyboard on the desktop" is re-asserted
+                        // for the new one here.
+                        if (display > 0 && DexPrefs.getBool(CaptionService.this,
+                                DexPrefs.KEY_OSK, DexPrefs.DEF_OSK)) {
+                            wm.post(() -> wm.imePolicy(display, 0));
+                        }
                     }
                     if (ticks++ % 25 == 0) {
                         trace("tick display=" + display + " tasks="
@@ -460,6 +481,146 @@ public final class CaptionService extends AccessibilityService {
         SparseArray<List<AccessibilityWindowInfo>> all = getWindowsOnAllDisplays();
         if (all == null) return null;
         return all.get(display);
+    }
+
+    // ── on-screen keyboard ─────────────────────────────────────────────────
+
+    /**
+     * The accessibility half of the taskbar's keyboard toggle: let the soft
+     * keyboard show while a hardware keyboard is attached, or hand that back
+     * to the platform.
+     *
+     * Without the override, a paired keyboard makes the IME reject every show
+     * request an app makes, and the daemon's IMEPOLICY half has nothing to
+     * place on the desktop. This is the sanctioned route to the same switch
+     * the user has under "physical keyboard" settings — which is also why the
+     * framework refuses it once the user has flipped that switch by hand:
+     * their explicit choice outranks a service's, permanently. Only logged.
+     */
+    void applyOskMode(boolean on) {
+        if (android.os.Build.VERSION.SDK_INT < 29) return;  // no override mode below Q
+        boolean took = getSoftKeyboardController().setShowMode(
+                on ? SHOW_MODE_IGNORE_HARD_KEYBOARD : SHOW_MODE_AUTO);
+        if (!took) trace("soft keyboard mode " + on + " refused — user override in force");
+    }
+
+    /**
+     * Open the keyboard right now for whatever text box already holds input
+     * focus on {@code display}.
+     *
+     * Nothing public force-shows an IME with nothing focused: the framework
+     * only honours a show request issued from the focused editor's own
+     * process. With no text box focused this quietly does nothing, and the
+     * keyboard simply appears when one is next clicked.
+     *
+     * Two nudges, chosen by whether the editor's window still holds window
+     * focus. When it does (the taskbar is a non-focusable overlay, so a press
+     * moves nothing), the editor's view focus is cycled and CLICKed: the
+     * cycle matters because the framework picked the keyboard's display when
+     * this editor last STARTED input — before the policy flip — and a bare
+     * re-show would reuse that stale choice and open on the phone; a fresh
+     * focus is a fresh start under the new policy, and TextView answers the
+     * CLICK with showSoftInput itself. When the window has lost focus (the
+     * taskbar fell back to living inside the launcher's own window, whose
+     * press took focus with it), that request would be refused — the
+     * framework drops show requests from unfocused windows — so a real tap
+     * is injected at the editor instead: restoring focus is the point, and
+     * the genuine click path then shows the keyboard from the newly focused
+     * client.
+     *
+     * Scanned top-down across the display's windows rather than read off the
+     * focused window, for the same fallback: the app's editor keeps
+     * FOCUS_INPUT even when the launcher's window has taken window focus.
+     */
+    void raiseKeyboard(int display) {
+        if (android.os.Build.VERSION.SDK_INT < 30) return;  // getWindowsOnAllDisplays
+        List<AccessibilityWindowInfo> windows = windowsOnDisplay(display);
+        if (windows == null) return;
+        for (AccessibilityWindowInfo w : windows) {
+            AccessibilityNodeInfo root = w.getRoot();
+            if (root == null) continue;
+            AccessibilityNodeInfo editor = root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT);
+            if (editor != null && !editor.isEditable()) {
+                // A Compose (or other provider-backed) window resolves
+                // FOCUS_INPUT to the host view's own node, which is never
+                // editable — the real editor is a virtual node underneath it.
+                editor.recycle();
+                editor = findFocusedEditable(root);
+            } else if (editor == null && w.isFocused()) {
+                editor = findFocusedEditable(root);
+            }
+            root.recycle();
+            if (editor == null) continue;
+            if (w.isFocused()) {
+                if (editor.isFocused()) {
+                    editor.performAction(AccessibilityNodeInfo.ACTION_CLEAR_FOCUS);
+                }
+                editor.performAction(AccessibilityNodeInfo.ACTION_CLICK);
+            } else {
+                Rect b = new Rect();
+                editor.getBoundsInScreen(b);
+                Path tap = new Path();
+                tap.moveTo(b.exactCenterX(), b.exactCenterY());
+                GestureDescription.Builder gesture = new GestureDescription.Builder();
+                gesture.setDisplayId(display);
+                gesture.addStroke(new GestureDescription.StrokeDescription(tap, 0, 40));
+                dispatchGesture(gesture.build(), null, null);
+            }
+            editor.recycle();
+            return;
+        }
+    }
+
+    /**
+     * The focused editable, found by walking the tree, for windows where the
+     * FOCUS_INPUT shortcut cannot name it (see {@link #raiseKeyboard}).
+     * Bounded: a busy window is a few hundred nodes, a pathological one is
+     * not this method's problem.
+     */
+    private AccessibilityNodeInfo findFocusedEditable(AccessibilityNodeInfo root) {
+        java.util.ArrayDeque<AccessibilityNodeInfo> queue = new java.util.ArrayDeque<>();
+        for (int i = 0; i < root.getChildCount(); i++) {
+            AccessibilityNodeInfo c = root.getChild(i);
+            if (c != null) queue.add(c);
+        }
+        int budget = 250;
+        AccessibilityNodeInfo found = null;
+        while (!queue.isEmpty() && budget-- > 0 && found == null) {
+            AccessibilityNodeInfo n = queue.poll();
+            if (n.isFocused() && n.isEditable()) {
+                found = n;
+                break;
+            }
+            for (int i = 0; i < n.getChildCount(); i++) {
+                AccessibilityNodeInfo c = n.getChild(i);
+                if (c != null) queue.add(c);
+            }
+            n.recycle();
+        }
+        for (AccessibilityNodeInfo n : queue) n.recycle();
+        return found;
+    }
+
+    /**
+     * Dismiss the keyboard on {@code display}, if one is up.
+     *
+     * Neither half of the toggle's "off" hides anything by itself: the show
+     * mode only matters while a hardware keyboard is attached, and the
+     * placement policy governs future shows, not the one on screen. BACK is
+     * the dismissal every keyboard honours — and it is sent only when an
+     * input-method window is actually present on the display, so it cannot
+     * navigate an app instead.
+     */
+    void lowerKeyboard(int display) {
+        if (android.os.Build.VERSION.SDK_INT < 30) return;  // getWindowsOnAllDisplays
+        List<AccessibilityWindowInfo> windows = windowsOnDisplay(display);
+        if (windows == null) return;
+        for (AccessibilityWindowInfo w : windows) {
+            if (w.getType() == AccessibilityWindowInfo.TYPE_INPUT_METHOD) {
+                performGlobalAction(GLOBAL_ACTION_BACK);
+                return;
+            }
+        }
     }
 
     /** Set by ensureCaption when a bar had to be moved or rebuilt this pass. */

@@ -246,6 +246,15 @@
     <string name="lx_quick_settings">ઝડપી સેટિંગ્સ</string>
     <string name="lx_fullscreen">પૂર્ણ સ્ક્રીન</string>
     <string name="lx_exit_fullscreen">પૂર્ણ સ્ક્રીનમાંથી બહાર</string>
+    <string name="lx_keyboard">ઑન-સ્ક્રીન કીબોર્ડ</string>
+    <string name="lx_keyboard_off">ઑન-સ્ક્રીન કીબોર્ડ બંધ કરો</string>
+    <string name="lx_kb_move">કીબોર્ડ ખસેડો</string>
+    <string name="lx_kb_collapse">સંકોચો</string>
+    <string name="lx_kb_expand">વિસ્તારો</string>
+    <string name="lx_kb_dock">નીચે જોડો</string>
+    <string name="lx_kb_float">તરતું</string>
+    <string name="lx_kb_close">કીબોર્ડ બંધ કરો</string>
+    <string name="lx_osk_needs_service">ઑન-સ્ક્રીન કીબોર્ડ માટે Open Android DeX ની ઍક્સેસિબિલિટી સેવા જોઈએ, જે બંધ છે. તેને સેટિંગ્સ → ઍક્સેસિબિલિટીમાં ચાલુ કરો.</string>
     <string name="lx_exit_dex">DeX બંધ કરો</string>
     <string name="lx_exit_title">DeX બંધ કરવું છે?</string>
     <string name="lx_exit_body">ડેસ્કટોપ બંધ થશે અને ફોન સામાન્ય થઈ જશે. અહીં ખુલ્લી ઐપ ફોન પર જશે.</string>
