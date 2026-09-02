@@ -2212,6 +2212,38 @@ struct RequestPump {
     /// lost when the adb shell dies between draining and reading the output.
     last_req_id: u64,
     shared: Arc<Shared>,
+    /// The fast channel to the launcher's queue. See [`RequestPump::tick`].
+    wm: crate::wm::WmClient,
+    /// Whether the last drain came over the daemon. Sets the poll rate: see
+    /// [`RequestPump::poll_interval`].
+    fast: bool,
+}
+
+/// One queued request, as the PC reads it off either channel.
+///
+/// `content query` prints `Row: 0 id=17, cmd=close, arg=com.foo` and the daemon's rows are
+/// rendered into the same shape by [`request_row`], so this is the single parser for both.
+/// Returns the id (absent on a pre-v2 launcher), the command and its argument.
+fn parse_request_row(line: &str) -> Option<(Option<u64>, &str, &str)> {
+    let cmd_pos = line.find("cmd=")?;
+    let arg_pos = line.find("arg=")?;
+    let id = line.find("id=").and_then(|p| {
+        line[p + 3..]
+            .chars()
+            .take_while(|c| c.is_ascii_digit())
+            .collect::<String>()
+            .parse()
+            .ok()
+    });
+    let cmd = line[cmd_pos + 4..].split(',').next().unwrap_or("").trim();
+    let arg = line[arg_pos + 4..].trim();
+    Some((id, cmd, arg))
+}
+
+/// The daemon's rows in the shape [`parse_request_row`] reads. Paired with it on purpose:
+/// the two channels must not be able to disagree about what a request is.
+fn request_row(id: u64, cmd: &str, arg: &str) -> String {
+    format!("id={id}, cmd={cmd}, arg={arg}")
 }
 
 impl RequestPump {
@@ -2231,13 +2263,61 @@ impl RequestPump {
         self.run(&format!("(({cmd}) >/dev/null 2>&1 &)")).is_some()
     }
 
+    /// One drain of the launcher's request queue.
+    ///
+    /// The queue lives in two places at once and this reads whichever is cheaper. The
+    /// ContentProvider is the channel that always exists, and `content query` is a whole
+    /// app_process VM per read — 537 ms measured on a Redmi Note 7 (SDM660, Android 10)
+    /// against 73 ms for a bare adb shell round trip. At this poll rate that was a JVM
+    /// starting roughly every 0.7 s for the entire session whether or not anything had
+    /// been pressed, which is most of what made an idle desktop warm, and it still left
+    /// most of a second between a taskbar press and anything happening.
+    ///
+    /// The daemon holds the same rows under the same ids and answers over a socket that
+    /// is already open, so the idle case — by far the common one — costs a write and a
+    /// read. `content query` is then only paid on phones where the daemon could not
+    /// start, which is what keeps a press working there exactly as before.
     fn tick(&mut self, display: i32) {
+        if let Some(rows) = self.wm.req_get() {
+            self.fast = true;
+            if !rows.is_empty() {
+                // Rendered into the shape `handle_requests` already parses rather than
+                // given a second parser: the id watermark, the argument charset check and
+                // every verb below must stay identical across the two channels, and the
+                // surest way to keep them identical is for there to be one of them.
+                let reqs = rows
+                    .iter()
+                    .map(|(id, cmd, arg)| request_row(*id, cmd, arg))
+                    .collect::<Vec<_>>()
+                    .join("
+");
+                self.handle_requests(&reqs, display);
+            }
+            return;
+        }
+        self.fast = false;
         let Some(reqs) = self.run(
             "content query --uri content://com.ccrstech.openandroiddex.launcher.requests/v2 2>/dev/null",
         ) else {
             return;
         };
         self.handle_requests(&reqs, display);
+    }
+
+    /// How long to wait before draining again.
+    ///
+    /// The old 150 ms was a compromise with the cost of asking: at 537 ms per
+    /// `content query` a shorter period would have had the phone starting a VM
+    /// continuously, and a longer one made the taskbar feel broken. Over the daemon the
+    /// question is nearly free, so the period can be what actually decides how quickly a
+    /// press is noticed. It stays at 150 ms whenever the daemon is not answering, because
+    /// there the old cost is back and polling harder would only heat the phone.
+    fn poll_interval(&self) -> Duration {
+        if self.fast {
+            Duration::from_millis(40)
+        } else {
+            Duration::from_millis(150)
+        }
     }
 
     /// Execute the launcher's queued requests. v2 rows carry an id and stay
@@ -2255,25 +2335,15 @@ impl RequestPump {
         // so the rows only mark this and one reconcile runs after the loop.
         let mut audio_dirty = false;
         for line in reqs.lines() {
-            let (Some(cmd_pos), Some(arg_pos)) = (line.find("cmd="), line.find("arg=")) else {
+            let Some((id, cmd, arg)) = parse_request_row(line) else {
                 continue;
             };
-            let id: Option<u64> = line.find("id=").and_then(|p| {
-                line[p + 3..]
-                    .chars()
-                    .take_while(|c| c.is_ascii_digit())
-                    .collect::<String>()
-                    .parse()
-                    .ok()
-            });
             if let Some(id) = id {
                 if id <= self.last_req_id {
                     ack_id = ack_id.max(id); // re-ack in case the delete was lost
                     continue;
                 }
             }
-            let cmd = line[cmd_pos + 4..].split(',').next().unwrap_or("").trim();
-            let arg = line[arg_pos + 4..].trim();
             // '-' is here for MediaCodec encoder names, which the Settings
             // window sends verbatim; every consumer below either parses the
             // value or passes it to scrcpy as a single argv entry, never to a
@@ -2538,6 +2608,14 @@ impl RequestPump {
             // Ack AFTER execution: drop the handled rows on the phone. If
             // the ack itself is lost, last_req_id keeps the rows from
             // re-executing and a later pass cleans them up.
+            //
+            // BOTH channels, always: the launcher queues every request to both, so
+            // acking only the one this row arrived on leaves the other copy behind —
+            // harmless to correctness (the watermark skips it) but it would grow the
+            // provider's queue for the whole session. The daemon ack is a socket write;
+            // the `content delete` is the expensive one and is why this is fired in the
+            // background rather than waited on.
+            self.wm.req_ack(ack_id);
             self.run_bg(&format!(
                 "content delete --uri content://com.ccrstech.openandroiddex.launcher.requests/v2 --where \"id<={ack_id}\""
             ));
@@ -2975,6 +3053,8 @@ fn spawn_freeform_enforcer(
     // launcher's queue costs ~1s on the device.
     thread::spawn(move || {
         let mut pump = RequestPump {
+            wm: crate::wm::WmClient::new(),
+            fast: false,
             shell: ShellSession::new(serial),
             app,
             key,
@@ -2991,7 +3071,7 @@ fn spawn_freeform_enforcer(
             if display >= 0 {
                 pump.tick(display);
             }
-            thread::sleep(Duration::from_millis(150));
+            thread::sleep(pump.poll_interval());
         }
     });
 }
@@ -3839,6 +3919,39 @@ pub fn kill_all(app: &AppHandle) {
 
 #[cfg(test)]
 mod tests {
+
+    /// The launcher queues every request twice — once in the ContentProvider, once in the
+    /// window daemon — and the PC reads whichever answered. If the two shapes ever
+    /// disagreed, presses would be silently dropped on one path or run twice on the
+    /// other, so the synthesiser and the parser are pinned to each other here.
+    #[test]
+    fn both_request_channels_parse_identically() {
+        // what `content query` actually prints
+        let from_provider = "Row: 0 id=17, cmd=close, arg=com.foo.bar";
+        // what the daemon's rows are rendered into
+        let from_daemon = request_row(17, "close", "com.foo.bar");
+
+        let a = parse_request_row(from_provider).expect("provider row");
+        let b = parse_request_row(&from_daemon).expect("daemon row");
+        assert_eq!(a, b);
+        assert_eq!(a, (Some(17), "close", "com.foo.bar"));
+    }
+
+    /// A pre-v2 launcher's rows carry no id and must still run (best-effort), rather than
+    /// being skipped for having no watermark.
+    #[test]
+    fn a_row_without_an_id_still_parses() {
+        let got = parse_request_row("Row: 0 cmd=key, arg=back").expect("row");
+        assert_eq!(got, (None, "key", "back"));
+    }
+
+    /// An argument may hold spaces (a config value does); it runs to end of line.
+    #[test]
+    fn request_arg_keeps_its_spaces() {
+        let row = request_row(9, "cfg", "encoder OMX.qcom.video");
+        let got = parse_request_row(&row).expect("row");
+        assert_eq!(got, (Some(9), "cfg", "encoder OMX.qcom.video"));
+    }
     use super::*;
 
     /// Exactly the shape the enforcer feeds the parser: `dumpsys activity activities`

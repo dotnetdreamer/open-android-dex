@@ -140,6 +140,80 @@ impl WmClient {
         out
     }
 
+    /// Drain the launcher's pending requests from the daemon.
+    ///
+    /// `None` means the daemon did not answer — it is not running, or it predates the
+    /// verb — and the caller must fall back to the `content query` channel.
+    /// `Some(vec![])` means it answered and there is nothing queued, which is the
+    /// overwhelmingly common case and the one worth being cheap: this is a write and a
+    /// read on an open socket, against a `content query` that boots an app_process VM
+    /// (537 ms measured on a Redmi Note 7) every time it is asked.
+    ///
+    /// Rows are NOT consumed by reading. `req_ack` drops them once they have actually
+    /// been executed, so a pump that dies mid-tick delays a press by one poll rather than
+    /// eating it — the same discipline the v2 ContentProvider protocol already uses.
+    pub fn req_get(&self) -> Option<Vec<(u64, String, String)>> {
+        let lines = self.lines_command("REQGET")?;
+        let mut out = Vec::new();
+        for line in lines {
+            // REQ <id> <cmd> <arg…>
+            let Some(rest) = line.strip_prefix("REQ ") else {
+                continue;
+            };
+            let mut parts = rest.splitn(3, ' ');
+            let (Some(id), Some(cmd)) = (parts.next(), parts.next()) else {
+                continue;
+            };
+            let Ok(id) = id.parse::<u64>() else {
+                continue;
+            };
+            out.push((id, cmd.to_string(), parts.next().unwrap_or("").to_string()));
+        }
+        Some(out)
+    }
+
+    /// Drop every queued request at or below `id`.
+    pub fn req_ack(&self, id: u64) -> bool {
+        self.ok(&format!("REQACK {id}"))
+    }
+
+    /// A multi-line reply, up to `END`. `None` if the daemon never answered, so a caller
+    /// can tell "not there" from "there, nothing to say".
+    fn lines_command(&self, command: &str) -> Option<Vec<String>> {
+        let mut guard = self.conn.lock().ok()?;
+        if !Self::ensure(&mut guard) {
+            return None;
+        }
+        let conn = guard.as_mut().expect("ensured");
+        if writeln!(conn.writer, "{command}").is_err() {
+            *guard = None;
+            return None;
+        }
+        let mut out = Vec::new();
+        loop {
+            let mut line = String::new();
+            match conn.reader.read_line(&mut line) {
+                Ok(0) | Err(_) => {
+                    // EOF mid-reply: the daemon went away and this answer is a fragment,
+                    // so report absence rather than a short list the caller would treat
+                    // as "nothing queued".
+                    *guard = None;
+                    return None;
+                }
+                Ok(_) => {}
+            }
+            let line = line.trim_end();
+            if line == "END" {
+                return Some(out);
+            }
+            if line.starts_with("ERR") {
+                // An older daemon without the verb. Absent, not empty.
+                return None;
+            }
+            out.push(line.to_string());
+        }
+    }
+
     /// Reserve `px` at the top of the task for chrome by shrinking the app's bounds.
     ///
     /// Deliberately does NOT publish a captionBar inset source: that additionally wakes

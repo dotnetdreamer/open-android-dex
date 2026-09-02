@@ -29,15 +29,47 @@ public class RequestProvider extends ContentProvider {
     /** Seeded from wall time: still increases across launcher restarts. */
     private static long nextId = System.currentTimeMillis();
 
+    /** The fast channel. Created on first use; one socket for the process. */
+    private static WmClient wm;
+
     public static void enqueue(String cmd, String arg) {
+        final long id;
         synchronized (QUEUE) {
-            QUEUE.add(new String[]{String.valueOf(++nextId), cmd, arg});
+            id = ++nextId;
+            QUEUE.add(new String[]{String.valueOf(id), cmd, arg});
             // The PC logs what it executes; this is the other end of that
             // pair, so a request that is raised but never drained (a dead
             // pump, a wedged adb shell) shows up as a gap rather than as
             // "the button does nothing".
             DexLog.step("request", cmd + " " + arg + " queued (" + QUEUE.size() + " pending)");
         }
+        offerToDaemon(id, cmd, arg);
+    }
+
+    /**
+     * Also hand the request to the window daemon, which is how the PC will actually see
+     * it while that daemon is up.
+     *
+     * Reading this queue costs the PC an `content query`, and that is a whole app_process
+     * VM per read — 537 ms measured on a Redmi Note 7, against 73 ms for a bare adb shell
+     * round trip. Polled often enough to feel responsive it kept a JVM starting roughly
+     * every 0.7 s for the life of the session, which is most of what made an idle desktop
+     * warm, and it still put most of a second in front of every press. The daemon answers
+     * the same question over a socket that is already open.
+     *
+     * The row stays in QUEUE regardless. This is an ADDITION, not a replacement: the
+     * daemon is best-effort (it is absent on phones where it could not start, and it dies
+     * with the session), and a press must never depend on it. The PC reads both channels
+     * and skips anything at or below its watermark, which is why both copies carry the
+     * same id.
+     *
+     * Posted rather than called: enqueue runs on the UI thread, and WmClient is blocking
+     * socket I/O.
+     */
+    private static synchronized void offerToDaemon(long id, String cmd, String arg) {
+        if (wm == null) wm = new WmClient();
+        final WmClient client = wm;
+        client.post(() -> client.reqPut(id, cmd, arg));
     }
 
     @Override

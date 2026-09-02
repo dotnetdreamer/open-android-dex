@@ -43,6 +43,9 @@ import java.util.List;
  *   AUDIOROUTE SET <type> <address|->         -> OK          pin media to a phone output
  *   AUDIOROUTE CLEAR                          -> OK          back to the phone's own policy
  *   ARM <ttlSeconds> <settings chain…>        -> OK          refresh the dead-man switch
+ *   REQPUT <id> <cmd> <arg…>                  -> OK          launcher raises a PC request
+ *   REQGET                                    -> REQ <id> <cmd> <arg…> … / END
+ *   REQACK <id>                               -> OK          drop rows with id <= N
  *   BYE                                       -> (closes)
  *   ERR <reason>                              on any failure
  *
@@ -59,6 +62,27 @@ public final class WmDaemon {
 
     /** How long RECLAIM waits for an activity that is still starting. */
     static final long RECLAIM_WAIT_MS = 2000L;
+
+    /**
+     * Launcher -> PC requests, waiting for the PC to drain them.
+     *
+     * The launcher cannot close another app's task or flip a system toggle; the PC can,
+     * over adb. That channel used to be a ContentProvider the PC read with
+     * `content query`, which costs a whole app_process VM per read — measured at 537 ms
+     * on a Redmi Note 7 against 73 ms for a bare adb shell round trip. Polling it at
+     * 150 ms meant booting a JVM roughly every 0.7 s for the entire session, which is
+     * most of what made an idle desktop warm, and it put 150 ms of poll wait plus 537 ms
+     * of query in front of every taskbar press.
+     *
+     * Same rows, same ack discipline, over the socket that is already open. See
+     * RequestProvider, which still carries the payload when this daemon is not up.
+     *
+     * Bounded because the PC can go away (cable out, app killed) while the launcher keeps
+     * queueing: past the cap the OLDEST row is dropped, so a stale backlog can never
+     * stop the newest press from being seen.
+     */
+    private static final java.util.ArrayDeque<String[]> REQUESTS = new java.util.ArrayDeque<>();
+    private static final int REQUESTS_MAX = 256;
 
     /** A component name and nothing else: the LAUNCH verb's only input check. */
     static final java.util.regex.Pattern COMPONENT =
@@ -261,6 +285,71 @@ public final class WmDaemon {
                 }
                 String r = sh("input -d " + d + " keyevent 4 2>&1");
                 out.println(r.contains("Exception") ? "ERR " + r.replace('\n', ' ') : "OK");
+                return;
+            }
+
+            case "REQPUT": {
+                // "REQPUT <id> <cmd> <arg…>". The id is the LAUNCHER'S, not ours, and
+                // that is the whole point: the same request is also queued in
+                // RequestProvider, so the PC sees each press on both channels and its
+                // existing "skip anything at or below the watermark" rule is what stops
+                // it running twice. Two id spaces here would mean every taskbar press
+                // executing twice — once per channel.
+                //
+                // The arg is the rest of the line, spaces and all (a package name never
+                // has one, a config value can), so it is re-joined rather than read as a
+                // single token. Same reason as ARM.
+                if (a.length < 3) {
+                    out.println("ERR no command");
+                    return;
+                }
+                StringBuilder arg = new StringBuilder();
+                for (int i = 3; i < a.length; i++) {
+                    if (arg.length() > 0) arg.append(' ');
+                    arg.append(a[i]);
+                }
+                try {
+                    Long.parseLong(a[1]);
+                } catch (Exception e) {
+                    out.println("ERR bad id");
+                    return;
+                }
+                synchronized (REQUESTS) {
+                    REQUESTS.add(new String[]{a[1], a[2], arg.toString()});
+                    while (REQUESTS.size() > REQUESTS_MAX) REQUESTS.poll();
+                }
+                out.println("OK");
+                return;
+            }
+
+            case "REQGET": {
+                // Read WITHOUT clearing, exactly as the v2 ContentProvider does: the PC
+                // acks only once a request has actually been executed, so a PC that dies
+                // between reading and acting delays the press by one poll instead of
+                // eating it.
+                synchronized (REQUESTS) {
+                    for (String[] r : REQUESTS) {
+                        out.println("REQ " + r[0] + " " + r[1] + " " + r[2]);
+                    }
+                }
+                out.println("END");
+                return;
+            }
+
+            case "REQACK": {
+                long upto;
+                try {
+                    upto = Long.parseLong(a[1]);
+                } catch (Exception e) {
+                    out.println("ERR bad id");
+                    return;
+                }
+                synchronized (REQUESTS) {
+                    for (java.util.Iterator<String[]> it = REQUESTS.iterator(); it.hasNext(); ) {
+                        if (Long.parseLong(it.next()[0]) <= upto) it.remove();
+                    }
+                }
+                out.println("OK");
                 return;
             }
 

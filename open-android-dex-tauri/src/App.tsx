@@ -164,6 +164,11 @@ export default function App() {
    */
   const switchingToWireless = useRef(false);
   const deployedFor = useRef<number | null>(null);
+  /**
+   * The in-flight `adb_prepare_desktop` call, awaited by the launcher deploy
+   * rather than by the launch itself — see the note where it is fired.
+   */
+  const prepareProfile = useRef<Promise<unknown> | null>(null);
   const sawDesktop = useRef(false);
   /**
    * Set when the desktop was stopped in order to be started again — the
@@ -255,7 +260,16 @@ export default function App() {
     );
     try {
       setDexStep({ state: "busy", text: "Preparing desktop profile…" });
-      await invoke("adb_prepare_desktop", {
+      // FIRED, NOT AWAITED. The profile is a chain of `settings` round trips —
+      // measured at ~1.2s on a Redmi Note 7 over USB, because each `settings`
+      // boots its own process on the phone — and awaiting it put every one of
+      // those milliseconds in front of the launch. Nothing it writes is needed
+      // to CREATE the virtual display; the globals matter to the apps that
+      // open on it, so the deadline is the launcher deploy, not the spawn.
+      // The deploy effect below awaits this promise before it starts anything,
+      // which is what keeps enable_freeform_support/hidden_api_policy/
+      // block_untrusted_touches guaranteed to be in place by then.
+      prepareProfile.current = invoke("adb_prepare_desktop", {
         serial: device.serial,
         samsungDesktop: false,
       }).catch((e) => logWarn(`launch: prepare_desktop failed (continuing) — ${String(e)}`));
@@ -339,7 +353,11 @@ export default function App() {
     sawDesktop.current = true;
     logInfo(`launch: display ${displayId} is up — deploying the launcher`);
     setDexStep({ state: "busy", text: "Deploying DeX launcher…" });
-    invoke("adb_start_launcher", { serial: device.serial, displayId })
+    // The desktop profile has been writing itself while the display came up.
+    // By here it is almost always already done, and this await costs nothing —
+    // but it is what makes "fired, not awaited" above safe rather than a race.
+    Promise.resolve(prepareProfile.current)
+      .then(() => invoke("adb_start_launcher", { serial: device.serial, displayId }))
       .then(() => {
         logInfo("launch: desktop ready");
         setDexStep({ state: "done", text: "Desktop ready" });

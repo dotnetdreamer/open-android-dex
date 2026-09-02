@@ -243,6 +243,22 @@ final class WmClient {
     }
 
     /**
+     * Hand a launcher -> PC request to the daemon, under the id RequestProvider already
+     * gave it.
+     *
+     * The same row is queued in RequestProvider too. That is deliberate: this is the fast
+     * channel and that is the one that still works with no daemon, and the PC reads both.
+     * Passing ITS id rather than minting one is what keeps the PC's "skip anything at or
+     * below the watermark" rule able to tell the two copies apart — otherwise every
+     * taskbar press would execute twice.
+     *
+     * Blocking socket I/O: never call this from the main thread.
+     */
+    boolean reqPut(long id, String cmd, String arg) {
+        return ok(request("REQPUT " + id + " " + cmd + " " + arg));
+    }
+
+    /**
      * Processor jiffies as {busy, total}, or null when the daemon is not there.
      *
      * Asked of the daemon rather than read directly because /proc/stat is

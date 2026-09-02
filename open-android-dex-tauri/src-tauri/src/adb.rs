@@ -562,29 +562,48 @@ pub fn perf_globals_script() -> String {
         .join("; ")
 }
 
-/// One `settings get` round trip for every key we may overwrite.
+/// Every global we may overwrite, in ONE `settings list` round trip.
+///
+/// It used to be a shell loop calling `settings get` once per key. Each of
+/// those boots its own process on the phone, so the cost was per-key and
+/// dominated by process startup rather than by adb: measured on a Redmi Note 7
+/// (SDM660, Android 10) the eight-key loop took ~240ms against ~80ms for a
+/// single `settings list global`, and prepare_desktop pays it twice.
+///
+/// The one behavioural difference is the whole reason for the normalisation
+/// below: `settings get` answers "null" for a key with no row, while
+/// `settings list` simply does not print it. Those two are NOT interchangeable
+/// downstream — `undo_perf_globals_script` reads a MISSING key as "this
+/// snapshot predates the app knowing about this setting, leave it alone" and a
+/// "null" as "the phone had no row, delete ours". Handing it absences instead
+/// of nulls would strand our zeroed animation scales on the user's phone
+/// forever. So every key that was asked for and did not come back is written
+/// in as "null", exactly as the old loop reported it.
 fn read_desktop_globals(app: &tauri::AppHandle, serial: &str) -> HashMap<String, String> {
-    let keys = DESKTOP_GLOBALS
+    let wanted = DESKTOP_GLOBALS
         .iter()
         .chain(PERF_GLOBALS.iter())
         .chain(std::iter::once(&TOUCH_GLOBAL))
         .copied()
-        .collect::<Vec<_>>()
-        .join(" ");
-    let out = run_adb(
-        app,
-        &[
-            "-s",
-            serial,
-            "shell",
-            &format!("for k in {keys}; do echo \"$k=$(settings get global $k)\"; done"),
-        ],
-    )
-    .unwrap_or_default();
-    out.lines()
+        .collect::<Vec<_>>();
+    let out = run_adb(app, &["-s", serial, "shell", "settings list global"]).unwrap_or_default();
+    parse_globals(&out, &wanted)
+}
+
+/// Pull the keys we asked for out of a `settings list global` dump, reporting
+/// anything absent as "null" — see [`read_desktop_globals`] for why that
+/// distinction is load-bearing rather than cosmetic.
+fn parse_globals(out: &str, wanted: &[&str]) -> HashMap<String, String> {
+    let mut found: HashMap<String, String> = out
+        .lines()
         .filter_map(|l| l.trim().split_once('='))
-        .map(|(k, v)| (k.to_string(), v.trim().to_string()))
-        .collect()
+        .filter(|(k, _)| wanted.contains(&k.trim()))
+        .map(|(k, v)| (k.trim().to_string(), v.trim().to_string()))
+        .collect();
+    for key in wanted {
+        found.entry((*key).to_string()).or_insert_with(|| "null".into());
+    }
+    found
 }
 
 fn restore_store_path(app: &tauri::AppHandle) -> Option<PathBuf> {
@@ -1448,6 +1467,7 @@ pub fn adb_start_launcher(
         "launcher installed in {}ms",
         deploy_started.elapsed().as_millis()
     );
+
     // Overlay-taskbar permission: the taskbar is a TYPE_APPLICATION_OVERLAY
     // window so it floats above app windows (base layer ~111000 vs 21000 for
     // app windows). The op only sticks because the APK *declares*
@@ -2120,6 +2140,43 @@ mod tests {
 
     /// This one is NOT recoverable — the switch is on the phone — so it must
     /// be told apart from the two that are, in both directions. Claiming it as
+    /// `settings list global` prints nothing at all for a key with no row,
+    /// while the `settings get` loop this replaced answered "null". The two are
+    /// not interchangeable: `undo_perf_globals_script` reads a MISSING key as
+    /// "leave the user's setting alone" and a "null" as "delete the row we
+    /// added". Losing that distinction would strand DeX's zeroed animation
+    /// scales on the phone after every session.
+    #[test]
+    fn absent_globals_are_reported_as_null() {
+        let dump = "enable_freeform_support=1
+window_animation_scale=0.5
+unrelated_key=7
+";
+        let got = parse_globals(
+            dump,
+            &[
+                "enable_freeform_support",
+                "window_animation_scale",
+                "hidden_api_policy",
+            ],
+        );
+        assert_eq!(got.get("enable_freeform_support").unwrap(), "1");
+        assert_eq!(got.get("window_animation_scale").unwrap(), "0.5");
+        // asked for, never printed -> must look exactly like `settings get` did
+        assert_eq!(got.get("hidden_api_policy").unwrap(), "null");
+        // a global we never asked about must not enter the snapshot
+        assert!(!got.contains_key("unrelated_key"));
+    }
+
+    /// The dump is hundreds of lines of other people's settings; values may
+    /// themselves contain '=' and must survive intact.
+    #[test]
+    fn parses_values_containing_equals() {
+        let got = parse_globals("some_key=a=b=c
+", &["some_key"]);
+        assert_eq!(got.get("some_key").unwrap(), "a=b=c");
+    }
+
     /// a key mismatch would uninstall the launcher and lose its settings to
     /// reach the identical failure a second time.
     #[test]
