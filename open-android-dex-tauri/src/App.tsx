@@ -5,7 +5,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { error as logError, info as logInfo, warn as logWarn } from "@tauri-apps/plugin-log";
 import { useSessions } from "./features/mirror/useSessions";
 import { WirelessPanel } from "./features/wireless/WirelessPanel";
-import { IS_MAC, TITLEBAR_LEAD } from "./lib/host";
+import { IS_MAC, NO_PERMISSIONS_HINT, TITLEBAR_LEAD } from "./lib/host";
 import type {
   DeviceInfo,
   KnownDevice,
@@ -627,9 +627,11 @@ export default function App() {
                         <p className="text-[11.5px] text-slate-500">
                           {d.state === "unauthorized"
                             ? "Confirm the USB-debugging prompt on the phone"
-                            : d.state === "offline"
-                              ? "Device is offline — reconnect the cable"
-                              : d.state}
+                            : d.state === "no-permissions"
+                              ? `This computer is not allowed to open the phone. ${NO_PERMISSIONS_HINT}`
+                              : d.state === "offline"
+                                ? "Device is offline — reconnect the cable"
+                                : d.state}
                         </p>
                       </div>
                       <span className={`badge ${d.state === "unauthorized" ? "badge-warn" : ""}`}>

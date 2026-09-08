@@ -4,15 +4,15 @@
 
 ### Your phone is already a computer. This gives it a desktop.
 
-Plug your Android phone into your Windows PC or Mac and a real desktop opens on
-your screen, with a taskbar, an app drawer, and windows you can drag, resize and
-snap side by side
+Plug your Android phone into your Windows PC, Mac or Linux machine and a real
+desktop opens on your screen, with a taskbar, an app drawer, and windows you can
+drag, resize and snap side by side
 
 Unplug it and your phone goes back to being a phone
 
 [![Download](https://img.shields.io/github/v/release/dotnetdreamer/open-android-dex?label=Download&style=for-the-badge&color=2ea043)](https://github.com/dotnetdreamer/open-android-dex/releases/latest)
 [![Licence](https://img.shields.io/badge/Licence-GPL--3.0-blue?style=for-the-badge)](LICENSE)
-[![Platform](https://img.shields.io/badge/Windows%20%7C%20macOS-lightgrey?style=for-the-badge)](https://github.com/dotnetdreamer/open-android-dex/releases/latest)
+[![Platform](https://img.shields.io/badge/Windows%20%7C%20macOS%20%7C%20Linux-lightgrey?style=for-the-badge)](https://github.com/dotnetdreamer/open-android-dex/releases/latest)
 
 **Free. Open source. No account. No subscription. No root**
 
@@ -31,7 +31,7 @@ https://github.com/user-attachments/assets/9b44d8f4-8e9b-47b5-bd44-3ef486eb8e60
 
 ## Try it in three steps
 
-1. **Download** the app for [Windows or Mac](https://github.com/dotnetdreamer/open-android-dex/releases/latest) and install it
+1. **Download** the app for [Windows, Mac or Linux](https://github.com/dotnetdreamer/open-android-dex/releases/latest) and install it
 2. **Turn on USB debugging** on your phone. Go to Settings, then About phone,
    tap *Build number* seven times, go back, open Developer options and switch on
    USB debugging
@@ -210,7 +210,7 @@ screen already in front of you, for nothing.
 
 | | |
 | --- | --- |
-| **Your computer** | Windows 10 or 11, or a Mac (Intel or Apple Silicon) |
+| **Your computer** | Windows 10 or 11, a Mac (Intel or Apple Silicon), or a 64-bit Linux desktop |
 | **Your phone** | Any Android 8.0 or newer |
 | **A cable** | Any USB cable that carries data, or skip it and use Wi-Fi |
 | **Root** | No |
@@ -224,6 +224,9 @@ screen already in front of you, for nothing.
 | Windows | `..._x64-setup.exe` (installer) or `..._x64_portable.zip` |
 | Mac, Apple Silicon (M1 to M4) | `..._aarch64.dmg` |
 | Mac, Intel | `..._x64.dmg` |
+| Linux — Ubuntu, Debian, Mint | `..._amd64.deb` |
+| Linux — Fedora, openSUSE | `..._x86_64.rpm` |
+| Any other Linux | `..._amd64.AppImage` |
 | **The desktop, phone only** (HDMI to a monitor, or Samsung DeX) | `OpenAndroidDeX-Launcher-v<version>.apk` |
 | **Just Ubuntu, phone only** | `LinuxOnDroid-v<version>.apk` |
 
@@ -330,6 +333,7 @@ The plain log lives here if you want to read it yourself:
 ```
 Windows   %LOCALAPPDATA%\com.ccrstech.openandroiddex\logs\open-android-dex.log
 macOS     ~/Library/Logs/com.ccrstech.openandroiddex/open-android-dex.log
+Linux     ~/.local/share/com.ccrstech.openandroiddex/logs/open-android-dex.log
 ```
 </details>
 

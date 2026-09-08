@@ -5,8 +5,15 @@
 | Windows | `..._x64-setup.exe` (installer) or `..._x64_portable.zip` |
 | Mac, Apple Silicon (M1–M4) | `..._aarch64.dmg` |
 | Mac, Intel | `..._x64.dmg` |
+| Linux — Ubuntu, Debian, Mint | `..._amd64.deb` |
+| Linux — Fedora, openSUSE | `..._x86_64.rpm` |
+| Any other Linux | `..._amd64.AppImage` |
 
 Not sure which Mac you have?  → About This Mac, and read the "Chip" line.
+
+Linux is 64-bit Intel/AMD only for now. It is the one machine scrcpy publishes
+a ready-made build for, and shipping a version of this that could not talk to
+your phone would not be worth the download.
 
 ### No computer? The phone apps are here too
 
@@ -21,6 +28,45 @@ The launcher APK is the same one the desktop app installs for you, so having
 one does not stop you using the other. Custom titlebars are the one thing that
 wants the computer — without it, your phone's own window chrome is used
 instead.
+
+### Linux: installing it
+
+Pick the file that matches what you run:
+
+- **Ubuntu, Debian, Mint** — `sudo apt install ./Open.Android.DeX_<version>_amd64.deb`
+- **Fedora, openSUSE** — `sudo dnf install ./Open.Android.DeX_<version>_x86_64.rpm`
+- **Anything else** — the AppImage. A downloaded file arrives without permission
+  to run, so give it that permission once and then start it:
+
+  ```
+  chmod +x Open.Android.DeX_<version>_amd64.AppImage
+  ./Open.Android.DeX_<version>_amd64.AppImage
+  ```
+
+### Linux: the phone appears but says it is not allowed
+
+This is the one thing that catches nearly everyone, and it is not your phone's
+fault. Linux only lets a program open a USB device when a rule says it may, and
+a fresh install has no rule for a phone. Add the rules:
+
+```
+sudo apt install android-sdk-platform-tools-common
+```
+
+Then unplug the phone and plug it back in. The replug matters — the rules are
+applied at the moment the phone appears, so one that was already connected keeps
+the permissions it was given.
+
+### Linux: what is not there yet
+
+Connecting, the desktop, the launcher, and Ubuntu and Docker on the phone all
+work the same as everywhere else. Four smaller things are Windows-and-Mac only
+for now, and none of them stop the desktop working:
+
+- the fullscreen (⛶) button on the phone-side taskbar
+- Escape to leave fullscreen
+- three-finger touchpad gestures
+- "Project to PC", which is a Windows feature and is hidden here
 
 ### macOS: opening it the first time
 

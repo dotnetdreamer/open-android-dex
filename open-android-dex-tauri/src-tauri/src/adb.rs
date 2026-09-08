@@ -333,7 +333,23 @@ pub fn adb_list_devices(app: tauri::AppHandle) -> Result<Vec<DeviceInfo>, String
         }
         let mut parts = line.split_whitespace();
         let Some(serial) = parts.next() else { continue };
-        let state = parts.next().unwrap_or("unknown").to_string();
+        // `adb devices -l` writes the state as one token for every state but
+        // one. A phone this machine is not allowed to open prints
+        //
+        //     <serial>\tno permissions; see [http://developer.android.com/…]
+        //
+        // — a sentence, not a token — so splitting on whitespace makes the
+        // state the bare word "no", and that is what the UI then shows as the
+        // whole explanation. It is also the most common first-run failure on
+        // Linux, where a phone with no matching udev rule lands here on every
+        // poll, so it is named rather than passed through. The remedy is in
+        // `NO_PERMISSIONS_HINT` (host.ts), next to the text that shows it.
+        let rest = line[serial.len()..].trim_start();
+        let state = if rest.starts_with("no permissions") {
+            "no-permissions".to_string()
+        } else {
+            parts.next().unwrap_or("unknown").to_string()
+        };
         let mut model = String::new();
         let mut product = String::new();
         for kv in parts {

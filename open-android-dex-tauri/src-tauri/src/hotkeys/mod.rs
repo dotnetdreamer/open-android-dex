@@ -86,6 +86,14 @@ static NEXT_SESSION: AtomicU64 = AtomicU64::new(1);
 /// Start watching for Escape for a desktop session.
 pub fn start(app: AppHandle, key: String, shared: Arc<Shared>, stop: Arc<AtomicBool>) {
     stop_engine();
+    // Same guard, and same placement, as the gesture engine's. Without it a
+    // host with no key hook still gets the worker below — a thread waking four
+    // times a second, for the life of every session, to check a channel that
+    // nothing can ever send on, because the only sender is the hook that was
+    // not installed.
+    if !backend::supported() {
+        return;
+    }
     let (tx, rx) = std::sync::mpsc::channel::<()>();
     let busy = Arc::new(AtomicBool::new(false));
     let watcher = Watcher {

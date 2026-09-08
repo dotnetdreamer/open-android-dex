@@ -53,9 +53,19 @@ pub struct ProjectionSupport {
 /// `Some(false)` rather than `None`: this is a definite no, not a reading that
 /// failed. `None` is reserved for a Windows box whose localised `netsh` output
 /// could not be parsed, where talking the user out of the route would be wrong.
-#[cfg(not(windows))]
+/// Named per host rather than "not Windows": this string is shown to someone
+/// reading it on the machine it describes, and a Linux user told what macOS
+/// cannot do learns nothing except that the app is not sure what it is
+/// running on. The frontend hides the tab outright on both (`IS_WINDOWS` in
+/// host.ts), so this is the answer for a caller that arrives anyway.
+#[cfg(target_os = "macos")]
 const NO_MIRACAST: &str =
     "Miracast is a Windows feature. macOS has no wireless-display receiver a phone can \
+     cast DeX to — use the USB cable or Wi-Fi debugging instead.";
+
+#[cfg(not(any(windows, target_os = "macos")))]
+const NO_MIRACAST: &str =
+    "Miracast is a Windows feature. Linux has no wireless-display receiver a phone can \
      cast DeX to — use the USB cable or Wi-Fi debugging instead.";
 
 /// `netsh wlan show driver`, which reports Miracast support on the line

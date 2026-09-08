@@ -3117,17 +3117,25 @@ fn explain_failure(tail: &str) -> String {
         // almost always the unquoted command line scrcpy builds for its adb
         // child tripping over a space in the path. On macOS there is no command
         // line to trip over — it is Gatekeeper refusing a quarantined binary,
-        // or a lost executable bit.
+        // or a lost executable bit. On Linux there is no Gatekeeper either, and
+        // the remaining causes are the executable bit and a missing libudev,
+        // which is the one shared library the bundled adb and scrcpy need and
+        // the only one a very small install might not already have.
         if cfg!(windows) {
             "The bundled adb could not be launched by scrcpy. This is a problem with this \
              installation, not with the phone — try unzipping the app somewhere else, ideally \
              a path with no spaces in it."
                 .into()
-        } else {
+        } else if cfg!(target_os = "macos") {
             "The bundled adb could not be launched by scrcpy. This is a problem with this \
              installation, not with the phone — move Open Android DeX into your Applications \
              folder and open it again. If macOS has quarantined it, right-click the app and \
              choose Open once to allow it."
+                .into()
+        } else {
+            "The bundled adb could not be launched by scrcpy. This is a problem with this \
+             installation, not with the phone — check that the bundled adb is still executable \
+             (chmod +x), and that libudev is installed. Reinstalling the package restores both."
                 .into()
         }
     } else if t.contains("could not create display")

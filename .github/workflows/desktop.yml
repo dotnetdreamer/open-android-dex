@@ -33,12 +33,14 @@ env:
   # with open-android-dex-tauri/src-tauri/resources/THIRD_PARTY_LICENSES.md —
   # the "Verify bundled binaries" steps below enforce that.
   #
-  # One version, three assets, three checksums: the Windows zip here, and the
-  # two macOS tarballs on the build-macos matrix (a matrix leg cannot read a
-  # workflow-level env key that varies by leg). All three are the values from
-  # the release's own SHA256SUMS.txt.
+  # One version, four assets, four checksums: the Windows zip and the Linux
+  # tarball here, and the two macOS tarballs on the build-macos matrix (a matrix
+  # leg cannot read a workflow-level env key that varies by leg — which is why
+  # only the two single-arch platforms can be named at this level). All four are
+  # the values from the release's own SHA256SUMS.txt.
   SCRCPY_VERSION: "3.3.4"
   SCRCPY_SHA256_WIN64: "d8a155b7c180b7ca4cdadd40712b8750b63f3aab48cb5b8a2a39ac2d0d4c5d38"
+  SCRCPY_SHA256_LINUX64: "0305d98c06178c67e12427bbf340c436d0d58c9e2a39bf9ffbbf8f54d7ef95a5"
 
 jobs:
   version:
@@ -589,10 +591,262 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+  build-linux:
+    needs: [version, launcher]
+    # One arch only. scrcpy publishes a single Linux asset (x86_64); there is no
+    # aarch64 tarball to pair with an ARM runner, and shipping a Linux build we
+    # could not put a working scrcpy inside would be worse than not shipping one.
+    #
+    # Pinned, and not for tidiness — on Linux the runner image IS the
+    # compatibility floor. glibc is backward but not forward compatible, so a
+    # binary linked here runs on this release and newer and nothing older;
+    # `ubuntu-latest` would move that floor under a released product without a
+    # line of this file changing. 24.04 is what these steps were built and run
+    # against, so it is what is written down. Raising it is a decision about
+    # which distros keep working, and it should look like one.
+    runs-on: ubuntu-24.04
+    env:
+      # Same reasoning as the Windows and macOS jobs: no JDK, no Android SDK on
+      # this runner, and both payloads arrive from the `launcher` job.
+      SKIP_LAUNCHER_APK: "1"
+      SKIP_WMD_DEX: "1"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.dry_run && github.ref || format('refs/tags/v{0}', needs.version.outputs.version) }}
+
+      # Tauri's Linux build needs the system webview and GTK; the bundler needs
+      # librsvg for the icons and patchelf to fix the AppImage's rpaths. Each of
+      # these is a build-time dependency of a step that fails late and cryptically
+      # without it, which is why they are installed before anything else runs.
+      #
+      # `libwebkit2gtk-4.1-dev`, NOT 4.0: ubuntu-latest is 24.04, which dropped
+      # the 4.0 package entirely. Pinning the old name is the single most common
+      # way this job breaks — and it breaks at apt, before any Rust is compiled,
+      # so the error names the package rather than a missing symbol.
+      #
+      # `xdg-utils` is here because the AppImage bundler copies /usr/bin/xdg-open
+      # into the image — this app opens URLs through tauri-plugin-opener — and
+      # fails with "xdg-open binary not found" if it is absent. The runner image
+      # happens to ship it today, so this line buys nothing on a green run; it is
+      # what stops a slimmed-down future runner from failing the LAST bundler of
+      # the three, after the deb and rpm have already been built. (Found by
+      # building this job's steps in a bare ubuntu:24.04 container, where it is
+      # genuinely missing.)
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libxdo-dev \
+            libssl-dev \
+            patchelf \
+            desktop-file-utils \
+            xdg-utils \
+            build-essential \
+            file
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: open-android-dex-tauri/package-lock.json
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: open-android-dex-tauri/src-tauri
+
+      - name: Install frontend dependencies
+        working-directory: open-android-dex-tauri
+        run: npm ci
+
+      # The AppImage bundler fetches its own toolchain at build time — AppRun,
+      # linuxdeploy, and the gtk and gstreamer plugins — from three different
+      # hosts. That is a network dependency the .deb and .rpm halves do not
+      # have, and it is the one part of this job that can fail for reasons
+      # nothing here controls. Caching it turns a repeated download into a
+      # first-run cost and takes that failure mode off the table for reruns.
+      - name: Cache AppImage tooling
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/tauri
+          key: appimage-tools-x86_64
+
+      # ---- populate src-tauri/resources/bin, exactly as the other two jobs do.
+      # The Linux payload is the same shape as the macOS one and for the same
+      # reason: the shipped scrcpy is statically linked against SDL, FFmpeg and
+      # libusb (`ldd` names only libc, libm, libudev and libcap), so there are
+      # no media libraries to place beside it the way the Windows zip needs.
+      - name: Fetch scrcpy + adb
+        shell: bash
+        run: |
+          # Not GitHub's default `bash -e`: without pipefail the `sha256sum |
+          # cut` below would swallow a failing sha256sum and pass the checksum
+          # gate on an empty string.
+          set -euo pipefail
+
+          ver="$SCRCPY_VERSION"
+          bin="open-android-dex-tauri/src-tauri/resources/bin"
+          tgz="$RUNNER_TEMP/scrcpy-linux-x86_64-v$ver.tar.gz"
+          out="$RUNNER_TEMP/scrcpy"
+          mkdir -p "$bin" "$out"
+
+          url="https://github.com/Genymobile/scrcpy/releases/download/v$ver/scrcpy-linux-x86_64-v$ver.tar.gz"
+          echo "Downloading $url"
+          # --fail, or a 404 writes its HTML body to the file and the checksum
+          # then reports a mismatch instead of a missing download.
+          curl --fail --location --show-error --silent \
+               --retry 3 --retry-all-errors \
+               --output "$tgz" "$url"
+
+          actual="$(sha256sum "$tgz" | cut -d' ' -f1)"
+          if [ "$actual" != "$SCRCPY_SHA256_LINUX64" ]; then
+            echo "::error title=scrcpy checksum mismatch::linux-x86_64 v$ver"
+            echo "  expected $SCRCPY_SHA256_LINUX64"
+            echo "  actual   $actual"
+            exit 1
+          fi
+          echo "Checksum OK"
+
+          tar xzf "$tgz" -C "$out"
+          # the tarball nests everything under scrcpy-linux-x86_64-v<ver>/ —
+          # flatten it. `cp -a` and not `cp -R`: only -a keeps the mode bits.
+          cp -a "$out/scrcpy-linux-x86_64-v$ver/." "$bin/"
+
+          # The man page has nowhere to go inside a .deb's private resource
+          # directory, and shipping it would mean listing it in
+          # THIRD_PARTY_LICENSES.md. (The macOS job drops the same file; the
+          # Windows job drops its .bat/.vbs launcher shims at this point.)
+          rm -f "$bin/scrcpy.1"
+
+          chmod +x "$bin/adb" "$bin/scrcpy"
+          ls -l "$bin"
+
+      - name: Download phone payloads (launcher APK + wmd dex)
+        uses: actions/download-artifact@v4
+        with:
+          name: phone-payloads
+          path: open-android-dex-tauri/src-tauri/resources/bin
+
+      - name: Verify bundled binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          bin="open-android-dex-tauri/src-tauri/resources/bin"
+
+          missing=()
+          for f in adb scrcpy scrcpy-server icon.png \
+                   openandroiddex-launcher.apk openandroiddex-wmd.dex; do
+            [ -f "$bin/$f" ] || missing+=("$f")
+          done
+          if [ ${#missing[@]} -gt 0 ]; then
+            echo "::error::missing from $bin: ${missing[*]}"
+            exit 1
+          fi
+
+          # A cleared execute bit is invisible until the first adb call fails at
+          # runtime with a permission error that names no cause.
+          for f in adb scrcpy; do
+            [ -x "$bin/$f" ] || { echo "::error::$bin/$f is not executable"; exit 1; }
+          done
+
+          # …and the wrong tarball is invisible until the app runs on a machine
+          # that cannot execute it. `file` is the Linux answer to the macOS job's
+          # `lipo -archs`; unlike lipo it reports one architecture rather than a
+          # list, because ELF has no fat binaries.
+          for f in adb scrcpy; do
+            case "$(file -b "$bin/$f")" in
+              *x86-64*) ;;
+              *) echo "::error::$f is $(file -b "$bin/$f"), expected x86-64"; exit 1 ;;
+            esac
+          done
+
+          # scrcpy's Linux release links SDL, FFmpeg and libusb statically —
+          # `ldd` names only libc, libm, libudev and libcap. That fact is what
+          # lets the .deb declare two extra dependencies rather than a media
+          # stack, so it is an assumption this build rests on rather than a
+          # detail. If upstream ever ships a dynamic build instead, the package
+          # still builds and installs and then fails to run on any machine
+          # without SDL — assert it here, where the message says what changed.
+          for lib in libSDL2 libavcodec libavformat libavutil libswresample libusb; do
+            if ldd "$bin/scrcpy" | grep -q "$lib"; then
+              echo "::error::bundled scrcpy now links $lib dynamically — it used to be static."
+              echo "  The deb/rpm dependency lists in tauri.linux.conf.json no longer cover it."
+              ldd "$bin/scrcpy"
+              exit 1
+            fi
+          done
+
+          # Keep the shipped licence notice honest about what is actually bundled.
+          lic="open-android-dex-tauri/src-tauri/resources/THIRD_PARTY_LICENSES.md"
+          grep -qF "scrcpy $SCRCPY_VERSION" "$lic" || {
+            echo "::error::THIRD_PARTY_LICENSES.md does not mention scrcpy $SCRCPY_VERSION — update it alongside SCRCPY_VERSION"
+            exit 1
+          }
+
+          ls -l "$bin"
+
+      - name: Build Tauri app
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # No RUSTFLAGS here. `+crt-static` is the Windows job's way of not
+          # depending on a redistributable MSVC runtime; the Linux equivalent
+          # would be a static glibc, which breaks NSS and is not what any distro
+          # expects a .deb to do. The .deb and .rpm declare their dependencies
+          # instead (tauri.linux.conf.json), and the AppImage carries its own.
+        with:
+          projectPath: open-android-dex-tauri
+          tauriScript: npx tauri
+          # `--bundles` overrides tauri.conf.json's Windows-only ["nsis"].
+          # tauri.linux.conf.json sets the same three, so this is belt and
+          # braces — and it is what documents the intent at the call site.
+          args: --bundles deb,rpm,appimage
+
+      - name: Stage release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          V="${{ needs.version.outputs.version }}"
+          # No `--target`, so the bundle tree is directly under release/ — the
+          # same shape as the Windows job, not the macOS one.
+          B="open-android-dex-tauri/src-tauri/target/release/bundle"
+          mkdir -p dist
+
+          # Renamed to the Open.Android.DeX_<version>_<arch>.<ext> shape the
+          # other platforms publish. The bundler's own names differ per format —
+          # deb is lower-case-and-hyphens, rpm carries a release number, the
+          # AppImage keeps the product name — and a releases page listing three
+          # spellings of one product reads as three different things.
+          cp "$B"/deb/*.deb           "dist/Open.Android.DeX_${V}_amd64.deb"
+          cp "$B"/rpm/*.rpm           "dist/Open.Android.DeX_${V}_x86_64.rpm"
+          cp "$B"/appimage/*.AppImage "dist/Open.Android.DeX_${V}_amd64.AppImage"
+          ls -l dist
+
+      # The AppImage's own execute bit does not survive this — upload-artifact
+      # strips it, and so does every browser that downloads one. That is why the
+      # release notes say to `chmod +x` it, and it is not worth working around:
+      # the bits inside the .deb and .rpm are carried by the archive format
+      # itself, so the packaged installs are unaffected.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-linux
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 1
+
   # One release, cut once, with every platform's artifacts already in hand.
-  # Naming both build jobs in `needs` waits for the macOS matrix in full.
+  # Naming every build job in `needs` waits for the macOS matrix in full.
   release:
-    needs: [version, build-windows, build-macos]
+    needs: [version, build-windows, build-macos, build-linux]
     if: ${{ !inputs.dry_run }}
     runs-on: ubuntu-latest
     steps:

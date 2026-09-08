@@ -48,6 +48,10 @@ fn hook() -> &'static Mutex<(u64, u32)> {
 /// reasons nobody can reproduce.
 static SWALLOW_UP: AtomicBool = AtomicBool::new(false);
 
+pub fn supported() -> bool {
+    true
+}
+
 pub fn start(_app: AppHandle, _key: String, session: u64, stop: Arc<AtomicBool>) {
     {
         let stop = stop.clone();

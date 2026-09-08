@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { error as logError, info as logInfo } from "@tauri-apps/plugin-log";
-import { IS_MAC, MDNS_HINT, THIS_COMPUTER, THIS_COMPUTER_CAP } from "../../lib/host";
+import { IS_WINDOWS, MDNS_HINT, THIS_COMPUTER, THIS_COMPUTER_CAP } from "../../lib/host";
 import type {
   DeviceInfo,
   KnownDevice,
@@ -348,7 +348,11 @@ export function WirelessPanel({
         >
           <span aria-hidden="true">🔢</span> Type a code
         </button>
-        {!IS_MAC && (
+        {/* Windows only, and asked as such. Miracast is a Windows receiver:
+            this tab used to be drawn for anything that was not a Mac, which
+            made it appear on Linux, where every step behind it leads to a
+            Settings page that does not exist. */}
+        {IS_WINDOWS && (
           <button
             role="tab"
             aria-selected={tab === "project"}

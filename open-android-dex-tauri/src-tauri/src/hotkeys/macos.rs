@@ -74,6 +74,10 @@ struct TapState {
     tap: Option<CFRetained<CFMachPort>>,
 }
 
+pub fn supported() -> bool {
+    true
+}
+
 pub fn start(_app: AppHandle, _key: String, session: u64, stop: Arc<AtomicBool>) {
     // Asked before creating the tap, and this is not belt and braces. An
     // active tap IS an Accessibility request: on an untrusted process

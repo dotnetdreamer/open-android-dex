@@ -9,6 +9,12 @@ use std::sync::Arc;
 
 use tauri::AppHandle;
 
+/// No hook can be installed here, so `hotkeys::start` returns before it builds
+/// the machinery an installed hook would feed — see the guard in `mod.rs`.
+pub fn supported() -> bool {
+    false
+}
+
 pub fn start(_app: AppHandle, _key: String, _session: u64, _stop: Arc<AtomicBool>) {}
 
 pub fn stop() {}

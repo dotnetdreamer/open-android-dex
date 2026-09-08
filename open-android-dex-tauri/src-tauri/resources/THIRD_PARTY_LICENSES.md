@@ -16,11 +16,13 @@ Source: https://github.com/Genymobile/scrcpy
 
 Files, Windows: `scrcpy.exe`, `scrcpy-server`
 Files, macOS: `scrcpy`, `scrcpy-server`
+Files, Linux: `scrcpy`, `scrcpy-server`
 
 The scrcpy release archive also carries the libraries listed under
-"Libraries bundled by scrcpy" below, which are **not** Apache-2.0. On macOS the
-build is statically linked, so those libraries are inside the `scrcpy` binary
-rather than beside it — their licences still apply.
+"Libraries bundled by scrcpy" below, which are **not** Apache-2.0. On macOS and
+Linux the build is statically linked, so those libraries are inside the `scrcpy`
+binary rather than beside it — their licences still apply, and apply to the
+binary that contains them.
 
 ## Android Debug Bridge (adb)
 
@@ -31,8 +33,10 @@ Source: https://android.googlesource.com/platform/packages/modules/adb/
 
 Files, Windows: `adb.exe`, `AdbWinApi.dll`, `AdbWinUsbApi.dll`
 Files, macOS: `adb`
+Files, Linux: `adb`
 
-Shipped as part of the scrcpy release above, which bundles adb on both platforms.
+Shipped as part of the scrcpy release above, which bundles adb on all three
+platforms.
 
 ### Apache License 2.0
 
@@ -51,6 +55,10 @@ CONDITIONS OF ANY KIND, either express or implied.
 
 These ship inside the scrcpy release archive. They are listed separately because
 they are **not** covered by scrcpy's Apache-2.0 licence.
+
+Only the Windows build ships them as separate files. The macOS and Linux builds
+are statically linked, so on those two the code below is *inside* the `scrcpy`
+binary — which changes where it is, not whether these licences apply.
 
 ### FFmpeg
 

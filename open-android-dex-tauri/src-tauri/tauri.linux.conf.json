@@ -1,0 +1,17 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "bundle": {
+    "targets": ["deb", "rpm", "appimage"],
+    "category": "Utility",
+    "linux": {
+      "deb": {
+        "depends": ["libudev1", "libcap2"],
+        "recommends": ["fonts-noto-color-emoji"]
+      },
+      "rpm": {
+        "depends": ["libudev.so.1()(64bit)", "libcap.so.2()(64bit)"],
+        "recommends": ["google-noto-emoji-color-fonts"]
+      }
+    }
+  }
+}
