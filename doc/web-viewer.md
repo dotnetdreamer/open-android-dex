@@ -196,6 +196,11 @@ Without it, scoped storage denies this uid `open()` under `/sdcard`, so listing
 comes back empty and uploads take the MediaStore route instead — no permission,
 write-only, Downloads only. The page is told which it is looking at.
 
+The DeX desktop's own **File transfer** window extends this story rather than
+forking it — same `ACTION_TRANSFER` card, same grant rule, but a copy lands
+where the user navigated instead of always in Downloads. See
+[`file-transfer.md`](file-transfer.md).
+
 ## Process placement
 
 `WebService` runs in the **launcher's own process**, unlike `LinuxService` and

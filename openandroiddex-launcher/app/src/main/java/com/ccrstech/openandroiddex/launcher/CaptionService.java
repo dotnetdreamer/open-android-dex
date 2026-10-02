@@ -481,7 +481,8 @@ public final class CaptionService extends AccessibilityService {
                 && !SettingsActivity.class.getName().equals(t.activity)
                 && !LinuxActivity.class.getName().equals(t.activity)
                 && !DockerActivity.class.getName().equals(t.activity)
-                && !TaskManagerActivity.class.getName().equals(t.activity);
+                && !TaskManagerActivity.class.getName().equals(t.activity)
+                && !FileTransferActivity.class.getName().equals(t.activity);
     }
 
     /** @return true if any caption geometry changed, i.e. windows are on the move. */
@@ -1380,9 +1381,13 @@ public final class CaptionService extends AccessibilityService {
         // The Docker window is asked for the same reason as the Linux one: its
         // ✕ stops a machine with the user's running containers in it, and a
         // task removal gives the activity no chance to say so.
+        // The File transfer window joins them for the same reason once more:
+        // its ✕ can land mid-copy, and a half-copied file the user was never
+        // warned about is worse than one more confirmation.
         if (getPackageName().equals(task.pkg)
                 && (LinuxActivity.class.getName().equals(task.activity)
-                || DockerActivity.class.getName().equals(task.activity))) {
+                || DockerActivity.class.getName().equals(task.activity)
+                || FileTransferActivity.class.getName().equals(task.activity))) {
             sendBroadcast(new android.content.Intent(LauncherActivity.ACTION_CLOSE_WINDOW)
                     .setPackage(getPackageName())
                     .putExtra("activity", task.activity));

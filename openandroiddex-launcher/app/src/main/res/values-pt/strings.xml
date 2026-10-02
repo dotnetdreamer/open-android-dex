@@ -525,4 +525,45 @@ Se desativar isto mais tarde, o Android força o encerramento do Linux e o ambie
     <string name="wb_rtc_unavailable">O WebRTC não conseguiu iniciar neste dispositivo — não há alternativa, por isso o visualizador não funciona aqui</string>
     <string name="wb_rtc_starting">A iniciar o WebRTC… quem se ligar agora espera um instante.</string>
     <string name="wb_local_only">Este endereço só funciona nesta rede. Defina um ponto de encontro abaixo para alcançar o telemóvel de qualquer lugar.</string>
+
+    <!-- ── File transfer ── -->
+    <string name="ft_label">Transferência de ficheiros</string>
+    <string name="ft_cannot_open">Não é possível abrir a transferência de ficheiros</string>
+    <string name="ft_pc_win">Este PC</string>
+    <string name="ft_pc_mac">Este Mac</string>
+    <string name="ft_pc_linux">Este computador</string>
+    <string name="ft_pc_generic">Este computador</string>
+    <string name="ft_phone">Este telemóvel</string>
+    <string name="ft_up">Subir</string>
+    <string name="ft_new_folder">Nova pasta</string>
+    <string name="ft_new_folder_title">Nova pasta</string>
+    <string name="ft_new_folder_hint">Nome da pasta</string>
+    <string name="ft_new_folder_failed">Não foi possível criar a pasta</string>
+    <string name="ft_refresh">Atualizar</string>
+    <string name="ft_loading">A carregar…</string>
+    <string name="ft_empty">Esta pasta está vazia</string>
+    <string name="ft_unreadable">Não é possível ler esta pasta</string>
+    <string name="ft_truncated">A mostrar os primeiros %1$d itens</string>
+    <string name="ft_free">%1$s livres</string>
+    <string name="ft_to_phone_into">Copiar para «%1$s»</string>
+    <string name="ft_to_pc_into">Copiar para «%1$s»</string>
+    <string name="ft_select_first">Selecione primeiro os ficheiros</string>
+    <string name="ft_selected">Selecionados: %1$d</string>
+    <string name="ft_copying">%1$s — %2$d de %3$d</string>
+    <string name="ft_cancel">Cancelar</string>
+    <string name="ft_done">%1$d ficheiros copiados para «%2$s»</string>
+    <string name="ft_done_one">Copiado para «%1$s»</string>
+    <string name="ft_failed">Falha na transferência</string>
+    <string name="ft_failed_n">%1$d de %2$d falharam</string>
+    <string name="ft_skipped_links">%1$d atalhos ignorados</string>
+    <string name="ft_skipped_links_one">1 atalho ignorado</string>
+    <string name="ft_close_busy_title">Ainda há uma cópia em curso</string>
+    <string name="ft_close_busy_body">Fechar esta janela interrompe a cópia. Os ficheiros já copiados ficam onde estão.</string>
+    <string name="ft_close_busy_go">Parar e fechar</string>
+    <string name="ft_host_unreachable">O computador não está a responder. A aplicação do computador pode ter sido reiniciada.</string>
+    <string name="ft_retry">Tentar novamente</string>
+    <string name="ft_no_storage">Este telemóvel não tem acesso a todos os ficheiros, por isso não é possível listar as suas pastas nem copiar para elas.</string>
+    <string name="ft_grant">Dar acesso</string>
+    <string name="ft_menu_downloads">Abrir a pasta Transferências do telemóvel</string>
+    <string name="ft_menu_grant">Permitir acesso a todos os ficheiros</string>
 </resources>

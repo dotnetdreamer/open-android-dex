@@ -402,6 +402,9 @@ public class TaskManagerActivity extends Activity {
             } else if (SettingsActivity.class.getName().equals(activity)) {
                 label = getString(R.string.settings_label);
                 glyph = "⚙";
+            } else if (FileTransferActivity.class.getName().equals(activity)) {
+                label = getString(R.string.ft_label);
+                glyph = "📁";
             } else {
                 continue;
             }

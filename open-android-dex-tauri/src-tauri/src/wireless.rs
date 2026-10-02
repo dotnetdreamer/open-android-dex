@@ -802,8 +802,14 @@ static QR_SESSION: Mutex<QrState> = Mutex::new(QrState {
     busy: false,
 });
 
+/// Bytes from the system CSPRNG.
+///
+/// `pub(crate)` rather than private because the file service mints its session
+/// token with it too (`files.rs`): both are live credentials for the phone, and
+/// a second implementation would be a second place to get it wrong — or to
+/// quietly fall back to a seeded hasher.
 #[cfg(windows)]
-fn fill_random(out: &mut [u8]) -> bool {
+pub(crate) fn fill_random(out: &mut [u8]) -> bool {
     use windows_sys::Win32::Security::Cryptography::{
         BCryptGenRandom, BCRYPT_USE_SYSTEM_PREFERRED_RNG,
     };
@@ -818,8 +824,9 @@ fn fill_random(out: &mut [u8]) -> bool {
     status == 0
 }
 
+/// The same, from the kernel's own pool.
 #[cfg(not(windows))]
-fn fill_random(out: &mut [u8]) -> bool {
+pub(crate) fn fill_random(out: &mut [u8]) -> bool {
     use std::io::Read as _;
     std::fs::File::open("/dev/urandom")
         .and_then(|mut f| f.read_exact(out))

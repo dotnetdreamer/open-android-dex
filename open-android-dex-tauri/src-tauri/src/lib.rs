@@ -1,6 +1,7 @@
 mod adb;
 mod diag;
 mod embed;
+mod files;
 mod gestures;
 mod hotkeys;
 mod projection;
@@ -101,6 +102,10 @@ pub fn run() {
                 // A keyboard hook must not outlive the process that owns its
                 // callback, and on macOS neither must an event tap.
                 hotkeys::stop_engine();
+                // A bound listener must not outlive the process either, and
+                // the per-session stop flag alone races us to the door: the
+                // accept thread only observes it once per 200ms poll.
+                files::shutdown_all();
             }
         });
 }

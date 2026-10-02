@@ -832,4 +832,59 @@ If you switch this off again later, Android force-closes Linux and the desktop r
     <string name="wb_rtc_unavailable">WebRTC could not start on this device — there is nothing to fall back to, so the viewer cannot run here</string>
     <string name="wb_rtc_starting">Starting WebRTC… a viewer that connects now will wait a moment.</string>
     <string name="wb_local_only">This address only works on this network. Set a rendezvous below to reach the phone from anywhere.</string>
+
+    <!-- ── File transfer ── -->
+    <string name="ft_label">File transfer</string>
+    <string name="ft_cannot_open">Cannot open File transfer</string>
+
+    <!-- Pane headings -->
+    <string name="ft_pc_win">This PC</string>
+    <string name="ft_pc_mac">This Mac</string>
+    <string name="ft_pc_linux">This computer</string>
+    <string name="ft_pc_generic">This computer</string>
+    <string name="ft_phone">This phone</string>
+
+    <!-- Navigation -->
+    <string name="ft_up">Up</string>
+    <string name="ft_new_folder">New folder</string>
+    <string name="ft_new_folder_title">New folder</string>
+    <string name="ft_new_folder_hint">Folder name</string>
+    <string name="ft_new_folder_failed">Could not create the folder</string>
+    <string name="ft_refresh">Refresh</string>
+
+    <!-- Listing states -->
+    <string name="ft_loading">Loading…</string>
+    <string name="ft_empty">This folder is empty</string>
+    <string name="ft_unreadable">This folder cannot be read</string>
+    <string name="ft_truncated">Showing the first %1$d items</string>
+    <string name="ft_free">%1$s free</string>
+
+    <!-- The copy buttons -->
+    <string name="ft_to_phone_into">Copy to %1$s</string>
+    <string name="ft_to_pc_into">Copy to %1$s</string>
+    <string name="ft_select_first">Select files first</string>
+    <string name="ft_selected">%1$d selected</string>
+
+    <!-- Copying -->
+    <string name="ft_copying">%1$s — %2$d of %3$d</string>
+    <string name="ft_cancel">Cancel</string>
+    <string name="ft_done">%1$d files copied to %2$s</string>
+    <string name="ft_done_one">Copied to %1$s</string>
+    <string name="ft_failed">Transfer failed</string>
+    <string name="ft_failed_n">%1$d of %2$d failed</string>
+    <string name="ft_skipped_links">%1$d shortcuts skipped</string>
+    <string name="ft_skipped_links_one">1 shortcut skipped</string>
+    <string name="ft_close_busy_title">A copy is still running</string>
+    <string name="ft_close_busy_body">Closing this window stops it. The files already copied stay where they are.</string>
+    <string name="ft_close_busy_go">Stop and close</string>
+
+    <!-- Faults -->
+    <string name="ft_host_unreachable">The computer is not answering. The desktop app may have been restarted.</string>
+    <string name="ft_retry">Retry</string>
+    <string name="ft_no_storage">This phone has not been given access to all files, so its folders cannot be listed or copied into.</string>
+    <string name="ft_grant">Give access</string>
+
+    <!-- Tile menu -->
+    <string name="ft_menu_downloads">Open the phone\'s Downloads folder</string>
+    <string name="ft_menu_grant">Allow access to all files</string>
 </resources>

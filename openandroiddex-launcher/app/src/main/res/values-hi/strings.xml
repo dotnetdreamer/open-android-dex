@@ -521,4 +521,45 @@
     <string name="wb_rtc_unavailable">इस डिवाइस पर WebRTC शुरू नहीं हो सका — कोई विकल्प नहीं है, इसलिए व्यूअर यहाँ नहीं चल सकता</string>
     <string name="wb_rtc_starting">WebRTC शुरू हो रहा है… अभी जुड़ने वाले दर्शक को थोड़ा रुकना होगा।</string>
     <string name="wb_local_only">यह पता केवल इसी नेटवर्क पर काम करता है। कहीं से भी फ़ोन तक पहुँचने के लिए नीचे रेंडेज़वू सेट करें।</string>
+
+    <!-- ── File transfer ── -->
+    <string name="ft_label">फ़ाइल ट्रांसफ़र</string>
+    <string name="ft_cannot_open">फ़ाइल ट्रांसफ़र नहीं खुल सका</string>
+    <string name="ft_pc_win">यह पीसी</string>
+    <string name="ft_pc_mac">यह Mac</string>
+    <string name="ft_pc_linux">यह कंप्यूटर</string>
+    <string name="ft_pc_generic">यह कंप्यूटर</string>
+    <string name="ft_phone">यह फ़ोन</string>
+    <string name="ft_up">ऊपर</string>
+    <string name="ft_new_folder">नया फ़ोल्डर</string>
+    <string name="ft_new_folder_title">नया फ़ोल्डर</string>
+    <string name="ft_new_folder_hint">फ़ोल्डर का नाम</string>
+    <string name="ft_new_folder_failed">फ़ोल्डर नहीं बनाया जा सका</string>
+    <string name="ft_refresh">रीफ़्रेश करें</string>
+    <string name="ft_loading">लोड हो रहा है…</string>
+    <string name="ft_empty">यह फ़ोल्डर खाली है</string>
+    <string name="ft_unreadable">यह फ़ोल्डर पढ़ा नहीं जा सकता</string>
+    <string name="ft_truncated">पहले %1$d आइटम दिखाए जा रहे हैं</string>
+    <string name="ft_free">%1$s खाली</string>
+    <string name="ft_to_phone_into">“%1$s” में कॉपी करें</string>
+    <string name="ft_to_pc_into">“%1$s” में कॉपी करें</string>
+    <string name="ft_select_first">पहले फ़ाइलें चुनें</string>
+    <string name="ft_selected">%1$d चुने गए</string>
+    <string name="ft_copying">%1$s — %3$d में से %2$d</string>
+    <string name="ft_cancel">रद्द करें</string>
+    <string name="ft_done">%1$d फ़ाइलें “%2$s” में कॉपी की गईं</string>
+    <string name="ft_done_one">“%1$s” में कॉपी किया गया</string>
+    <string name="ft_failed">ट्रांसफ़र विफल</string>
+    <string name="ft_failed_n">%2$d में से %1$d विफल</string>
+    <string name="ft_skipped_links">%1$d शॉर्टकट छोड़े गए</string>
+    <string name="ft_skipped_links_one">1 शॉर्टकट छोड़ा गया</string>
+    <string name="ft_close_busy_title">एक कॉपी अभी भी चल रही है</string>
+    <string name="ft_close_busy_body">यह विंडो बंद करने से कॉपी रुक जाएगी। जो फ़ाइलें पहले ही कॉपी हो चुकी हैं, वे जहाँ हैं वहीं रहेंगी।</string>
+    <string name="ft_close_busy_go">रोकें और बंद करें</string>
+    <string name="ft_host_unreachable">कंप्यूटर जवाब नहीं दे रहा है। हो सकता है डेस्कटॉप ऐप फिर से शुरू किया गया हो।</string>
+    <string name="ft_retry">फिर से कोशिश करें</string>
+    <string name="ft_no_storage">इस फ़ोन पर सभी फ़ाइलों तक पहुँच नहीं दी गई है, इसलिए इसके फ़ोल्डर न तो दिखाए जा सकते हैं और न ही उनमें कॉपी किया जा सकता है।</string>
+    <string name="ft_grant">अनुमति दें</string>
+    <string name="ft_menu_downloads">फ़ोन का Downloads फ़ोल्डर खोलें</string>
+    <string name="ft_menu_grant">सभी फ़ाइलों तक पहुँच की अनुमति दें</string>
 </resources>

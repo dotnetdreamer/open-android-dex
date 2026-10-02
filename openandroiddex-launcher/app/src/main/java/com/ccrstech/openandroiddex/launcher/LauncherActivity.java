@@ -146,7 +146,7 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
      * slowest, and being wrong here costs an exit that closes only the phone's
      * window.
      */
-    private static final long PC_SILENCE_MS = 30_000L;
+    static final long PC_SILENCE_MS = 30_000L;
 
     /**
      * Below this display width the shell lays its chrome out compactly — see
@@ -210,6 +210,23 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
      */
     public static final String ACTION_TRANSFER =
             "com.ccrstech.openandroiddex.launcher.TRANSFER";
+
+    /**
+     * The computer's file service is up: which OS it is ({@code os}), and the
+     * credential the File transfer window presents when it connects
+     * ({@code token}).
+     *
+     * <p>Sent with {@code -p}, unlike RUNNING and TRANSFER, because it carries
+     * a secret: those two are deliberately unaddressed so any receiver of ours
+     * can hear them, and a token on an unaddressed broadcast is a token every
+     * app on the phone is handed. See {@link HostLink}, which is where it
+     * lands, and files.rs on the PC side, which mints it.
+     *
+     * <p>The port is NOT sent. It is a compile-time constant on both sides, so
+     * a forged beacon can waste a connection attempt but cannot redirect one.
+     */
+    public static final String ACTION_FILES =
+            "com.ccrstech.openandroiddex.launcher.FILES";
 
     /**
      * The live desktop, so {@link WidgetDetourActivity} can tell whether there
@@ -582,6 +599,21 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
     /** The screenshot flash and the preview it leaves behind. Built on first use. */
     private ShotHud shotHud;
 
+    /**
+     * The PC's file-service beacon. Nothing is rebuilt when it lands: the File
+     * transfer tile is gated on {@link #onPhone()}, which is true from the
+     * first frame and never depends on a broadcast arriving. A beacon that
+     * never comes therefore shows up where it can be acted on — as
+     * "the computer is not answering" INSIDE the window — instead of as a tile
+     * that silently fails to appear.
+     */
+    private final BroadcastReceiver filesReceiver = new BroadcastReceiver() {
+        @Override
+        public void onReceive(Context ctx, Intent intent) {
+            HostLink.seen(intent.getStringExtra("os"), intent.getStringExtra("token"));
+        }
+    };
+
     private final BroadcastReceiver transferReceiver = new BroadcastReceiver() {
         @Override
         public void onReceive(Context ctx, Intent intent) {
@@ -784,6 +816,13 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
             registerReceiver(transferReceiver, transferFilter, Context.RECEIVER_EXPORTED);
         } else {
             registerReceiver(transferReceiver, transferFilter);
+        }
+        // Also from the PC (adb), so exported for the same reason.
+        IntentFilter filesFilter = new IntentFilter(ACTION_FILES);
+        if (android.os.Build.VERSION.SDK_INT >= 33) {
+            registerReceiver(filesReceiver, filesFilter, Context.RECEIVER_EXPORTED);
+        } else {
+            registerReceiver(filesReceiver, filesFilter);
         }
         // sticky: returns the latest battery snapshot immediately
         lastBattery = registerReceiver(batteryReceiver,
@@ -992,6 +1031,10 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
         }
         try {
             unregisterReceiver(transferReceiver);
+        } catch (Exception ignored) {
+        }
+        try {
+            unregisterReceiver(filesReceiver);
         } catch (Exception ignored) {
         }
         try {
@@ -2564,9 +2607,15 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
      * nothing else will list them: loadApps skips our own package, so an app
      * grid built from the launcher intent never contains them.
      *
-     * A list rather than a row, because both shells show these four and neither
+     * A list rather than a row, because both shells show these and neither
      * shows them the same way — the DeX drawer puts them in a labelled row
      * above the app list, the Windows 11 Start menu pins them into its grid.
+     *
+     * Two of the tiles are conditional, and for the same kind of reason: an
+     * offer that cannot be honoured is worse than no offer. Docker is absent
+     * where the APK ships no QEMU for the ABI, and File transfer is absent on
+     * the phone's own screen, where the computer whose drives fill its left
+     * pane does not exist.
      *
      * Docker sits beside Linux rather than inside it, because it is not a guest
      * of the Ubuntu container and could never be one: it is a whole virtual
@@ -2599,6 +2648,17 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
         }
         tiles.add(glyphTile("🌐", getString(R.string.wb_label),
                 v -> launchWeb(), this::showWebMenu));
+        // Only where a computer made this display. The pane on the left of
+        // that window IS the computer's filesystem, and there is no computer
+        // when the shell is drawn on the phone's own screen — the same
+        // reasoning that hides Docker where the ABI cannot run it, and the
+        // same switch buildPhoneDock is built on, so the tile can never be
+        // half-right. Last in the list on purpose: the four above keep their
+        // order, and their positions in the Windows 11 Start grid.
+        if (!onPhone()) {
+            tiles.add(glyphTile("📁", getString(R.string.ft_label),
+                    v -> launchFileTransfer(), this::showFileTransferMenu));
+        }
         return tiles;
     }
 
@@ -2662,6 +2722,12 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
             // icons" is set to large, and the ones that would be clipped are
             // Docker and the Web viewer. Scrolling costs nothing here and
             // clipping costs a tile.
+            //
+            // Still four in this branch, not five: File transfer is gated on
+            // !onPhone(), and compact() is only ever true on a display narrow
+            // enough that it is either the phone's own screen or a desktop
+            // driven at phone width. The fifth tile can appear here — a narrow
+            // desktop — which is exactly why this stays a scroller.
             HorizontalScrollView rowScroll = new HorizontalScrollView(this);
             rowScroll.setHorizontalScrollBarEnabled(false);
             rowScroll.addView(row);
@@ -2994,43 +3060,17 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
     /**
      * Ask before sending the user to the OS "All files access" screen.
      *
-     * The confirmation is not politeness. Revoking this op makes the platform
-     * kill the whole app id (StorageManagerService.killAppForOpChange), which
-     * takes a running container down mid-write AND kills the launcher — the
-     * HOME task of the desktop display. Someone who turns it on from here has
-     * to know what turning it off again does.
+     * The dialog, and the reason it has to be there at all, live in
+     * {@link WebFiles#requestAllFiles} — the File transfer window offers the
+     * same grant, and a second copy of that invariant is a second place to
+     * forget it. What stays here is the part only the desktop can do: shaping
+     * the OS screen into a freeform rect on this display.
      */
     private void requestAllFilesAccess() {
         dismissPopups();
-        new android.app.AlertDialog.Builder(this)
-                .setTitle(getString(R.string.ln_shared_grant_title))
-                .setMessage(getString(R.string.ln_shared_grant_body))
-                .setNegativeButton(getString(R.string.st_cancel), null)
-                .setPositiveButton(getString(R.string.ln_shared_grant_go),
-                        (d, w) -> openAllFilesScreen())
-                .show();
-    }
-
-    /**
-     * The OS "All files access" screen for this app.
-     *
-     * An on-device Settings screen, so it works with a PC and without one —
-     * the Linux feature is app-owned and must never need the desktop host to
-     * grant anything. We never set the app-op ourselves.
-     */
-    private void openAllFilesScreen() {
-        Intent intent = new Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
-                Uri.parse("package:" + getPackageName()))
-                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
         ActivityOptions opts = shapeForDesktop(
                 ActivityOptions.makeBasic(), desktopWindowRect(dp(820), dp(620)));
-        try {
-            startActivity(intent, opts.toBundle());
-        } catch (Exception e) {
-            DexLog.warn("linux", "cannot open the all-files-access screen", e);
-            Toast.makeText(this, getString(R.string.ln_shared_grant_failed),
-                    Toast.LENGTH_LONG).show();
-        }
+        WebFiles.requestAllFiles(this, opts.toBundle());
     }
 
     /**
@@ -3183,6 +3223,113 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
             startActivity(intent, opts.toBundle());
         } catch (Exception e) {
             Toast.makeText(this, getString(R.string.dk_cannot_open),
+                    Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    /** Right-click / long-press on the File transfer tile. */
+    private void showFileTransferMenu(View anchor) {
+        android.widget.PopupMenu menu = new android.widget.PopupMenu(this, anchor);
+        menu.getMenu().add(0, 1, 0, getString(R.string.ft_label));
+        menu.getMenu().add(0, 2, 1, getString(R.string.ft_menu_downloads));
+        // Only offered when it would do something. The desktop connect already
+        // appop-grants this, so the row is normally absent.
+        if (!WebFiles.hasAllFiles()) {
+            menu.getMenu().add(0, 3, 2, getString(R.string.ft_menu_grant));
+        }
+        // One explicit id per branch and no trailing else, for the reason
+        // spelled out on showLinuxMenu.
+        menu.setOnMenuItemClickListener(item -> {
+            int id = item.getItemId();
+            if (id == 1) {
+                launchFileTransfer();
+            } else if (id == 2) {
+                openDownloadsFolder();
+            } else if (id == 3) {
+                requestAllFilesAccess();
+            }
+            return true;
+        });
+        menu.show();
+    }
+
+    /**
+     * Open the File transfer window, centered and freeform.
+     *
+     * Wider than the other windows because it is the only one with two
+     * independent file panes side by side: below roughly 660dp of pane the
+     * layout stacks them vertically, which is the right answer on a narrow
+     * display and the wrong first sight of the feature on a desktop.
+     */
+    private void launchFileTransfer() {
+        hideDrawer();
+        dismissPopups();
+        // Same restore dance as Settings, Linux, Docker and the Web viewer:
+        // our own package has no taskbar icon, so a minimised window can only
+        // come back through CaptionService — and it must name THIS activity.
+        if (minimisedActivities.contains(FileTransferActivity.class.getName())) {
+            sendBroadcast(new Intent(ACTION_RESTORE)
+                    .setPackage(getPackageName())
+                    .putExtra("pkg", getPackageName())
+                    .putExtra("activity", FileTransferActivity.class.getName()));
+            return;
+        }
+        Intent intent = new Intent(this, FileTransferActivity.class)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        ActivityOptions opts = shapeForDesktop(ActivityOptions.makeBasic(),
+                desktopWindowRect(FileTransferActivity.class, dp(1040), dp(700)));
+        try {
+            startActivity(intent, opts.toBundle());
+        } catch (Exception e) {
+            Toast.makeText(this, getString(R.string.ft_cannot_open),
+                    Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    /**
+     * Show the phone's Downloads folder.
+     *
+     * The tile menu's shortcut to "where the last drag-and-drop landed": that
+     * folder is {@link TransferHud}'s subject and the Web viewer's upload
+     * target, so it is the one place on the phone the desktop keeps putting
+     * things.
+     *
+     * ACTION_VIEW_DOWNLOADS and not a document URI for that folder. The first
+     * shape this was written in built
+     * {@code content://…externalstorage.documents/root/primary} and paired it
+     * with MIME_TYPE_DIR — a ROOT uri with a DOCUMENT type, which lands at the
+     * top of internal storage rather than in Downloads, under a menu item that
+     * promises Downloads. DownloadManager's own action names the folder
+     * directly and needs no URI permission we cannot grant.
+     *
+     * A concrete component, for the reason TransferHud spells out at the same
+     * intent: more than one app answers this on a Samsung phone, and the
+     * chooser — launched into a freeform window on a secondary display — opens
+     * and closes again without ever showing the folder.
+     */
+    private void openDownloadsFolder() {
+        dismissPopups();
+        Intent intent = new Intent(android.app.DownloadManager.ACTION_VIEW_DOWNLOADS)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        try {
+            ComponentName target = null;
+            for (ResolveInfo ri : getPackageManager().queryIntentActivities(intent, 0)) {
+                if (ri.activityInfo == null) continue;
+                String pkg = ri.activityInfo.packageName;
+                if ("android".equals(pkg)) continue;
+                target = new ComponentName(pkg, ri.activityInfo.name);
+                break;
+            }
+            if (target != null) intent.setComponent(target);
+        } catch (Exception e) {
+            DexLog.warn("files", "cannot resolve a handler for Downloads", e);
+        }
+        ActivityOptions opts = shapeForDesktop(
+                ActivityOptions.makeBasic(), desktopWindowRect(dp(900), dp(640)));
+        try {
+            startActivity(intent, opts.toBundle());
+        } catch (Exception e) {
+            Toast.makeText(this, getString(R.string.lx_tx_cannot_open_folder),
                     Toast.LENGTH_SHORT).show();
         }
     }
@@ -5755,6 +5902,9 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
             } else if (TaskManagerActivity.class.getName().equals(activity)) {
                 label = getString(R.string.tm_title);
                 glyph = "📊";
+            } else if (FileTransferActivity.class.getName().equals(activity)) {
+                label = getString(R.string.ft_label);
+                glyph = "📁";
             } else {
                 continue;
             }
@@ -5777,6 +5927,8 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
                     launchDocker();
                 } else if (TaskManagerActivity.class.getName().equals(target)) {
                     launchTaskManager();
+                } else if (FileTransferActivity.class.getName().equals(target)) {
+                    launchFileTransfer();
                 } else {
                     launchSettings();
                 }
@@ -6162,8 +6314,9 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
 
     /** Centered rect for a desktop window of this size, clamped to the display. */
     Rect desktopWindowRect(int wPx, int hPx) {
-        // Settings, Linux, Docker, the Web viewer and the Task Manager all ask
-        // for a rect in the high hundreds of dp — sizes chosen for a 1920x1080
+        // Settings, Linux, Docker, the Web viewer, the Task Manager and the
+        // File transfer window all ask for a rect in the high hundreds of dp
+        // — sizes chosen for a 1920x1080
         // desktop. On a 381dp-wide phone every one of them clamps to the same
         // nine tenths of the screen, which is a window with a sliver of
         // wallpaper around it and the dock across its foot. Maximize instead,
@@ -6182,7 +6335,7 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
      * last left.
      *
      * Our own windows are keyed on the activity rather than the package,
-     * because five of them share one package name — see
+     * because six of them share one package name — see
      * {@link WindowMemory#keyFor(Context, String, String)}. The centred default
      * below is what a window that has never been moved still gets.
      */

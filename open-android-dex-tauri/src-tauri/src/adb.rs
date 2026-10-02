@@ -1226,6 +1226,14 @@ pub fn restore_phone(app: &tauri::AppHandle, serial: &str) {
         &["-s", serial, "forward", "--remove", &forward],
         RESTORE_TIMEOUT,
     );
+    // Same for the file service's reverse. Left behind it would point the
+    // phone at a port this process no longer owns.
+    let reverse = format!("tcp:{}", crate::files::DEVICE_PORT);
+    let _ = run_adb_timeout(
+        app,
+        &["-s", serial, "reverse", "--remove", &reverse],
+        RESTORE_TIMEOUT,
+    );
 }
 
 #[tauri::command(async)]
@@ -2018,6 +2026,34 @@ pub fn forward_wm_port(app: &tauri::AppHandle, serial: &str) -> bool {
         Ok(_) => true,
         Err(e) => {
             log::warn!("adb forward for wmd failed: {e} — host-side window control unavailable");
+            false
+        }
+    }
+}
+
+/// Let the PHONE reach a server on this computer — the mirror image of
+/// [`forward_wm_port`], for the file service the File transfer window talks to.
+///
+/// Note the argument order: `reverse` takes `<device> <host>`, the opposite way
+/// round from `forward`. Getting it backwards is accepted by adb and simply
+/// never carries anything, so it is written out in named bindings here rather
+/// than inline.
+///
+/// Dies exactly the way a forward does — a reverse does not survive the device
+/// dropping off adb — so the enforcer re-issues this beside `forward_wm_port`
+/// whenever the daemon stops answering.
+///
+/// Idempotent: adb replaces an existing reverse for the same device port.
+pub fn reverse_files_port(app: &tauri::AppHandle, serial: &str, host_port: u16) -> bool {
+    let device = format!("tcp:{}", crate::files::DEVICE_PORT);
+    let host = format!("tcp:{host_port}");
+    match run_adb_quiet(app, &["-s", serial, "reverse", &device, &host]) {
+        Ok(_) => true,
+        Err(e) => {
+            log::warn!(
+                "adb reverse for the file service failed: {e} — the File transfer \
+                 window will show this computer as unreachable"
+            );
             false
         }
     }

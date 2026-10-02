@@ -11,6 +11,7 @@ use tauri::{AppHandle, Emitter, Manager};
 
 use crate::adb;
 use crate::diag;
+use crate::files;
 use crate::shell::ShellSession;
 use crate::transfer;
 
@@ -2704,6 +2705,17 @@ impl Enforcer {
             self.run_bg(&format!(
                 "am broadcast -a com.ccrstech.openandroiddex.launcher.RUNNING --ei seq {seq} --ez fs {fs} --ez tp {tp} --es pkgs '{pkgs}'"
             ));
+            // -p, unlike RUNNING above: this one carries a credential, and
+            // RUNNING is deliberately unaddressed so any receiver of ours can
+            // hear it. Suppressed entirely when the file service did not come
+            // up, so a launcher that never hears this shows an honest
+            // "not answering" instead of a half-working window.
+            if let Some((token, os)) = crate::files::beacon(&self.key) {
+                self.run_bg(&format!(
+                    "am broadcast -a com.ccrstech.openandroiddex.launcher.FILES \
+                     -p com.ccrstech.openandroiddex.launcher --es os {os} --es token {token}"
+                ));
+            }
             self.last_pkgs = Some(pkgs);
         }
     }
@@ -2891,6 +2903,13 @@ impl Enforcer {
             let serial = self.key.split('|').next().unwrap_or("").to_string();
             if !serial.is_empty() {
                 crate::adb::forward_wm_port(&self.app, &serial);
+                // The file service's reverse died in the same event, and
+                // nothing else would ever notice: the launcher only finds out
+                // by failing to connect, which it reports as the computer
+                // being unreachable.
+                if let Some(host_port) = crate::files::host_port(&self.key) {
+                    crate::adb::reverse_files_port(&self.app, &serial, host_port);
+                }
             }
         }
         // grep on the device: the full dump is hundreds of KB and shipping
@@ -2922,7 +2941,7 @@ impl Enforcer {
 
 /// The session's virtual display and its density, or None once the session
 /// is gone (which ends both loops below).
-fn session_display(app: &AppHandle, key: &str) -> Option<(i32, i32)> {
+pub(crate) fn session_display(app: &AppHandle, key: &str) -> Option<(i32, i32)> {
     let state = app.state::<MirrorState>();
     let map = state.0.lock().unwrap();
     map.get(key).map(|s| {
@@ -3048,6 +3067,13 @@ fn spawn_freeform_enforcer(
         shared.clone(),
         stop.clone(),
     );
+
+    // The file service the phone's File transfer window talks to. Started
+    // per session and torn down with it; the reverse is what lets the phone
+    // reach it at all, and without one the window says so rather than hanging.
+    if let Some(host_port) = crate::files::start(app.clone(), key.clone(), stop.clone()) {
+        crate::adb::reverse_files_port(&app, &serial, host_port);
+    }
 
     // Request pump: its own thread and adb shell, because one drain of the
     // launcher's queue costs ~1s on the device.
@@ -3373,6 +3399,7 @@ fn monitor(app: AppHandle, mut opts: MirrorOptions, attempt: Attempt, stop: Arc<
         // the user ever started.
         stop.store(true, Ordering::SeqCst);
         transfer::forget(&key);
+        files::forget(&key);
         // …and so does the audio companion, whose lifetime nests inside the
         // desktop's. Left running it would keep diverting the phone's sound
         // to a computer that no longer shows anything. A desktop RESTART

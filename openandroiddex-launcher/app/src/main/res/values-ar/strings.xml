@@ -521,4 +521,45 @@
     <string name="wb_rtc_unavailable">تعذّر تشغيل WebRTC على هذا الجهاز — لا بديل عنه، لذا لا يمكن تشغيل العارض هنا</string>
     <string name="wb_rtc_starting">جارٍ تشغيل WebRTC… من يتصل الآن سينتظر لحظة.</string>
     <string name="wb_local_only">هذا العنوان يعمل على هذه الشبكة فقط. اضبط نقطة التقاء أدناه للوصول إلى الهاتف من أي مكان.</string>
+
+    <!-- ── File transfer ── -->
+    <string name="ft_label">نقل الملفات</string>
+    <string name="ft_cannot_open">تعذّر فتح نقل الملفات</string>
+    <string name="ft_pc_win">هذا الكمبيوتر</string>
+    <string name="ft_pc_mac">جهاز Mac هذا</string>
+    <string name="ft_pc_linux">هذا الكمبيوتر</string>
+    <string name="ft_pc_generic">هذا الكمبيوتر</string>
+    <string name="ft_phone">هذا الهاتف</string>
+    <string name="ft_up">للأعلى</string>
+    <string name="ft_new_folder">مجلد جديد</string>
+    <string name="ft_new_folder_title">مجلد جديد</string>
+    <string name="ft_new_folder_hint">اسم المجلد</string>
+    <string name="ft_new_folder_failed">تعذّر إنشاء المجلد</string>
+    <string name="ft_refresh">تحديث</string>
+    <string name="ft_loading">جارٍ التحميل…</string>
+    <string name="ft_empty">هذا المجلد فارغ</string>
+    <string name="ft_unreadable">لا يمكن قراءة هذا المجلد</string>
+    <string name="ft_truncated">يتم عرض أول %1$d عنصر</string>
+    <string name="ft_free">المساحة المتاحة: %1$s</string>
+    <string name="ft_to_phone_into">نسخ إلى %1$s</string>
+    <string name="ft_to_pc_into">نسخ إلى %1$s</string>
+    <string name="ft_select_first">اختر الملفات أولًا</string>
+    <string name="ft_selected">تم تحديد %1$d</string>
+    <string name="ft_copying">%1$s — %2$d من %3$d</string>
+    <string name="ft_cancel">إلغاء</string>
+    <string name="ft_done">تم نسخ %1$d من الملفات إلى %2$s</string>
+    <string name="ft_done_one">تم النسخ إلى %1$s</string>
+    <string name="ft_failed">فشل النقل</string>
+    <string name="ft_failed_n">فشل %1$d من %2$d</string>
+    <string name="ft_skipped_links">تم تخطي %1$d من الاختصارات</string>
+    <string name="ft_skipped_links_one">تم تخطي اختصار واحد</string>
+    <string name="ft_close_busy_title">لا تزال عملية النسخ جارية</string>
+    <string name="ft_close_busy_body">إغلاق هذه النافذة يوقف النسخ. أما الملفات التي نُسخت بالفعل فتبقى في مكانها.</string>
+    <string name="ft_close_busy_go">إيقاف وإغلاق</string>
+    <string name="ft_host_unreachable">الكمبيوتر لا يستجيب. ربما أُعيد تشغيل تطبيق سطح المكتب.</string>
+    <string name="ft_retry">إعادة المحاولة</string>
+    <string name="ft_no_storage">لم يُمنح هذا الهاتف إذن الوصول إلى كل الملفات، لذا لا يمكن عرض مجلداته أو النسخ إليها.</string>
+    <string name="ft_grant">منح الإذن</string>
+    <string name="ft_menu_downloads">فتح مجلد التنزيلات في الهاتف</string>
+    <string name="ft_menu_grant">السماح بالوصول إلى كل الملفات</string>
 </resources>

@@ -521,4 +521,45 @@
     <string name="wb_rtc_unavailable">WebRTC 无法在此设备上启动 —— 没有备选方案，查看器无法在这里运行</string>
     <string name="wb_rtc_starting">正在启动 WebRTC…… 现在连接的观看者需要稍等片刻。</string>
     <string name="wb_local_only">此地址只在本网络内有效。请在下方设置会合服务器，以便从任何地方访问手机。</string>
+
+    <!-- ── File transfer ── -->
+    <string name="ft_label">文件传输</string>
+    <string name="ft_cannot_open">无法打开文件传输</string>
+    <string name="ft_pc_win">此电脑</string>
+    <string name="ft_pc_mac">此 Mac</string>
+    <string name="ft_pc_linux">此电脑</string>
+    <string name="ft_pc_generic">此电脑</string>
+    <string name="ft_phone">此手机</string>
+    <string name="ft_up">上一级</string>
+    <string name="ft_new_folder">新建文件夹</string>
+    <string name="ft_new_folder_title">新建文件夹</string>
+    <string name="ft_new_folder_hint">文件夹名称</string>
+    <string name="ft_new_folder_failed">无法创建文件夹</string>
+    <string name="ft_refresh">刷新</string>
+    <string name="ft_loading">正在加载…</string>
+    <string name="ft_empty">此文件夹为空</string>
+    <string name="ft_unreadable">无法读取此文件夹</string>
+    <string name="ft_truncated">仅显示前 %1$d 项</string>
+    <string name="ft_free">可用 %1$s</string>
+    <string name="ft_to_phone_into">复制到“%1$s”</string>
+    <string name="ft_to_pc_into">复制到“%1$s”</string>
+    <string name="ft_select_first">请先选择文件</string>
+    <string name="ft_selected">已选择 %1$d 项</string>
+    <string name="ft_copying">%1$s — %2$d / %3$d</string>
+    <string name="ft_cancel">取消</string>
+    <string name="ft_done">已将 %1$d 个文件复制到“%2$s”</string>
+    <string name="ft_done_one">已复制到“%1$s”</string>
+    <string name="ft_failed">传输失败</string>
+    <string name="ft_failed_n">%2$d 个中有 %1$d 个失败</string>
+    <string name="ft_skipped_links">已跳过 %1$d 个快捷方式</string>
+    <string name="ft_skipped_links_one">已跳过 1 个快捷方式</string>
+    <string name="ft_close_busy_title">仍有文件正在复制</string>
+    <string name="ft_close_busy_body">关闭此窗口会停止复制。已复制的文件会保留在原处。</string>
+    <string name="ft_close_busy_go">停止并关闭</string>
+    <string name="ft_host_unreachable">电脑没有响应。桌面应用可能已重新启动。</string>
+    <string name="ft_retry">重试</string>
+    <string name="ft_no_storage">此手机尚未授予“所有文件”访问权限，因此无法列出其中的文件夹，也无法将文件复制到其中。</string>
+    <string name="ft_grant">授予权限</string>
+    <string name="ft_menu_downloads">打开手机的“下载”文件夹</string>
+    <string name="ft_menu_grant">允许访问所有文件</string>
 </resources>

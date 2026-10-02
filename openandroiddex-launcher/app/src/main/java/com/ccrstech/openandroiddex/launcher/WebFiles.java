@@ -56,6 +56,50 @@ final class WebFiles {
         return Build.VERSION.SDK_INT < 30 || Environment.isExternalStorageManager();
     }
 
+    /**
+     * Ask before sending the user to the OS "All files access" screen.
+     *
+     * <p>The confirmation is not politeness. Revoking this op makes the
+     * platform kill the whole app id
+     * ({@code StorageManagerService.killAppForOpChange}), which takes a
+     * running container down mid-write AND kills the launcher — the HOME task
+     * of the desktop display. Someone who turns it on from here has to know
+     * what turning it off again does.
+     *
+     * <p>Lives here rather than in the desktop because two windows now offer
+     * the grant — the desktop's Linux tile and the File transfer window — and
+     * a second copy of this dialog is a second place for that invariant to be
+     * forgotten. We never set the app-op ourselves; this is an on-device
+     * Settings screen, so it works with a PC and without one.
+     *
+     * @param opts window shaping for the OS screen, or null for the platform's
+     *             own default — only the desktop can shape a freeform rect.
+     */
+    static void requestAllFiles(android.app.Activity act, android.os.Bundle opts) {
+        new android.app.AlertDialog.Builder(act)
+                .setTitle(act.getString(R.string.ln_shared_grant_title))
+                .setMessage(act.getString(R.string.ln_shared_grant_body))
+                .setNegativeButton(act.getString(R.string.st_cancel), null)
+                .setPositiveButton(act.getString(R.string.ln_shared_grant_go),
+                        (d, w) -> openAllFilesScreen(act, opts))
+                .show();
+    }
+
+    private static void openAllFilesScreen(android.app.Activity act, android.os.Bundle opts) {
+        Intent intent = new Intent(android.provider.Settings
+                .ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
+                android.net.Uri.parse("package:" + act.getPackageName()))
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        try {
+            act.startActivity(intent, opts);
+        } catch (Exception e) {
+            DexLog.warn("web", "cannot open the all-files-access screen", e);
+            android.widget.Toast.makeText(act,
+                    act.getString(R.string.ln_shared_grant_failed),
+                    android.widget.Toast.LENGTH_LONG).show();
+        }
+    }
+
     static File root(Context ctx) {
         return new File(Web.root(ctx));
     }
@@ -66,9 +110,25 @@ final class WebFiles {
      * @return null when it is not, which every caller turns into a 403.
      */
     static File resolve(Context ctx, String path) {
-        if (path == null || path.isEmpty()) return root(ctx);
+        return resolve(root(ctx), path);
+    }
+
+    /**
+     * The same containment check, against a root the caller chooses.
+     *
+     * <p>Split out for the File transfer window, which browses the whole of
+     * shared storage and must not inherit {@link Web#KEY_ROOT}: that pref is
+     * the Web VIEWER's jail, it defaults to {@code /sdcard}, and no UI writes
+     * it — so reusing it verbatim would silently couple one feature's reach to
+     * another feature's unused setting, and a later Web viewer change would
+     * move the file manager's floor without anyone touching the file manager.
+     *
+     * @return null when the path escapes {@code rootDir}.
+     */
+    static File resolve(File rootDir0, String path) {
+        if (path == null || path.isEmpty()) return rootDir0;
         try {
-            File rootDir = root(ctx).getCanonicalFile();
+            File rootDir = rootDir0.getCanonicalFile();
             File target = new File(path).getCanonicalFile();
             String rootPath = rootDir.getPath();
             String targetPath = target.getPath();
@@ -107,6 +167,12 @@ final class WebFiles {
                 });
                 for (File f : children) {
                     if (f.isHidden()) continue;
+                    // A copy in flight writes <name>.part and renames at the
+                    // end (see receive below, and FileTransfer). A pane
+                    // refreshed mid-copy would otherwise list the half-written
+                    // file beside the finished ones, as a file the user can
+                    // select and copy back.
+                    if (f.getName().endsWith(".part")) continue;
                     JSONObject e = new JSONObject();
                     e.put("name", f.getName());
                     e.put("path", f.getAbsolutePath());
@@ -287,15 +353,44 @@ final class WebFiles {
     }
 
     static void finished(Context ctx, String name, String landedName, boolean ok) {
+        finished(ctx, Web.DEF_UPLOAD_DIR, name, landedName, ok);
+    }
+
+    /**
+     * The same card, for a copy that did NOT land in {@code /sdcard/Download}.
+     *
+     * <p>The File transfer window copies into whichever folder the user
+     * navigated to, and the card's whole value is its "Open folder" button —
+     * pointing that at Downloads when the file went somewhere else is worse
+     * than not raising a card at all.
+     */
+    static void finished(Context ctx, String dir, String name, String landedName, boolean ok) {
         Intent i = new Intent(LauncherActivity.ACTION_TRANSFER)
                 .setPackage(ctx.getPackageName())
                 .putExtra("name", b64(name))
-                .putExtra("dir", b64(Web.DEF_UPLOAD_DIR))
+                .putExtra("dir", b64(dir))
                 .putExtra("state", "done")
                 .putExtra("ok", ok ? 1 : 0)
                 .putExtra("fail", ok ? 0 : 1);
         if (ok && landedName != null) i.putExtra("landed", b64(landedName));
         ctx.sendBroadcast(i);
+    }
+
+    /**
+     * Bytes still free on the volume holding {@code dir}, or -1.
+     *
+     * <p>{@link android.os.StatFs} and not {@code File#getUsableSpace}: the
+     * latter answers 0 for a path the process cannot stat, which reads as a
+     * full disk and would have the File transfer window refuse a copy that
+     * would have worked.
+     */
+    static long freeBytes(File dir) {
+        try {
+            android.os.StatFs fs = new android.os.StatFs(dir.getAbsolutePath());
+            return fs.getAvailableBytes();
+        } catch (Exception e) {
+            return -1;
+        }
     }
 
     private static String b64(String s) {

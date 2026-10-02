@@ -521,4 +521,45 @@ Si lo desactivas más adelante, Android cerrará Linux a la fuerza y el escritor
     <string name="wb_rtc_unavailable">WebRTC no pudo iniciarse en este dispositivo: no hay alternativa, así que el visor no puede funcionar aquí</string>
     <string name="wb_rtc_starting">Iniciando WebRTC… quien se conecte ahora esperará un momento.</string>
     <string name="wb_local_only">Esta dirección solo funciona en esta red. Configura un punto de encuentro abajo para llegar al teléfono desde cualquier lugar.</string>
+
+    <!-- ── File transfer ── -->
+    <string name="ft_label">Transferencia de archivos</string>
+    <string name="ft_cannot_open">No se puede abrir la transferencia de archivos</string>
+    <string name="ft_pc_win">Este equipo</string>
+    <string name="ft_pc_mac">Este Mac</string>
+    <string name="ft_pc_linux">Este ordenador</string>
+    <string name="ft_pc_generic">Este ordenador</string>
+    <string name="ft_phone">Este teléfono</string>
+    <string name="ft_up">Subir</string>
+    <string name="ft_new_folder">Nueva carpeta</string>
+    <string name="ft_new_folder_title">Nueva carpeta</string>
+    <string name="ft_new_folder_hint">Nombre de la carpeta</string>
+    <string name="ft_new_folder_failed">No se ha podido crear la carpeta</string>
+    <string name="ft_refresh">Actualizar</string>
+    <string name="ft_loading">Cargando…</string>
+    <string name="ft_empty">Esta carpeta está vacía</string>
+    <string name="ft_unreadable">No se puede leer esta carpeta</string>
+    <string name="ft_truncated">Se muestran los primeros %1$d elementos</string>
+    <string name="ft_free">%1$s libres</string>
+    <string name="ft_to_phone_into">Copiar a «%1$s»</string>
+    <string name="ft_to_pc_into">Copiar a «%1$s»</string>
+    <string name="ft_select_first">Primero selecciona archivos</string>
+    <string name="ft_selected">Seleccionados: %1$d</string>
+    <string name="ft_copying">%1$s — %2$d de %3$d</string>
+    <string name="ft_cancel">Cancelar</string>
+    <string name="ft_done">%1$d archivos copiados a «%2$s»</string>
+    <string name="ft_done_one">Copiado a «%1$s»</string>
+    <string name="ft_failed">Error en la transferencia</string>
+    <string name="ft_failed_n">%1$d de %2$d han fallado</string>
+    <string name="ft_skipped_links">%1$d accesos directos omitidos</string>
+    <string name="ft_skipped_links_one">1 acceso directo omitido</string>
+    <string name="ft_close_busy_title">Todavía hay una copia en curso</string>
+    <string name="ft_close_busy_body">Si cierras esta ventana, la copia se detendrá. Los archivos ya copiados se quedan donde están.</string>
+    <string name="ft_close_busy_go">Detener y cerrar</string>
+    <string name="ft_host_unreachable">El ordenador no responde. Puede que la aplicación de escritorio se haya reiniciado.</string>
+    <string name="ft_retry">Reintentar</string>
+    <string name="ft_no_storage">Este teléfono no tiene acceso a todos los archivos, así que no se pueden mostrar sus carpetas ni copiar nada en ellas.</string>
+    <string name="ft_grant">Dar acceso</string>
+    <string name="ft_menu_downloads">Abrir la carpeta Descargas del teléfono</string>
+    <string name="ft_menu_grant">Permitir acceso a todos los archivos</string>
 </resources>

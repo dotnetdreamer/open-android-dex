@@ -258,6 +258,24 @@
             android:resizeableActivity="true"
             android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|navigation|uiMode" />
 
+        <!-- In-desktop File transfer window: the computer's drives on the
+             left, this phone's storage on the right, and the buttons between
+             them that copy a selection either way. Same task rules as
+             Settings, Linux, Docker and the Web viewer, for the same reasons.
+
+             No new permission: it speaks to the computer over INTERNET (the
+             loopback port adb reverses onto this device, exactly as the Web
+             viewer speaks over loopback) and reads storage under the
+             MANAGE_EXTERNAL_STORAGE this package already declares. -->
+        <activity
+            android:name=".FileTransferActivity"
+            android:exported="false"
+            android:label="@string/ft_label"
+            android:launchMode="singleTask"
+            android:taskAffinity="com.ccrstech.openandroiddex.launcher.filetransfer"
+            android:resizeableActivity="true"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|navigation|uiMode" />
+
         <!-- Asks for screen capture and does nothing else. It owns a TASK for
              the reason WidgetDetourActivity spells out: an activity started
              FOR A RESULT lands in the caller's task, and a system dialog

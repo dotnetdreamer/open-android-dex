@@ -521,4 +521,45 @@
     <string name="wb_rtc_unavailable">આ ઉપકરણ પર WebRTC શરૂ થઈ શક્યું નહીં — કોઈ વિકલ્પ નથી, તેથી વ્યૂઅર અહીં ચાલી શકતું નથી</string>
     <string name="wb_rtc_starting">WebRTC શરૂ થઈ રહ્યું છે… હમણાં જોડાનાર દર્શકે થોડી રાહ જોવી પડશે.</string>
     <string name="wb_local_only">આ સરનામું ફક્ત આ નેટવર્ક પર ચાલે છે. ગમે ત્યાંથી ફોન સુધી પહોંચવા નીચે રેન્ડિવુ સેટ કરો.</string>
+
+    <!-- ── File transfer ── -->
+    <string name="ft_label">ફાઇલ ટ્રાન્સફર</string>
+    <string name="ft_cannot_open">ફાઇલ ટ્રાન્સફર ખોલી શકાયું નહીં</string>
+    <string name="ft_pc_win">આ પીસી</string>
+    <string name="ft_pc_mac">આ Mac</string>
+    <string name="ft_pc_linux">આ કમ્પ્યુટર</string>
+    <string name="ft_pc_generic">આ કમ્પ્યુટર</string>
+    <string name="ft_phone">આ ફોન</string>
+    <string name="ft_up">ઉપર</string>
+    <string name="ft_new_folder">નવું ફોલ્ડર</string>
+    <string name="ft_new_folder_title">નવું ફોલ્ડર</string>
+    <string name="ft_new_folder_hint">ફોલ્ડરનું નામ</string>
+    <string name="ft_new_folder_failed">ફોલ્ડર બનાવી શકાયું નહીં</string>
+    <string name="ft_refresh">રીફ્રેશ કરો</string>
+    <string name="ft_loading">લોડ થઈ રહ્યું છે…</string>
+    <string name="ft_empty">આ ફોલ્ડર ખાલી છે</string>
+    <string name="ft_unreadable">આ ફોલ્ડર વાંચી શકાતું નથી</string>
+    <string name="ft_truncated">પહેલી %1$d આઇટમ બતાવી છે</string>
+    <string name="ft_free">%1$s ખાલી</string>
+    <string name="ft_to_phone_into">%1$s માં કૉપિ કરો</string>
+    <string name="ft_to_pc_into">%1$s માં કૉપિ કરો</string>
+    <string name="ft_select_first">પહેલાં ફાઇલો પસંદ કરો</string>
+    <string name="ft_selected">%1$d પસંદ કરેલ</string>
+    <string name="ft_copying">%1$s — %3$d માંથી %2$d</string>
+    <string name="ft_cancel">રદ કરો</string>
+    <string name="ft_done">%1$d ફાઇલો %2$s માં કૉપિ થઈ</string>
+    <string name="ft_done_one">%1$s માં કૉપિ થયું</string>
+    <string name="ft_failed">ટ્રાન્સફર નિષ્ફળ</string>
+    <string name="ft_failed_n">%2$d માંથી %1$d નિષ્ફળ</string>
+    <string name="ft_skipped_links">%1$d શૉર્ટકટ છોડી દેવાયા</string>
+    <string name="ft_skipped_links_one">1 શૉર્ટકટ છોડી દેવાયો</string>
+    <string name="ft_close_busy_title">એક કૉપિ હજી ચાલી રહી છે</string>
+    <string name="ft_close_busy_body">આ વિન્ડો બંધ કરવાથી કૉપિ અટકી જશે. પહેલેથી કૉપિ થયેલી ફાઇલો જ્યાં છે ત્યાં જ રહેશે.</string>
+    <string name="ft_close_busy_go">રોકો અને બંધ કરો</string>
+    <string name="ft_host_unreachable">કમ્પ્યુટર જવાબ આપતું નથી. કદાચ ડેસ્કટોપ ઍપ ફરી શરૂ કરવામાં આવી હોય.</string>
+    <string name="ft_retry">ફરી પ્રયાસ કરો</string>
+    <string name="ft_no_storage">આ ફોનમાં બધી ફાઇલોની ઍક્સેસ આપવામાં આવી નથી, તેથી તેના ફોલ્ડર બતાવી શકાતા નથી અને તેમાં કૉપિ પણ કરી શકાતું નથી.</string>
+    <string name="ft_grant">ઍક્સેસ આપો</string>
+    <string name="ft_menu_downloads">ફોનનું Downloads ફોલ્ડર ખોલો</string>
+    <string name="ft_menu_grant">બધી ફાઇલોની ઍક્સેસની મંજૂરી આપો</string>
 </resources>

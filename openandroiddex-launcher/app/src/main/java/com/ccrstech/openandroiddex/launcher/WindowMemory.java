@@ -69,10 +69,11 @@ final class WindowMemory {
      * puts "Chrome" somewhere means Chrome, not one of its activities.
      *
      * Our OWN package is the exception, and it has to be: Settings, Linux,
-     * Docker, the Web viewer and the Task Manager are five separate windows
-     * behind one package name, and keyed on the package alone the last one
-     * moved would decide where all five open. They each own a task (see their
-     * taskAffinity in the manifest), so the activity is what tells them apart.
+     * Docker, the Web viewer, the Task Manager and File transfer are six
+     * separate windows behind one package name, and keyed on the package alone
+     * the last one moved would decide where all six open. They each own a task
+     * (see their taskAffinity in the manifest), so the activity is what tells
+     * them apart.
      */
     static String keyFor(Context ctx, String pkg, String activity) {
         if (pkg == null || pkg.isEmpty()) return "";
