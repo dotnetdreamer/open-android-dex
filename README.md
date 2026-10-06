@@ -2,7 +2,7 @@
 
 # Open Android DeX
 
-### Your phone is already a computer. This gives it a desktop.
+### Your phone is already a computer. This gives it a desktop
 
 Plug your Android phone into your Windows PC, Mac or Linux machine and a real
 desktop opens on your screen, with a taskbar, an app drawer, and windows you can
@@ -10,9 +10,13 @@ drag, resize and snap side by side
 
 Unplug it and your phone goes back to being a phone
 
+Or install **Open Android DeX directly on your phone** and use it without a PC.
+Run the launcher on the phone itself, on a compatible external monitor, or
+access it through the built-in Web viewer in a browser.
+
 [![Download](https://img.shields.io/github/v/release/dotnetdreamer/open-android-dex?label=Download&style=for-the-badge&color=2ea043)](https://github.com/dotnetdreamer/open-android-dex/releases/latest)
 [![Licence](https://img.shields.io/badge/Licence-GPL--3.0-blue?style=for-the-badge)](LICENSE)
-[![Platform](https://img.shields.io/badge/Windows%20%7C%20macOS%20%7C%20Linux-lightgrey?style=for-the-badge)](https://github.com/dotnetdreamer/open-android-dex/releases/latest)
+[![Platform](https://img.shields.io/badge/Android%20%7C%20Windows%20%7C%20macOS%20%7C%20Linux-lightgrey?style=for-the-badge)](https://github.com/dotnetdreamer/open-android-dex/releases/latest)
 
 **Free. Open source. No account. No subscription. No root**
 
@@ -29,7 +33,9 @@ https://github.com/user-attachments/assets/9b44d8f4-8e9b-47b5-bd44-3ef486eb8e60
 
 ---
 
-## Try it in three steps
+## Get started
+
+### On a Windows PC, Mac or Linux computer
 
 1. **Download** the app for [Windows, Mac or Linux](https://github.com/dotnetdreamer/open-android-dex/releases/latest) and install it
 2. **Turn on USB debugging** on your phone. Go to Settings, then About phone,
@@ -37,11 +43,45 @@ https://github.com/user-attachments/assets/9b44d8f4-8e9b-47b5-bd44-3ef486eb8e60
    USB debugging
 3. **Plug the phone in** and tap *Allow* when it asks
 
-The desktop opens on its own and the app gets out of your way. There is nothing
-to install on the phone. Everything it needs comes inside the download.
+The desktop opens on its own and the app gets out of your way. The desktop app
+installs the phone-side launcher for you. Everything it needs comes inside the
+download.
 
-> **Any Android phone running Android 8 or newer will work.** You do not need a
-> Samsung, a special cable, a monitor, or root.
+> **The PC setup works with Android 8 or newer.** You do not need a Samsung,
+> a special cable, a monitor, or root.
+
+### On Android, without a PC
+
+1. **Download `OpenAndroidDeX-Launcher-v<version>.apk`** from the
+   [latest release](https://github.com/dotnetdreamer/open-android-dex/releases/latest)
+   using your phone's browser
+2. **Open the APK and install it.** If Android asks, allow your browser or file
+   manager to *install unknown apps*
+3. **Launch Open Android DeX** from your phone's app list. You can use it on the
+   phone's screen, or connect a compatible monitor and open it there, including
+   inside Samsung DeX
+
+The standalone launcher includes the app drawer, widgets, settings, Ubuntu,
+Docker and the Web viewer. **No PC, USB debugging or root is needed.** You can
+also choose it as your default home app when prompted, so the phone's Home
+button or gesture returns to Open Android DeX.
+
+To keep the dock or taskbar visible over other apps, allow **Display over other
+apps** for Open Android DeX in Android settings. Tap the notification bell to
+enable notification access if you want notifications in the launcher. Enable
+the Open Android DeX accessibility service for the Mouse touchpad or browser
+control. The Web viewer asks for permission to share the screen when you start
+it.
+
+**Window support depends on your phone.** On a monitor, standalone mode uses
+the phone's own desktop mode and window controls, such as Samsung DeX. An
+external monitor needs compatible video output and an adapter. On the phone's
+screen, apps may open fullscreen if Android does not support freeform windows.
+Open Android DeX's custom title bars require the PC app and Android 14 or newer.
+
+For **Ubuntu alone**, install `LinuxOnDroid-v<version>.apk` instead. See
+[the Linux section below](#ubuntu-a-whole-linux-computer-running-on-your-phone)
+for details.
 
 ---
 
@@ -182,7 +222,7 @@ switched on behind your back.
 |  | **Open Android DeX** | Samsung DeX | Android 16 desktop mode | scrcpy | Vysor / AirDroid |
 | --- | :---: | :---: | :---: | :---: | :---: |
 | Works on any Android phone | ✅ Android 8+ | ❌ Samsung only | ❌ recent Pixels and tablets | ✅ | ✅ |
-| Needs a monitor or special cable | ❌ uses your PC screen | ✅ required | ✅ required on phones | ❌ | ❌ |
+| Needs a monitor or special cable | ❌ uses your PC or phone screen | ✅ required | ✅ required on phones | ❌ | ❌ |
 | Needs root | ❌ never | ❌ | ❌ | ❌ | ❌ |
 | Resizable windows with title bars | ✅ | ✅ | ✅ | ❌ one mirror window | ❌ one mirror window |
 | Live home screen widgets on the desktop | ✅ | ❌ | ❌ | ❌ | ❌ |
@@ -210,9 +250,9 @@ screen already in front of you, for nothing.
 
 | | |
 | --- | --- |
-| **Your computer** | Windows 10 or 11, a Mac (Intel or Apple Silicon), or a 64-bit Linux desktop |
+| **Your computer** | Optional. For the PC app: Windows 10 or 11, a Mac (Intel or Apple Silicon), or a 64-bit Linux desktop |
 | **Your phone** | Any Android 8.0 or newer |
-| **A cable** | Any USB cable that carries data, or skip it and use Wi-Fi |
+| **A cable** | None for the phone alone. For the PC app: a USB data cable or Wi-Fi. For a monitor: compatible video output and an adapter |
 | **Root** | No |
 | **An account** | No |
 | **Money** | No |
@@ -227,7 +267,7 @@ screen already in front of you, for nothing.
 | Linux — Ubuntu, Debian, Mint | `..._amd64.deb` |
 | Linux — Fedora, openSUSE | `..._x86_64.rpm` |
 | Any other Linux | `..._amd64.AppImage` |
-| **The desktop, phone only** (HDMI to a monitor, or Samsung DeX) | `OpenAndroidDeX-Launcher-v<version>.apk` |
+| **Android — standalone launcher** (phone screen, compatible monitor or Samsung DeX) | `OpenAndroidDeX-Launcher-v<version>.apk` |
 | **Just Ubuntu, phone only** | `LinuxOnDroid-v<version>.apk` |
 
 ---
@@ -237,15 +277,18 @@ screen already in front of you, for nothing.
 <details>
 <summary><b>Do I need to root my phone?</b></summary>
 
-No. Nothing here needs root and nothing needs Shizuku. All it uses is USB
-debugging, which is a normal Android setting.
+No. Nothing here needs root or Shizuku. The PC app connects through Android's
+USB or wireless debugging. The standalone Android apps do not need debugging
+enabled.
 </details>
 
 <details>
 <summary><b>Does this change my phone permanently?</b></summary>
 
-No. It switches a few display settings on while the desktop is running and puts
-them all back afterwards, including when you unplug without closing the app.
+The PC app switches a few display settings on while the desktop is running and
+puts them all back afterwards, including when you unplug without closing the
+app. In standalone mode, making Open Android DeX your default home app is
+optional, and you can switch back in Android's default-app settings.
 </details>
 
 <details>
@@ -271,9 +314,12 @@ for good in Settings → Notifications, and the bell disappears with it.
 <details>
 <summary><b>Will it work on my phone?</b></summary>
 
-Almost certainly, if it runs Android 8 or newer. It does not need Samsung
-hardware, DisplayPort, a dock or an adapter. A few phones with unusual software
-handle windows differently, so if yours misbehaves please
+The PC setup works with Android 8 or newer and does not need Samsung hardware,
+DisplayPort, a dock or an adapter. The standalone launcher also runs on the
+phone's screen; using it on an external monitor requires compatible video
+output, and resizable windows depend on the phone's desktop support. A few
+phones with unusual software handle windows differently, so if yours
+misbehaves please
 [open an issue](https://github.com/dotnetdreamer/open-android-dex/issues).
 </details>
 
