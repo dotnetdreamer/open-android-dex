@@ -60,8 +60,15 @@ public final class WmDaemon {
     static final String LAUNCHER = "com.ccrstech.openandroiddex.launcher";
     static final String CAPTION_SERVICE = LAUNCHER + "/" + LAUNCHER + ".CaptionService";
 
-    /** How long RECLAIM waits for an activity that is still starting. */
-    static final long RECLAIM_WAIT_MS = 2000L;
+    /**
+     * How long RECLAIM waits for an activity that is still starting.
+     *
+     * Under the launcher's WmClient.READ_TIMEOUT_MS (1500) on purpose. When there is
+     * nothing to take back — the usual answer: the app opened where it was asked to —
+     * the whole wait runs out, and a reply that lands after the client has hung up
+     * makes it send the request again and wait all over.
+     */
+    static final long RECLAIM_WAIT_MS = 1200L;
 
     /**
      * Launcher -> PC requests, waiting for the PC to drain them.
@@ -216,7 +223,7 @@ public final class WmDaemon {
                     out.println("ERR no desktop display");
                     return;
                 }
-                int task = topTaskFromDump(d, LAUNCHER);
+                int task = topTaskFromDump(sh("dumpsys activity activities"), d, LAUNCHER);
                 if (task < 0) {
                     out.println("OK none");     // an empty desktop is not a failure
                     return;
@@ -254,7 +261,7 @@ public final class WmDaemon {
                 long deadline = System.currentTimeMillis() + RECLAIM_WAIT_MS;
                 int[] found = null;
                 while (found == null && System.currentTimeMillis() < deadline) {
-                    found = strayTask(comp, want);
+                    found = strayTask(sh("dumpsys activity activities"), comp, want);
                     if (found == null) sleep(120);
                 }
                 if (found == null) {
@@ -926,19 +933,25 @@ public final class WmDaemon {
     /**
      * A task running {@code component} on some display other than {@code want}.
      *
-     * Returns {task id, stack id} or null. Read from the dump rather than the task API
-     * for the reason spelled out on displayFromDump: the API is Android 12, and the
-     * phones that need any of this are older.
+     * Returns {task id, stack id} or null. Read from {@code dump} — `dumpsys activity
+     * activities` — rather than the task API for the reason spelled out on
+     * displayFromDump: the API is Android 12, and the phones that need any of this are
+     * older.
      *
-     * Matched on the ACTIVITY, never on the package: the launcher's own task carries the
-     * same package name, and a package match would cheerfully move the desktop itself
-     * onto the desktop.
+     * Null as well when the app already has a window on {@code want}: the launch landed
+     * where it was asked to, and a second window of the same app on the phone is the
+     * phone's own. Taking that one too is "I opened YouTube on the desktop and the
+     * YouTube I was watching on the phone vanished".
+     *
+     * Matched by package except for our own package — see matches — and only on the
+     * activities' own lines, see isHistLine.
      */
-    private static int[] strayTask(String component, int want) {
+    static int[] strayTask(String dump, String component, int want) {
         int display = -1;
         int task = -1;
         int stack = -1;
-        for (String raw : sh("dumpsys activity activities").split("\n")) {
+        int[] stray = null;
+        for (String raw : dump.split("\n")) {
             String line = raw.trim();
             if (line.startsWith("Display #")) {
                 display = intAfter(line, "Display #");
@@ -952,12 +965,13 @@ public final class WmDaemon {
             }
             // The activity lives on the Hist line under its task, so the ids above are
             // still the ones this line belongs to.
-            if (task >= 0 && display != want && display >= 0
-                    && line.contains("ActivityRecord{") && matches(line, component)) {
-                return new int[]{task, stack >= 0 ? stack : task};
+            if (task < 0 || display < 0 || !isHistLine(line) || !matches(line, component)) {
+                continue;
             }
+            if (display == want) return null;
+            if (stray == null) stray = new int[]{task, stack >= 0 ? stack : task};
         }
-        return null;
+        return stray;
     }
 
     /** Uninterruptible enough for a poll; a spurious wake just polls again. */
@@ -993,20 +1007,49 @@ public final class WmDaemon {
      * Task id of the front-most task on {@code displayId} that is not {@code skipPkg},
      * or -1. The dump prints each display's tasks top to bottom, so the first match is
      * the window a person would call the one in front.
+     *
+     * Found through its activity (isHistLine) rather than its task line. After the last
+     * display the dump lists every display's tasks again, under headers that are not
+     * "Display #" — so a desktop holding nothing but the launcher, printed last, used to
+     * run on into that listing and answer with a task of the PHONE's, which CLOSETOP
+     * then closed.
      */
-    private static int topTaskFromDump(int displayId, String skipPkg) {
+    static int topTaskFromDump(String dump, int displayId, String skipPkg) {
         boolean here = false;
-        for (String raw : sh("dumpsys activity activities").split("\n")) {
+        int task = -1;
+        for (String raw : dump.split("\n")) {
             String line = raw.trim();
             if (line.startsWith("Display #")) {
                 here = intAfter(line, "Display #") == displayId;
+                task = -1;
                 continue;
             }
-            if (!here || !line.startsWith("* ") || !isTaskLine(line)) continue;
-            if (line.contains(skipPkg)) continue;
-            return intAfter(line, " #");
+            if (!here) continue;
+            if (isTaskLine(line) && line.startsWith("* ")) {
+                task = intAfter(line, " #");
+                continue;
+            }
+            if (task >= 0 && isHistLine(line) && !line.contains(skipPkg)) return task;
         }
         return -1;
+    }
+
+    /**
+     * Whether a trimmed dump line is an activity's own entry under its task:
+     * "* Hist #0: ActivityRecord{…}", or "* Hist  #0:" as Android 15 pads it.
+     *
+     * The only lines that may be read as "this activity lives in the task above". The
+     * dump names activities in a dozen other places — mLastPausedActivity, printed
+     * before its own task's line; ResumedActivity and mFocusedApp, printed after the
+     * last display — and with the display and task still set from the section parsed
+     * last, each of those reads as an activity of the phone's bottom-most task. That is
+     * how opening YouTube on a Galaxy A13's desktop moved Google's voice search onto it,
+     * and opening Clock moved Settings.
+     */
+    private static boolean isHistLine(String line) {
+        return line.startsWith("* Hist")
+                && line.substring("* Hist".length()).trim().startsWith("#")
+                && line.contains("ActivityRecord{");
     }
 
     /**

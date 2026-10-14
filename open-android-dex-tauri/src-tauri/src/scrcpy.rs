@@ -35,6 +35,18 @@ pub struct MirrorOptions {
     pub audio: bool,
     #[serde(default)]
     pub stay_awake: bool,
+    /// scrcpy --keep-active (4.0+): report user activity on the session's
+    /// display every few seconds, so it never times out while it is open.
+    ///
+    /// Not a replacement for `stay_awake`, and the two cover different
+    /// halves. `--stay-awake` is a global setting that only holds while the
+    /// phone is CHARGING, which a USB cable usually means and a wireless
+    /// session on battery never does — there, an idle desktop (reading, no
+    /// mouse movement) used to time out and go dark under the user. This one
+    /// works on either power source and changes no setting, so there is
+    /// nothing to put back if the PC side dies.
+    #[serde(default)]
+    pub keep_active: bool,
     #[serde(default)]
     pub turn_screen_off: bool,
     #[serde(default)]
@@ -163,6 +175,10 @@ pub struct SessionHandle {
     display_id: Arc<AtomicI32>,
     /// Density (dpi) of the virtual display, from the same log line.
     density: Arc<AtomicI32>,
+    /// The size the virtual display was actually created at, from the same
+    /// log line — which is not always the size `--new-display` asked for: see
+    /// [`parse_display_size_announced`]. None until the line is seen.
+    display_size: Arc<Mutex<Option<(i32, i32)>>>,
     /// Native window handle once embedded into the shell (0 = not embedded).
     hwnd: Arc<std::sync::atomic::AtomicIsize>,
     /// Last lines scrcpy printed on this attempt.
@@ -241,6 +257,9 @@ fn build_args(opts: &MirrorOptions) -> Vec<String> {
     if opts.stay_awake {
         args.push("--stay-awake".into());
     }
+    if opts.keep_active {
+        args.push("--keep-active".into());
+    }
     if opts.turn_screen_off {
         args.push("--turn-screen-off".into());
     }
@@ -283,6 +302,12 @@ fn build_args(opts: &MirrorOptions) -> Vec<String> {
     // out because the transfer HUD names the folder and the progress poll
     // stats the file in it — see transfer.rs.
     args.push(format!("--push-target={}", transfer::PUSH_TARGET));
+    // Black, which is what scrcpy drew before 4.0 made dark gray the default.
+    // It is not only the letterbox colour: since 4.0 the window opens as soon
+    // as the stream's size is known, BEFORE the first frame, and until that
+    // frame arrives this is all it shows. An empty virtual display is black,
+    // so gray would flash on every desktop start and every reconnect.
+    args.push("--background-color=000000".into());
     if let Some(display) = &opts.new_display {
         args.push(format!("--new-display={display}"));
         if opts.vd_no_decorations {
@@ -371,6 +396,9 @@ fn branded_exe(_app: &AppHandle, exe: &std::path::Path) -> std::path::PathBuf {
 
 /// Spawn scrcpy — bundled copy preferred, PATH fallback for dev machines.
 /// The bundled adb is forced via the ADB env var so scrcpy shares our server.
+///
+/// The fallback must be scrcpy 4.0 or newer: the command line carries options
+/// older releases reject outright (`--keep-active`, `--background-color`).
 fn spawn_scrcpy(app: &AppHandle, opts: &MirrorOptions) -> Result<Child, String> {
     let bin = adb::bin_dir(app)?;
     let exe = bin.join(adb::exe_name("scrcpy"));
@@ -400,13 +428,14 @@ fn spawn_scrcpy(app: &AppHandle, opts: &MirrorOptions) -> Result<Child, String> 
         adb::warn_if_not_executable(&adb_path);
         // On Windows, a NAME — never a path.
         //
-        // scrcpy builds the command line for its adb child by joining argv with
-        // spaces and no quoting ("only make it work for this very simple case",
-        // sys/win/process.c), so `CreateProcess` has to guess where the
-        // executable ends. Handing it `C:\Users\Laptop city\…\adb.exe` makes
-        // that a guess, and on at least one machine it guessed wrong and failed
-        // the whole session with `CreateProcessW() error 193` before a display
-        // could exist. A bare name has nowhere to go wrong: `CreateProcess`
+        // scrcpy before 4.0 built the command line for its adb child by joining
+        // argv with spaces and no quoting ("only make it work for this very
+        // simple case", sys/win/process.c), so `CreateProcess` had to guess
+        // where the executable ends. Handing it `C:\Users\Laptop city\…\adb.exe`
+        // made that a guess, and on at least one machine it guessed wrong and
+        // failed the whole session with `CreateProcessW() error 193` before a
+        // display could exist. 4.0 quotes every argument (util/command.c), but
+        // the bare name stays: it is still exactly right — `CreateProcess`
         // searches the calling program's own directory first, and scrcpy.exe
         // lives in the same directory as the adb.exe we want it to use.
         //
@@ -422,26 +451,29 @@ fn spawn_scrcpy(app: &AppHandle, opts: &MirrorOptions) -> Result<Child, String> 
         cmd.env("ADB", &adb_path);
     }
     // Our logo on the mirror window (and its taskbar button) instead of
-    // scrcpy's android.
+    // scrcpy's.
     //
-    // The Windows build is PORTABLE, so scrcpy otherwise loads `icon.png`
-    // from its own directory — and that is the icon.png out of the scrcpy
-    // zip, sitting right next to the exe. Current scrcpy takes a full file
-    // path in SCRCPY_ICON_PATH (verified against the bundled binary's
-    // strings); older builds took the containing directory in
-    // SCRCPY_ICON_DIR, which the PATH fallback on a dev machine may still
-    // be. Both point at the same file, and the unused one is ignored.
+    // scrcpy 4.0+ loads two images, by fixed name, from SCRCPY_ICON_DIR:
+    // `scrcpy.png`, the window icon, and `disconnected.png`, which fills the
+    // window for two seconds when the phone drops. resources/icon holds both —
+    // our logo under scrcpy's name, and scrcpy's own disconnected picture.
+    // Without the variable the bundled (portable) builds read both from beside
+    // the exe, where `scrcpy.png` is scrcpy's logo. A directory missing either
+    // file is not fatal, but each miss is an ERROR line in the session log.
+    // (3.x read a single file path from SCRCPY_ICON_PATH instead; it is no
+    // longer set, because 4.0+ ignores it.)
     //
-    // Unlike ADB above, neither string reaches CreateProcess — scrcpy hands
-    // it straight to SDL_image — so an absolute path is safe here.
+    // Unlike ADB above, this never reaches a command line — scrcpy opens the
+    // files itself — so an absolute path is safe here.
     if let Ok(dir) = adb::resources_dir(app).map(|d| d.join("icon")) {
-        let icon = dir.join("icon.png");
-        if icon.is_file() {
-            cmd.env("SCRCPY_ICON_PATH", &icon);
+        if dir.join("scrcpy.png").is_file() {
             cmd.env("SCRCPY_ICON_DIR", &dir);
         }
     }
-    let args = build_args(opts);
+    #[allow(unused_mut)] // only Windows adds to it
+    let mut args = build_args(opts);
+    #[cfg(windows)]
+    args.push(format!("--port={}", listen_port_range()));
     // The exact command line, because every scrcpy failure is a question
     // about which option it was given.
     log::info!(
@@ -461,6 +493,32 @@ fn spawn_scrcpy(app: &AppHandle, opts: &MirrorOptions) -> Result<Child, String> 
     adb::hide_console(&mut cmd);
     cmd.spawn()
         .map_err(|e| format!("failed to start scrcpy: {e}"))
+}
+
+/// Where the next session's scrcpy starts looking for a port to listen on
+/// while its server dials back — Windows only.
+///
+/// scrcpy walks its port range (27183:27199) and takes the first port it can
+/// listen on, which keeps concurrent sessions apart everywhere but Windows. It
+/// sets SO_REUSEADDR, and on Windows that lets a second process bind a port
+/// another is already LISTENING on. So the desktop and its audio companion,
+/// spawned a fraction of a second apart, both sat on 27183, both `adb reverse`
+/// rules pointed at it, and each server's connection landed in whichever of the
+/// two processes Windows chose — on a Galaxy A13, no sound at all, and on a
+/// second try the desktop lost its own video and control sockets as well.
+///
+/// Each spawn therefore starts one port further along. A port is only held
+/// until the server has connected (scrcpy closes the listener then), so a few
+/// seconds of each session's start, and the rotation can wrap freely.
+#[cfg(windows)]
+static NEXT_PORT: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(0);
+
+#[cfg(windows)]
+fn listen_port_range() -> String {
+    const FIRST: u16 = 27183;
+    const LAST: u16 = 27199;
+    let first = FIRST + NEXT_PORT.fetch_add(1, Ordering::SeqCst) % (LAST - FIRST + 1);
+    format!("{first}:{LAST}")
 }
 
 /// "[server] INFO: New display: 1920x1080/370 (id=3)" → 3
@@ -485,6 +543,20 @@ fn parse_display_density(line: &str) -> Option<i32> {
     num.parse().ok()
 }
 
+/// "New display: 1920x1072/160 (id=3)" → (1920, 1072)
+///
+/// The size the display was really created at, which since scrcpy 4.0 need not
+/// be the one `--new-display` asked for: the server rounds it DOWN to a
+/// multiple of the video encoder's size alignment (`NewDisplayCapture.prepare`),
+/// so an encoder that wants 16 turns 1920x1080 into 1920x1072. The two phones
+/// checked when upgrading report 2, which leaves 1080 alone — but maximized
+/// windows and the taskbar strip are measured from the bottom edge, and must
+/// not depend on which encoder a phone happens to have.
+fn parse_display_size_announced(line: &str) -> Option<(i32, i32)> {
+    let rest = &line[line.find("New display:")? + "New display:".len()..];
+    parse_display_size(rest.split_whitespace().next()?)
+}
+
 /// Drain one of scrcpy's output pipes: record every line, watch for the
 /// virtual display id and announce it to the webview once seen.
 ///
@@ -492,12 +564,14 @@ fn parse_display_density(line: &str) -> Option<i32> {
 /// itself in INFO lines ("Device: …", "Renderer: …", "New display: …") and the
 /// one that is missing is usually the whole answer; throwing them away left
 /// nothing to read when a phone stopped part-way.
+#[allow(clippy::too_many_arguments)]
 fn spawn_output_reader<R: Read + Send + 'static>(
     app: AppHandle,
     key: String,
     serial: String,
     display_id: Arc<AtomicI32>,
     density: Arc<AtomicI32>,
+    display_size: Arc<Mutex<Option<(i32, i32)>>>,
     output: OutputLog,
     stream: R,
 ) {
@@ -527,9 +601,14 @@ fn spawn_output_reader<R: Read + Send + 'static>(
                     if let Some(d) = parse_display_density(&line) {
                         density.store(d, Ordering::SeqCst);
                     }
+                    // Before the id, so that whoever sees the id sees the size.
+                    let size = parse_display_size_announced(&line);
+                    if size.is_some() {
+                        *display_size.lock().unwrap() = size;
+                    }
                     display_id.store(id, Ordering::SeqCst);
                     log::info!(
-                        "scrcpy [{key}] virtual display id={id} density={}",
+                        "scrcpy [{key}] virtual display id={id} density={} size={size:?}",
                         density.load(Ordering::SeqCst)
                     );
                     let _ = app.emit(
@@ -571,6 +650,7 @@ fn register_session(
     // "New display" line is never seen, the taskbar height and the maximize
     // bounds still come out right.
     let density = Arc::new(AtomicI32::new(requested_density(opts).unwrap_or(-1)));
+    let display_size = Arc::new(Mutex::new(None));
     let output: OutputLog = Arc::new(Mutex::new(VecDeque::with_capacity(OUTPUT_KEEP)));
     if let Some(out) = child.stdout.take() {
         spawn_output_reader(
@@ -579,6 +659,7 @@ fn register_session(
             opts.serial.clone(),
             display_id.clone(),
             density.clone(),
+            display_size.clone(),
             output.clone(),
             out,
         );
@@ -590,6 +671,7 @@ fn register_session(
             opts.serial.clone(),
             display_id.clone(),
             density.clone(),
+            display_size.clone(),
             output.clone(),
             err,
         );
@@ -603,6 +685,7 @@ fn register_session(
         app_package: opts.app_package.clone(),
         display_id: display_id.clone(),
         density: density.clone(),
+        display_size,
         hwnd: Arc::new(std::sync::atomic::AtomicIsize::new(0)),
         output: output.clone(),
         audio_playback: opts.audio_playback,
@@ -857,6 +940,7 @@ fn record_comp(line: &str) -> Option<String> {
 /// nothing over parsing a single section of it.
 fn parse_all_display_tasks(dump: &str) -> Vec<(i32, Vec<TaskRec>)> {
     let mut out = Vec::new();
+    let root = root_task_indent(dump);
     // Everything before the first header belongs to no display.
     for chunk in dump.split("Display #").skip(1) {
         // "18 (activities from top to bottom):" — take the leading run of digits, which
@@ -868,9 +952,21 @@ fn parse_all_display_tasks(dump: &str) -> Vec<(i32, Vec<TaskRec>)> {
         else {
             continue;
         };
-        out.push((id, parse_section(chunk)));
+        out.push((id, parse_section(chunk, root)));
     }
     out
+}
+
+/// The indent the dump prints ROOT tasks at: that of the first task line under any
+/// display. It is the same for every display (2 on Android 15, 4 on One UI 4), which is
+/// what lets it tell a display's own tasks from the listing after the last display —
+/// see parse_section.
+fn root_task_indent(dump: &str) -> Option<usize> {
+    let body = &dump[dump.find("Display #")?..];
+    body.lines().find_map(|line| {
+        let t = line.trim_start();
+        t.starts_with("* Task{").then(|| line.len() - t.len())
+    })
 }
 
 /// One display's slice of the dump → its ROOT standard tasks, topmost first.
@@ -882,13 +978,22 @@ fn parse_all_display_tasks(dump: &str) -> Vec<(i32, Vec<TaskRec>)> {
 /// makes every desktop window look like it is also on the phone, which reads as the phone
 /// having claimed all of them at once.
 ///
-/// So a task line is only taken at the indent of the FIRST task line in the section.
-/// The SplitRoot container is itself `type=undefined` and skipped on its own merit; what
-/// this rejects is the standard tasks nested two levels below it.
-fn parse_section(section: &str) -> Vec<TaskRec> {
+/// So a task line is only taken at the root indent. The SplitRoot container is itself
+/// `type=undefined` and skipped on its own merit; what this rejects is the standard tasks
+/// nested two levels below it.
+///
+/// And the root indent is the DUMP's (`root`, from root_task_indent), not the section's.
+/// After the last display the dump prints the window hierarchy, which lists every
+/// display's tasks again two levels deeper, and the last section runs on into it. A
+/// display with tasks of its own measured its indent from them and skipped that listing;
+/// an EMPTY one — a desktop the moment it is created, before the launcher lands, printed
+/// last — measured it from the listing and took the phone's tasks for its own. The
+/// enforcer then re-launched the visible one onto the desktop (`am start --display`):
+/// whatever app was open on the phone when a session started jumped to the monitor.
+fn parse_section(section: &str, root: Option<usize>) -> Vec<TaskRec> {
     let mut out = Vec::new();
     let mut cur: Option<TaskRec> = None;
-    let mut root_indent: Option<usize> = None;
+    let mut root_indent: Option<usize> = root;
     for line in section.lines() {
         let t = line.trim_start();
         if t.starts_with("* Task{") {
@@ -1217,6 +1322,7 @@ fn audio_companion_options(serial: &str, dup: bool) -> MirrorOptions {
         max_fps: 0,
         audio: true,
         stay_awake: false,
+        keep_active: false,
         turn_screen_off: false,
         always_on_top: false,
         fullscreen: false,
@@ -1549,6 +1655,10 @@ struct WinState {
     /// Re-issues of the current target. Capped so an app that simply will
     /// not take our bounds cannot turn into an endless `am start` storm.
     attempts: u8,
+    /// Whether this task has been seen as a window (freeform) since we began
+    /// shaping it. One that never has, after a full round of re-launches, is
+    /// one the platform keeps full screen — see `Enforcer::unshapeable`.
+    seen_freeform: bool,
 }
 
 /// How long to wait for a transition to land before re-issuing it.
@@ -1624,6 +1734,13 @@ struct Enforcer {
     /// Reclaim attempts per task, so a window that will not come back is not chased on
     /// every poll for the rest of the session.
     reclaims: HashMap<u32, u8>,
+    /// Tasks this display keeps full screen however often they are re-launched in
+    /// freeform: an app that will not resize, on a display that will not force it
+    /// (YouTube on a Galaxy A13). Left alone until they become a window some other
+    /// way, leave the display, or are asked for from the taskbar menu. The parking
+    /// fallback used to re-arm itself for these, which re-launched the app every
+    /// PENDING_TIMEOUT for as long as it was on screen.
+    unshapeable: HashSet<u32>,
     /// Which display each task was on at the previous poll — the instrument behind
     /// `track_moves`.
     seen_on: HashMap<u32, i32>,
@@ -1938,6 +2055,9 @@ impl Enforcer {
                 "freeform-enforcer [{}] task {id} ({pkg}) menu request -> maxed={want_maxed}",
                 self.key
             );
+            // Asked for by name, so it gets a full round again even if this display
+            // refused it before.
+            self.unshapeable.remove(&id);
             self.apply(rec, want_maxed, display, density);
         }
     }
@@ -1966,6 +2086,7 @@ impl Enforcer {
             windowed: dflt,
             pending: None,
             attempts: 0,
+            seen_freeform: rec.freeform,
         });
         // a new target restarts the attempt budget
         if entry.maxed != maxed || entry.pending.is_none() {
@@ -2047,11 +2168,27 @@ impl Enforcer {
             .collect();
         let ids: HashSet<u32> = live.iter().map(|t| t.id).collect();
         self.wins.retain(|id, _| ids.contains(id));
+        // Kept while the task is on this display at all, hidden or not, so that
+        // bringing it back in front does not start the re-launches over.
+        self.unshapeable.retain(|id| tasks.iter().any(|t| t.id == *id));
 
         for rec in live {
             let id = rec.id;
             let filling = rec.fullscreen
                 || (rec.freeform && rec.bounds.is_some_and(|b| self.fills(b)));
+
+            if self.unshapeable.contains(&id) {
+                if filling {
+                    continue;
+                }
+                // It became a window after all, so it is ours to shape again.
+                self.unshapeable.remove(&id);
+            }
+            if rec.freeform {
+                if let Some(w) = self.wins.get_mut(&id) {
+                    w.seen_freeform = true;
+                }
+            }
 
             let Some(state) = self.wins.get(&id) else {
                 // Unknown task: a launch. Anything already filling the screen
@@ -2077,6 +2214,7 @@ impl Enforcer {
                             windowed: rec.bounds.unwrap_or(dflt),
                             pending: None,
                             attempts: 0,
+                            seen_freeform: rec.freeform,
                         },
                     );
                 }
@@ -2106,15 +2244,35 @@ impl Enforcer {
                     // never flip here — an app that keeps re-asserting
                     // fullscreen would oscillate forever
                     let tries = self.wins.get(&id).map_or(0, |w| w.attempts);
-                    if tries >= MAX_APPLY_ATTEMPTS {
+                    let ever_a_window = self.wins.get(&id).is_some_and(|w| w.seen_freeform);
+                    if tries >= MAX_APPLY_ATTEMPTS && !ever_a_window {
+                        // Not one of those re-launches made it a window, so
+                        // parking is no way out either — maximized is freeform
+                        // too. That is the platform refusing, not an app
+                        // fighting back, and asking again every PENDING_TIMEOUT
+                        // only re-launches it for as long as it is on screen.
+                        // Leave it full screen.
+                        log::warn!(
+                            "freeform-enforcer [{}] task {id} ({}) never became a window in \
+                             {tries} re-launches — this display keeps it full screen, leaving it be",
+                            self.key,
+                            rec.comp
+                        );
+                        self.wins.remove(&id);
+                        self.unshapeable.insert(id);
+                    } else if tries >= MAX_APPLY_ATTEMPTS {
                         // Giving up must not leave the window filling the
                         // display: it would have no caption and would sit
                         // under the taskbar, and the next tick would read it
                         // as a fresh press and flip straight back. Settle on
                         // maximized, which is reachable, keeps the caption and
                         // clears the taskbar — the next press then restores.
+                        // Reachable because this task HAS been a window: an
+                        // app that keeps re-asserting fullscreen (Brave, for
+                        // about a minute) is outlasted this way, not abandoned.
                         log::warn!(
-                            "freeform-enforcer [{}] task {id} will not settle at maxed={want}                              after {tries} tries — parking it maximized",
+                            "freeform-enforcer [{}] task {id} will not settle at maxed={want} \
+                             after {tries} tries — parking it maximized",
                             self.key
                         );
                         self.wins.get_mut(&id).unwrap().windowed = dflt;
@@ -2849,9 +3007,27 @@ impl Enforcer {
             // tasks onto a display they never belonged to.
             self.owned.clear();
             self.reclaims.clear();
+            self.unshapeable.clear();
             self.seen_on.clear();
             self.last_pkgs = None;
             self.last_display = display;
+            // The size the display was really made at, which can be a few
+            // pixels short of the one asked for (parse_display_size_announced).
+            // Per display rather than once: a reconnect mints a new one, and it
+            // may have been asked for at a size changed mid-session.
+            if let Some(size) = session_display_size(&self.app, &self.key) {
+                if self.display_size != Some(size) {
+                    log::info!(
+                        "freeform-enforcer [{}] display {display} is {}x{} (geometry was \
+                         based on {:?})",
+                        self.key,
+                        size.0,
+                        size.1,
+                        self.display_size
+                    );
+                }
+                self.display_size = Some(size);
+            }
             // Make freeform the display's DEFAULT windowing mode, so every
             // launch — including from the in-desktop home — starts windowed
             // with no fullscreen flash. Where the wm command is missing,
@@ -2952,6 +3128,16 @@ pub(crate) fn session_display(app: &AppHandle, key: &str) -> Option<(i32, i32)> 
     })
 }
 
+/// The size a session's display was actually created at, once scrcpy has
+/// announced it. None before that, and for a display only ever found through
+/// dumpsys (see `spawn_display_watchdog`), where the size asked for is all
+/// there is to go on.
+fn session_display_size(app: &AppHandle, key: &str) -> Option<(i32, i32)> {
+    let state = app.state::<MirrorState>();
+    let map = state.0.lock().unwrap();
+    map.get(key).and_then(|s| *s.display_size.lock().unwrap())
+}
+
 /// The Android display a session is showing, for callers outside this module.
 ///
 /// The gesture engine needs it per gesture rather than once: an auto-reconnect
@@ -3013,6 +3199,7 @@ fn spawn_freeform_enforcer(
                 wins: Default::default(),
                 owned: Default::default(),
                 reclaims: Default::default(),
+                unshapeable: Default::default(),
                 seen_on: Default::default(),
                 wm: crate::wm::WmClient::new(),
                 last_display: -1,
@@ -3527,32 +3714,51 @@ fn display_is_trusted(dump: &str) -> bool {
     dump.contains("FLAG_TRUSTED")
 }
 
+/// The `DisplayInfo{…}` line for logical display `id`, out of `dumpsys display`.
+///
+/// Matched on the character after the number as well as the number, so display 1
+/// does not answer display 11's question — and that character depends on the
+/// release. Android 10 closes the quoted name with it (`DisplayInfo{"scrcpy,
+/// displayId 11", …`), Android 12 still prints a stray quote (`DisplayInfo{"scrcpy",
+/// displayId 15", …`), and Android 13 and later a comma (`displayId 2, …`). Matching
+/// the quote alone never found the display on 13+, so a phone there whose maker
+/// withholds trusted displays was never told why typing did not work.
+fn display_info_line(dump: &str, id: i32) -> Option<&str> {
+    let needle = format!("displayId {id}");
+    dump.lines().find(|line| {
+        line.contains("DisplayInfo{")
+            && line
+                .match_indices(needle.as_str())
+                .any(|(at, _)| matches!(line[at + needle.len()..].chars().next(), Some('"' | ',')))
+    })
+}
+
 /// One dumpsys, once per session, off the thread that reads scrcpy's output.
 fn warn_if_display_untrusted(app: &AppHandle, serial: &str, session_key: &str, id: i32) {
-    // The logical display's own line: `DisplayInfo{"scrcpy, displayId 11", …}`.
-    // The closing quote is part of the pattern on purpose — without it,
-    // display 1 matches display 11's question.
-    let query = format!("dumpsys display | grep -m1 'displayId {id}\"'");
-    let Ok(dump) = adb::run_adb(app, &["-s", serial, "shell", &query]) else {
+    // Every display's info line, a handful of them; picking ours is display_info_line's
+    // job, where the format can be tested rather than spelled in a grep pattern.
+    let query = "dumpsys display | grep -F 'DisplayInfo{'";
+    let Ok(dump) = adb::run_adb(app, &["-s", serial, "shell", query]) else {
         log::warn!("{serial}: could not read the flags of display {id}");
         return;
     };
-    if dump.trim().is_empty() {
+    let Some(line) = display_info_line(&dump, id) else {
         log::warn!("{serial}: display {id} is not in dumpsys — cannot tell if it is trusted");
         return;
-    }
-    if display_is_trusted(&dump) {
+    };
+    if display_is_trusted(line) {
         log::info!("{serial}: display {id} is trusted — windows on it can take focus");
         return;
     }
-    log::warn!("{serial}: display {id} is NOT trusted: {}", dump.trim());
+    log::warn!("{serial}: display {id} is NOT trusted: {}", line.trim());
     notice(
         app,
         session_key,
+        // Not "too old": this also fires on Android 13+ phones whose maker withholds
+        // trusted displays. And "some": a Galaxy A13 gave Clock a window, YouTube none.
         concat!(
-            "This phone is too old to give apps their own windows here, so they open ",
-            "full-screen, without title bars, and typing does not reach this screen. ",
-            "The taskbar still works — use it to switch between apps and close them.",
+            "This phone doesn't fully support app windows. Some apps open full screen, ",
+            "and typing won't work. To leave an app, use Back to launcher below.",
         ),
     );
 }
@@ -4115,6 +4321,64 @@ mod tests {
         );
     }
 
+    /// A desktop the moment it exists: no tasks of its own yet and printed LAST, so its
+    /// section runs on into the window hierarchy, which repeats every display's tasks two
+    /// levels deeper. Shapes as the enforcer's grep leaves them, from a Galaxy A13
+    /// (Android 12: root tasks at indent 4) and the Android 15 emulator (indent 2).
+    const EMPTY_DESKTOP_LAST_A12: &str = concat!(
+        "Display #0 (activities from top to bottom):\n",
+        "  mBounds=Rect(0, 0 - 0, 0)\n",
+        "    * Task{6d9da2b #8 type=home A=10105:com.sec.android.app.launcher.activities.LauncherActivity U=0 rootTaskId=1 visible=true mode=fullscreen translucent=false sz=1}\n",
+        "      * Hist #0: ActivityRecord{ec3327a u0 com.sec.android.app.launcher/.activities.LauncherActivity t8}\n",
+        "  mBounds=Rect(0, 0 - 0, 0)\n",
+        "    * Task{baaf261 #901 type=standard A=10742:com.dotnetdreamer.ludowala U=0 visible=false mode=fullscreen translucent=true sz=1}\n",
+        "      * Hist #0: ActivityRecord{fc953ba u0 com.dotnetdreamer.ludowala/.MainActivity t901}\n",
+        "Display #15 (activities from top to bottom):\n",
+        "  ResumedActivity: ActivityRecord{ec3327a u0 com.sec.android.app.launcher/.activities.LauncherActivity t8}\n",
+        "  mFocusedApp=ActivityRecord{ec3327a u0 com.sec.android.app.launcher/.activities.LauncherActivity t8}\n",
+        "      * Task{acaab19 #1 type=home ?? U=0 visible=true mode=fullscreen translucent=false sz=1}\n",
+        "        * Task{6d9da2b #8 type=home A=10105:com.sec.android.app.launcher.activities.LauncherActivity U=0 rootTaskId=1 visible=true mode=fullscreen translucent=false sz=1}\n",
+        "          * ActivityRecord{ec3327a u0 com.sec.android.app.launcher/.activities.LauncherActivity t8}\n",
+        "      * Task{baaf261 #901 type=standard A=10742:com.dotnetdreamer.ludowala U=0 visible=false mode=fullscreen translucent=true sz=1}\n",
+        "        * ActivityRecord{fc953ba u0 com.dotnetdreamer.ludowala/.MainActivity t901}\n",
+    );
+    const EMPTY_DESKTOP_LAST_A15: &str = concat!(
+        "Display #0 (activities from top to bottom):\n",
+        "  * Task{df43d14 #1 type=home U=0 visible=true visibleRequested=true mode=fullscreen translucent=false sz=1}\n",
+        "    * Task{91928b #148 type=home I=com.google.android.apps.nexuslauncher/.NexusLauncherActivity U=0 rootTaskId=1 visible=false visibleRequested=false mode=fullscreen translucent=false sz=1}\n",
+        "      * Hist  #1: ActivityRecord{7df105a u0 com.google.android.apps.nexuslauncher/.NexusLauncherActivity t148}\n",
+        "  * Task{e769d3e #151 type=standard A=10209:com.dotnetdreamer.lightsnip U=0 visible=true visibleRequested=true mode=fullscreen translucent=false sz=1}\n",
+        "    * Hist  #0: ActivityRecord{96999f9 u0 com.dotnetdreamer.lightsnip/.MainActivity t151}\n",
+        "Display #2 (activities from top to bottom):\n",
+        "  ResumedActivity: ActivityRecord{96999f9 u0 com.dotnetdreamer.lightsnip/.MainActivity t151}\n",
+        "  mFocusedApp=ActivityRecord{96999f9 u0 com.dotnetdreamer.lightsnip/.MainActivity t151}\n",
+        "      * Task{df43d14 #1 type=home U=0 visible=true visibleRequested=true mode=fullscreen translucent=false sz=1}\n",
+        "        * Task{91928b #148 type=home I=com.google.android.apps.nexuslauncher/.NexusLauncherActivity U=0 rootTaskId=1 visible=false visibleRequested=false mode=fullscreen translucent=false sz=1}\n",
+        "          * ActivityRecord{7df105a u0 com.google.android.apps.nexuslauncher/.NexusLauncherActivity t148}\n",
+        "      * Task{e769d3e #151 type=standard A=10209:com.dotnetdreamer.lightsnip U=0 visible=true visibleRequested=true mode=fullscreen translucent=false sz=1}\n",
+        "        * ActivityRecord{96999f9 u0 com.dotnetdreamer.lightsnip/.MainActivity t151}\n",
+    );
+
+    /// The phone's open app must stay the phone's. Read as the desktop's, the enforcer
+    /// re-launched it onto the desktop the instant a session began.
+    #[test]
+    fn an_empty_desktop_printed_last_owns_no_tasks() {
+        for (dump, desktop, phone_task) in [
+            (EMPTY_DESKTOP_LAST_A12, 15, 901),
+            (EMPTY_DESKTOP_LAST_A15, 2, 151),
+        ] {
+            let all = parse_all_display_tasks(dump);
+            let on = |id: i32| -> Vec<u32> {
+                all.iter()
+                    .find(|(d, _)| *d == id)
+                    .map(|(_, ts)| ts.iter().map(|t| t.id).collect())
+                    .unwrap_or_default()
+            };
+            assert!(on(desktop).is_empty(), "display {desktop} took {:?}", on(desktop));
+            assert_eq!(on(0), vec![phone_task]);
+        }
+    }
+
     /// A root task with a child task is one entry, not two.
     #[test]
     fn counts_only_root_tasks() {
@@ -4200,5 +4464,105 @@ mod tests {
         // DisplayInfo.flagsToString's own, which is what dumpsys prints.
         let trusted = UNTRUSTED.replace("FLAG_PRESENTATION", "FLAG_PRESENTATION, FLAG_TRUSTED");
         assert!(display_is_trusted(&trusted));
+    }
+
+    /// `dumpsys display | grep -F 'DisplayInfo{'`, captured: a Galaxy A13 on
+    /// Android 12 (untrusted, stray quote after the id) and the Android 15
+    /// emulator (trusted, a comma). The built-in screen is in both and IS
+    /// trusted, so answering with the wrong line reads as the wrong verdict.
+    const DISPLAYS_A12: &str = concat!(
+        r#"    mBaseDisplayInfo=DisplayInfo{"Built-in Screen", displayId 0", displayGroupId 0, FLAG_SECURE, FLAG_SUPPORTS_PROTECTED_BUFFERS, FLAG_TRUSTED, real 1080 x 2408, type INTERNAL}"#,
+        "\n",
+        r#"    mBaseDisplayInfo=DisplayInfo{"scrcpy", displayId 15", displayGroupId 0, FLAG_PRESENTATION, real 1920 x 1080, type VIRTUAL, owner com.android.shell (uid 2000), removeMode 1}"#,
+        "\n",
+    );
+    const DISPLAYS_A15: &str = concat!(
+        r#"    mBaseDisplayInfo=DisplayInfo{"Built-in Screen", displayId 0, displayGroupId 0, FLAG_SECURE, FLAG_SUPPORTS_PROTECTED_BUFFERS, FLAG_TRUSTED, real 1220 x 2712, type INTERNAL}"#,
+        "\n",
+        r#"    mBaseDisplayInfo=DisplayInfo{"scrcpy", displayId 2, displayGroupId 1, FLAG_PRESENTATION, FLAG_TRUSTED, FLAG_OWN_DISPLAY_GROUP, FLAG_ALWAYS_UNLOCKED, FLAG_TOUCH_FEEDBACK_DISABLED, real 1920 x 1080,"#,
+        "\n",
+    );
+
+    /// The Android 13+ spelling went unread until 2026-10: every such display
+    /// came back "not in dumpsys", trusted or not.
+    #[test]
+    fn finds_the_display_in_every_releases_format() {
+        let a10 = display_info_line(UNTRUSTED, 11).expect("Android 10");
+        assert!(!display_is_trusted(a10));
+        let a12 = display_info_line(DISPLAYS_A12, 15).expect("Android 12");
+        assert!(a12.contains("scrcpy") && !display_is_trusted(a12));
+        let a15 = display_info_line(DISPLAYS_A15, 2).expect("Android 15");
+        assert!(a15.contains("scrcpy") && display_is_trusted(a15));
+    }
+
+    #[test]
+    fn display_1_does_not_answer_for_display_11() {
+        assert_eq!(display_info_line(UNTRUSTED, 1), None);
+        let a15 = DISPLAYS_A15.replace("displayId 2,", "displayId 12,");
+        assert_eq!(display_info_line(&a15, 1), None);
+        assert_eq!(display_info_line(&a15, 2), None);
+        assert!(display_info_line(&a15, 12).is_some());
+    }
+
+    /// scrcpy's announcement as the output reader receives it (scrcpy 5.0.1,
+    /// NewDisplayCapture), for a display asked for at 1920x1080 on an encoder
+    /// that aligns to 16.
+    const NEW_DISPLAY: &str = "[server] INFO: New display: 1920x1072/160 (id=214)";
+
+    #[test]
+    fn reads_the_new_display_announcement() {
+        assert_eq!(parse_display_id(NEW_DISPLAY), Some(214));
+        assert_eq!(parse_display_density(NEW_DISPLAY), Some(160));
+        // the size the display was made at, not the 1080 that was asked for
+        assert_eq!(parse_display_size_announced(NEW_DISPLAY), Some((1920, 1072)));
+    }
+
+    #[test]
+    fn other_lines_announce_no_display() {
+        let line = "INFO: Renderer: direct3d11";
+        assert_eq!(parse_display_id(line), None);
+        assert_eq!(parse_display_size_announced(line), None);
+    }
+
+    /// The frontend sends camelCase, and a misspelt key would drop the option
+    /// silently rather than fail — which is what this pins.
+    #[test]
+    fn a_desktop_session_keeps_its_display_awake() {
+        let opts: MirrorOptions = serde_json::from_value(serde_json::json!({
+            "serial": "X",
+            "newDisplay": "1920x1080/160",
+            "keepActive": true,
+        }))
+        .expect("desktop options");
+        let args = build_args(&opts);
+        assert!(args.iter().any(|a| a == "--keep-active"));
+        assert!(args.iter().any(|a| a == "--background-color=000000"));
+    }
+
+    /// The companion runs with --no-control, and scrcpy refuses to start with
+    /// that and --keep-active together ("Cannot keep device active if control
+    /// is disabled") — sound would silently stop following the desktop.
+    #[test]
+    fn the_audio_companion_carries_no_window_options() {
+        let args = build_args(&audio_companion_options("X", true));
+        assert!(!args
+            .iter()
+            .any(|a| a == "--keep-active" || a.starts_with("--background-color")));
+    }
+
+    /// The desktop and its audio companion are spawned back to back; on
+    /// Windows, starting both on the same port is what cross-wired their
+    /// servers' connections (see `NEXT_PORT`).
+    #[cfg(windows)]
+    #[test]
+    fn back_to_back_spawns_listen_on_different_ports() {
+        let a = listen_port_range();
+        let b = listen_port_range();
+        assert_ne!(a, b);
+        for range in [&a, &b] {
+            let (first, last) = range.split_once(':').expect("first:last");
+            assert!((27183..=27199).contains(&first.parse::<u16>().expect("port")));
+            assert_eq!(last, "27199");
+        }
     }
 }

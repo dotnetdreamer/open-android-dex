@@ -76,6 +76,11 @@ export interface MirrorOptions {
   maxFps: number; // 0 = scrcpy default
   audio: boolean;
   stayAwake: boolean;
+  /**
+   * scrcpy --keep-active: keep the session's display from timing out, on
+   * battery as well as on a charger (stayAwake only holds while charging).
+   */
+  keepActive?: boolean;
   turnScreenOff: boolean;
   alwaysOnTop: boolean;
   fullscreen: boolean;

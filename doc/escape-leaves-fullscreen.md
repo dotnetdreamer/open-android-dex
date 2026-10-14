@@ -6,7 +6,8 @@ out was the taskbar's ⛶ button. That button is on the *phone*, which is exactl
 the wrong place to reach for when the desktop is covering the whole monitor.
 
 Code: `src-tauri/src/hotkeys/`. Status: **compiles on both hosts, not verified
-on hardware.**
+on hardware.** F11 (below, added with the scrcpy 5.0.1 upgrade) compiles on
+Windows; its macOS half mirrors the Escape path but has not been compiled.
 
 ## Why a host key hook
 
@@ -71,13 +72,37 @@ worker does the work — Windows silently removes a hook whose callback is slow
 (`LowLevelHooksTimeout`), and macOS does the same to a tap. A held Escape repeats
 about thirty times a second, so a busy flag keeps one exit in flight.
 
+## F11 toggles it
+
+scrcpy 4.0 bound bare F11 to its own fullscreen — SDL's — and since then never
+forwards the key to the phone. Left alone, that is a second fullscreen beside
+ours: the taskbar's ⛶ icon cannot see it, Escape cannot leave it (the hook only
+acts on a fullscreen it knows about), and on Windows the two fight over the
+window's frame, because ours is a style change and a resize and SDL's is its own.
+
+So the same hook takes F11 as well and routes it to `embed::toggle_fullscreen` —
+the ⛶ button's own path, which keeps the icon true and Escape working. Unlike
+Escape it is taken in either state, since F11 always does something. It is still
+only taken while the desktop window is in front, and only bare, the same rule
+scrcpy applies; anywhere else it goes where it was going. Android loses nothing
+it still had: scrcpy stopped forwarding F11 in 4.0.
+
+A held F11 repeats its key-down, and each repeat reaching the toggle would flip
+fullscreen many times a second. Only the first down of a press counts; its
+repeats and its release follow that first decision (`hotkeys::f11_event`, shared
+by both backends so the two cannot drift).
+
+On Linux there is no hook, so F11 reaches scrcpy — the better outcome there:
+`embed/` cannot resize the window on Linux, which makes scrcpy's own fullscreen
+the only one that host has.
+
 ## Costs
 
 The hook is installed for the whole session rather than only while fullscreen,
 which trades a little always-on machinery for having no state machine to get
 wrong. It is cheap on purpose: every keystroke on the machine reaches the
-callback, and everything that is not Escape is passed on after two integer
-comparisons, before any state is read.
+callback, and everything that is neither Escape nor F11 is passed on after a few
+integer comparisons, before any state is read.
 
 Both backends key their teardown by a session number, for the reason
 `gestures/windows.rs` does: a session's stop-watcher outlives the hook it was

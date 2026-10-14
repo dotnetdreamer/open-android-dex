@@ -928,9 +928,11 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
         if (qsWm == null) qsWm = new WmClient();
         final WmClient client = qsWm;
         client.post(() -> {
-            boolean moved = client.reclaim(display, component.flattenToShortString());
+            int moved = client.reclaim(display, component.flattenToShortString());
             DexLog.step("launch", component.flattenToShortString()
-                    + (moved ? " — pulled onto the desktop" : " — stayed on the phone"));
+                    + (moved > 0 ? " — pulled onto the desktop (task " + moved + ")"
+                    : moved == 0 ? " — nothing to pull back"
+                    : " — the window daemon did not answer"));
         });
     }
 
@@ -1495,9 +1497,10 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
         // No overlay permission yet: show an in-activity bar so the desktop is
         // usable, but keep watching. The PC grants the app-op over adb, and if
         // it lands late this upgrades to the floating bar instead of leaving
-        // the taskbar stuck underneath every app window.
+        // the taskbar stuck underneath every app window. Not where overlays
+        // are buried: there the permission arriving changes nothing.
         addTaskbarToActivity();
-        scheduleOverlayUpgrade(0);
+        if (!overlaysBuried()) scheduleOverlayUpgrade(0);
     }
 
     private void addTaskbarToActivity() {
@@ -1512,8 +1515,53 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
         rootFrame.addView(taskbarView, lp);
     }
 
+    /** {@code Display.FLAG_TRUSTED}, hidden in the SDK; this value since Android 11. */
+    private static final int DISPLAY_FLAG_TRUSTED = 1 << 7;
+
+    /**
+     * Can an overlay window of ours be SEEN on this desktop's display? Every
+     * overlay we own — the taskbar, the Start menu, the notification cards, the
+     * HUDs — asks this rather than {@link Settings#canDrawOverlays} alone, and
+     * takes its in-activity fallback when the answer is no.
+     */
+    boolean overlaysUsable() {
+        return Settings.canDrawOverlays(this) && !overlaysBuried();
+    }
+
+    /**
+     * True where the permission is granted and the overlay is drawn UNDER the
+     * apps anyway.
+     *
+     * Samsung, on a virtual display that is not trusted: the window manager's
+     * own tree has the overlay above the apps, but One UI parents the display's
+     * whole app layer (DefaultTaskDisplayArea) to a RootWrapper above the Root
+     * that every overlay lives in. The overlay is added, reported shown, and
+     * never composited — the full-screen desktop covers it. Measured on a
+     * Galaxy A13 (One UI 4, Android 12) as SurfaceFlinger's layer tree for the
+     * scrcpy display; the phone's own screen keeps overlays above apps.
+     *
+     * Trusted displays (Android 13+, where scrcpy can ask for one) are not
+     * affected — that is the S25 Ultra the desktop is built on — and neither is
+     * MIUI, which draws overlays above apps on the same untrusted display. From
+     * Android 11 because that is where both the display-area hierarchy and the
+     * trusted flag begin.
+     */
+    private boolean overlaysBuried() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return false;
+        if (!"samsung".equalsIgnoreCase(Build.MANUFACTURER)) return false;
+        Display display = getDisplay();
+        return display != null
+                && display.getDisplayId() != Display.DEFAULT_DISPLAY
+                && (display.getFlags() & DISPLAY_FLAG_TRUSTED) == 0;
+    }
+
     /** Add the taskbar as an always-on-top overlay window; false if not permitted. */
     private boolean attachTaskbarOverlay() {
+        if (overlaysBuried()) {
+            DexLog.step("taskbar", "overlays draw under apps on this display (Samsung, "
+                    + "untrusted) — the taskbar goes inside the desktop instead");
+            return false;
+        }
         if (!android.provider.Settings.canDrawOverlays(this)) {
             DexLog.warn("taskbar", "no overlay permission yet — app windows will cover the bar");
             return false;
@@ -1671,7 +1719,7 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
         if (attempt >= 10 || taskbarOverlay) return;
         handler.postDelayed(() -> {
             if (taskbarOverlay || isFinishing()) return;
-            if (android.provider.Settings.canDrawOverlays(LauncherActivity.this)) {
+            if (overlaysUsable()) {
                 rootFrame.removeView(taskbarView);
                 if (!attachTaskbarOverlay()) addTaskbarToActivity();
             } else {
@@ -2640,8 +2688,14 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
         ((TextView) settings.getChildAt(1)).setText(getString(R.string.settings_label));
         tiles.add(settings);
 
-        tiles.add(glyphTile("🐧", getString(R.string.ln_label),
-                v -> launchLinux(), this::showLinuxMenu));
+        // Both gated on the ABI: a 32-bit install (armeabi-v7a, see the
+        // launcher's build.gradle) carries neither proot nor QEMU, and a tile
+        // that can only answer "Linux setup failed: unsupported abi" is worse
+        // than no tile.
+        if (Linux.abiSupported()) {
+            tiles.add(glyphTile("🐧", getString(R.string.ln_label),
+                    v -> launchLinux(), this::showLinuxMenu));
+        }
         if (Docker.abiSupported()) {
             tiles.add(glyphTile("🐳", getString(R.string.dk_label),
                     v -> launchDocker(), this::showDockerMenu));
@@ -4005,7 +4059,7 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
         // since the last open. ~16 views; cheaper than watching the grid.
         fillStartPinned();
         int pad = dp(compact ? 14 : 48);
-        if (android.provider.Settings.canDrawOverlays(this)) {
+        if (overlaysUsable()) {
             Point size = new Point();
             getWindowManager().getDefaultDisplay().getRealSize(size);
             WindowManager.LayoutParams lp = new WindowManager.LayoutParams(

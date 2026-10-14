@@ -172,7 +172,7 @@ final class ShotHud {
     }
 
     private void attach() {
-        if (android.provider.Settings.canDrawOverlays(act)) {
+        if (act.overlaysUsable()) {
             WindowManager.LayoutParams lp = new WindowManager.LayoutParams(
                     ViewGroup.LayoutParams.WRAP_CONTENT,
                     ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -314,7 +314,7 @@ final class ShotHud {
     // ── the flash's own window ──────────────────────────────────────────
 
     private boolean attachFlash(View sheet) {
-        if (android.provider.Settings.canDrawOverlays(act)) {
+        if (act.overlaysUsable()) {
             WindowManager.LayoutParams lp = new WindowManager.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT,
                     ViewGroup.LayoutParams.MATCH_PARENT,

@@ -8,15 +8,15 @@ its own copyright holders; none of them is a work of this project.
 
 ---
 
-## scrcpy 3.3.4
+## scrcpy 5.0.1
 
 Copyright © Genymobile, Romain Vimont and contributors.
 Licensed under the **Apache License, Version 2.0**.
 Source: https://github.com/Genymobile/scrcpy
 
-Files, Windows: `scrcpy.exe`, `scrcpy-server`
-Files, macOS: `scrcpy`, `scrcpy-server`
-Files, Linux: `scrcpy`, `scrcpy-server`
+Files, Windows: `scrcpy.exe`, `scrcpy-server`, `LICENSE.txt`
+Files, macOS: `scrcpy`, `scrcpy-server`, `LICENSE`
+Files, Linux: `scrcpy`, `scrcpy-server`, `LICENSE`
 
 The scrcpy release archive also carries the libraries listed under
 "Libraries bundled by scrcpy" below, which are **not** Apache-2.0. On macOS and
@@ -60,27 +60,36 @@ Only the Windows build ships them as separate files. The macOS and Linux builds
 are statically linked, so on those two the code below is *inside* the `scrcpy`
 binary — which changes where it is, not whether these licences apply.
 
-### FFmpeg
+### FFmpeg 9.0.2
 
 Copyright © the FFmpeg developers.
 Licensed under the **GNU Lesser General Public License, version 2.1 or later**
 (portions are GPL-2.0-or-later when built with GPL-enabled options).
 Source: https://ffmpeg.org/download.html
 
-Files, Windows: `avcodec-61.dll`, `avformat-61.dll`, `avutil-59.dll`,
-`swresample-5.dll`
+Files, Windows: `avcodec-63.dll`, `avformat-63.dll`, `avutil-61.dll`,
+`swresample-7.dll`
 
     https://www.gnu.org/licenses/old-licenses/lgpl-2.1.html
 
-### SDL2
+### dav1d 1.5.4
+
+Copyright © VideoLAN and dav1d authors.
+Licensed under the **BSD 2-Clause licence**.
+Source: https://code.videolan.org/videolan/dav1d
+
+The AV1 decoder. It has no file of its own: on Windows it is compiled into
+`avcodec-63.dll`, and on macOS and Linux into the `scrcpy` binary.
+
+### SDL3 3.4.18
 
 Copyright © Sam Lantinga and contributors.
 Licensed under the **zlib licence**.
 Source: https://github.com/libsdl-org/SDL
 
-Files, Windows: `SDL2.dll`
+Files, Windows: `SDL3.dll`
 
-### libusb
+### libusb 1.0.30
 
 Copyright © the libusb contributors.
 Licensed under the **GNU Lesser General Public License, version 2.1 or later**.
@@ -88,10 +97,14 @@ Source: https://github.com/libusb/libusb
 
 Files, Windows: `libusb-1.0.dll`
 
-### scrcpy application icon
+### scrcpy images
 
-`icon.png` is scrcpy's own application icon, from the scrcpy release archive,
-and is used as the mirror window's icon. Copyright © the scrcpy authors.
+`scrcpy.png` and `disconnected.png` in `resources/bin` are scrcpy's own
+application icon and its "phone disconnected" picture, from the scrcpy release
+archive. A copy of `disconnected.png` is also in `resources/icon`, where the
+desktop window shows it when the phone disconnects (the `scrcpy.png` beside it
+there is this project's own logo, under the file name scrcpy loads).
+Copyright © the scrcpy authors; Apache License, Version 2.0.
 
 ---
 

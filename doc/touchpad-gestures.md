@@ -310,7 +310,7 @@ would disagree with nothing left to reconcile them.
    so it is the slowest thing here. If it reads as laggy, a `KEY` verb on the
    daemon is the fix.
 5. **Two-finger pinch still does nothing.** Windows sets `MK_CONTROL` in
-   `WM_MOUSEWHEEL`'s `wParam` rather than injecting a Ctrl keydown, and SDL2
+   `WM_MOUSEWHEEL`'s `wParam` rather than injecting a Ctrl keydown, and SDL
    reads only the wheel delta — so scrcpy injects a plain scroll with
    `metaState = 0` and no Android app sees a zoom. Out of scope here; it is a
    scrcpy-side problem, not a gesture-recognition one.

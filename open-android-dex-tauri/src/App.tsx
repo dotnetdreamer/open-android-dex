@@ -43,6 +43,9 @@ function desktopOptions(d: DeviceInfo): MirrorOptions {
     audio: true,
     audioPlayback: false,
     stayAwake: true,
+    // stayAwake only holds while the phone charges; over Wi-Fi on battery an
+    // idle desktop would otherwise time out and go dark
+    keepActive: true,
     turnScreenOff: false,
     alwaysOnTop: false,
     fullscreen: false,

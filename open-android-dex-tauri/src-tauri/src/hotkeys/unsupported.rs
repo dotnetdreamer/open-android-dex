@@ -2,7 +2,9 @@
 //!
 //! Nothing is lost that was not already missing: the taskbar's ⛶ button is
 //! also inert on a host where `embed/` cannot resize the scrcpy window, so
-//! there is no fullscreen here for Escape to leave.
+//! there is no fullscreen here for Escape to leave. F11 is not taken either,
+//! which here is the better outcome: it reaches scrcpy, whose own F11
+//! fullscreen (4.0+) is the only one this host has.
 
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;

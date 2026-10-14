@@ -23,9 +23,9 @@
 //! here would sit outside it. See `Enforcer::transfer_pass` for the broadcast
 //! and `TransferHud.java` for the other end.
 //!
-//! Paths with spaces are safe on both platforms, by different routes: on
-//! Windows scrcpy quotes the local path before handing it to adb
-//! (`sc_adb_push`), even though it quotes nothing else; on macOS its posix
+//! Paths with spaces are safe on every platform, by different routes: on
+//! Windows scrcpy (4.0+) quotes every argument of the adb command line it
+//! builds (`sc_command_serialize_windows`); on macOS and Linux its posix
 //! backend passes argv as an array, so there is no command line to split in the
 //! first place.
 

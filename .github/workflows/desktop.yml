@@ -38,9 +38,9 @@ env:
   # leg cannot read a workflow-level env key that varies by leg — which is why
   # only the two single-arch platforms can be named at this level). All four are
   # the values from the release's own SHA256SUMS.txt.
-  SCRCPY_VERSION: "3.3.4"
-  SCRCPY_SHA256_WIN64: "d8a155b7c180b7ca4cdadd40712b8750b63f3aab48cb5b8a2a39ac2d0d4c5d38"
-  SCRCPY_SHA256_LINUX64: "0305d98c06178c67e12427bbf340c436d0d58c9e2a39bf9ffbbf8f54d7ef95a5"
+  SCRCPY_VERSION: "5.0.1"
+  SCRCPY_SHA256_WIN64: "b12a2c4ee8be317422451fc7dcf8ee20a71b5ea7ef9ad73ddd825a25316227a5"
+  SCRCPY_SHA256_LINUX64: "9f969d30cc574816077edecda65719c1c70b0aee1df1ba5fa00779ac07b8fd6e"
 
 jobs:
   version:
@@ -330,11 +330,15 @@ jobs:
         shell: pwsh
         run: |
           $bin = "open-android-dex-tauri/src-tauri/resources/bin"
+          # The DLL names carry their major versions (FFmpeg 9, SDL3 since
+          # scrcpy 4.0), so this list moves with every scrcpy upgrade — a stale
+          # name fails here rather than as a missing DLL on a user's machine.
           $required = @(
             'adb.exe', 'AdbWinApi.dll', 'AdbWinUsbApi.dll',
-            'scrcpy.exe', 'scrcpy-server', 'SDL2.dll',
-            'avcodec-61.dll', 'avformat-61.dll', 'avutil-59.dll',
-            'swresample-5.dll', 'libusb-1.0.dll', 'icon.png',
+            'scrcpy.exe', 'scrcpy-server', 'SDL3.dll',
+            'avcodec-63.dll', 'avformat-63.dll', 'avutil-61.dll',
+            'swresample-7.dll', 'libusb-1.0.dll',
+            'scrcpy.png', 'disconnected.png',
             'openandroiddex-launcher.apk', 'openandroiddex-wmd.dex'
           )
           $missing = $required | Where-Object { -not (Test-Path (Join-Path $bin $_)) }
@@ -413,12 +417,12 @@ jobs:
             # `lipo -archs` spells the same architecture differently from the
             # scrcpy asset name. Both are needed, so both are written down.
             lipo_arch: arm64
-            scrcpy_sha256: "8fef43520405dd523c74e1530ac68febcc5a405ea89712c874936675da8513dd"
+            scrcpy_sha256: "33611e51977a8289e2e124b220f727895181ef2eb9060e0987a4dc2db9cf0d6b"
           - target: x86_64-apple-darwin
             label: x64
             scrcpy_arch: x86_64
             lipo_arch: x86_64
-            scrcpy_sha256: "cf9b3453a33279b6009dfb256b1a84c374bd4c30a71edd74bacab28d72a5d929"
+            scrcpy_sha256: "31a5467a9e907f162b093267cbbab1276b15c6e709c2ea8159566a8d165beb50"
     env:
       # Same reasoning as the Windows job: this runner has no JDK and no
       # Android SDK, and both payloads arrive from the `launcher` job below.
@@ -518,7 +522,7 @@ jobs:
           bin="open-android-dex-tauri/src-tauri/resources/bin"
 
           missing=()
-          for f in adb scrcpy scrcpy-server icon.png \
+          for f in adb scrcpy scrcpy-server scrcpy.png disconnected.png \
                    openandroiddex-launcher.apk openandroiddex-wmd.dex; do
             [ -f "$bin/$f" ] || missing+=("$f")
           done
@@ -743,7 +747,7 @@ jobs:
           bin="open-android-dex-tauri/src-tauri/resources/bin"
 
           missing=()
-          for f in adb scrcpy scrcpy-server icon.png \
+          for f in adb scrcpy scrcpy-server scrcpy.png disconnected.png \
                    openandroiddex-launcher.apk openandroiddex-wmd.dex; do
             [ -f "$bin/$f" ] || missing+=("$f")
           done
@@ -776,7 +780,13 @@ jobs:
           # detail. If upstream ever ships a dynamic build instead, the package
           # still builds and installs and then fails to run on any machine
           # without SDL — assert it here, where the message says what changed.
-          for lib in libSDL2 libavcodec libavformat libavutil libswresample libusb; do
+          #
+          # `libSDL` rather than a version, so the check cannot pass vacuously
+          # across an SDL major (scrcpy 4.0 moved from SDL2 to SDL3). `libva` is
+          # scrcpy 5.0's hardware decoding: it is dlopen()ed at runtime today,
+          # which is what keeps it optional — no libva just means software
+          # decoding. Linked outright it would be a new .deb dependency.
+          for lib in libSDL libavcodec libavformat libavutil libswresample libusb libva; do
             if ldd "$bin/scrcpy" | grep -q "$lib"; then
               echo "::error::bundled scrcpy now links $lib dynamically — it used to be static."
               echo "  The deb/rpm dependency lists in tauri.linux.conf.json no longer cover it."

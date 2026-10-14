@@ -419,7 +419,7 @@ final class NotificationPanel {
         theme = DexTheme.of(act);
         bannerKey = call.key;
         View card = buildBanner(call);
-        if (Settings.canDrawOverlays(act)) {
+        if (act.overlaysUsable()) {
             WindowManager.LayoutParams lp = new WindowManager.LayoutParams(
                     fit(BANNER_DP), ViewGroup.LayoutParams.WRAP_CONTENT,
                     WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
@@ -582,7 +582,7 @@ final class NotificationPanel {
         column.setOrientation(LinearLayout.VERTICAL);
         column.setGravity(Gravity.END);
 
-        if (Settings.canDrawOverlays(act)) {
+        if (act.overlaysUsable()) {
             WindowManager.LayoutParams lp = new WindowManager.LayoutParams(
                     fit(HEADS_UP_DP), ViewGroup.LayoutParams.WRAP_CONTENT,
                     WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,

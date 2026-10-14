@@ -334,8 +334,8 @@ xattr -dr com.apple.quarantine "/Applications/Open Android DeX.app"
 ```
 
 Then open it normally. macOS may also ask for Local Network permission, which is
-for Wi-Fi connections, and Accessibility, which is only used by the fullscreen
-button. USB needs neither.
+for Wi-Fi connections, and Accessibility, which is only used for full screen
+(the button, and the F11 and Esc keys). USB needs neither.
 </details>
 
 <details>

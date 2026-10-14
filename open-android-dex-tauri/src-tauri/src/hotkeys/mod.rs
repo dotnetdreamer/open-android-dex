@@ -1,10 +1,15 @@
-//! Escape leaves fullscreen.
+//! Escape leaves fullscreen; F11 toggles it.
 //!
 //! The desktop's fullscreen is ours, not scrcpy's — the session is spawned
 //! without `--fullscreen` and the window is resized by `embed/` — so the only
 //! things that can leave it are the taskbar's ⛶ button and this. The button is
 //! on the phone, which is the wrong place to reach for when the desktop is
 //! covering the whole monitor and the pointer is somewhere in Android.
+//!
+//! F11 is here because scrcpy 4.0 took it: bare F11 now toggles scrcpy's OWN
+//! fullscreen (SDL's), a second one beside ours that the ⛶ icon cannot see and
+//! Escape cannot leave — and on Windows the two fight over the window's frame.
+//! Taking the key first makes it the keyboard twin of the ⛶ button instead.
 //!
 //! ## Why a host key hook at all
 //!
@@ -18,13 +23,14 @@
 //! ## What it costs, and what it does not
 //!
 //! The hook is installed for the session, but it does almost nothing: the
-//! common path is two integer comparisons, because everything that is not
-//! Escape-down is passed on before any state is read. The key is only
+//! common path is a few integer comparisons, because everything that is not
+//! Escape or F11 is passed on before any state is read. Escape is only
 //! **swallowed** when it was going to do something — fullscreen is on *and*
-//! the desktop window is in front — so Escape reaches Android untouched in
-//! every other case, including when the desktop is merely windowed. That is
-//! the same bargain a browser makes, and it is what stops this from quietly
-//! taking a useful key away from Android apps.
+//! the desktop window is in front — so it reaches Android untouched in every
+//! other case, including when the desktop is merely windowed. That is the same
+//! bargain a browser makes, and it is what stops this from quietly taking a
+//! useful key away from Android apps. F11 costs Android nothing either way:
+//! scrcpy has kept it from the phone since 4.0.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -39,7 +45,16 @@ use crate::scrcpy::Shared;
 #[cfg_attr(not(any(windows, target_os = "macos")), path = "unsupported.rs")]
 mod backend;
 
-/// What a host's key hook asks before deciding to swallow Escape.
+/// What a key asked the worker to do.
+#[derive(Clone, Copy)]
+enum Action {
+    /// Escape: out of fullscreen, never into it — see `embed::exit_fullscreen`.
+    Exit,
+    /// F11: in or out, exactly as the taskbar's ⛶ does it.
+    Toggle,
+}
+
+/// What a host's key hook asks before deciding to swallow a key.
 ///
 /// Deliberately tiny and cheap: on macOS this is consulted from inside an
 /// event tap, which the system disables if it dawdles, and on Windows from a
@@ -47,11 +62,11 @@ mod backend;
 /// through. Neither may do anything that can block.
 #[derive(Clone)]
 pub struct Watcher {
-    tx: std::sync::mpsc::Sender<()>,
+    tx: std::sync::mpsc::Sender<Action>,
     shared: Arc<Shared>,
-    /// One exit in flight at a time. A held Escape repeats about thirty times
-    /// a second, and each of those would otherwise queue another round trip
-    /// through the window server.
+    /// One change in flight at a time. A held Escape repeats about thirty
+    /// times a second, and each of those would otherwise queue another round
+    /// trip through the window server.
     busy: Arc<AtomicBool>,
 }
 
@@ -62,15 +77,15 @@ impl Watcher {
         self.shared.is_fullscreen()
     }
 
-    /// Ask for fullscreen to be left. Answers whether the key should be
-    /// swallowed — which it is even while an earlier exit is still landing,
-    /// because letting the repeat through would send a stray Escape to Android
-    /// in the middle of leaving.
-    fn request_exit(&self) -> bool {
+    /// Hand a change to the worker. Answers whether the key should be
+    /// swallowed — which it is even while an earlier change is still landing,
+    /// because letting the repeat through would send a stray key to Android
+    /// (or, for F11, to scrcpy's own fullscreen) in the middle of it.
+    fn request(&self, action: Action) -> bool {
         if self.busy.swap(true, Ordering::SeqCst) {
             return true;
         }
-        let _ = self.tx.send(());
+        let _ = self.tx.send(action);
         true
     }
 }
@@ -94,7 +109,7 @@ pub fn start(app: AppHandle, key: String, shared: Arc<Shared>, stop: Arc<AtomicB
     if !backend::supported() {
         return;
     }
-    let (tx, rx) = std::sync::mpsc::channel::<()>();
+    let (tx, rx) = std::sync::mpsc::channel::<Action>();
     let busy = Arc::new(AtomicBool::new(false));
     let watcher = Watcher {
         tx,
@@ -109,15 +124,19 @@ pub fn start(app: AppHandle, key: String, shared: Arc<Shared>, stop: Arc<AtomicB
         let (app, key, stop) = (app.clone(), key.clone(), stop.clone());
         std::thread::spawn(move || loop {
             match rx.recv_timeout(Duration::from_millis(250)) {
-                Ok(()) => {
-                    match crate::embed::exit_fullscreen(&app, &key) {
+                Ok(action) => {
+                    let (result, which) = match action {
+                        Action::Exit => (crate::embed::exit_fullscreen(&app, &key), "escape"),
+                        Action::Toggle => (crate::embed::toggle_fullscreen(&app, &key), "f11"),
+                    };
+                    match result {
                         Ok(on) => shared.record_fullscreen(on),
                         // Nowhere to show this: the key was pressed over a
                         // window belonging to another process, and the button
                         // that mirrors the state is on the phone. On macOS
                         // this is where a missing Accessibility grant
                         // announces itself.
-                        Err(e) => log::warn!("hotkeys [{key}] escape: {e}"),
+                        Err(e) => log::warn!("hotkeys [{key}] {which}: {e}"),
                     }
                     busy.store(false, Ordering::SeqCst);
                 }
@@ -164,7 +183,20 @@ fn take_escape(app: &AppHandle, key: &str, watcher: &Watcher) -> bool {
     if !backend::desktop_is_foreground(app, key) {
         return false;
     }
-    watcher.request_exit()
+    watcher.request(Action::Exit)
+}
+
+/// Decide what to do about one F11 press, from a host's key hook.
+///
+/// No fullscreen test first, unlike Escape: F11 does something in either
+/// state, so the only question is whether the desktop is the window in front.
+/// Anywhere else the key is passed on — F11 in the user's browser is the
+/// browser's.
+fn take_f11(app: &AppHandle, key: &str, watcher: &Watcher) -> bool {
+    if !backend::desktop_is_foreground(app, key) {
+        return false;
+    }
+    watcher.request(Action::Toggle)
 }
 
 /// Session-key helper shared by both backends, so the two cannot disagree
@@ -187,29 +219,58 @@ fn ctx() -> &'static Mutex<Option<Ctx>> {
     CTX.get_or_init(|| Mutex::new(None))
 }
 
-/// The whole decision, for a host that has just seen Escape go down.
-///
-/// Lives here rather than in each backend so there is one answer to "should
-/// this key be swallowed" and not two that drift apart.
 fn release_ctx(session: u64) {
     if let Ok(mut guard) = ctx().lock() {
         // Only if it is still ours. A hook shutting down late must not clear
         // the state its replacement has already installed.
         if guard.as_ref().is_some_and(|c| c.session == session) {
             *guard = None;
+            F11_HELD.store(false, Ordering::SeqCst);
+            F11_TAKEN.store(false, Ordering::SeqCst);
         }
     }
 }
 
-fn on_escape_down() -> bool {
+/// Run a decision against the current session, answering "not ours" when
+/// there is none — or when the state is busy, which is never waited for.
+fn with_ctx(decide: impl FnOnce(&Ctx) -> bool) -> bool {
     let Ok(guard) = ctx().try_lock() else {
         // Contended only while a session is starting or ending. Passing the
-        // key on is the safe answer: a missed Escape is a nuisance, a
-        // swallowed one during teardown is a key that vanished.
+        // key on is the safe answer: a missed key is a nuisance, a swallowed
+        // one during teardown is a key that vanished.
         return false;
     };
-    let Some(c) = guard.as_ref() else {
-        return false;
-    };
-    take_escape(&c.app, &c.key, &c.watcher)
+    guard.as_ref().is_some_and(decide)
+}
+
+/// The whole decision, for a host that has just seen Escape go down.
+///
+/// Lives here rather than in each backend so there is one answer to "should
+/// this key be swallowed" and not two that drift apart.
+fn on_escape_down() -> bool {
+    with_ctx(|c| take_escape(&c.app, &c.key, &c.watcher))
+}
+
+/// F11 is held down. A held key repeats its key-down for as long as it is
+/// held, and every repeat reaching the toggle would flip fullscreen many times
+/// a second — so only the first down of a press counts as the press.
+static F11_HELD: AtomicBool = AtomicBool::new(false);
+/// The current F11 press was taken, so its repeats and its release are too —
+/// scrcpy must not be handed the half of a press it never saw begin.
+static F11_TAKEN: AtomicBool = AtomicBool::new(false);
+
+/// The whole decision for one F11 event (down, repeat or up), from a host's
+/// key hook: answers whether to swallow it. `bare` is only read on the first
+/// down — only a bare F11 is ours, as only a bare F11 is scrcpy's.
+fn f11_event(down: bool, bare: bool) -> bool {
+    if !down {
+        F11_HELD.store(false, Ordering::SeqCst);
+        return F11_TAKEN.swap(false, Ordering::SeqCst);
+    }
+    if F11_HELD.swap(true, Ordering::SeqCst) {
+        return F11_TAKEN.load(Ordering::SeqCst); // a repeat follows its press
+    }
+    let take = bare && with_ctx(|c| take_f11(&c.app, &c.key, &c.watcher));
+    F11_TAKEN.store(take, Ordering::SeqCst);
+    take
 }

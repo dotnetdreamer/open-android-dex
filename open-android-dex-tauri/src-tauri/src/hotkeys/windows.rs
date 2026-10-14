@@ -11,7 +11,7 @@
 //! that thread is pumping messages — hence a thread of our own with a message
 //! loop, exactly as the touchpad reader has. Windows silently removes a hook
 //! whose callback is slow (`LowLevelHooksTimeout`), so the callback does
-//! nothing but compare two integers on the way to passing the key on.
+//! nothing but compare a few integers on the way to passing the key on.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -20,7 +20,7 @@ use std::time::Duration;
 use tauri::AppHandle;
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    GetAsyncKeyState, VK_CONTROL, VK_ESCAPE, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT,
+    GetAsyncKeyState, VK_CONTROL, VK_ESCAPE, VK_F11, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT,
 };
 use windows_sys::Win32::System::Threading::GetCurrentThreadId;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
@@ -101,7 +101,7 @@ fn run(session: u64) {
         if handle.is_null() {
             log::warn!(
                 "hotkeys: could not install the keyboard hook ({}) — Escape will not leave \
-                 fullscreen",
+                 fullscreen, and F11 will toggle scrcpy's fullscreen instead of ours",
                 std::io::Error::last_os_error()
             );
             return;
@@ -109,7 +109,7 @@ fn run(session: u64) {
         if let Ok(mut guard) = hook().lock() {
             *guard = (session, GetCurrentThreadId());
         }
-        log::info!("hotkeys: Escape leaves fullscreen");
+        log::info!("hotkeys: Escape leaves fullscreen, F11 toggles it");
 
         let mut msg: MSG = std::mem::zeroed();
         while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) > 0 {
@@ -124,7 +124,7 @@ fn run(session: u64) {
         }
         super::release_ctx(session);
         SWALLOW_UP.store(false, Ordering::SeqCst);
-        log::info!("hotkeys: stopped watching for Escape");
+        log::info!("hotkeys: stopped watching for Escape and F11");
     }
 }
 
@@ -137,9 +137,13 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
     let message = wparam as u32;
     let down = message == WM_KEYDOWN || message == WM_SYSKEYDOWN;
     let up = message == WM_KEYUP || message == WM_SYSKEYUP;
-    // The cheap test first, and it is the one that answers for every keystroke
-    // on the machine that is not Escape.
-    if (down || up) && (*(lparam as *const KBDLLHOOKSTRUCT)).vkCode == VK_ESCAPE as u32 {
+    if !(down || up) {
+        return CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam);
+    }
+    // The cheap tests first, and they are the ones that answer for every
+    // keystroke on the machine that is neither Escape nor F11.
+    let vk = (*(lparam as *const KBDLLHOOKSTRUCT)).vkCode;
+    if vk == VK_ESCAPE as u32 {
         if down {
             let take = !modified() && super::on_escape_down();
             SWALLOW_UP.store(take, Ordering::SeqCst);
@@ -149,11 +153,18 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
         } else if SWALLOW_UP.swap(false, Ordering::SeqCst) {
             return 1;
         }
+    } else if vk == VK_F11 as u32 {
+        // Repeats and the release are settled in `f11_event`, which reads
+        // `bare` only on the first down of a press.
+        let bare = up || !modified();
+        if super::f11_event(down, bare) {
+            return 1; // swallowed: scrcpy's own F11 fullscreen never starts
+        }
     }
     CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam)
 }
 
-/// Is a modifier held? Then this Escape is not ours.
+/// Is a modifier held? Then this Escape (or F11) is not ours.
 ///
 /// Ctrl+Escape opens the Start menu, Ctrl+Shift+Escape opens Task Manager and
 /// Alt+Escape cycles windows — all three arrive here as a plain `VK_ESCAPE`
@@ -164,8 +175,8 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
 ///
 /// `GetAsyncKeyState` rather than `GetKeyState`: the latter reports the state
 /// of the *calling thread's* input queue, and a hook thread has no synchronised
-/// queue of its own. Only reached on an Escape, so its cost is paid a handful
-/// of times a session and never in the general keystroke path.
+/// queue of its own. Only reached on Escape and F11, so its cost is paid a
+/// handful of times a session and never in the general keystroke path.
 unsafe fn modified() -> bool {
     [VK_CONTROL, VK_MENU, VK_SHIFT, VK_LWIN, VK_RWIN]
         .into_iter()

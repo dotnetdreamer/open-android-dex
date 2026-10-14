@@ -24,13 +24,19 @@ android {
         versionCode 321
         versionName "0.3.21"
 
-        // The jniLibs this APK ships by hand (proot, QEMU) exist for these two
-        // only, so a third ABI would produce a build that installs and then
-        // cannot run half its features. Stated here as well because the WebRTC
-        // AAR below carries four, and without a filter the APK would grow by
-        // ~20 MB of armeabi-v7a and x86 code nothing in it can use.
+        // armeabi-v7a is here for the desktop, not for Linux or Docker. Plenty
+        // of phones run 32-bit Android on a 64-bit chip (Galaxy A13, Redmi 9A,
+        // most Android Go builds), and an APK with native code for none of a
+        // phone's ABIs is refused outright — INSTALL_FAILED_NO_MATCHING_ABIS —
+        // which took the whole desktop away from phones the README promises
+        // ("Any Android 8.0 or newer"). The only armeabi-v7a library is
+        // WebRTC's, from the AAR below; the hand-shipped jniLibs (proot, QEMU)
+        // stay 64-bit only, and Linux.abiSupported / Docker.abiSupported keep
+        // those two features out of sight on a 32-bit install. A 64-bit phone
+        // still installs as arm64-v8a. x86 (32-bit) stays out: no phone worth
+        // the ~16 MB runs it.
         ndk {
-            abiFilters 'arm64-v8a', 'x86_64'
+            abiFilters 'arm64-v8a', 'armeabi-v7a', 'x86_64'
         }
     }
 
@@ -138,8 +144,8 @@ android {
 // other one here.
 //
 // Size: ~12 MB of native code per ABI, which the abiFilters above hold to the
-// two this APK already ships. That is the price of reaching a phone that has
-// no inbound route at all — see doc/web-viewer.md.
+// three this APK ships. That is the price of reaching a phone that has no
+// inbound route at all — see doc/web-viewer.md.
 dependencies {
     implementation 'io.github.webrtc-sdk:android:144.7559.12'
 }

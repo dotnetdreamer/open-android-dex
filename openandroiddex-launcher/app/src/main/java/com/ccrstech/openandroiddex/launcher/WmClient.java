@@ -375,9 +375,19 @@ final class WmClient {
      * allowed to land wherever the platform puts it, and the daemon then moves the task
      * across. Only MANAGE_ACTIVITY_TASKS is needed for that, which is why it works on
      * screens of ours that nothing is allowed to START on this display.
+     *
+     * Returns the id of the task it moved, 0 when there was nothing to move — the window
+     * was already on the desktop, or never turned up — and -1 when the daemon did not
+     * answer. "OK none" is an OK, so a yes/no here could not tell the first two apart.
      */
-    boolean reclaim(int displayId, String component) {
-        return ok(request("RECLAIM " + displayId + " " + component));
+    int reclaim(int displayId, String component) {
+        String reply = request("RECLAIM " + displayId + " " + component);
+        if (!ok(reply)) return -1;
+        try {
+            return Integer.parseInt(reply.substring(2).trim());
+        } catch (NumberFormatException e) {
+            return 0;
+        }
     }
 
     private static boolean ok(String reply) {

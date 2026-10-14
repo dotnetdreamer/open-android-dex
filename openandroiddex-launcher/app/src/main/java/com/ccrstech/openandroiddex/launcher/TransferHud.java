@@ -241,7 +241,7 @@ final class TransferHud {
         }
         build();
         if (card == null) return;
-        if (android.provider.Settings.canDrawOverlays(act)) {
+        if (act.overlaysUsable()) {
             WindowManager.LayoutParams lp = new WindowManager.LayoutParams(
                     act.dp(CARD_DP), ViewGroup.LayoutParams.WRAP_CONTENT,
                     WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,

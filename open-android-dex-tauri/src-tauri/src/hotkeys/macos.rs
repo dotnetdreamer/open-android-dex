@@ -35,6 +35,10 @@ unsafe extern "C" {
 /// hardware position, not a character, so it does not move with the layout.
 const KEY_ESCAPE: i64 = 53;
 
+/// F11 (`kVK_F11`), likewise a position. On most Mac keyboards it arrives as
+/// this only with Fn held, which is why Fn is not in [`MODIFIERS`].
+const KEY_F11: i64 = 103;
+
 /// The modifiers that make Escape somebody else's key.
 ///
 /// Command, Control, Option and Shift only: Caps Lock, Fn and the numeric-pad
@@ -170,7 +174,7 @@ fn run(session: u64) {
         *guard = (session, handle);
     }
     std::mem::forget(run_loop.clone());
-    log::info!("hotkeys: Escape leaves fullscreen");
+    log::info!("hotkeys: Escape leaves fullscreen, F11 toggles it");
 
     CFRunLoop::run();
 
@@ -187,7 +191,7 @@ fn run(session: u64) {
     }
     super::release_ctx(session);
     SWALLOW_UP.store(false, Ordering::SeqCst);
-    log::info!("hotkeys: stopped watching for Escape");
+    log::info!("hotkeys: stopped watching for Escape and F11");
 }
 
 unsafe extern "C-unwind" fn tap_callback(
@@ -223,6 +227,16 @@ unsafe extern "C-unwind" fn tap_callback(
         Some(unsafe { event.as_ref() }),
         CGEventField::KeyboardEventKeycode,
     );
+    if code == KEY_F11 {
+        // Repeats and the release are settled in `f11_event`, which reads
+        // `bare` only on the first down of a press.
+        let bare = !CGEvent::flags(Some(unsafe { event.as_ref() })).intersects(MODIFIERS);
+        return if super::f11_event(down, bare) {
+            std::ptr::null_mut()
+        } else {
+            pass
+        };
+    }
     if code != KEY_ESCAPE {
         return pass;
     }
