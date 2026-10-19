@@ -887,4 +887,90 @@ If you switch this off again later, Android force-closes Linux and the desktop r
     <!-- Tile menu -->
     <string name="ft_menu_downloads">Open the phone\'s Downloads folder</string>
     <string name="ft_menu_grant">Allow access to all files</string>
+
+    <!-- ── Remote access ── -->
+    <string name="rm_label">Remote access</string>
+    <string name="rm_subtitle">Log in to this Linux from your computer with ssh, on any network. Nothing to set up on a router, and no account.</string>
+
+    <!-- The status card -->
+    <string name="rm_state_off">Off</string>
+    <string name="rm_state_off_sub">Turn it on, and the computers you pair can reach Ubuntu on this phone from anywhere: home, work, or with the phone on mobile data.</string>
+    <string name="rm_state_starting">Starting…</string>
+    <string name="rm_state_online">Reachable from anywhere</string>
+    <string name="rm_state_offline">On, waiting for a network</string>
+    <string name="rm_turn_on">Turn on</string>
+    <string name="rm_turn_off">Turn off</string>
+    <string name="rm_linux_missing">Linux is not installed yet. Open Linux once to install it, and computers can connect as soon as it is ready.</string>
+    <string name="rm_open_linux">Open Linux</string>
+    <string name="rm_linux_installing">Linux is still being set up. Computers can connect when it finishes.</string>
+    <string name="rm_linux_error">Linux did not finish setting up. Open Linux to try again, and computers can connect once it is done.</string>
+    <string name="rm_ssh_install_failed">The SSH server could not be installed in Linux. Check the phone\'s connection, then turn remote access off and on to try again.</string>
+    <string name="rm_ssh_starting">Starting the SSH server inside Linux…</string>
+    <string name="rm_ssh_failed">The SSH server inside Linux would not start. Reinstalling Linux usually fixes this; your files in the shared folder are kept.</string>
+    <string name="rm_battery">Android can pause remote access when the screen is off. Let it keep running in the background so computers can always reach the phone.</string>
+    <string name="rm_battery_allow">Allow</string>
+    <string name="rm_battery_desktop">On the phone, open Settings → Apps → %1$s → Battery and choose Unrestricted.</string>
+    <string name="rm_unavailable">Remote access needs a 64-bit phone, like Linux itself.</string>
+    <plurals name="rm_sessions">
+        <item quantity="one">%d computer connected now</item>
+        <item quantity="other">%d computers connected now</item>
+    </plurals>
+    <plurals name="rm_paired_count">
+        <item quantity="one">%d computer paired · none connected</item>
+        <item quantity="other">%d computers paired · none connected</item>
+    </plurals>
+
+    <!-- The computers -->
+    <string name="rm_computers">Computers</string>
+    <string name="rm_no_computers">No computers yet. Add one and only that computer can get in.</string>
+    <string name="rm_add">Add a computer</string>
+    <string name="rm_remove">Remove</string>
+    <string name="rm_remove_title">Remove %1$s?</string>
+    <string name="rm_remove_body">It is disconnected straight away, and can only get back in by pairing again.</string>
+    <string name="rm_connected_direct">Connected now · direct · %1$d ms</string>
+    <string name="rm_connected_relay">Connected now · through a relay · %1$d ms</string>
+    <string name="rm_paired_when">Paired %1$s</string>
+    <string name="rm_os_windows" translatable="false">Windows</string>
+    <string name="rm_os_macos" translatable="false">macOS</string>
+    <string name="rm_os_linux" translatable="false">Linux</string>
+    <string name="rm_os_other">Computer</string>
+
+    <!-- Add a computer -->
+    <string name="rm_code_title">Type this code on your computer</string>
+    <string name="rm_code_preparing">Getting a code ready…</string>
+    <string name="rm_code_expires">Expires in %1$s</string>
+    <string name="rm_code_how_app">In Open Android DeX on the computer, click Phone Linux and type it there.</string>
+    <string name="rm_code_how_cli">No app on that computer? Run: dexremote pair %1$s</string>
+    <string name="rm_cancel">Cancel</string>
+    <string name="rm_paired_ok">%1$s can now reach this Linux.</string>
+    <string name="rm_paired_how">On it, run: ssh %1$s</string>
+    <string name="rm_done">Done</string>
+    <string name="rm_pair_failed_bad_code">The computer typed a different code, so nothing was saved.</string>
+    <string name="rm_pair_failed_expired">The code expired before a computer used it.</string>
+    <string name="rm_pair_failed_other">Pairing did not finish.</string>
+    <string name="rm_try_again">New code</string>
+
+    <!-- Connecting -->
+    <string name="rm_connect">From a paired computer</string>
+    <string name="rm_connect_terminal">In any terminal</string>
+    <string name="rm_connect_vscode">In VS Code: Remote-SSH, then %1$s</string>
+    <string name="rm_copy">Copy</string>
+    <string name="rm_copied">Copied</string>
+    <string name="rm_host_key">User root · host key %1$s</string>
+    <string name="rm_phone_id">Phone ID %1$s</string>
+    <string name="rm_security_note">Only computers you pair can connect. Each one proves its own key before anything reaches Linux, and SSH checks a second key after that. Connections go straight between the two devices whenever the networks allow it, and otherwise through a public relay that passes them on without being able to read them.</string>
+
+    <!-- The ongoing notification -->
+    <string name="rm_note_on">Remote access on · reachable from anywhere</string>
+    <string name="rm_note_offline">Remote access on · offline</string>
+    <plurals name="rm_note_connected">
+        <item quantity="one">Remote access on · %d computer connected</item>
+        <item quantity="other">Remote access on · %d computers connected</item>
+    </plurals>
+    <string name="rm_note_settings">Remote access</string>
+    <string name="rm_note_turn_off">Turn off</string>
+    <string name="rm_note_resume">Remote access is paused — tap to resume</string>
+
+    <!-- The Linux tile's menu -->
+    <string name="ln_remote_menu">Remote access…</string>
 </resources>

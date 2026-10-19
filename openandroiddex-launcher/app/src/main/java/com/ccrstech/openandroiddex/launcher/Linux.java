@@ -568,7 +568,7 @@ final class Linux {
         }
     }
 
-    private static String primaryAbi() {
+    static String primaryAbi() {
         String[] abis = Build.SUPPORTED_ABIS;
         return (abis != null && abis.length > 0) ? abis[0] : "";
     }
@@ -666,6 +666,18 @@ final class Linux {
                 || st.features < FEATURE_LEVEL) {
             return true;
         }
+        // Remote access ends in an sshd inside the guest, and a guest built
+        // before linux-setup.sh learned setup_ssh has none. Asked ONLY while
+        // remote access is on: that is what lets this be a condition rather
+        // than a FEATURE_LEVEL bump, which would have re-run the setup script
+        // on every container out there to install a server most of them will
+        // never use. Fresh installs get it anyway — setup_ssh is unconditional
+        // in the script — so switching remote access on there is instant.
+        // Settled like VS Code's install: after three failures at this level
+        // it stops asking, or every launch would rebuild the guest — and hold
+        // the desktop back while it did — for as long as remote access is on.
+        if (LinuxRemote.isEnabled(ctx) && !LinuxRemote.sshdInstalled(ctx)
+                && !LinuxRemote.sshdGaveUp(ctx)) return true;
         // A selection that no longer matches what the guest was built with —
         // the chooser is reachable again from the Linux tile, and a guest that
         // is otherwise `ready` would never run the setup script again to
@@ -754,6 +766,10 @@ final class Linux {
     }
 
     /** Whole-file read; "" on any error (missing file included). */
+    static String readFile(File f) {
+        return readText(f);
+    }
+
     private static String readText(File f) {
         if (f == null || !f.exists()) return "";
         try (java.io.FileInputStream in = new java.io.FileInputStream(f)) {

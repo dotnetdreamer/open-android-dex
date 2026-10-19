@@ -1799,6 +1799,11 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
                 Linux.scanShared(this);
             }, "linux-shared-dir").start();
             root.postDelayed(() -> LinuxService.provision(this), 3000);
+            // Remote access, if the user left it on. A desktop session starts
+            // with the PC force-stopping this package, which takes the tunnel
+            // and every SSH session with it; this is the moment it comes back.
+            // Same delay as the provision, for the same reason.
+            root.postDelayed(() -> LinuxService.remoteResume(this), 3000);
         }
     }
 
@@ -2969,6 +2974,12 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
         if (!Linux.isUninstalled(this)) {
             menu.getMenu().add(0, 6, 3, getString(R.string.ln_apps_menu));
         }
+        // SSH into this Linux from a computer elsewhere. Offered whether or not
+        // a container exists yet: the window says what is missing and how to
+        // get it, which is more use than an entry that appears later.
+        if (LinuxRemote.available(this)) {
+            menu.getMenu().add(0, 7, 3, getString(R.string.ln_remote_menu));
+        }
         menu.getMenu().add(0, 4, 4, getString(R.string.ln_reinstall));
         // Only while there is something to remove. Offering "Uninstall" over a
         // container that is already gone is an action that would do nothing,
@@ -2993,10 +3004,40 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
                 confirmLinuxUninstall();
             } else if (id == 6) {
                 chooseLinuxApps();
+            } else if (id == 7) {
+                openLinuxRemote();
             }
             return true;
         });
         menu.show();
+    }
+
+    /**
+     * The Remote access window, freeform on this display like the Linux one.
+     * Its own task and affinity, so it opens beside a live Linux window rather
+     * than replacing what that window shows.
+     */
+    private void openLinuxRemote() {
+        hideDrawer();
+        dismissPopups();
+        if (minimisedActivities.contains(LinuxRemoteActivity.class.getName())) {
+            sendBroadcast(new Intent(ACTION_RESTORE)
+                    .setPackage(getPackageName())
+                    .putExtra("pkg", getPackageName())
+                    .putExtra("activity", LinuxRemoteActivity.class.getName()));
+            return;
+        }
+        Intent intent = new Intent(this, LinuxRemoteActivity.class)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        ActivityOptions opts = shapeForDesktop(
+                ActivityOptions.makeBasic(),
+                desktopWindowRect(LinuxRemoteActivity.class, dp(560), dp(720)));
+        try {
+            startActivity(intent, opts.toBundle());
+        } catch (Exception e) {
+            DexLog.warn("remote", "cannot open the Remote access window", e);
+            Toast.makeText(this, getString(R.string.ln_cannot_open), Toast.LENGTH_SHORT).show();
+        }
     }
 
     /**
@@ -5959,6 +6000,9 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
             } else if (FileTransferActivity.class.getName().equals(activity)) {
                 label = getString(R.string.ft_label);
                 glyph = "📁";
+            } else if (LinuxRemoteActivity.class.getName().equals(activity)) {
+                label = getString(R.string.rm_label);
+                glyph = "📡";
             } else {
                 continue;
             }
@@ -5983,6 +6027,8 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
                     launchTaskManager();
                 } else if (FileTransferActivity.class.getName().equals(target)) {
                     launchFileTransfer();
+                } else if (LinuxRemoteActivity.class.getName().equals(target)) {
+                    openLinuxRemote();
                 } else {
                     launchSettings();
                 }

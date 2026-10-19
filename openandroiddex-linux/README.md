@@ -7,13 +7,17 @@ storage — no shell uid, no daemon, no PC. Display is XFCE4 through TigerVNC's
 Xvnc, rendered by noVNC in a WebView window on the desktop display, with
 Firefox and Chromium installed.
 
-This directory holds the two on-device scripts, which
+This directory holds the three on-device scripts — setup, the desktop runtime,
+and `linux-ssh.sh`, remote access's sshd (see `doc/remote-access.md`) — which
 `open-android-dex-tauri/scripts/build-launcher-apk.mjs` copies into the
 launcher's assets on every build. proot itself is **committed** to the
 launcher's jniLibs for the two ABIs we stage — **arm64-v8a** (real phones) and
 **x86_64** (the Android emulator); `proot/` rebuilds those binaries and explains
-why we do not use the upstream prebuilts. The Ubuntu base rootfs is downloaded
-by the app on first run.
+why we do not use the upstream prebuilts. `sftp-shim/` builds the small library
+remote access preloads into the guest's sftp-server, without which SFTP — scp,
+sftp, WinSCP — cannot run under proot (its header says why); the two builds are
+committed under the launcher's `assets/linux/sftp/`. The Ubuntu base rootfs is
+downloaded by the app on first run.
 
 Verified end-to-end on an x86_64 Android 16 emulator (2026-08-18): full XFCE
 desktop, terminal, input, VncAuth. Not yet re-verified on the arm64 phone.
@@ -326,6 +330,7 @@ every other phase sends a plain dash-separated token and reads unchanged.
 | 6080 | websockify + noVNC http — `http://127.0.0.1:6080/dex.html?password=<vncpass>&v=<rtpid>`, our viewer page (`doc/linux-viewer.md`), staged into the web root beside Ubuntu's own `vnc.html` and `vnc_lite.html` |
 | 6081 | the PulseAudio tap — raw s16le/48k/stereo, read by `LinuxAudio` in the app (`doc/linux-audio.md`) |
 | 4713 | the PulseAudio control protocol, for `pavucontrol`, the panel plugin and anything linking libpulse |
+| 7022 | sshd, while remote access is on — from `linux-ssh.sh`, in a proot of its own. Keys only; reached from outside the phone only through the dexremote tunnel. Another free port when 7022 is taken |
 
 ## Sound
 

@@ -729,6 +729,10 @@ function refocus() {
   else rfb.focus();
 }
 
+function openRemote() {
+  location.href = 'dexremote:open';
+}
+
 function control(el, handler) {
   if (!el) return;
   el.setAttribute('tabindex', '-1');
@@ -759,6 +763,10 @@ function wire() {
     }
   });
   control($('dock'), () => setChrome('docked'));
+  // Remote access lives in the app, not in this page: a navigation the
+  // Activity intercepts opens its window. See LinuxActivity's WebViewClient.
+  control($('remote'), openRemote);
+  control($('p-remote'), openRemote);
 
   control($('zoom-in'), () => zoomBy(ZOOM_STEP));
   control($('zoom-out'), () => zoomBy(1 / ZOOM_STEP));

@@ -1,8 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
   LinuxOnDroid, standalone. The whole difference between this app and the
-  desktop shell is this file: same code, same resources, same proot — three
-  components instead of a dozen, and only the permissions those three need.
+  desktop shell is this file: same code, same resources, same proot — the
+  Linux window and its service, plus remote access's window and receiver,
+  instead of a dozen components, and only the permissions those need.
 
   What is deliberately NOT here, and why nothing misses it: the shell
   (LauncherActivity, CaptionService, the taskbar's window daemon), the Web
@@ -50,6 +51,18 @@
          It also makes this APK ineligible for Play without a declaration form.
          Moot while it is debug-signed, which Play rejects outright. -->
     <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
+
+    <!-- Remote access: SSH into this Linux from a computer anywhere. The same
+         four the desktop build declares, for the same reasons (see its
+         manifest): the network watch native code cannot do on Android, a wake
+         lock while a computer is connected, coming back after a reboot, and
+         the battery exemption the Remote access window asks for. This app is
+         the one most likely to be left running as a pocket server, which is
+         exactly the case these exist for. -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
 
     <!-- label + icon are the product's, not the shell's: this app IS
          LinuxOnDroid, so it says so in the app list, in Settings → Apps, and on
@@ -113,6 +126,31 @@
             android:resizeableActivity="true"
             android:windowSoftInputMode="adjustResize"
             android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|navigation|uiMode" />
+
+        <!-- The Remote access window. Reached from the viewer's control bar and
+             from the notification; an affinity of this app's own, like the
+             window's, for the reason spelled out there. -->
+        <activity
+            android:name=".LinuxRemoteActivity"
+            android:exported="false"
+            android:icon="@mipmap/ic_linux"
+            android:label="@string/rm_label"
+            android:launchMode="singleTask"
+            android:taskAffinity="com.ccrstech.linuxondroid.remote"
+            android:resizeableActivity="true"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|navigation|uiMode" />
+
+        <!-- Brings remote access back after a reboot or an update. Guarded by
+             DUMP like the desktop build's: the system sends these, apps may not. -->
+        <receiver
+            android:name=".RemoteResumeReceiver"
+            android:exported="true"
+            android:permission="android.permission.DUMP">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
 
         <!-- Owns the whole container: downloads and verifies the rootfs, runs
              the apt provisioning, and hosts the proot/Xvnc/websockify runtime,

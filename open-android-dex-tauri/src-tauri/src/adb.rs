@@ -1160,9 +1160,22 @@ pub fn restore_phone(app: &tauri::AppHandle, serial: &str) {
     for op in BACKGROUND_OPS {
         script.push_str(&format!("appops set {LAUNCHER_PACKAGE} {op} default; "));
     }
-    script.push_str(&format!(
-        "dumpsys deviceidle whitelist -{LAUNCHER_PACKAGE}; "
-    ));
+    // …but only when it was ours to remove. "Unrestricted" battery that the
+    // user chose on the phone is what keeps Remote access alive with no PC
+    // around, and taking it away because a cable came out would end that.
+    // Remote access being ON counts as that choice too: switching it on during
+    // a session never shows the phone's own battery prompt (the session's
+    // exemption is already in place), so without this the first unplug would
+    // quietly take away what the user had just asked for.
+    if !power_exemption_is_ours(app, serial) {
+        log::info!("{serial}: battery exemption was the user's own — left in place");
+    } else if crate::remote::phone_remote_enabled(app, serial) {
+        log::info!("{serial}: remote access is on — keeping the battery exemption it needs");
+    } else {
+        script.push_str(&format!(
+            "dumpsys deviceidle whitelist -{LAUNCHER_PACKAGE}; "
+        ));
+    }
 
     // 4. the shell-uid window daemon. `[W]mDaemon` and not `WmDaemon`: -f
     //    matches whole command lines, and this script IS a command line
@@ -1191,8 +1204,19 @@ pub fn restore_phone(app: &tauri::AppHandle, serial: &str) {
     // 5. the launcher, and the phone's own home screen in front. Killing the
     //    launcher is what actually releases top-display focus — an empty virtual
     //    display does not hold it, a resumed home activity on one does.
+    //
+    //    The force-stop takes Linux's Remote access down with everything else,
+    //    and the broadcast right behind it is what brings it back — for a phone
+    //    whose user switched it on, and nothing at all for any other. 0x20 is
+    //    FLAG_INCLUDE_STOPPED_PACKAGES (a force-stopped package is skipped by
+    //    broadcasts otherwise), 0x10000000 FLAG_RECEIVER_FOREGROUND. A launcher
+    //    from before Remote access has no such receiver, and the broadcast is
+    //    then simply delivered to no one.
     script.push_str(&format!(
-        "am force-stop {LAUNCHER_PACKAGE}; input keyevent KEYCODE_HOME"
+        "am force-stop {LAUNCHER_PACKAGE}; \
+         am broadcast -n {LAUNCHER_PACKAGE}/.RemoteResumeReceiver \
+         -a {REMOTE_RESUME_ACTION} -f 0x10000020 >/dev/null 2>&1; \
+         input keyevent KEYCODE_HOME"
     ));
 
     let undone = match run_adb_timeout(app, &["-s", serial, "shell", &script], RESTORE_TIMEOUT) {
@@ -1268,6 +1292,8 @@ pub fn adb_connect(app: tauri::AppHandle, address: String) -> Result<String, Str
 }
 
 pub const LAUNCHER_PACKAGE: &str = "com.ccrstech.openandroiddex.launcher";
+/// RemoteResumeReceiver's action: "bring Remote access back if it was on".
+pub const REMOTE_RESUME_ACTION: &str = "com.ccrstech.openandroiddex.launcher.remote.RESUME";
 pub const LAUNCHER_COMPONENT: &str =
     "com.ccrstech.openandroiddex.launcher/.LauncherActivity";
 
@@ -1705,6 +1731,23 @@ const BACKGROUND_OPS: [&str; 2] = ["RUN_IN_BACKGROUND", "RUN_ANY_IN_BACKGROUND"]
 /// Everything here is undone by [`restore_phone`]. This is a permission the user
 /// never explicitly granted, so it does not outlive the session.
 fn exempt_from_power_saving(app: &tauri::AppHandle, serial: &str) {
+    // Was the launcher exempt BEFORE we touched it? Then the user granted it on
+    // the phone — Remote access asks for exactly this, so that the phone stays
+    // reachable with no PC anywhere — and the exit path must leave it alone.
+    // The same "only undo what we did" rule notification access follows.
+    let already = run_adb_quiet(
+        app,
+        &[
+            "-s",
+            serial,
+            "shell",
+            &format!("dumpsys deviceidle whitelist | grep -c {LAUNCHER_PACKAGE} || true"),
+        ],
+    )
+    .map(|o| o.trim() != "0" && !o.trim().is_empty())
+    .unwrap_or(false);
+    remember_power_exemption(app, serial, !already);
+
     // `+package` adds; the list survives reboots, which is why exit removes it.
     let whitelisted = run_adb(
         app,
@@ -2005,6 +2048,28 @@ fn notification_grant_is_ours(app: &tauri::AppHandle, serial: &str) -> bool {
         .get(serial)
         .and_then(|saved| saved.get(NOTIFICATION_GRANT_KEY))
         .is_some_and(|v| v == "1")
+}
+
+/// Key in the per-serial restore map: "1" when THIS app put the launcher on the
+/// doze whitelist, "0" when it was already there — the user's own grant.
+const POWER_EXEMPTION_KEY: &str = "power_exemption_granted_by_us";
+
+fn remember_power_exemption(app: &tauri::AppHandle, serial: &str, ours: bool) {
+    let mut map = load_restore_map(app);
+    map.entry(serial.to_string()).or_default().insert(
+        POWER_EXEMPTION_KEY.to_string(),
+        if ours { "1" } else { "0" }.to_string(),
+    );
+    save_restore_map(app, &map);
+}
+
+/// Absent counts as ours: a session recorded before this key existed was
+/// always put on the whitelist by us, which is what the exit path assumed.
+fn power_exemption_is_ours(app: &tauri::AppHandle, serial: &str) -> bool {
+    load_restore_map(app)
+        .get(serial)
+        .and_then(|saved| saved.get(POWER_EXEMPTION_KEY))
+        .is_none_or(|v| v == "1")
 }
 
 /// Bring the daemon's loopback port to the PC so the host can drive windows

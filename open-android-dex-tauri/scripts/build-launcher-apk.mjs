@@ -90,6 +90,69 @@ if (sdk) {
   buildEnv.ANDROID_SDK_ROOT = sdk
 }
 
+// The two asset syncs come BEFORE the APK build, not after it. They used to
+// follow it, so every build packed the scripts the previous build had synced:
+// a script change reached the phone one build late, which looks exactly like
+// the change not working.
+
+// ── linux: keep the app's provisioning scripts in sync ─────────────────────
+// The Linux feature is now owned entirely by the launcher APK (no PC push, no
+// daemon): proot ships as committed jniLibs, the Ubuntu rootfs is downloaded
+// by the app on first run, and the two provisioning scripts are APK assets.
+// The scripts' source of truth is openandroiddex-linux/; copy them into the
+// launcher's assets so a build always carries the current version. Nothing is
+// pushed to resources/bin any more — the whole stack rides inside the APK.
+if (process.env.SKIP_LAUNCHER_APK === '1') {
+  console.log('[linux] SKIP_LAUNCHER_APK=1 — leaving launcher assets as is')
+} else {
+  const linuxDir = resolve(here, '..', '..', 'openandroiddex-linux')
+  const assetsLinux = resolve(
+    here, '..', '..', 'openandroiddex-launcher', 'app', 'src', 'main', 'assets', 'linux'
+  )
+  mkdirSync(assetsLinux, { recursive: true })
+  // linux-ssh.sh is remote access's runtime: the guest's sshd, in a proot of
+  // its own so it outlives the desktop session (see the script's header).
+  const scripts = ['linux-setup.sh', 'linux-rt.sh', 'linux-ssh.sh']
+  for (const name of scripts) {
+    const src = join(linuxDir, name)
+    if (!existsSync(src)) {
+      console.error(`[linux] ${src} is missing`)
+      process.exit(1)
+    }
+    copyFileSync(src, join(assetsLinux, name))
+  }
+  console.log(`[linux] synced ${scripts.join(' + ')} → launcher assets`)
+}
+
+// ── docker: same deal, one directory over ──────────────────────────────────
+// The Docker feature is a sibling of Linux, not a part of it: it is a QEMU
+// virtual machine (this kernel has no PID/user namespaces, so a container is
+// not makeable on Android itself — see Docker.java). QEMU ships as committed
+// jniLibs, Alpine's kernel/initramfs/modloop/minirootfs are downloaded by the
+// app on first run, and the two scripts here are APK assets.
+//
+// guest-init.sh is the one that is NOT run on Android: the app appends it to
+// Alpine's initramfs and the guest kernel executes it as PID 1. It is still an
+// asset like any other — the app only has to copy bytes.
+if (process.env.SKIP_LAUNCHER_APK === '1') {
+  console.log('[docker] SKIP_LAUNCHER_APK=1 — leaving launcher assets as is')
+} else {
+  const dockerDir = resolve(here, '..', '..', 'openandroiddex-docker')
+  const assetsDocker = resolve(
+    here, '..', '..', 'openandroiddex-launcher', 'app', 'src', 'main', 'assets', 'docker'
+  )
+  mkdirSync(assetsDocker, { recursive: true })
+  for (const name of ['docker-rt.sh', 'guest-init.sh']) {
+    const src = join(dockerDir, name)
+    if (!existsSync(src)) {
+      console.error(`[docker] ${src} is missing`)
+      process.exit(1)
+    }
+    copyFileSync(src, join(assetsDocker, name))
+  }
+  console.log('[docker] synced docker-rt.sh + guest-init.sh → launcher assets')
+}
+
 if (process.env.SKIP_LAUNCHER_APK === '1') {
   console.log('[launcher-apk] SKIP_LAUNCHER_APK=1 — keeping the bundled APK as is')
 } else {
@@ -158,59 +221,4 @@ if (process.env.SKIP_WMD_DEX === '1') {
   }
   stage(builtDex, bundledDex)
   console.log(`[wmd] bundled ${statSync(bundledDex).size} bytes → ${bundledDex}`)
-}
-
-// ── linux: keep the app's provisioning scripts in sync ─────────────────────
-// The Linux feature is now owned entirely by the launcher APK (no PC push, no
-// daemon): proot ships as committed jniLibs, the Ubuntu rootfs is downloaded
-// by the app on first run, and the two provisioning scripts are APK assets.
-// The scripts' source of truth is openandroiddex-linux/; copy them into the
-// launcher's assets so a build always carries the current version. Nothing is
-// pushed to resources/bin any more — the whole stack rides inside the APK.
-if (process.env.SKIP_LAUNCHER_APK === '1') {
-  console.log('[linux] SKIP_LAUNCHER_APK=1 — leaving launcher assets as is')
-} else {
-  const linuxDir = resolve(here, '..', '..', 'openandroiddex-linux')
-  const assetsLinux = resolve(
-    here, '..', '..', 'openandroiddex-launcher', 'app', 'src', 'main', 'assets', 'linux'
-  )
-  mkdirSync(assetsLinux, { recursive: true })
-  for (const name of ['linux-setup.sh', 'linux-rt.sh']) {
-    const src = join(linuxDir, name)
-    if (!existsSync(src)) {
-      console.error(`[linux] ${src} is missing`)
-      process.exit(1)
-    }
-    copyFileSync(src, join(assetsLinux, name))
-  }
-  console.log('[linux] synced linux-setup.sh + linux-rt.sh → launcher assets')
-}
-
-// ── docker: same deal, one directory over ──────────────────────────────────
-// The Docker feature is a sibling of Linux, not a part of it: it is a QEMU
-// virtual machine (this kernel has no PID/user namespaces, so a container is
-// not makeable on Android itself — see Docker.java). QEMU ships as committed
-// jniLibs, Alpine's kernel/initramfs/modloop/minirootfs are downloaded by the
-// app on first run, and the two scripts here are APK assets.
-//
-// guest-init.sh is the one that is NOT run on Android: the app appends it to
-// Alpine's initramfs and the guest kernel executes it as PID 1. It is still an
-// asset like any other — the app only has to copy bytes.
-if (process.env.SKIP_LAUNCHER_APK === '1') {
-  console.log('[docker] SKIP_LAUNCHER_APK=1 — leaving launcher assets as is')
-} else {
-  const dockerDir = resolve(here, '..', '..', 'openandroiddex-docker')
-  const assetsDocker = resolve(
-    here, '..', '..', 'openandroiddex-launcher', 'app', 'src', 'main', 'assets', 'docker'
-  )
-  mkdirSync(assetsDocker, { recursive: true })
-  for (const name of ['docker-rt.sh', 'guest-init.sh']) {
-    const src = join(dockerDir, name)
-    if (!existsSync(src)) {
-      console.error(`[docker] ${src} is missing`)
-      process.exit(1)
-    }
-    copyFileSync(src, join(assetsDocker, name))
-  }
-  console.log('[docker] synced docker-rt.sh + guest-init.sh → launcher assets')
 }

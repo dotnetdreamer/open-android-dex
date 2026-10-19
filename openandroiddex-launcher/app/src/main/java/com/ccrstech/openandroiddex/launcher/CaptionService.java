@@ -482,7 +482,8 @@ public final class CaptionService extends AccessibilityService {
                 && !LinuxActivity.class.getName().equals(t.activity)
                 && !DockerActivity.class.getName().equals(t.activity)
                 && !TaskManagerActivity.class.getName().equals(t.activity)
-                && !FileTransferActivity.class.getName().equals(t.activity);
+                && !FileTransferActivity.class.getName().equals(t.activity)
+                && !LinuxRemoteActivity.class.getName().equals(t.activity);
     }
 
     /** @return true if any caption geometry changed, i.e. windows are on the move. */

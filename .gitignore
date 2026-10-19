@@ -8,9 +8,18 @@
 openandroiddex-launcher/build/
 openandroiddex-launcher/*/build/
 
+# Cargo output for the remote-access crate. Its Cargo.lock IS tracked — the
+# phone binary is built from it and committed to jniLibs, so the lockfile is
+# what makes that build repeatable. (The desktop app's own target/ is covered
+# by open-android-dex-tauri/.gitignore.)
+openandroiddex-remote/target/
+
 # IDE, per-machine
 .idea/
 .vscode/
+
+# macOS Finder metadata, written into every directory a Finder window opens.
+.DS_Store
 
 # Reverse-engineering scratch, local only. jadx/apktool output from a third-party
 # closed-source product, plus our written analysis of it, kept as reference for the

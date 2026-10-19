@@ -46,8 +46,19 @@ public class LinuxService extends Service {
     static final String ACTION_RESET = "com.ccrstech.openandroiddex.launcher.linux.RESET";
     /** Wipe the container and leave it gone, with the storage free. */
     static final String ACTION_UNINSTALL = "com.ccrstech.openandroiddex.launcher.linux.UNINSTALL";
+    /** Remote access on: the tunnel and the guest's sshd. See {@link RemoteHost}. */
+    static final String ACTION_REMOTE_ON = "com.ccrstech.openandroiddex.launcher.linux.REMOTE_ON";
+    static final String ACTION_REMOTE_OFF = "com.ccrstech.openandroiddex.launcher.linux.REMOTE_OFF";
+    /** Start remote access again if the user left it on — boot, an update, a PC session ending. */
+    static final String ACTION_REMOTE_RESUME = "com.ccrstech.openandroiddex.launcher.linux.REMOTE_RESUME";
+    /** Open "Add a computer" with the code in {@link #EXTRA_CODE}. */
+    static final String ACTION_REMOTE_PAIR = "com.ccrstech.openandroiddex.launcher.linux.REMOTE_PAIR";
+    static final String ACTION_REMOTE_PAIR_CANCEL = "com.ccrstech.openandroiddex.launcher.linux.REMOTE_PAIR_CANCEL";
     static final String EXTRA_W = "w";
     static final String EXTRA_H = "h";
+    static final String EXTRA_CODE = "code";
+    /** On REMOTE_OFF: it came from the notification's Turn off. */
+    private static final String EXTRA_FROM_NOTIFICATION = "from_notification";
 
     private static final String CHANNEL = "linux";
     private static final int NOTIF_ID = 0x1D;
@@ -56,6 +67,11 @@ public class LinuxService extends Service {
     private static final AtomicBoolean provisioning = new AtomicBoolean(false);
 
     private final ExecutorService io = Executors.newSingleThreadExecutor();
+    private final android.os.Handler mainHandler = new android.os.Handler(android.os.Looper.getMainLooper());
+    /** Remote access, while it is on. Never null after onCreate. */
+    private RemoteHost remote;
+    /** What the notification said last, so a remote change can repost it. */
+    private String foregroundText;
     /** Kept only so the runtime process is not GC-reaped mid-life. */
     private Process runtimeProc;
     /**
@@ -66,6 +82,8 @@ public class LinuxService extends Service {
      * leaving a working desktop the window never connects to.
      */
     private volatile boolean runtimeUp;
+    /** elapsedRealtime of the last spawn; see idleStop. */
+    private volatile long runtimeSpawnedAt;
     /** Newest start we have seen, so idleStop cannot cancel a start in flight. */
     private volatile int lastStartId;
 
@@ -122,16 +140,68 @@ public class LinuxService extends Service {
         send(ctx, ACTION_UNINSTALL, 0, 0);
     }
 
-    private static void send(Context ctx, String action, int w, int h) {
+    /**
+     * Turn remote access on, and remember that it is on.
+     *
+     * @return false when Android refused to start the service from where the
+     *         caller is. It is still on, and comes up at the next chance —
+     *         boot, an update, the desktop or the Linux window opening.
+     */
+    static boolean remoteOn(Context ctx) {
+        LinuxRemote.setEnabled(ctx, true);
+        LinuxRemote.clearSshdGaveUp(ctx);
+        return send(ctx, ACTION_REMOTE_ON, 0, 0);
+    }
+
+    /** Turn remote access off: every session ends, and it stays off. */
+    static void remoteOff(Context ctx) {
+        LinuxRemote.setEnabled(ctx, false);
+        send(ctx, ACTION_REMOTE_OFF, 0, 0);
+    }
+
+    /**
+     * Bring remote access back if the user left it on, and do nothing at all
+     * otherwise. Safe to call from anywhere and as often as you like — boot,
+     * an app update, the desktop starting, the Linux window opening — which is
+     * why nothing calls ACTION_REMOTE_ON for this.
+     *
+     * @return false when Android refused to start the service from where we
+     *         are (background start restrictions); the caller may then ask
+     *         the user to tap something, which is always allowed to.
+     */
+    static boolean remoteResume(Context ctx) {
+        if (!LinuxRemote.isEnabled(ctx) || !LinuxRemote.available(ctx)) return true;
+        return send(ctx, ACTION_REMOTE_RESUME, 0, 0);
+    }
+
+    /** Open "Add a computer" for {@code code}; turns remote access on if it was off. */
+    static void remotePair(Context ctx, String code) {
+        LinuxRemote.setEnabled(ctx, true);
+        Intent i = new Intent(ctx, LinuxService.class).setAction(ACTION_REMOTE_PAIR)
+                .putExtra(EXTRA_CODE, code);
+        start(ctx, i);
+    }
+
+    static void remotePairCancel(Context ctx) {
+        send(ctx, ACTION_REMOTE_PAIR_CANCEL, 0, 0);
+    }
+
+    private static boolean send(Context ctx, String action, int w, int h) {
         Intent i = new Intent(ctx, LinuxService.class).setAction(action);
         if (w > 0) i.putExtra(EXTRA_W, w).putExtra(EXTRA_H, h);
+        return start(ctx, i);
+    }
+
+    private static boolean start(Context ctx, Intent i) {
         try {
             ctx.startForegroundService(i);
+            return true;
         } catch (Exception e) {
             // Background-start restrictions can refuse this outright. Losing a
             // Linux command is a bad outcome; taking the desktop shell down
             // with an uncaught exception is a far worse one.
-            DexLog.warn("linux", "could not start the service for " + action, e);
+            DexLog.warn("linux", "could not start the service for " + i.getAction(), e);
+            return false;
         }
     }
 
@@ -151,6 +221,14 @@ public class LinuxService extends Service {
     @Override
     public void onCreate() {
         super.onCreate();
+        remote = RemoteHost.of(this);
+        remote.setListener(() -> mainHandler.post(() -> {
+            refreshForeground();
+            // The host stops itself when it finds remote access switched off
+            // behind its back; with it gone this service may have nothing
+            // left to be foreground for.
+            if (!remote.running() && !LinuxRemote.isEnabled(this)) idleStopQueued();
+        }));
         goForeground(getString(R.string.ln_installing));
     }
 
@@ -160,8 +238,63 @@ public class LinuxService extends Service {
         // call, and a start that arrives after an idleStop dropped us out of the
         // foreground has its own five seconds to satisfy.
         lastStartId = startId;
-        goForeground(getString(R.string.ln_installing));
+        // What it said last, not "Installing…" every time: a start that is
+        // about nothing the text describes (remote access going off with the
+        // desktop up, say) must not leave it claiming an install.
+        goForeground(foregroundText != null ? foregroundText : getString(R.string.ln_installing));
         String action = intent != null ? intent.getAction() : null;
+        // A null intent is Android restarting us after killing the process —
+        // which only happens because the return below said START_STICKY, which
+        // it only says while remote access is on. So: bring that back.
+        if (intent == null) action = ACTION_REMOTE_RESUME;
+        // Not only on the null intent, though: Android re-creates a sticky
+        // service with whatever start was pending when it died, and only
+        // falls back to null when there was none — closing the Linux window
+        // can be that start. So every start that is not the one switching
+        // remote access off brings it up when it is on. start() is a no-op
+        // while it is running.
+        boolean remoteWanted = LinuxRemote.isEnabled(this) && LinuxRemote.available(this);
+        if (remoteWanted && !ACTION_REMOTE_OFF.equals(action) && !ACTION_UNINSTALL.equals(action)) {
+            remote.start();
+            // RemoteResumeReceiver's "paused — tap to resume", if one is up:
+            // whatever brought remote access back, it is not paused now.
+            try {
+                getSystemService(NotificationManager.class).cancel(0x1E);
+            } catch (Exception ignored) {
+            }
+        }
+        if (ACTION_REMOTE_ON.equals(action) || ACTION_REMOTE_RESUME.equals(action)) {
+            if (remoteWanted) {
+                goForeground(getString(R.string.ln_label));
+            } else {
+                idleStopQueued();
+            }
+            return stickiness();
+        } else if (ACTION_REMOTE_OFF.equals(action)) {
+            // Only the notification's Turn off clears the marker here: it has
+            // no code of ours in front of it to do that. Every other caller
+            // went through remoteOff, which already did — and clearing it
+            // again would undo an On that was tapped while this Off queued.
+            if (intent.getBooleanExtra(EXTRA_FROM_NOTIFICATION, false)) {
+                LinuxRemote.setEnabled(this, false);
+            }
+            remote.stop();
+            // stop() is asynchronous; idle once it has had its moment.
+            mainHandler.postDelayed(this::idleStopQueued, 5000);
+            return stickiness();
+        } else if (ACTION_REMOTE_PAIR.equals(action)) {
+            String code = intent.getStringExtra(EXTRA_CODE);
+            if (code != null && LinuxRemote.available(this)) {
+                remote.start();
+                remote.pair(code);
+                goForeground(getString(R.string.ln_label));
+            }
+            return stickiness();
+        } else if (ACTION_REMOTE_PAIR_CANCEL.equals(action)) {
+            remote.cancelPair();
+            if (!remoteWanted) idleStopQueued();
+            return stickiness();
+        }
         if (ACTION_START.equals(action)) {
             final int w = intent.getIntExtra(EXTRA_W, 1280);
             final int h = intent.getIntExtra(EXTRA_H, 800);
@@ -177,7 +310,11 @@ public class LinuxService extends Service {
                 // scan started here would be cut off: :linux has no other
                 // component and is reaped the moment stopSelf lands.
                 Linux.scanShared(this);
-                stopSelf();
+                // idleStop, not stopSelf: closing the desktop window ends the
+                // DESKTOP. Remote access, if it is on, is the reason this
+                // service is still wanted, and someone may be logged in over
+                // SSH right now.
+                idleStop();
             });
         } else if (ACTION_RESET.equals(action)) {
             io.execute(() -> {
@@ -187,18 +324,33 @@ public class LinuxService extends Service {
         } else if (ACTION_UNINSTALL.equals(action)) {
             io.execute(() -> {
                 uninstall();
-                stopSelf(); // nothing left to be foreground for
+                idleStop(); // nothing left to be foreground for
             });
         } else { // PROVISION (default)
             io.execute(this::provision);
         }
-        return START_NOT_STICKY;
+        return stickiness();
+    }
+
+    /**
+     * Sticky only while remote access is on. A container the user is looking
+     * at is theirs to restart; one they asked to keep reachable has to come
+     * back by itself if Android reclaims the process, or "reachable from
+     * anywhere" would quietly stop being true the first time memory ran low.
+     */
+    private int stickiness() {
+        return LinuxRemote.isEnabled(this) ? START_STICKY : START_NOT_STICKY;
     }
 
     @Override
     public void onDestroy() {
         super.onDestroy();
         io.shutdownNow();
+        // The host is the process's, not this instance's: stopped (in order,
+        // ahead of whatever start a next instance sends it) and told to stop
+        // reporting to a service that is gone.
+        remote.stop();
+        remote.setListener(null);
         // The pump is a daemon thread, so the process usually takes it with it.
         // This is for the case where the service goes and the process does not.
         LinuxAudio.stop();
@@ -302,6 +454,13 @@ public class LinuxService extends Service {
      */
     private void uninstall() {
         DexLog.step("linux", "uninstall — wiping the container");
+        // Remote access is SSH into this container, so it goes off with it —
+        // otherwise a tunnel would keep the phone awake and online to answer
+        // "Linux is not installed" for ever. The paired computers are KEPT
+        // (files/linux-remote is outside the container): reinstalling and
+        // switching remote access back on brings every one of them back.
+        LinuxRemote.setEnabled(this, false);
+        remote.stop();
         wipe();
         Linux.setUninstalled(this, true);
         DexLog.step("linux", "uninstall — container removed, provisioning off");
@@ -317,13 +476,25 @@ public class LinuxService extends Service {
      */
     private void wipe() {
         stopRuntime();
-        File dir = Linux.root(this);
-        File doomed = new File(dir.getParentFile(), "linux-deleting");
-        deleteTree(doomed);
-        if (dir.exists() && !dir.renameTo(doomed)) {
-            doomed = dir; // rename refused; delete in place rather than not at all
+        // sshd runs in a proot of its own over the same rootfs, and a wipe
+        // under a live one is the half-deleted tree this method exists to
+        // avoid. Held stopped for the whole wipe, not just stopped: deleting a
+        // leftover tree first can take a while, and the live guest still reads
+        // as ready until the rename, so sshd would be started again on it.
+        // Remote access itself stays on through a reinstall; it reports
+        // "installing" until the new guest has an sshd again.
+        remote.holdSsh();
+        try {
+            File dir = Linux.root(this);
+            File doomed = new File(dir.getParentFile(), "linux-deleting");
+            deleteTree(doomed);
+            if (dir.exists() && !dir.renameTo(doomed)) {
+                doomed = dir; // rename refused; delete in place rather than not at all
+            }
+            deleteTree(doomed);
+        } finally {
+            remote.releaseSsh();
         }
-        deleteTree(doomed);
     }
 
     private static void deleteTree(File f) {
@@ -473,6 +644,7 @@ public class LinuxService extends Service {
             // force-stop (DeX session end) tears the whole container down; the
             // service staying foreground is what keeps it alive until then.
             runtimeUp = true;
+            runtimeSpawnedAt = android.os.SystemClock.elapsedRealtime();
             runtimeProc = pb.start();
             // The guest has no audio device: it plays into a null sink and this
             // drains that sink's monitor into an AudioTrack. Started here rather
@@ -545,7 +717,13 @@ public class LinuxService extends Service {
 
     // ── foreground plumbing ──
 
+    /** Repost the notification with what remote access says now. Main thread. */
+    private void refreshForeground() {
+        if (foregroundText != null) goForeground(foregroundText);
+    }
+
     private void goForeground(String text) {
+        foregroundText = text;
         try {
             NotificationManager nm = getSystemService(NotificationManager.class);
             if (nm.getNotificationChannel(CHANNEL) == null) {
@@ -554,13 +732,24 @@ public class LinuxService extends Service {
                 ch.setShowBadge(false);
                 nm.createNotificationChannel(ch);
             }
-            Notification n = new Notification.Builder(this, CHANNEL)
+            // While remote access is on it is what this notification is FOR —
+            // the one sign on the phone that a door is open — so its line wins
+            // over the install/runtime text, and the way to close the door is
+            // right there on it.
+            String remoteLine = remote != null ? remote.summary() : null;
+            Notification.Builder b = new Notification.Builder(this, CHANNEL)
                     .setSmallIcon(android.R.drawable.ic_menu_manage)
                     .setContentTitle(getString(R.string.ln_label))
-                    .setContentText(text)
+                    .setContentText(remoteLine != null ? remoteLine : text)
                     .setContentIntent(openWindow())
-                    .setOngoing(true)
-                    .build();
+                    .setOngoing(true);
+            if (remoteLine != null) {
+                b.addAction(new Notification.Action.Builder(null,
+                        getString(R.string.rm_note_settings), openRemote()).build());
+                b.addAction(new Notification.Action.Builder(null,
+                        getString(R.string.rm_note_turn_off), remoteOffIntent()).build());
+            }
+            Notification n = b.build();
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
                 startForeground(NOTIF_ID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE);
             } else {
@@ -593,6 +782,25 @@ public class LinuxService extends Service {
                 PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
     }
 
+    private PendingIntent openRemote() {
+        return PendingIntent.getActivity(this, 1,
+                new Intent(this, LinuxRemoteActivity.class)
+                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
+    }
+
+    /**
+     * The notification's "Turn off". Straight to the service, which is why the
+     * REMOTE_OFF handler clears the enabled marker itself: a PendingIntent has
+     * no code of ours in front of it to do that.
+     */
+    private PendingIntent remoteOffIntent() {
+        return PendingIntent.getForegroundService(this, 2,
+                new Intent(this, LinuxService.class).setAction(ACTION_REMOTE_OFF)
+                        .putExtra(EXTRA_FROM_NOTIFICATION, true),
+                PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
+    }
+
     /**
      * Drop foreground + stop when neither provisioning nor a runtime is up.
      *
@@ -604,9 +812,42 @@ public class LinuxService extends Service {
      */
     private void idleStop() {
         if (provisioning.get()) return;
+        // A desktop start in flight: runtimeUp goes true before linux-rt.sh has
+        // written the rt.pid that readStatus looks for. Only for a moment after
+        // the spawn, though — a session that has since ended by itself leaves
+        // runtimeUp set, and must not keep the service up for ever. Asked again
+        // once the moment has passed: had the start died in it, nothing else
+        // would ask.
+        long sinceSpawn = android.os.SystemClock.elapsedRealtime() - runtimeSpawnedAt;
+        if (runtimeUp && sinceSpawn < 15_000) {
+            mainHandler.postDelayed(this::idleStopQueued, 15_000 - sinceSpawn + 500);
+            return;
+        }
         if (Linux.readStatus(this).running) return;
+        // Remote access is a reason to be running all by itself: no window, no
+        // desktop session, just a phone that can be reached. The marker, not
+        // only running(): it is written before the intent that starts the host
+        // is even sent, so a provisioning run finishing in the instant before
+        // the host's thread gets going cannot idle the service out from under it.
+        if (remote != null && remote.running()) return;
+        if (LinuxRemote.isEnabled(this) && LinuxRemote.available(this)) return;
         if (stopSelfResult(lastStartId)) {
             stopForeground(STOP_FOREGROUND_REMOVE);
+        }
+    }
+
+    /**
+     * idleStop, queued on the io thread behind whatever it is doing. The
+     * remote-access starts decide on the main thread, and an idleStop run
+     * there could land between a desktop start's spawn and its rt.pid and stop
+     * the service under it; every other caller already runs on io, after its
+     * own work.
+     */
+    private void idleStopQueued() {
+        try {
+            io.execute(this::idleStop);
+        } catch (java.util.concurrent.RejectedExecutionException destroyed) {
+            // onDestroy has run; there is nothing left to stop.
         }
     }
 

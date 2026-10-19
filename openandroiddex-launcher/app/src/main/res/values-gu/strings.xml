@@ -562,4 +562,75 @@
     <string name="ft_grant">ઍક્સેસ આપો</string>
     <string name="ft_menu_downloads">ફોનનું Downloads ફોલ્ડર ખોલો</string>
     <string name="ft_menu_grant">બધી ફાઇલોની ઍક્સેસની મંજૂરી આપો</string>
+
+    <!-- ── Remote access ── -->
+    <string name="rm_label">રિમોટ ઍક્સેસ</string>
+    <string name="rm_subtitle">કોઈપણ નેટવર્ક પર, તમારા કમ્પ્યુટરથી ssh વડે આ Linux માં લૉગ ઇન કરો. રાઉટર પર કંઈ સેટ કરવાનું નથી, અને કોઈ એકાઉન્ટની જરૂર નથી.</string>
+    <string name="rm_state_off">બંધ</string>
+    <string name="rm_state_off_sub">તેને ચાલુ કરો, અને તમે જોડી બનાવેલા કમ્પ્યુટર ગમે ત્યાંથી આ ફોન પરના Ubuntu સુધી પહોંચી શકશે: ઘરેથી, ઑફિસેથી, કે ફોન મોબાઇલ ડેટા પર હોય ત્યારે પણ.</string>
+    <string name="rm_state_starting">શરૂ થઈ રહ્યું છે…</string>
+    <string name="rm_state_online">ગમે ત્યાંથી પહોંચી શકાય છે</string>
+    <string name="rm_state_offline">ચાલુ, નેટવર્કની રાહ જોઈ રહ્યું છે</string>
+    <string name="rm_turn_on">ચાલુ કરો</string>
+    <string name="rm_turn_off">બંધ કરો</string>
+    <string name="rm_linux_missing">Linux હજી ઇન્સ્ટોલ થયું નથી. તેને ઇન્સ્ટોલ કરવા માટે એક વાર Linux ખોલો; તે તૈયાર થતાં જ કમ્પ્યુટર કનેક્ટ થઈ શકશે.</string>
+    <string name="rm_open_linux">Linux ખોલો</string>
+    <string name="rm_linux_installing">Linux હજી સેટ થઈ રહ્યું છે. તે પૂરું થાય ત્યારે કમ્પ્યુટર કનેક્ટ થઈ શકશે.</string>
+    <string name="rm_linux_error">Linux નું સેટઅપ પૂરું થયું નહીં. ફરી પ્રયાસ કરવા Linux ખોલો; તે પૂરું થતાં જ કમ્પ્યુટર કનેક્ટ થઈ શકશે.</string>
+    <string name="rm_ssh_install_failed">Linux માં SSH સર્વર ઇન્સ્ટોલ થઈ શક્યું નહીં. ફોનનું કનેક્શન તપાસો, પછી ફરી પ્રયાસ કરવા રિમોટ ઍક્સેસ બંધ કરીને ફરી ચાલુ કરો.</string>
+    <string name="rm_ssh_starting">Linux ની અંદર SSH સર્વર શરૂ થઈ રહ્યું છે…</string>
+    <string name="rm_ssh_failed">Linux ની અંદર SSH સર્વર શરૂ થઈ શક્યું નહીં. Linux ફરીથી ઇન્સ્ટોલ કરવાથી સામાન્ય રીતે આ ઠીક થઈ જાય છે; શેર કરેલા ફોલ્ડરમાંની તમારી ફાઇલો સચવાઈ રહે છે.</string>
+    <string name="rm_battery">સ્ક્રીન બંધ હોય ત્યારે Android રિમોટ ઍક્સેસ થોભાવી શકે છે. તેને બૅકગ્રાઉન્ડમાં ચાલુ રહેવા દો, જેથી કમ્પ્યુટર હંમેશાં ફોન સુધી પહોંચી શકે.</string>
+    <string name="rm_battery_allow">મંજૂરી આપો</string>
+    <string name="rm_battery_desktop">ફોન પર સેટિંગ્સ → એપ → %1$s → બૅટરી ખોલો અને “પ્રતિબંધિત નથી” પસંદ કરો.</string>
+    <string name="rm_unavailable">રિમોટ ઍક્સેસ માટે 64-બિટ ફોન જોઈએ, Linux ની જેમ જ.</string>
+    <plurals name="rm_sessions">
+        <item quantity="one">હમણાં %d કમ્પ્યુટર કનેક્ટ છે</item>
+        <item quantity="other">હમણાં %d કમ્પ્યુટર કનેક્ટ છે</item>
+    </plurals>
+    <plurals name="rm_paired_count">
+        <item quantity="one">%d કમ્પ્યુટરની જોડી બનાવી · કોઈ કનેક્ટ નથી</item>
+        <item quantity="other">%d કમ્પ્યુટરની જોડી બનાવી · કોઈ કનેક્ટ નથી</item>
+    </plurals>
+    <string name="rm_computers">કમ્પ્યુટર</string>
+    <string name="rm_no_computers">હજી કોઈ કમ્પ્યુટર નથી. એક ઉમેરો, અને ફક્ત તે જ કમ્પ્યુટર અંદર આવી શકશે.</string>
+    <string name="rm_add">કમ્પ્યુટર ઉમેરો</string>
+    <string name="rm_remove">કાઢી નાખો</string>
+    <string name="rm_remove_title">%1$s ને કાઢી નાખીએ?</string>
+    <string name="rm_remove_body">તેનું કનેક્શન તરત જ કપાઈ જાય છે, અને ફરીથી જોડી બનાવ્યા પછી જ તે પાછું આવી શકે છે.</string>
+    <string name="rm_connected_direct">હમણાં કનેક્ટ છે · સીધું · %1$d ms</string>
+    <string name="rm_connected_relay">હમણાં કનેક્ટ છે · રિલે દ્વારા · %1$d ms</string>
+    <string name="rm_paired_when">%1$s ના રોજ જોડી બનાવી</string>
+    <string name="rm_os_other">કમ્પ્યુટર</string>
+    <string name="rm_code_title">આ કોડ તમારા કમ્પ્યુટર પર ટાઇપ કરો</string>
+    <string name="rm_code_preparing">કોડ તૈયાર થઈ રહ્યો છે…</string>
+    <string name="rm_code_expires">%1$s માં સમાપ્ત થશે</string>
+    <string name="rm_code_how_app">કમ્પ્યુટર પરના Open Android DeX માં “Phone Linux” પર ક્લિક કરો અને ત્યાં તે ટાઇપ કરો.</string>
+    <string name="rm_code_how_cli">તે કમ્પ્યુટર પર એપ નથી? ચલાવો: dexremote pair %1$s</string>
+    <string name="rm_cancel">રદ કરો</string>
+    <string name="rm_paired_ok">%1$s હવે આ Linux સુધી પહોંચી શકે છે.</string>
+    <string name="rm_paired_how">તેના પર ચલાવો: ssh %1$s</string>
+    <string name="rm_done">થઈ ગયું</string>
+    <string name="rm_pair_failed_bad_code">કમ્પ્યુટરે અલગ કોડ ટાઇપ કર્યો, તેથી કંઈ સાચવ્યું નથી.</string>
+    <string name="rm_pair_failed_expired">કોઈ કમ્પ્યુટર વાપરે તે પહેલાં કોડની મુદત પૂરી થઈ ગઈ.</string>
+    <string name="rm_pair_failed_other">જોડી બનાવવાનું પૂરું થયું નહીં.</string>
+    <string name="rm_try_again">નવો કોડ</string>
+    <string name="rm_connect">જોડી બનાવેલા કમ્પ્યુટરથી</string>
+    <string name="rm_connect_terminal">કોઈપણ ટર્મિનલમાં</string>
+    <string name="rm_connect_vscode">VS Code માં: Remote-SSH, પછી %1$s</string>
+    <string name="rm_copy">કૉપિ કરો</string>
+    <string name="rm_copied">કૉપિ થયું</string>
+    <string name="rm_host_key">યુઝર root · હોસ્ટ કી %1$s</string>
+    <string name="rm_phone_id">ફોન ID %1$s</string>
+    <string name="rm_security_note">ફક્ત તમે જોડી બનાવેલા કમ્પ્યુટર જ કનેક્ટ થઈ શકે છે. Linux સુધી કંઈ પહોંચે તે પહેલાં દરેક કમ્પ્યુટર પોતાની કી સાબિત કરે છે, અને પછી SSH બીજી કી તપાસે છે. નેટવર્ક મંજૂરી આપે ત્યારે કનેક્શન બંને ઉપકરણો વચ્ચે સીધા જાય છે; નહીં તો એક જાહેર રિલે દ્વારા, જે તેમને આગળ મોકલે છે પણ વાંચી શકતો નથી.</string>
+    <string name="rm_note_on">રિમોટ ઍક્સેસ ચાલુ · ગમે ત્યાંથી પહોંચી શકાય છે</string>
+    <string name="rm_note_offline">રિમોટ ઍક્સેસ ચાલુ · ઑફલાઇન</string>
+    <plurals name="rm_note_connected">
+        <item quantity="one">રિમોટ ઍક્સેસ ચાલુ · %d કમ્પ્યુટર કનેક્ટ છે</item>
+        <item quantity="other">રિમોટ ઍક્સેસ ચાલુ · %d કમ્પ્યુટર કનેક્ટ છે</item>
+    </plurals>
+    <string name="rm_note_settings">રિમોટ ઍક્સેસ</string>
+    <string name="rm_note_turn_off">બંધ કરો</string>
+    <string name="rm_note_resume">રિમોટ ઍક્સેસ થોભાવેલું છે — ફરી શરૂ કરવા ટૅપ કરો</string>
+    <string name="ln_remote_menu">રિમોટ ઍક્સેસ…</string>
 </resources>

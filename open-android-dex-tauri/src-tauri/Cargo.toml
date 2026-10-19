@@ -35,6 +35,14 @@ qrcode = { version = "0.14", default-features = false }
 # paint — the titlebar is laid out differently on macOS (traffic lights on the
 # left, drawn by the system) and the Miracast tab does not exist there at all.
 tauri-plugin-os = "2"
+# Remote access: SSH into the phone's Linux from this computer, from any
+# network. The same crate the phone's daemon is built from, so the two ends
+# share one protocol implementation and `cargo test` there runs both against
+# each other. It brings iroh (QUIC, hole punching, the relay fallback).
+openandroiddex-remote = { path = "../../openandroiddex-remote" }
+# The ProxyCommand runs before Tauri does and needs a runtime of its own; this
+# is the same tokio Tauri already links.
+tokio = { version = "1", features = ["rt-multi-thread", "sync"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.60", features = [

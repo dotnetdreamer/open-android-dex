@@ -4,6 +4,7 @@ import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { error as logError, info as logInfo, warn as logWarn } from "@tauri-apps/plugin-log";
 import { useSessions } from "./features/mirror/useSessions";
+import { RemotePanel } from "./features/remote/RemotePanel";
 import { WirelessPanel } from "./features/wireless/WirelessPanel";
 import { IS_MAC, NO_PERMISSIONS_HINT, TITLEBAR_LEAD } from "./lib/host";
 import type {
@@ -121,6 +122,24 @@ function EscapeButtons({ onHome, onClose }: { onHome: () => void; onClose: () =>
   );
 }
 
+/**
+ * The way into Phone Linux. On every screen, because SSH into a phone's Linux
+ * does not depend on a desktop session at all: the phone may be on mobile data
+ * in another city, with nothing plugged in here.
+ */
+function RemoteButton({ onClick }: { onClick: () => void }) {
+  return (
+    <button
+      className="btn-ghost"
+      onClick={onClick}
+      title="SSH into the Linux on a paired phone, from any network"
+    >
+      <span aria-hidden="true">📡</span>
+      Phone Linux
+    </button>
+  );
+}
+
 function Wordmark() {
   return (
     <div className="wordmark">
@@ -147,6 +166,8 @@ export default function App() {
    * up first would make it look like it hadn't.
    */
   const [reconnectDone, setReconnectDone] = useState(false);
+  /** The Phone Linux sheet — SSH into a paired phone's Ubuntu (remote.rs). */
+  const [showRemote, setShowRemote] = useState(false);
 
   const phaseRef = useRef(phase);
   phaseRef.current = phase;
@@ -679,6 +700,7 @@ export default function App() {
                   {diagBusy ? "Collecting…" : "Diagnostics"}
                 </button>
                 <EscapeButtons onHome={backToLauncher} onClose={closeTopWindow} />
+                <RemoteButton onClick={() => setShowRemote(true)} />
               </div>
               <span className="text-[11.5px] text-slate-500">scanning in the background…</span>
             </div>
@@ -720,6 +742,7 @@ export default function App() {
                     Go wireless
                   </button>
                 )}
+                <RemoteButton onClick={() => setShowRemote(true)} />
                 <button className="btn-danger" onClick={() => stopDesktop(phase.device)}>
                   Exit DeX
                 </button>
@@ -748,11 +771,14 @@ export default function App() {
                 >
                   Devices
                 </button>
+                <RemoteButton onClick={() => setShowRemote(true)} />
               </div>
             </div>
           )}
         </div>
       )}
+
+      {showRemote && <RemotePanel devices={devices} onClose={() => setShowRemote(false)} />}
     </div>
   );
 }

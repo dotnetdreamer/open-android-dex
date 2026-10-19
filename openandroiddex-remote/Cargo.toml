@@ -1,0 +1,59 @@
+[package]
+name = "openandroiddex-remote"
+version = "0.1.0"
+description = "Remote access to the phone's Linux: SSH from any computer, on any network"
+authors = ["Idrees Khan"]
+license = "GPL-3.0-or-later"
+repository = "https://github.com/dotnetdreamer/open-android-dex"
+edition = "2021"
+publish = false
+
+# One crate, two ends. The phone runs the `dexremote` binary (built for the two
+# Android ABIs by build-android.sh and committed to the launcher's jniLibs as
+# libdexremote.so); the desktop app links the library and is the other end of
+# every connection. Sharing the protocol code is the point: neither side can
+# drift from the other, and `cargo test` here runs both against each other.
+[lib]
+name = "dexremote"
+path = "src/lib.rs"
+
+[[bin]]
+name = "dexremote"
+path = "src/main.rs"
+
+[dependencies]
+# default-features off drops `metrics`, which nothing here reads. portmapper
+# stays: asking the phone's home router for a mapping (UPnP / NAT-PMP / PCP) is
+# what turns "phone on home Wi-Fi, laptop in a café" into a direct path instead
+# of a relayed one, and that is the most common shape of this feature's use.
+iroh = { version = "1.3", default-features = false, features = ["tls-ring", "portmapper", "fast-apple-datapath"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-util", "io-std", "net", "time", "sync", "fs"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Already in iroh's tree. HMAC and PBKDF2 are implemented over sha2 in
+# crypto.rs rather than pulling the RustCrypto crates for a dozen lines each.
+sha2 = "0.11"
+subtle = "2.6"
+base64 = "0.22"
+data-encoding = "2"
+getrandom = "0.4"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "std", "registry"] }
+anyhow = "1"
+
+# flock(2), for the identity lock. std's File::lock compiles for Android but
+# answers Unsupported there; libc is in the tree already, under tokio.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+# Only applies when this crate is the root of the build, i.e. to the phone
+# binary. The desktop app links the library under its own profile.
+#
+# Size over speed, within reason: the binary ships twice in every APK (arm64 and
+# x86_64), and what it moves is an SSH session, not a file server. QUIC's crypto
+# is ring's hand-written assembly either way.
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true

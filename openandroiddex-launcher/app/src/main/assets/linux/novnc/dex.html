@@ -83,6 +83,14 @@
     </div>
 
     <div class="tb-group tb-right">
+      <!-- Remote access: SSH into this Linux from a computer. Wide bars only —
+           a portrait phone's bar is already full — and always in the panel
+           below. A dexremote: navigation that LinuxActivity intercepts, not a
+           JavaScript bridge: this page is served from inside the guest. -->
+      <button id="remote" class="key wide-only" type="button" tabindex="-1"
+              title="Remote access" aria-label="Remote access">
+        <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><rect x="2.5" y="7" width="13" height="11" rx="2" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M5.5 11l2 1.6-2 1.6M9.5 15h3" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/><path d="M18 9.5a4 4 0 0 1 0 5M20.5 7a7.5 7.5 0 0 1 0 10" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
+      </button>
       <button id="collapse" class="key" type="button" tabindex="-1"
               title="Hide the bar" aria-label="Hide the bar">
         <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M6 14.5 12 8.5l6 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
@@ -126,6 +134,9 @@
     </button>
     <button id="p-zoom" class="pkey" type="button" tabindex="-1" title="Zoom" aria-label="Zoom">
       <svg viewBox="0 0 24 24" width="21" height="21" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M15.4 15.4 21 21M7.6 10.5h5.8M10.5 7.6v5.8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+    </button>
+    <button id="p-remote" class="pkey" type="button" tabindex="-1" title="Remote access" aria-label="Remote access">
+      <svg viewBox="0 0 24 24" width="21" height="21" aria-hidden="true"><rect x="2.5" y="7" width="13" height="11" rx="2" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M5.5 11l2 1.6-2 1.6M9.5 15h3" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/><path d="M18 9.5a4 4 0 0 1 0 5M20.5 7a7.5 7.5 0 0 1 0 10" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
     </button>
     <span class="pkey-sep" aria-hidden="true"></span>
     <button id="dock" class="pkey" type="button" tabindex="-1" title="Dock to the top" aria-label="Dock to the top">

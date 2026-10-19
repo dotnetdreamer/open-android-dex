@@ -562,4 +562,75 @@ Si vous la désactivez plus tard, Android forcera la fermeture de Linux et le bu
     <string name="ft_grant">Autoriser l’accès</string>
     <string name="ft_menu_downloads">Ouvrir le dossier Téléchargements du téléphone</string>
     <string name="ft_menu_grant">Autoriser l’accès à tous les fichiers</string>
+
+    <!-- ── Remote access ── -->
+    <string name="rm_label">Accès à distance</string>
+    <string name="rm_subtitle">Connectez-vous à ce Linux depuis votre ordinateur avec ssh, sur n’importe quel réseau. Rien à configurer sur le routeur, et aucun compte.</string>
+    <string name="rm_state_off">Désactivé</string>
+    <string name="rm_state_off_sub">Activez-le, et les ordinateurs que vous associez pourront joindre Ubuntu sur ce téléphone de partout : à la maison, au travail ou avec le téléphone sur les données mobiles.</string>
+    <string name="rm_state_starting">Démarrage…</string>
+    <string name="rm_state_online">Joignable de partout</string>
+    <string name="rm_state_offline">Activé, en attente d’un réseau</string>
+    <string name="rm_turn_on">Activer</string>
+    <string name="rm_turn_off">Désactiver</string>
+    <string name="rm_linux_missing">Linux n’est pas encore installé. Ouvrez Linux une fois pour l’installer, et les ordinateurs pourront se connecter dès qu’il sera prêt.</string>
+    <string name="rm_open_linux">Ouvrir Linux</string>
+    <string name="rm_linux_installing">Linux est encore en cours de configuration. Les ordinateurs pourront se connecter une fois qu’elle sera terminée.</string>
+    <string name="rm_linux_error">La configuration de Linux n’est pas allée jusqu’au bout. Ouvrez Linux pour réessayer ; les ordinateurs pourront se connecter une fois qu’elle sera terminée.</string>
+    <string name="rm_ssh_install_failed">Le serveur SSH n’a pas pu être installé dans Linux. Vérifiez la connexion du téléphone, puis désactivez et réactivez l’accès à distance pour réessayer.</string>
+    <string name="rm_ssh_starting">Démarrage du serveur SSH dans Linux…</string>
+    <string name="rm_ssh_failed">Le serveur SSH dans Linux n’a pas pu démarrer. Réinstaller Linux règle généralement le problème ; vos fichiers du dossier partagé sont conservés.</string>
+    <string name="rm_battery">Android peut mettre l’accès à distance en pause quand l’écran est éteint. Laissez-le fonctionner en arrière-plan pour que les ordinateurs puissent toujours joindre le téléphone.</string>
+    <string name="rm_battery_allow">Autoriser</string>
+    <string name="rm_battery_desktop">Sur le téléphone, ouvrez Paramètres → Applications → %1$s → Batterie et choisissez « Non restreinte ».</string>
+    <string name="rm_unavailable">L’accès à distance nécessite un téléphone 64 bits, comme Linux lui-même.</string>
+    <plurals name="rm_sessions">
+        <item quantity="one">%d ordinateur connecté en ce moment</item>
+        <item quantity="other">%d ordinateurs connectés en ce moment</item>
+    </plurals>
+    <plurals name="rm_paired_count">
+        <item quantity="one">%d ordinateur associé · aucun connecté</item>
+        <item quantity="other">%d ordinateurs associés · aucun connecté</item>
+    </plurals>
+    <string name="rm_computers">Ordinateurs</string>
+    <string name="rm_no_computers">Aucun ordinateur pour l’instant. Ajoutez-en un, et seul cet ordinateur pourra entrer.</string>
+    <string name="rm_add">Ajouter un ordinateur</string>
+    <string name="rm_remove">Retirer</string>
+    <string name="rm_remove_title">Retirer %1$s ?</string>
+    <string name="rm_remove_body">Il est déconnecté immédiatement et ne pourra revenir qu’en étant de nouveau associé.</string>
+    <string name="rm_connected_direct">Connecté · direct · %1$d ms</string>
+    <string name="rm_connected_relay">Connecté · via un relais · %1$d ms</string>
+    <string name="rm_paired_when">Associé le %1$s</string>
+    <string name="rm_os_other">Ordinateur</string>
+    <string name="rm_code_title">Saisissez ce code sur votre ordinateur</string>
+    <string name="rm_code_preparing">Préparation d’un code…</string>
+    <string name="rm_code_expires">Expire dans %1$s</string>
+    <string name="rm_code_how_app">Sur l’ordinateur, dans Open Android DeX, cliquez sur « Phone Linux » et saisissez-le là.</string>
+    <string name="rm_code_how_cli">Pas d’application sur cet ordinateur ? Exécutez : dexremote pair %1$s</string>
+    <string name="rm_cancel">Annuler</string>
+    <string name="rm_paired_ok">%1$s peut désormais joindre ce Linux.</string>
+    <string name="rm_paired_how">Sur celui-ci, exécutez : ssh %1$s</string>
+    <string name="rm_done">Terminé</string>
+    <string name="rm_pair_failed_bad_code">L’ordinateur a saisi un autre code, donc rien n’a été enregistré.</string>
+    <string name="rm_pair_failed_expired">Le code a expiré avant qu’un ordinateur l’utilise.</string>
+    <string name="rm_pair_failed_other">L’association n’a pas abouti.</string>
+    <string name="rm_try_again">Nouveau code</string>
+    <string name="rm_connect">Depuis un ordinateur associé</string>
+    <string name="rm_connect_terminal">Dans n’importe quel terminal</string>
+    <string name="rm_connect_vscode">Dans VS Code : Remote-SSH, puis %1$s</string>
+    <string name="rm_copy">Copier</string>
+    <string name="rm_copied">Copié</string>
+    <string name="rm_host_key">Utilisateur root · clé d’hôte %1$s</string>
+    <string name="rm_phone_id">ID du téléphone %1$s</string>
+    <string name="rm_security_note">Seuls les ordinateurs que vous associez peuvent se connecter. Chacun prouve sa propre clé avant que quoi que ce soit n’atteigne Linux, puis SSH vérifie une seconde clé. Les connexions passent directement entre les deux appareils chaque fois que les réseaux le permettent, et sinon par un relais public qui les transmet sans pouvoir les lire.</string>
+    <string name="rm_note_on">Accès à distance activé · joignable de partout</string>
+    <string name="rm_note_offline">Accès à distance activé · hors ligne</string>
+    <plurals name="rm_note_connected">
+        <item quantity="one">Accès à distance activé · %d ordinateur connecté</item>
+        <item quantity="other">Accès à distance activé · %d ordinateurs connectés</item>
+    </plurals>
+    <string name="rm_note_settings">Accès à distance</string>
+    <string name="rm_note_turn_off">Désactiver</string>
+    <string name="rm_note_resume">L’accès à distance est en pause — appuyez pour reprendre</string>
+    <string name="ln_remote_menu">Accès à distance…</string>
 </resources>

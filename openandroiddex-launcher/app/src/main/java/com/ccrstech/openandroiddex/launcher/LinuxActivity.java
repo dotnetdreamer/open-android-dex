@@ -272,6 +272,10 @@ public class LinuxActivity extends Activity {
         // AND already carries this build's features, and it stays out of the
         // way entirely while the app chooser has yet to be answered.
         LinuxService.provision(this);
+        // Remote access, if the user left it on and something (an update, the
+        // system reclaiming memory) ended it. LinuxOnDroid has no desktop shell
+        // to do this at startup, so the window that IS the app does it.
+        LinuxService.remoteResume(this);
         askForNotifications();
         IntentFilter closeFilter = new IntentFilter(LauncherActivity.ACTION_CLOSE_WINDOW);
         if (android.os.Build.VERSION.SDK_INT >= 33) {
@@ -776,6 +780,16 @@ public class LinuxActivity extends Activity {
         dialog.show();
     }
 
+    /** The Remote access window, in a task of its own beside this one. */
+    private void openRemote() {
+        try {
+            startActivity(new Intent(this, LinuxRemoteActivity.class)
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+        } catch (Exception e) {
+            DexLog.warn("remote", "cannot open the Remote access window", e);
+        }
+    }
+
     /** Stop the container for real, then close the viewer. */
     private void shutdownAndFinish() {
         DexLog.step("linux", "shutdown requested");
@@ -1145,6 +1159,20 @@ public class LinuxActivity extends Activity {
             public void onReceivedHttpError(WebView view, WebResourceRequest request,
                                             WebResourceResponse response) {
                 if (request.isForMainFrame()) fail(view);
+            }
+
+            // The viewer's Remote access button. A navigation and not a
+            // JavaScript bridge, on purpose: this page is served from INSIDE
+            // the guest, and a bridge would hand anything running in Linux a
+            // way to call into the app. A link to one of our own windows is
+            // all it can ever be, so that is all it is.
+            @Override
+            public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
+                if ("dexremote".equals(request.getUrl().getScheme())) {
+                    openRemote();
+                    return true;
+                }
+                return false;
             }
         });
         // Index 0: always BELOW the starting/connecting card if one is up.

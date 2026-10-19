@@ -147,6 +147,25 @@ cable, no desktop app. Tap the icon and Ubuntu opens on your phone. Keep about
 
 <img src="doc/img/phone-linux.png" alt="Ubuntu running on the phone on its own, with the control strip along the top" width="300">
 
+#### Log in to it from another computer
+
+Your phone's Ubuntu can also be a machine you SSH into, from a laptop or
+desktop anywhere — the same Wi-Fi, a different one, or with the phone on mobile
+data in your bag. Nothing to open on a router, no account, no server to run.
+
+1. On the phone: Linux → **Remote access** → *Turn on* → *Add a computer*.
+2. On the computer: Open Android DeX → **Phone Linux** → type the code. With the
+   phone plugged in there is no code at all.
+3. Then, in any terminal: `ssh galaxy-s25-ultra` (or whatever your phone is
+   called). VS Code's Remote-SSH, scp, rsync and git find it by name too.
+
+Only computers you pair can get in, each with a key of its own, and the
+connection is end-to-end encrypted. It goes straight between the two devices
+whenever the networks allow it and through a relay — which cannot read it —
+when they do not. No desktop app on that computer? The `dexremote` command does
+the same job. How it works, and what was ruled out on the way:
+[doc/remote-access.md](doc/remote-access.md).
+
 A control strip sits along the top wherever Linux is running, on the phone or in
 a window. It holds the pointer, the keyboard, the screen and zoom. Tap the
 pointer and you pick how touch should behave: point where you look, use the
@@ -449,6 +468,7 @@ gh workflow run desktop.yml -f bump=patch      # or -f version=0.4.0, or -f dry_
 | [openandroiddex-launcher/](openandroiddex-launcher/) | The desktop shell that runs on the phone. Everything you see |
 | [openandroiddex-wmd/](openandroiddex-wmd/) | The small window daemon that moves and resizes app windows |
 | [openandroiddex-linux/](openandroiddex-linux/) | Ubuntu provisioning and runtime scripts |
+| [openandroiddex-remote/](openandroiddex-remote/) | Remote access: SSH into the phone's Linux from any network. Rust, both ends — the phone's daemon and the computer's side |
 | [openandroiddex-docker/](openandroiddex-docker/) | The Alpine VM scripts and QEMU build |
 | [openandroiddex-signal/](openandroiddex-signal/) | Optional relay for reaching a phone from anywhere. One Node file with no dependencies |
 | [test/](test/) | End to end checks that run without a phone |

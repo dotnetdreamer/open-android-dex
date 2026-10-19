@@ -158,3 +158,47 @@ export interface MirrorNotice {
   sessionKey: string;
   text: string;
 }
+
+// ── Phone Linux over SSH (remote.rs) ────────────────────────────────────
+
+/** A phone this computer is paired with, for SSH into its Linux. */
+export interface RemotePhone {
+  /** Its endpoint id: how it is dialled, from any network. */
+  id: string;
+  name: string;
+  /** The `Host` in ~/.ssh/config: what goes after `ssh`. */
+  alias: string;
+  user: string;
+  pairedAt: number;
+  via: "code" | "usb" | string;
+  sshCommand: string;
+  /** Straight after a USB pairing: what still stands between it and a login. */
+  note?: string;
+}
+
+/** One probe of a paired phone. */
+export interface RemoteProbe {
+  reachable: boolean;
+  /** The path in use goes straight to the phone, not through a relay. */
+  direct: boolean;
+  rttMs: number;
+  /** The guest sshd: up, starting, down, failed, missing, installing. */
+  ssh: string;
+  sessions: number;
+  /** Why it could not be reached, as a sentence. */
+  error?: string | null;
+}
+
+/** What the launcher on a plugged-in phone says about remote access. */
+export interface RemoteUsbStatus {
+  ok: boolean;
+  /** The phone can run Linux, so it can do remote access. */
+  available: boolean;
+  enabled: boolean;
+  name: string;
+  /** ready | installing | missing | failed | ssh-failed */
+  linux: string;
+  id: string;
+  /** This computer is already paired with it. */
+  pairedHere: boolean;
+}

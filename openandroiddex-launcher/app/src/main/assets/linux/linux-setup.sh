@@ -1051,6 +1051,122 @@ EOF
 state installing-desktop 93 sound
 setup_audio || note "sound: phase failed, continuing"
 
+# -- phase: the SSH server -------------------------------------------------
+# Remote access (LinuxRemote.java, and openandroiddex-remote/ for the tunnel)
+# ends in an sshd in here: a computer anywhere dials the phone over an
+# encrypted tunnel, and the tunnel's far end is 127.0.0.1:<port> inside this
+# container. This phase only INSTALLS it. The configuration, the host key and
+# authorized_keys are the app's, kept OUTSIDE the rootfs in
+# files/linux-remote/ssh, which linux-ssh.sh binds onto /etc/oadx-ssh -- so a
+# reinstall keeps every paired computer and the host key they all pinned.
+#
+# OpenSSH and not dropbear: the people at the other end will be using VS Code's
+# Remote-SSH, scp, rsync and git, and OpenSSH is what all of those are tested
+# against. It works under proot because this proot emulates the one thing sshd
+# needs real root for -- privilege separation's chroot into /run/sshd. A chroot
+# to a directory with no bind mount inside it is emulated by re-rooting the
+# tracee (proot's fake_id0/chroot.c), and the setuid to the sshd user that
+# follows it is faked like every other id change in here.
+#
+# policy-rc.d: openssh-server's postinst would otherwise try to START sshd, on
+# port 22, which this uid can never bind -- and with no init in a proot
+# container there is nothing to start it with anyway. 101 is "action
+# forbidden", the standard answer in chroots and containers. It is left in
+# place deliberately: every later apt install of a daemon (a database, a web
+# server) would hit the same wall, and an install that ends in "failed to
+# start" is worse than one that leaves the starting to the user.
+#
+# Unstamped and guarded on the binary, like setup_git: a FEATURE bump has to
+# bring this to guests that already settled.
+# Settled the way VS Code's install is (see vscode_settled): Linux.needsProvision
+# asks for a run whenever remote access is on and there is no sshd, so an
+# openssh-server that will not install would otherwise rebuild the guest on
+# every launch, holding the desktop back each time. Three failures at this
+# feature level and it stops; the stamp holds the level, so a new one tries
+# again, and so does the user switching remote access on (LinuxRemote
+# .clearSshdGaveUp).
+ssh_gave_up() {
+  _at=$(cat .stamp-ssh-gaveup 2>/dev/null)
+  [ -n "$_at" ] && [ "$_at" -ge "$FEAT" ] 2>/dev/null
+}
+
+ssh_attempt_failed() {
+  tries=$(cat .ssh-attempts 2>/dev/null)
+  [ -n "$tries" ] || tries=0
+  tries=$((tries + 1))
+  echo "$tries" > .ssh-attempts
+  if [ "$tries" -ge 3 ]; then
+    note "ssh: giving up after $tries attempts - the rest of the guest is fine"
+    echo "$FEAT" > .stamp-ssh-gaveup
+    rm -f .ssh-attempts
+  else
+    note "ssh: attempt $tries failed, will retry on the next launch"
+  fi
+}
+
+# dpkg's own word that openssh-server is in and configured, not merely a
+# binary on disk: an install killed after unpacking — the force-stop at the end
+# of a DeX session can land mid-apt — leaves /usr/sbin/sshd behind with its
+# postinst never run, so no privilege-separation user, and an sshd that dies at
+# every start.
+#
+# openssh-sftp-server with it: the app's sshd_config runs the packaged
+# sftp-server (with the shim from sftp-shim/ preloaded) rather than
+# internal-sftp, which cannot be given one, and --no-install-recommends would
+# otherwise leave it out.
+ssh_package_ok() {
+  [ -x rootfs/usr/sbin/sshd ] && [ -x rootfs/usr/lib/openssh/sftp-server ] || return 1
+  [ "$(run_guest "dpkg-query -W -f='\${Status}' openssh-server" 2>/dev/null)" = "install ok installed" ]
+}
+
+# .stamp-ssh is what LinuxRemote.sshdInstalled reads, beside the binary: set
+# only once dpkg has said yes, and re-earned whenever the binary is gone.
+setup_ssh() {
+  if [ -f .stamp-ssh ] && [ -x rootfs/usr/sbin/sshd ] && [ -x rootfs/usr/lib/openssh/sftp-server ]; then
+    return 0
+  fi
+  rm -f .stamp-ssh
+  if ! ssh_package_ok; then
+    if ssh_gave_up; then
+      note "ssh: not retrying openssh-server at this level"
+      return 1
+    fi
+    if [ ! -e rootfs/usr/sbin/policy-rc.d ]; then
+      printf '#!/bin/sh\nexit 101\n' > rootfs/usr/sbin/policy-rc.d || return 1
+      chmod 755 rootfs/usr/sbin/policy-rc.d || return 1
+    fi
+    # An install cut short leaves dpkg mid-transaction, and every apt-get
+    # after it refuses until that is finished — the same repair the desktop
+    # phase runs, and a no-op when there is nothing to finish.
+    repair_dpkg
+    # The package lists are whatever the guest was built with, and on a guest
+    # built a while ago they name versions the mirror has since replaced: an
+    # install off them fails on 404s. Not fatal, like every update here — a
+    # hiccup in one repo fails the whole command and says nothing about this
+    # package. The install is the judge.
+    run_guest "apt-get update" || true
+    if ! guest_or_note "ssh" "apt-get install -y --no-install-recommends openssh-server openssh-sftp-server" \
+        || ! ssh_package_ok; then
+      ssh_attempt_failed
+      return 1
+    fi
+    rm -f .ssh-attempts .stamp-ssh-gaveup
+  fi
+  # Privilege separation's chroot. sshd refuses to start without it, and on a
+  # real system systemd-tmpfiles makes it at boot, which nothing does here.
+  # linux-ssh.sh makes it again before every start; this is for a first start
+  # that happens before that script has ever run.
+  mkdir -p rootfs/run/sshd rootfs/etc/oadx-ssh || return 1
+  # Never through a link the guest put there; chmod would follow it out.
+  [ -L rootfs/run/sshd ] || chmod 755 rootfs/run/sshd
+  touch .stamp-ssh
+  note "ssh: openssh-server ready"
+  return 0
+}
+
+state installing-desktop 93 ssh
+setup_ssh || note "ssh: phase failed, continuing"
+
 # Guarded on the selection AND the binaries, not on a stamp: the chooser can
 # come back with a browser ticked that the stamped pass was never asked for,
 # and a plain .stamp-browsers would skip past that request forever. A wanted

@@ -566,4 +566,75 @@ Wenn du sie später wieder abschaltest, erzwingt Android das Beenden von Linux u
     <string name="ft_grant">Zugriff erlauben</string>
     <string name="ft_menu_downloads">Ordner „Downloads“ des Telefons öffnen</string>
     <string name="ft_menu_grant">Zugriff auf alle Dateien erlauben</string>
+
+    <!-- ── Remote access ── -->
+    <string name="rm_label">Fernzugriff</string>
+    <string name="rm_subtitle">Melden Sie sich von Ihrem Computer aus per ssh bei diesem Linux an, in jedem Netzwerk. Am Router ist nichts einzurichten, und ein Konto braucht es nicht.</string>
+    <string name="rm_state_off">Aus</string>
+    <string name="rm_state_off_sub">Schalten Sie ihn ein, dann erreichen die Computer, die Sie koppeln, Ubuntu auf diesem Telefon von überall: zu Hause, bei der Arbeit oder wenn das Telefon mobile Daten nutzt.</string>
+    <string name="rm_state_starting">Wird gestartet…</string>
+    <string name="rm_state_online">Von überall erreichbar</string>
+    <string name="rm_state_offline">An, wartet auf ein Netzwerk</string>
+    <string name="rm_turn_on">Einschalten</string>
+    <string name="rm_turn_off">Ausschalten</string>
+    <string name="rm_linux_missing">Linux ist noch nicht installiert. Öffnen Sie Linux einmal, um es zu installieren; sobald es bereit ist, können sich Computer verbinden.</string>
+    <string name="rm_open_linux">Linux öffnen</string>
+    <string name="rm_linux_installing">Linux wird noch eingerichtet. Computer können sich verbinden, sobald das abgeschlossen ist.</string>
+    <string name="rm_linux_error">Linux wurde nicht fertig eingerichtet. Öffnen Sie Linux, um es erneut zu versuchen; sobald es fertig ist, können sich Computer verbinden.</string>
+    <string name="rm_ssh_install_failed">Der SSH-Server ließ sich nicht in Linux installieren. Prüfen Sie die Verbindung des Telefons und schalten Sie den Fernzugriff dann aus und wieder ein, um es erneut zu versuchen.</string>
+    <string name="rm_ssh_starting">SSH-Server in Linux wird gestartet…</string>
+    <string name="rm_ssh_failed">Der SSH-Server in Linux ließ sich nicht starten. Meist hilft es, Linux neu zu installieren; Ihre Dateien im gemeinsamen Ordner bleiben erhalten.</string>
+    <string name="rm_battery">Android kann den Fernzugriff pausieren, wenn der Bildschirm aus ist. Lassen Sie ihn im Hintergrund weiterlaufen, damit Computer das Telefon jederzeit erreichen.</string>
+    <string name="rm_battery_allow">Erlauben</string>
+    <string name="rm_battery_desktop">Öffnen Sie auf dem Telefon Einstellungen → Apps → %1$s → Akku und wählen Sie „Uneingeschränkt“.</string>
+    <string name="rm_unavailable">Fernzugriff braucht ein 64-Bit-Telefon, genau wie Linux selbst.</string>
+    <plurals name="rm_sessions">
+        <item quantity="one">%d Computer ist jetzt verbunden</item>
+        <item quantity="other">%d Computer sind jetzt verbunden</item>
+    </plurals>
+    <plurals name="rm_paired_count">
+        <item quantity="one">%d Computer gekoppelt · keiner verbunden</item>
+        <item quantity="other">%d Computer gekoppelt · keiner verbunden</item>
+    </plurals>
+    <string name="rm_computers">Computer</string>
+    <string name="rm_no_computers">Noch keine Computer. Fügen Sie einen hinzu, und nur dieser Computer kommt hinein.</string>
+    <string name="rm_add">Computer hinzufügen</string>
+    <string name="rm_remove">Entfernen</string>
+    <string name="rm_remove_title">%1$s entfernen?</string>
+    <string name="rm_remove_body">Er wird sofort getrennt und kommt nur durch erneutes Koppeln wieder hinein.</string>
+    <string name="rm_connected_direct">Jetzt verbunden · direkt · %1$d ms</string>
+    <string name="rm_connected_relay">Jetzt verbunden · über ein Relay · %1$d ms</string>
+    <string name="rm_paired_when">Gekoppelt am %1$s</string>
+    <string name="rm_os_other">Computer</string>
+    <string name="rm_code_title">Geben Sie diesen Code am Computer ein</string>
+    <string name="rm_code_preparing">Code wird vorbereitet…</string>
+    <string name="rm_code_expires">Läuft ab in %1$s</string>
+    <string name="rm_code_how_app">Klicken Sie am Computer in Open Android DeX auf „Phone Linux“ und geben Sie ihn dort ein.</string>
+    <string name="rm_code_how_cli">Keine App auf diesem Computer? Führen Sie aus: dexremote pair %1$s</string>
+    <string name="rm_cancel">Abbrechen</string>
+    <string name="rm_paired_ok">%1$s kann dieses Linux jetzt erreichen.</string>
+    <string name="rm_paired_how">Führen Sie dort aus: ssh %1$s</string>
+    <string name="rm_done">Fertig</string>
+    <string name="rm_pair_failed_bad_code">Der Computer hat einen anderen Code eingegeben, daher wurde nichts gespeichert.</string>
+    <string name="rm_pair_failed_expired">Der Code ist abgelaufen, bevor ein Computer ihn verwendet hat.</string>
+    <string name="rm_pair_failed_other">Das Koppeln wurde nicht abgeschlossen.</string>
+    <string name="rm_try_again">Neuer Code</string>
+    <string name="rm_connect">Von einem gekoppelten Computer</string>
+    <string name="rm_connect_terminal">In jedem Terminal</string>
+    <string name="rm_connect_vscode">In VS Code: Remote-SSH, dann %1$s</string>
+    <string name="rm_copy">Kopieren</string>
+    <string name="rm_copied">Kopiert</string>
+    <string name="rm_host_key">Benutzer root · Host-Schlüssel %1$s</string>
+    <string name="rm_phone_id">Telefon-ID %1$s</string>
+    <string name="rm_security_note">Nur Computer, die Sie koppeln, können sich verbinden. Jeder weist seinen eigenen Schlüssel nach, bevor irgendetwas Linux erreicht, und danach prüft SSH einen zweiten Schlüssel. Verbindungen laufen direkt zwischen den beiden Geräten, wann immer die Netzwerke es zulassen, und sonst über ein öffentliches Relay, das sie weiterreicht, ohne sie lesen zu können.</string>
+    <string name="rm_note_on">Fernzugriff an · von überall erreichbar</string>
+    <string name="rm_note_offline">Fernzugriff an · offline</string>
+    <plurals name="rm_note_connected">
+        <item quantity="one">Fernzugriff an · %d Computer verbunden</item>
+        <item quantity="other">Fernzugriff an · %d Computer verbunden</item>
+    </plurals>
+    <string name="rm_note_settings">Fernzugriff</string>
+    <string name="rm_note_turn_off">Ausschalten</string>
+    <string name="rm_note_resume">Fernzugriff ist pausiert — zum Fortsetzen tippen</string>
+    <string name="ln_remote_menu">Fernzugriff…</string>
 </resources>

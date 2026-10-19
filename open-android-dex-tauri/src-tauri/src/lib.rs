@@ -5,11 +5,18 @@ mod files;
 mod gestures;
 mod hotkeys;
 mod projection;
+mod remote;
 mod scrcpy;
 mod shell;
 mod transfer;
 mod wireless;
 mod wm;
+
+/// `ssh-proxy`: when ssh runs this binary as a phone's ProxyCommand, that is
+/// all it is — see remote::run_cli. `Some(exit code)` when it was that.
+pub fn remote_cli() -> Option<i32> {
+    remote::run_cli()
+}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -78,10 +85,22 @@ pub fn run() {
             embed::raise_session,
             diag::diag_collect,
             diag::diag_log_path,
-            diag::diag_reveal
+            diag::diag_reveal,
+            remote::remote_phones,
+            remote::remote_pair_code,
+            remote::remote_pair_usb,
+            remote::remote_usb_status,
+            remote::remote_forget,
+            remote::remote_probe,
+            remote::remote_open_terminal,
+            remote::remote_open_vscode
         ])
         .setup(|app| {
             diag::log_startup(&app.handle().clone());
+            // Each paired phone's ProxyCommand names this binary by path, and
+            // an update or a move changes that path. Rewritten on every start
+            // so `ssh <phone>` follows the app wherever it is.
+            remote::refresh_ssh_files();
             // Before anything else touches the pad: if a previous run was
             // killed mid-session it left the host's own touchpad gestures
             // stood down, and this is the pass that gives them back.

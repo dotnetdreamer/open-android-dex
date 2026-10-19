@@ -405,6 +405,9 @@ public class TaskManagerActivity extends Activity {
             } else if (FileTransferActivity.class.getName().equals(activity)) {
                 label = getString(R.string.ft_label);
                 glyph = "📁";
+            } else if (LinuxRemoteActivity.class.getName().equals(activity)) {
+                label = getString(R.string.rm_label);
+                glyph = "📡";
             } else {
                 continue;
             }

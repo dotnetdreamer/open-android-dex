@@ -562,4 +562,75 @@
     <string name="ft_grant">授予权限</string>
     <string name="ft_menu_downloads">打开手机的“下载”文件夹</string>
     <string name="ft_menu_grant">允许访问所有文件</string>
+
+    <!-- ── Remote access ── -->
+    <string name="rm_label">远程访问</string>
+    <string name="rm_subtitle">在任何网络下，都能从你的电脑用 ssh 登录这个 Linux。无需设置路由器，也不需要账号。</string>
+    <string name="rm_state_off">已关闭</string>
+    <string name="rm_state_off_sub">开启后，你配对的电脑可以从任何地方访问这台手机上的 Ubuntu：在家、在公司，或手机使用移动数据时都可以。</string>
+    <string name="rm_state_starting">正在启动…</string>
+    <string name="rm_state_online">可从任何地方访问</string>
+    <string name="rm_state_offline">已开启，正在等待网络</string>
+    <string name="rm_turn_on">开启</string>
+    <string name="rm_turn_off">关闭</string>
+    <string name="rm_linux_missing">尚未安装 Linux。打开一次 Linux 进行安装，准备就绪后电脑即可连接。</string>
+    <string name="rm_open_linux">打开 Linux</string>
+    <string name="rm_linux_installing">Linux 仍在设置中。完成后电脑即可连接。</string>
+    <string name="rm_linux_error">Linux 未完成设置。打开 Linux 重试，完成后电脑即可连接。</string>
+    <string name="rm_ssh_install_failed">无法在 Linux 中安装 SSH 服务器。请检查手机的网络连接，然后关闭再开启远程访问以重试。</string>
+    <string name="rm_ssh_starting">正在启动 Linux 中的 SSH 服务器…</string>
+    <string name="rm_ssh_failed">Linux 中的 SSH 服务器无法启动。重新安装 Linux 通常可以解决；共享文件夹中的文件会保留。</string>
+    <string name="rm_battery">屏幕关闭时，Android 可能会暂停远程访问。请允许它在后台持续运行，这样电脑随时都能访问手机。</string>
+    <string name="rm_battery_allow">允许</string>
+    <string name="rm_battery_desktop">在手机上打开“设置 → 应用 → %1$s → 电池”，然后选择“不受限制”。</string>
+    <string name="rm_unavailable">远程访问需要 64 位手机，与 Linux 本身一样。</string>
+    <plurals name="rm_sessions">
+        <item quantity="one">当前有 %d 台电脑已连接</item>
+        <item quantity="other">当前有 %d 台电脑已连接</item>
+    </plurals>
+    <plurals name="rm_paired_count">
+        <item quantity="one">已配对 %d 台电脑 · 暂无连接</item>
+        <item quantity="other">已配对 %d 台电脑 · 暂无连接</item>
+    </plurals>
+    <string name="rm_computers">电脑</string>
+    <string name="rm_no_computers">还没有电脑。添加一台后，只有那台电脑可以进入。</string>
+    <string name="rm_add">添加电脑</string>
+    <string name="rm_remove">移除</string>
+    <string name="rm_remove_title">要移除 %1$s 吗？</string>
+    <string name="rm_remove_body">它会立即断开，只有重新配对才能再次进入。</string>
+    <string name="rm_connected_direct">已连接 · 直连 · %1$d 毫秒</string>
+    <string name="rm_connected_relay">已连接 · 经由中继 · %1$d 毫秒</string>
+    <string name="rm_paired_when">%1$s配对</string>
+    <string name="rm_os_other">电脑</string>
+    <string name="rm_code_title">在电脑上输入此配对码</string>
+    <string name="rm_code_preparing">正在准备配对码…</string>
+    <string name="rm_code_expires">%1$s 后过期</string>
+    <string name="rm_code_how_app">在电脑上的 Open Android DeX 中点击“Phone Linux”，然后在那里输入。</string>
+    <string name="rm_code_how_cli">那台电脑没有安装应用？运行：dexremote pair %1$s</string>
+    <string name="rm_cancel">取消</string>
+    <string name="rm_paired_ok">%1$s 现在可以访问这个 Linux 了。</string>
+    <string name="rm_paired_how">在那台电脑上运行：ssh %1$s</string>
+    <string name="rm_done">完成</string>
+    <string name="rm_pair_failed_bad_code">电脑输入的配对码不一致，因此没有保存任何内容。</string>
+    <string name="rm_pair_failed_expired">配对码在电脑使用前已过期。</string>
+    <string name="rm_pair_failed_other">配对未完成。</string>
+    <string name="rm_try_again">新配对码</string>
+    <string name="rm_connect">从已配对的电脑连接</string>
+    <string name="rm_connect_terminal">在任意终端中</string>
+    <string name="rm_connect_vscode">在 VS Code 中：Remote-SSH，然后选择 %1$s</string>
+    <string name="rm_copy">复制</string>
+    <string name="rm_copied">已复制</string>
+    <string name="rm_host_key">用户 root · 主机密钥 %1$s</string>
+    <string name="rm_phone_id">手机 ID %1$s</string>
+    <string name="rm_security_note">只有你配对的电脑才能连接。每台电脑都要先证明自己的密钥，任何数据才会到达 Linux；之后 SSH 还会再校验第二把密钥。只要网络允许，连接就在两台设备之间直连；否则经由公共中继转发，而中继无法读取其中的内容。</string>
+    <string name="rm_note_on">远程访问已开启 · 可从任何地方访问</string>
+    <string name="rm_note_offline">远程访问已开启 · 离线</string>
+    <plurals name="rm_note_connected">
+        <item quantity="one">远程访问已开启 · %d 台电脑已连接</item>
+        <item quantity="other">远程访问已开启 · %d 台电脑已连接</item>
+    </plurals>
+    <string name="rm_note_settings">远程访问</string>
+    <string name="rm_note_turn_off">关闭</string>
+    <string name="rm_note_resume">远程访问已暂停 —— 点按即可恢复</string>
+    <string name="ln_remote_menu">远程访问…</string>
 </resources>

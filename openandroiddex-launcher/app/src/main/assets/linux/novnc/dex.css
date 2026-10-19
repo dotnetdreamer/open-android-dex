@@ -577,6 +577,12 @@ body.keys .coach, body.keys .toast { bottom: calc(var(--keyrow) + var(--kb-h) + 
   :root { --pkey: 42px; --keyrow: 40px; }
 }
 
+/* A fifth bar button does not fit a portrait phone: four controls, the status
+   dot and the chevron are already most of 360 px. Those get it in the panel. */
+@media (max-width: 420px) {
+  .wide-only { display: none; }
+}
+
 @media (min-width: 561px) {
   /* Wider than a phone: the sheet becomes a centred card rather than a
      right-hand drawer — on the DeX display that edge is where XFCE keeps its

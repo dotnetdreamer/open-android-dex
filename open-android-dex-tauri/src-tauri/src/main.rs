@@ -2,6 +2,14 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
+    // A phone's ProxyCommand, not the app: ssh runs this binary as
+    // `ssh-proxy <phone id>` for every `ssh <phone>`, scp and VS Code window
+    // (see remote.rs). It must not get anywhere near a window, the
+    // single-instance lock or the log plugin, so it is dealt with first.
+    if let Some(code) = open_android_dex_tauri_lib::remote_cli() {
+        std::process::exit(code);
+    }
+
     // A window that paints nothing is the default Linux experience otherwise.
     //
     // The webview here is WebKitGTK, and its DMABUF renderer is the fast path
