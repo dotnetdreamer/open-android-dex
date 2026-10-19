@@ -159,6 +159,16 @@ impl Computer {
         Ok(line)
     }
 
+    /// The SSH client key itself, as its 32-byte seed: for logging in without
+    /// `ssh`, which is how files are copied onto a phone (crate::sftp). Made
+    /// on first use, like the public half.
+    pub fn ssh_key_seed(&self) -> Result<[u8; 32]> {
+        self.ssh_public_key()?;
+        let private = self.ssh.join(KEY_NAME);
+        let pem = std::fs::read_to_string(&private).with_context(|| format!("cannot read {}", private.display()))?;
+        sshkey::parse_private_pem(&pem).with_context(|| format!("{} is not an unencrypted Ed25519 key", private.display()))
+    }
+
     pub fn phones(&self) -> Vec<Phone> {
         self.load().phones
     }

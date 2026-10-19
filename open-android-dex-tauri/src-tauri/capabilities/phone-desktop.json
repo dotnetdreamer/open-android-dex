@@ -1,0 +1,19 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "phone-desktop",
+  "description": "A phone's Linux desktop window (remote_desktop.rs). Its own page only: the phone's viewer page inside it is another origin, which no capability names, so it can call nothing. The clipboard is this page's to share with the guest, by its own rules (clipboardShare.ts), and the store keeps the switch for it.",
+  "windows": ["desktop-*"],
+  "permissions": [
+    "core:default",
+    "log:default",
+    "core:window:allow-set-fullscreen",
+    "core:window:allow-set-focus",
+    "core:window:allow-close",
+    "clipboard-manager:allow-read-text",
+    "clipboard-manager:allow-write-text",
+    "store:allow-load",
+    "store:allow-get",
+    "store:allow-set",
+    "store:allow-save"
+  ]
+}

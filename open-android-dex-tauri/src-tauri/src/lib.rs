@@ -6,6 +6,7 @@ mod gestures;
 mod hotkeys;
 mod projection;
 mod remote;
+mod remote_desktop;
 mod scrcpy;
 mod shell;
 mod transfer;
@@ -93,8 +94,18 @@ pub fn run() {
             remote::remote_forget,
             remote::remote_probe,
             remote::remote_open_terminal,
-            remote::remote_open_vscode
+            remote::remote_open_vscode,
+            remote_desktop::remote_open_desktop,
+            remote_desktop::remote_desktop_connect,
+            remote_desktop::remote_desktop_put,
+            remote_desktop::remote_desktop_put_cancel
         ])
+        // A phone's desktop window takes its local port and its tunnel with it.
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::Destroyed = event {
+                remote_desktop::window_closed(window.label());
+            }
+        })
         .setup(|app| {
             diag::log_startup(&app.handle().clone());
             // Each paired phone's ProxyCommand names this binary by path, and
@@ -125,6 +136,8 @@ pub fn run() {
                 // the per-session stop flag alone races us to the door: the
                 // accept thread only observes it once per 200ms poll.
                 files::shutdown_all();
+                // Each open desktop window holds the phone awake; say goodbye.
+                remote_desktop::close_all();
             }
         });
 }

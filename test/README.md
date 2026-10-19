@@ -34,7 +34,18 @@ direct path and the relay-only one, 4 MB intact with half-close, a removal
 closing a live session, scp, three sessions at once over the relay alone, the
 daemon on its own resolver taking new DNS servers from a `net` and staying
 reachable, a reopened code ending at its first deadline by the wall clock, and
-a changed host key refused.
+a changed host key refused. Then files onto the phone with `dexremote put` —
+SFTP inside the tunnel, against the same real sshd: a file and a folder byte
+for byte, with their times and executable bit, a link inside the folder left
+out and said so, a second and third drop named the way Thunar names copies
+and the first one untouched, the relay alone, Ctrl+C taking back the folder it
+was in the middle of, a host key other than the paired one refused before a
+byte is sent, and every copy's session let go. Then the desktop, with `dexremote desktop` against
+a stand-in websockify: refused with a sentence when there is no Linux, never
+started unless asked, a start the app reports failed, the size held to what a
+phone can carry, the password handed over, the page and 1 MB of WebSocket
+through the tunnel as one session, requests from other sites and other host
+names turned away, and Ctrl+C letting the phone go at once.
 
 Everything else needs a device. `doc/web-viewer.md` and `doc/remote-access.md`
 list what is still unverified there.

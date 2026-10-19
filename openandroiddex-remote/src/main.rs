@@ -12,6 +12,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+use anyhow::Context;
 use dexremote::computer::{self, Computer};
 use dexremote::{pairing, pc, phone};
 use iroh::EndpointId;
@@ -29,12 +30,23 @@ On a computer:
   dexremote probe <NAME>             is it reachable, and is the path direct?
   dexremote forward <NAME> [ADDR]    a local port to its SSH server (default 127.0.0.1:2222)
   dexremote proxy <ID>               stdin/stdout to its SSH server (ssh's ProxyCommand)
+  dexremote desktop <NAME> [ADDR]    its Linux desktop, in a browser tab: prints the address
+                                     to open (default 127.0.0.1:6080). Starts the desktop at
+                                     --size WxH (default 1920x1080) unless it is running;
+                                     --no-start only joins one that is
+  dexremote put <NAME> <PATH>…       copy files and folders onto its Linux desktop (--to DIR
+                                     for another folder of its home); nothing there is ever
+                                     replaced: a name in use gets Thunar's \"(copy 1)\"
+  dexremote get <NAME>               fetch what its Linux sent this computer — Send To, or
+                                     the dock's \"Send to computer\" — into Downloads (--to
+                                     DIR), and set up this computer's Send To entry there
 
   After pairing, `ssh <name>` works from any terminal, and so does VS Code's
   Remote-SSH: the pairing adds a Host for the phone to ~/.ssh/config.
 
 On the phone (run by the app):
   dexremote serve --dir DIR --ssh-port PORT --name NAME [--dns IP,…] [--relay URL]
+                  [--desktop-port PORT]
   dexremote init --dir DIR
 
   --state DIR overrides where a computer keeps its identity and phone list.
@@ -56,6 +68,9 @@ fn main() -> ExitCode {
         "forget" => forget(rest),
         "probe" => probe(rest),
         "forward" => forward(rest),
+        "desktop" => desktop(rest),
+        "put" => put(rest),
+        "get" => get(rest),
         "proxy" => return proxy(rest),
         "version" | "--version" | "-V" => {
             println!("dexremote {}", env!("CARGO_PKG_VERSION"));
@@ -116,7 +131,8 @@ fn serve(args: &[String]) -> anyhow::Result<()> {
         .map(|s| s.split(',').filter_map(|ip| ip.trim().parse().ok()).collect())
         .unwrap_or_default();
     let relay = flag(args, "--relay").map(|u| u.parse()).transpose()?;
-    runtime()?.block_on(phone::serve(phone::Config { dir, ssh_port, name, dns, relay }))
+    let desktop_port = flag(args, "--desktop-port").map(str::parse).transpose()?.unwrap_or(phone::DESKTOP_WEB_PORT);
+    runtime()?.block_on(phone::serve(phone::Config { dir, ssh_port, desktop_port, name, dns, relay }))
 }
 
 /// Make the identity if it is not there, and print `<endpoint id> <host key>`.
@@ -248,8 +264,12 @@ fn probe(args: &[String]) -> anyhow::Result<()> {
         client.close().await;
         r.map_err(anyhow::Error::from)
     })?;
+    let desktop = match probe.status.desktop.as_str() {
+        "" => String::new(),
+        state => format!(", desktop {state}"),
+    };
     println!(
-        "{}: reachable, {} ({} ms), SSH server {}, {} session(s) open",
+        "{}: reachable, {} ({} ms), SSH server {}{desktop}, {} session(s) open",
         probe.status.name,
         if probe.direct { "direct" } else { "relayed" },
         probe.rtt_ms,
@@ -273,6 +293,208 @@ fn forward(args: &[String]) -> anyhow::Result<()> {
         let client = std::sync::Arc::new(pc::Client::bind(key).await?);
         client.forward(id, listen).await
     })
+}
+
+/// The phone's desktop in a browser tab: the desktop app's "Desktop" button
+/// for a computer without the app.
+fn desktop(args: &[String]) -> anyhow::Result<()> {
+    dexremote::init_logging("warn,dexremote=info");
+    // A flag with no value: out before `positional`, which would take the word
+    // after it for one.
+    let join_only = args.iter().any(|a| a == "--no-start");
+    let args: Vec<String> = args.iter().filter(|a| *a != "--no-start").cloned().collect();
+    let c = computer(&args)?;
+    let pos = positional(&args);
+    let wanted = pos.first().copied().ok_or_else(|| anyhow::anyhow!("which phone?"))?;
+    let phone = find_phone(&c, wanted)?;
+    let id: EndpointId = phone.id.parse()?;
+    let size = flag(&args, "--size").unwrap_or("1920x1080");
+    let size = size
+        .split_once('x')
+        .and_then(|(w, h)| Some(dexremote::proto::DesktopSize { w: w.parse().ok()?, h: h.parse().ok()? }))
+        .ok_or_else(|| anyhow::anyhow!("--size is width x height, like 1920x1080"))?;
+    let listen: Option<SocketAddr> = pos.get(1).map(|a| a.parse()).transpose()?;
+    // The page checks nothing and the VNC password is in its address: it is
+    // served to this computer alone, which is also all the viewer's own
+    // checks let through (see pc::Desktop::serve).
+    if listen.is_some_and(|a| !a.ip().is_loopback()) {
+        anyhow::bail!("the desktop is only served on this computer: give a 127.0.0.1 address");
+    }
+    let key = c.endpoint_key()?;
+    runtime()?.block_on(async {
+        let listener = match listen {
+            Some(addr) => tokio::net::TcpListener::bind(addr).await.with_context(|| format!("cannot listen on {addr}"))?,
+            // The phone's own port when it is free, so the address looks like
+            // the one on the phone; any other when it is not.
+            None => match tokio::net::TcpListener::bind(("127.0.0.1", phone::DESKTOP_WEB_PORT)).await {
+                Ok(l) => l,
+                Err(_) => tokio::net::TcpListener::bind(("127.0.0.1", 0)).await?,
+            },
+        };
+        let port = listener.local_addr()?.port();
+        let client = std::sync::Arc::new(pc::Client::bind(key).await?);
+        let desktop = pc::Desktop::new(client.clone(), id);
+        eprintln!("Opening the desktop on {}…", phone.name);
+        let start = (!join_only).then_some(size);
+        let result = async {
+            let login = desktop
+                .open(start, || eprintln!("Starting it on the phone. The first start can take a minute."))
+                .await?;
+            println!("{}", pc::desktop_url(port, &login));
+            eprintln!("Open that in a browser on this computer. Ctrl+C here closes it.");
+            tokio::spawn(desktop.clone().keep_alive());
+            tokio::select! {
+                served = desktop.clone().serve(listener) => served?,
+                _ = tokio::signal::ctrl_c() => {}
+            }
+            anyhow::Ok(())
+        }
+        .await;
+        // Said, not left to time out — refused or finished: the phone counts
+        // the connection as someone looking, and stays awake for them.
+        desktop.close();
+        client.close().await;
+        result
+    })
+}
+
+/// Files onto the phone's Linux: what dropping them on the desktop app's
+/// window does, from a terminal. Prints where each one landed.
+#[cfg(feature = "sftp")]
+fn put(args: &[String]) -> anyhow::Result<()> {
+    use dexremote::sftp;
+    dexremote::init_logging("warn");
+    let c = computer(args)?;
+    let pos = positional(args);
+    let wanted = pos.first().copied().ok_or_else(|| anyhow::anyhow!("which phone?"))?;
+    let paths: Vec<PathBuf> = pos[1..].iter().map(PathBuf::from).collect();
+    if paths.is_empty() {
+        anyhow::bail!("what should be copied? `dexremote put {wanted} report.pdf photos/`");
+    }
+    let to = flag(args, "--to").unwrap_or(sftp::DESKTOP).to_string();
+    let phone = find_phone(&c, wanted)?;
+    let seed = c.ssh_key_seed()?;
+    let key = c.endpoint_key()?;
+    let report = runtime()?.block_on(async {
+        let client = pc::Client::bind(key).await?;
+        // Ctrl+C takes back the item being copied, as Cancel in the window does.
+        let cancel = sftp::CancellationToken::new();
+        let stop = cancel.clone();
+        tokio::spawn(async move {
+            if tokio::signal::ctrl_c().await.is_ok() {
+                stop.cancel();
+            }
+        });
+        let result = sftp::put(&client, &phone, &seed, &paths, &to, |_| {}, &cancel).await;
+        client.close().await;
+        result.map_err(anyhow::Error::from)
+    })?;
+    for name in &report.landed {
+        println!("{}/{name}", report.dir.trim_end_matches('/'));
+    }
+    let mut said = format!(
+        "{} {} ({}) to {} on {}",
+        if report.cancelled { "Stopped after copying" } else { "Copied" },
+        match report.files {
+            1 => "1 file".to_string(),
+            n => format!("{n} files"),
+        },
+        sftp::size(report.bytes),
+        report.dir,
+        phone.name
+    );
+    if report.links > 0 {
+        said.push_str(&format!("; {} link(s) or device(s) left out", report.links));
+    }
+    if report.unreadable > 0 {
+        said.push_str(&format!("; {} could not be read here", report.unreadable));
+    }
+    eprintln!("{said}.");
+    if report.cancelled {
+        anyhow::bail!("cancelled; the item being copied was taken back");
+    }
+    Ok(())
+}
+
+#[cfg(not(feature = "sftp"))]
+fn put(_: &[String]) -> anyhow::Result<()> {
+    anyhow::bail!("this build of dexremote cannot copy files: it was built without the `sftp` feature")
+}
+
+/// What the phone's Linux sent this computer: the desktop window does this
+/// while it is open; this is the same from a terminal.
+#[cfg(feature = "sftp")]
+fn get(args: &[String]) -> anyhow::Result<()> {
+    use dexremote::{outbox, sftp};
+    dexremote::init_logging("warn");
+    let c = computer(args)?;
+    let wanted = positional(args).first().copied().ok_or_else(|| anyhow::anyhow!("which phone?"))?;
+    let phone = find_phone(&c, wanted)?;
+    let into = match flag(args, "--to") {
+        Some(dir) => PathBuf::from(dir),
+        None => computer::home_dir().ok_or_else(|| anyhow::anyhow!("no home directory"))?.join("Downloads"),
+    };
+    std::fs::create_dir_all(&into).with_context(|| format!("cannot use {}", into.display()))?;
+    // The guest's home, when it is not the login's own: for a check against
+    // a stand-in sshd, whose login is this computer's real home.
+    let guest_home = flag(args, "--guest-home").map(str::to_string);
+    let seed = c.ssh_key_seed()?;
+    let key = c.endpoint_key()?;
+    let me = outbox::Me::new(&key.public(), &computer::computer_name());
+    let received = runtime()?.block_on(async {
+        let client = pc::Client::bind(key).await?;
+        let cancel = sftp::CancellationToken::new();
+        let stop = cancel.clone();
+        tokio::spawn(async move {
+            if tokio::signal::ctrl_c().await.is_ok() {
+                stop.cancel();
+            }
+        });
+        let result = async {
+            let guest = sftp::Guest::open(&client, &phone, &seed).await?;
+            let fetched = async {
+                let home = match &guest_home {
+                    Some(h) => h.clone(),
+                    None => guest.home().await?,
+                };
+                outbox::install(&guest, &home, &me, guest_home.is_none()).await?;
+                outbox::fetch(&guest, &home, &me, &into, |_| {}, &cancel).await
+            }
+            .await;
+            guest.close().await;
+            fetched
+        }
+        .await;
+        client.close().await;
+        result.map_err(anyhow::Error::from)
+    })?;
+    let mut items = 0;
+    for batch in &received {
+        for name in &batch.landed {
+            println!("{}", std::path::Path::new(&batch.dir).join(name).display());
+            items += 1;
+        }
+        if batch.links > 0 {
+            eprintln!("{} link(s) or device(s) inside a folder were left out.", batch.links);
+        }
+        if batch.missing > 0 {
+            eprintln!("{} item(s) were gone from Linux, or unreadable there.", batch.missing);
+        }
+        for why in &batch.failed {
+            eprintln!("not saved: {why}");
+        }
+    }
+    if received.is_empty() {
+        eprintln!("Nothing is waiting. In Linux, right-click a file and choose Send To → {}.", me.name);
+    } else {
+        eprintln!("Saved {items} item(s) from {} to {}.", phone.name, into.display());
+    }
+    Ok(())
+}
+
+#[cfg(not(feature = "sftp"))]
+fn get(_: &[String]) -> anyhow::Result<()> {
+    anyhow::bail!("this build of dexremote cannot fetch files: it was built without the `sftp` feature")
 }
 
 /// ssh's ProxyCommand. Exits as soon as the connection does: stdin is read on a

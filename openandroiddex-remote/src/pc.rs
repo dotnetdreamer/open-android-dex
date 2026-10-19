@@ -15,21 +15,28 @@
 //! Every failure is turned into a sentence (see [`DialError`]): ssh prints
 //! whatever its ProxyCommand writes to stderr, and "kex_exchange_identification:
 //! Connection closed by remote host" has never once told anyone what to do.
+//!
+//! The phone's desktop ([`Desktop`]) rides the same tunnel: its web viewer is
+//! served on a port of this computer's loopback, and a browser — or the
+//! desktop app's window — loads it from there as though it were the phone's.
 
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use iroh::endpoint::{presets, Connection, ConnectionError, RecvStream, SendStream};
 use iroh::{Endpoint, EndpointId, SecretKey};
-use tokio::net::TcpListener;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
 use tracing::{debug, info, warn};
 
 use crate::pairing::PairKeys;
 use crate::pipe::{splice, Traffic};
 use crate::proto::{
-    self, Auth, CtlRequest, CtlStatus, PairError, PairRequest, PairResponse, Refusal, SshHello, SshReady,
-    ALPN_CTL, ALPN_PAIR, ALPN_SSH, CLOSE_NOT_PAIRED, CLOSE_SHUTDOWN, CLOSE_UNPAIRED,
+    self, Auth, CtlRequest, CtlStatus, DesktopHello, DesktopOp, DesktopReply, DesktopSize, PairError, PairRequest,
+    PairResponse, Refusal, SshHello, SshReady, ALPN_CTL, ALPN_DESKTOP, ALPN_PAIR, ALPN_SSH, CLOSE_NOT_PAIRED,
+    CLOSE_SHUTDOWN, CLOSE_UNPAIRED,
 };
 use crate::sshkey;
 
@@ -43,6 +50,8 @@ pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 pub enum DialError {
     /// Nothing answered.
     Unreachable,
+    /// The phone answered, and its app is too old to know what was asked.
+    Outdated,
     /// The phone answered and does not know this computer.
     NotPaired,
     /// The phone forgot this computer while a session was open.
@@ -62,6 +71,10 @@ impl std::fmt::Display for DialError {
                 "The phone did not answer. Check that it is switched on and online, and that \
                  Remote access is turned on (Linux → Remote access on the phone)."
             }
+            DialError::Outdated => {
+                "The app on the phone is too old for this. Update Open Android DeX on the phone, \
+                 then try again."
+            }
             DialError::NotPaired => {
                 "The phone does not know this computer. Pair it again: on the phone open \
                  Linux → Remote access → Add a computer."
@@ -79,6 +92,13 @@ impl std::fmt::Display for DialError {
                  phone to see what went wrong."
             }
             DialError::Refused(Refusal::Disabled) => "Remote access was turned off on the phone.",
+            DialError::Refused(Refusal::LinuxUnfinished) => {
+                "Linux on the phone did not finish setting up. Open Linux on the phone and tap Retry."
+            }
+            DialError::Refused(Refusal::DesktopStopped) => "The desktop is not running on the phone.",
+            DialError::Refused(Refusal::DesktopFailed) => {
+                "The phone could not start its desktop. Open Linux on the phone to see what went wrong."
+            }
             DialError::Other(detail) => return write!(f, "The connection to the phone failed: {detail}"),
         })
     }
@@ -108,6 +128,22 @@ fn why_closed(conn: &Connection) -> Option<DialError> {
 
 fn failed(conn: &Connection, detail: impl std::fmt::Display) -> DialError {
     why_closed(conn).unwrap_or_else(|| DialError::Other(detail.to_string()))
+}
+
+/// The phone was there and turned the protocol down in the handshake: its app
+/// is from before this kind of connection existed — a desktop asked of a phone
+/// whose daemon only speaks SSH. TLS says so with alert 120,
+/// no_application_protocol, which QUIC carries as crypto error 0x178. Telling
+/// that apart is the difference between "update the app on the phone" and
+/// "check that the phone is online", which it plainly is.
+fn protocol_refused(e: &iroh::endpoint::ConnectError) -> bool {
+    use iroh::endpoint::{ConnectError, ConnectingError, ConnectionError, TransportErrorCode};
+    let conn = match e {
+        ConnectError::Connecting { source: ConnectingError::ConnectionError { source, .. }, .. } => source,
+        ConnectError::Connection { source, .. } => source,
+        _ => return false,
+    };
+    matches!(conn, ConnectionError::ConnectionClosed(close) if close.error_code == TransportErrorCode::crypto(120))
 }
 
 /// What a phone says about itself, and how the path to it looks right now.
@@ -229,7 +265,7 @@ impl Client {
             Ok(Ok(conn)) => Ok(conn),
             Ok(Err(e)) => {
                 debug!("connect: {e:#}");
-                Err(DialError::Unreachable)
+                Err(if protocol_refused(&e) { DialError::Outdated } else { DialError::Unreachable })
             }
             Err(_) => Err(DialError::Unreachable),
         }
@@ -414,4 +450,363 @@ fn selected_path(conn: &Connection) -> (bool, u64) {
         .find(|p| p.is_selected())
         .map(|p| (p.is_ip(), p.rtt().as_millis() as u64))
         .unwrap_or((false, 0))
+}
+
+// ── the desktop ───────────────────────────────────────────────────────────
+
+/// How to log in to a phone's desktop, as its `open` answered.
+#[derive(Debug, Clone)]
+pub struct DesktopLogin {
+    /// Xvnc's password. The viewer page takes it in its URL, as it does on
+    /// the phone, so nobody has to type it.
+    pub password: String,
+    /// The size the desktop is running at, when the phone knows it.
+    pub size: Option<DesktopSize>,
+}
+
+/// The viewer page for a desktop served on `port` of this computer's loopback.
+/// `ctx=pc` tells the page it is on a computer: a mouse and a keyboard, no
+/// touch methods, and no Remote access button of its own.
+pub fn desktop_url(port: u16, login: &DesktopLogin) -> String {
+    let password: String = login
+        .password
+        .bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => (b as char).to_string(),
+            _ => format!("%{b:02X}"),
+        })
+        .collect();
+    format!("http://127.0.0.1:{port}/dex.html?password={password}&ctx=pc")
+}
+
+/// How often a desktop's connection is asked whether it is still answered,
+/// and how long the answer may take. Long enough to ride out the phone moving
+/// networks, which the connection follows it across; short next to the
+/// minutes a dead daemon's connection otherwise lingers. A phone that starts
+/// its daemon again — the app updated, the desktop app's end-of-session
+/// clean-up — is back under the same address, the relay hands it the old
+/// connection's packets, and nothing ever says that connection is gone: the
+/// viewer sat on its last frame, looking connected, for three minutes.
+const PING_EVERY: Duration = Duration::from_secs(5);
+const PING_WAIT: Duration = Duration::from_secs(12);
+
+/// A phone's desktop, served on a port of this computer's loopback.
+///
+/// One QUIC connection carries all of it: the `open`, every file the viewer
+/// page loads and the VNC WebSocket are streams on it, so a page load costs no
+/// handshakes and no file waits behind the picture. When the connection goes —
+/// a network change neither end could follow, a phone asleep too long — the
+/// next stream dials a new one.
+pub struct Desktop {
+    client: Arc<Client>,
+    phone: EndpointId,
+    conn: std::sync::Mutex<Option<Connection>>,
+    /// One dial at a time: a page load opens dozens of streams at once, and
+    /// they should share one new connection, not race to make their own.
+    dialing: tokio::sync::Mutex<()>,
+}
+
+impl Desktop {
+    pub fn new(client: Arc<Client>, phone: EndpointId) -> Arc<Self> {
+        Arc::new(Desktop {
+            client,
+            phone,
+            conn: std::sync::Mutex::new(None),
+            dialing: tokio::sync::Mutex::new(()),
+        })
+    }
+
+    fn live(&self) -> Option<Connection> {
+        self.conn
+            .lock()
+            .unwrap()
+            .as_ref()
+            .filter(|c| c.close_reason().is_none())
+            .cloned()
+    }
+
+    /// The connection, dialled again if the last one has closed.
+    async fn connection(&self) -> Result<Connection, DialError> {
+        let _turn = self.dialing.lock().await;
+        if let Some(conn) = self.live() {
+            return Ok(conn);
+        }
+        let conn = self.client.dial(self.phone, ALPN_DESKTOP, CONNECT_TIMEOUT).await?;
+        *self.conn.lock().unwrap() = Some(conn.clone());
+        Ok(conn)
+    }
+
+    /// Is the desktop up, and how does one log in? With `start`, the phone
+    /// brings it up at that size if it is not running; without, a desktop that
+    /// is not running is [`Refusal::DesktopStopped`]. `starting` is called if
+    /// the phone says it is on its way up, which can take a minute.
+    pub async fn open(&self, start: Option<DesktopSize>, starting: impl FnOnce()) -> Result<DesktopLogin, DialError> {
+        let conn = self.connection().await?;
+        let (mut send, mut recv) = conn.open_bi().await.map_err(|e| failed(&conn, e))?;
+        let hello = DesktopHello { v: 1, auth: Some(self.client.auth()), op: DesktopOp::Open, start };
+        proto::write_frame(&mut send, &hello).await.map_err(|e| failed(&conn, e))?;
+        let _ = send.finish();
+        let mut starting = Some(starting);
+        loop {
+            // The phone gives up after two minutes; a little longer here, so
+            // that its answer is what ends this and not a guess.
+            let reply: DesktopReply =
+                match tokio::time::timeout(Duration::from_secs(150), proto::read_frame(&mut recv)).await {
+                    Ok(Ok(reply)) => reply,
+                    Ok(Err(e)) => return Err(failed(&conn, e)),
+                    Err(_) => return Err(DialError::Refused(Refusal::DesktopFailed)),
+                };
+            if reply.starting {
+                if let Some(starting) = starting.take() {
+                    starting();
+                }
+                continue;
+            }
+            if !reply.ok {
+                return Err(DialError::Refused(reply.refusal.unwrap_or(Refusal::DesktopFailed)));
+            }
+            return Ok(DesktopLogin { password: reply.password.unwrap_or_default(), size: reply.size });
+        }
+    }
+
+    /// Ask the live connection, if there is one, whether it is still
+    /// answered. One that is not is closed, which ends the viewer's socket on
+    /// it — so the viewer reconnects, on a new connection — rather than
+    /// leaving it looking at a picture nothing is drawing any more.
+    pub async fn ping(&self) -> bool {
+        let Some(conn) = self.live() else { return true };
+        let asked = async {
+            let (mut send, mut recv) = conn.open_bi().await.ok()?;
+            let hello = DesktopHello { v: 1, auth: Some(self.client.auth()), op: DesktopOp::Ping, start: None };
+            proto::write_frame(&mut send, &hello).await.ok()?;
+            let _ = send.finish();
+            proto::read_frame::<_, DesktopReply>(&mut recv).await.ok()
+        };
+        if let Ok(Some(_)) = tokio::time::timeout(PING_WAIT, asked).await {
+            return true;
+        }
+        info!("desktop: the phone stopped answering; hanging up so the viewer reconnects");
+        conn.close(0u32.into(), b"no answer");
+        false
+    }
+
+    /// [`Self::ping`] every few seconds, for as long as the desktop is open.
+    pub async fn keep_alive(self: Arc<Self>) {
+        loop {
+            tokio::time::sleep(PING_EVERY).await;
+            self.ping().await;
+        }
+    }
+
+    /// The live connection's path: direct or not, and its round trip.
+    pub fn path(&self) -> Option<(bool, u64)> {
+        self.live().map(|c| selected_path(&c))
+    }
+
+    /// Why the connection closed, once it has; `None` while it is up or
+    /// before there has been one.
+    pub fn closed(&self) -> Option<DialError> {
+        let conn = self.conn.lock().unwrap().clone()?;
+        conn.close_reason()
+            .map(|e| why_closed(&conn).unwrap_or_else(|| DialError::Other(e.to_string())))
+    }
+
+    /// Hang up, saying so. Anything that asks again dials again.
+    pub fn close(&self) {
+        if let Some(conn) = self.conn.lock().unwrap().take() {
+            conn.close(0u32.into(), b"done");
+        }
+    }
+
+    /// Put every connection made to `listener` through to the phone's web
+    /// viewer, each on a stream of its own — after its request has shown it
+    /// comes from the viewer itself (see [`check_request`]).
+    pub async fn serve(self: Arc<Self>, listener: TcpListener) -> std::io::Result<()> {
+        let port = listener.local_addr()?.port();
+        loop {
+            let (tcp, _) = listener.accept().await?;
+            let desktop = self.clone();
+            tokio::spawn(async move { desktop.forward(tcp, port).await });
+        }
+    }
+
+    async fn forward(&self, mut tcp: TcpStream, port: u16) {
+        let _ = tcp.set_nodelay(true);
+        let Some(received) = read_request_head(&mut tcp).await else {
+            return;
+        };
+        if let Err(why) = check_request(&received, port) {
+            info!("desktop: refused a request to the viewer's port ({why})");
+            let _ = tcp
+                .write_all(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                .await;
+            return;
+        }
+        let (send, recv) = match self.open_web().await {
+            Ok(stream) => stream,
+            Err(e) => {
+                debug!("desktop: {e}");
+                // Seen only if the page is loaded by hand while the phone is
+                // away: the app's window covers it with its own explanation.
+                let body = e.to_string();
+                let answer = format!(
+                    "HTTP/1.1 502 Bad Gateway\r\nContent-Type: text/plain; charset=utf-8\r\n\
+                     Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = tcp.write_all(answer.as_bytes()).await;
+                return;
+            }
+        };
+        let mut send = send;
+        // Everything read so far goes first: the request head, and whatever
+        // the browser had already sent behind it.
+        if send.write_all(&received).await.is_err() {
+            return;
+        }
+        let (r, w) = tcp.into_split();
+        let traffic = Traffic::default();
+        if let Err(e) = splice(r, w, send, recv, &traffic, None).await {
+            debug!("desktop: a stream ended with {e}");
+        }
+    }
+
+    /// One `web` stream, past its answer.
+    async fn open_web(&self) -> Result<(SendStream, RecvStream), DialError> {
+        let conn = self.connection().await?;
+        let (mut send, mut recv) = conn.open_bi().await.map_err(|e| failed(&conn, e))?;
+        let hello = DesktopHello { v: 1, auth: Some(self.client.auth()), op: DesktopOp::Web, start: None };
+        proto::write_frame(&mut send, &hello).await.map_err(|e| failed(&conn, e))?;
+        let reply: DesktopReply = match tokio::time::timeout(Duration::from_secs(30), proto::read_frame(&mut recv)).await
+        {
+            Ok(Ok(reply)) => reply,
+            Ok(Err(e)) => return Err(failed(&conn, e)),
+            Err(_) => return Err(DialError::Unreachable),
+        };
+        if !reply.ok {
+            return Err(DialError::Refused(reply.refusal.unwrap_or(Refusal::DesktopStopped)));
+        }
+        Ok((send, recv))
+    }
+}
+
+/// No request the viewer makes comes near this: it asks for files by name and
+/// opens one WebSocket.
+const MAX_REQUEST_HEAD: usize = 16 * 1024;
+
+/// Read until the end of an HTTP request head. Returns everything read, which
+/// may run past the head; `None` for a connection that sent nothing usable.
+async fn read_request_head(tcp: &mut TcpStream) -> Option<Vec<u8>> {
+    let mut received = Vec::with_capacity(1024);
+    let mut chunk = [0u8; 4096];
+    let read = async {
+        loop {
+            let n = tcp.read(&mut chunk).await.ok()?;
+            if n == 0 {
+                return None;
+            }
+            received.extend_from_slice(&chunk[..n]);
+            if head_end(&received).is_some() {
+                return Some(());
+            }
+            if received.len() > MAX_REQUEST_HEAD {
+                return None;
+            }
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(10), read).await.ok()??;
+    Some(received)
+}
+
+fn head_end(received: &[u8]) -> Option<usize> {
+    received.windows(4).position(|w| w == b"\r\n\r\n").map(|i| i + 4)
+}
+
+/// Is this request the viewer's own? Addressed to this port by name — and,
+/// when the browser says which page sent it, sent by a page served from here.
+///
+/// The port is on loopback, but loopback is not private to the app: any web
+/// page open in any browser on this computer can open a WebSocket to
+/// 127.0.0.1, and websockify checks nothing. Such a page names itself in
+/// `Origin`, and a DNS-rebinding one gives its own name in `Host`, so both are
+/// turned away here. That leaves the VNC password to stand against local
+/// programs only — the job it already had on the phone, where every app can
+/// reach websockify.
+fn check_request(received: &[u8], port: u16) -> Result<(), &'static str> {
+    let end = head_end(received).ok_or("no request")?;
+    let head = std::str::from_utf8(&received[..end]).map_err(|_| "not text")?;
+    let ours = [format!("127.0.0.1:{port}"), format!("localhost:{port}")];
+    let (mut host, mut origin) = (None, None);
+    for line in head.split("\r\n").skip(1) {
+        let Some((name, value)) = line.split_once(':') else { continue };
+        let slot = if name.eq_ignore_ascii_case("host") {
+            &mut host
+        } else if name.eq_ignore_ascii_case("origin") {
+            &mut origin
+        } else {
+            continue;
+        };
+        if slot.replace(value.trim()).is_some() {
+            return Err("a header twice");
+        }
+    }
+    let host = host.ok_or("no Host")?;
+    if !ours.iter().any(|o| o.eq_ignore_ascii_case(host)) {
+        return Err("another host");
+    }
+    if let Some(origin) = origin {
+        if !ours.iter().any(|o| origin.eq_ignore_ascii_case(&format!("http://{o}"))) {
+            return Err("another origin");
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn request(lines: &[&str]) -> Vec<u8> {
+        let mut text = lines.join("\r\n");
+        text.push_str("\r\n\r\n");
+        text.into_bytes()
+    }
+
+    #[test]
+    fn the_viewers_own_requests_go_through() {
+        let page = request(&["GET /dex.html?password=x&ctx=pc HTTP/1.1", "Host: 127.0.0.1:6080"]);
+        assert_eq!(check_request(&page, 6080), Ok(()));
+        let socket = request(&[
+            "GET /websockify HTTP/1.1",
+            "host: 127.0.0.1:6080",
+            "Upgrade: websocket",
+            "Origin: http://127.0.0.1:6080",
+        ]);
+        assert_eq!(check_request(&socket, 6080), Ok(()));
+        let by_name = request(&["GET / HTTP/1.1", "Host: localhost:6080", "Origin: http://localhost:6080"]);
+        assert_eq!(check_request(&by_name, 6080), Ok(()));
+    }
+
+    #[test]
+    fn other_pages_and_other_names_are_turned_away() {
+        let cross = request(&["GET /websockify HTTP/1.1", "Host: 127.0.0.1:6080", "Origin: https://example.com"]);
+        assert!(check_request(&cross, 6080).is_err(), "a page from elsewhere");
+        let rebound = request(&["GET /dex.html HTTP/1.1", "Host: example.com:6080"]);
+        assert!(check_request(&rebound, 6080).is_err(), "DNS rebinding");
+        let other_port = request(&["GET / HTTP/1.1", "Host: 127.0.0.1:6081"]);
+        assert!(check_request(&other_port, 6080).is_err());
+        let sandboxed = request(&["GET / HTTP/1.1", "Host: 127.0.0.1:6080", "Origin: null"]);
+        assert!(check_request(&sandboxed, 6080).is_err());
+        let nameless = request(&["GET / HTTP/1.1"]);
+        assert!(check_request(&nameless, 6080).is_err());
+        let doubled = request(&["GET / HTTP/1.1", "Host: 127.0.0.1:6080", "Host: example.com"]);
+        assert!(check_request(&doubled, 6080).is_err());
+        assert!(check_request(b"GET / HTTP/1.1\r\nHost: 127.0.0.1:6080\r\n", 6080).is_err(), "unfinished head");
+    }
+
+    #[test]
+    fn the_password_is_carried_in_the_url_intact() {
+        let login = DesktopLogin { password: "aZ09 &=?".into(), size: None };
+        assert_eq!(desktop_url(6080, &login), "http://127.0.0.1:6080/dex.html?password=aZ09%20%26%3D%3F&ctx=pc");
+    }
 }

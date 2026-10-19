@@ -49,11 +49,13 @@ for SPEC in aarch64-linux-android:arm64-v8a x86_64-linux-android:x86_64; do
   echo "══════════ $TARGET -> $ABI"
   # ring compiles C and assembly through the cc crate, which reads CC_<target>;
   # rustc links through the same clang so the two agree on the sysroot.
+  # No default features: `sftp` is the computer's way of copying files onto a
+  # phone, and the phone never dials anyone.
   env "CC_$LOWER=$TOOLCHAIN/$TARGET$API-clang" \
       "AR_$LOWER=$TOOLCHAIN/llvm-ar" \
       "CARGO_TARGET_${UPPER}_LINKER=$TOOLCHAIN/$TARGET$API-clang" \
       "CARGO_TARGET_${UPPER}_RUSTFLAGS=-C link-arg=-Wl,-z,max-page-size=16384" \
-      cargo build --release --locked --target "$TARGET"
+      cargo build --release --locked --no-default-features --target "$TARGET"
   mkdir -p "$DEST/$ABI"
   cp -f "target/$TARGET/release/dexremote" "$DEST/$ABI/libdexremote.so"
   echo "  -> $DEST/$ABI/libdexremote.so ($(wc -c < "$DEST/$ABI/libdexremote.so" | tr -d ' ') bytes)"

@@ -64,14 +64,32 @@ import java.util.concurrent.TimeUnit;
  *     charger, where it costs nothing. Otherwise the phone sleeps as usual: the
  *     relay connection is a socket, and a packet arriving on it wakes the CPU
  *     the way a push notification does.</li>
+ * <li><b>The desktop.</b> A computer can open the XFCE desktop too. The daemon
+ *     is told what state it is in, and Xvnc's password, on every change; when
+ *     a computer opens it and it is not running, the daemon asks, and the
+ *     service starts it exactly as the Linux window would.</li>
  * </ul>
  */
 final class RemoteHost {
 
-    /** Told when anything the notification shows has changed. */
+    /** What the host needs from the service it runs in. */
     interface Listener {
+        /** Anything the notification shows has changed. */
         void remoteChanged();
+
+        /**
+         * A paired computer opened the desktop and it is not running: start
+         * it at {@code w}×{@code h}. Never a restart — the service owns the
+         * container, and a session with someone's windows in it stays.
+         */
+        void startDesktop(int w, int h);
     }
+
+    /**
+     * How long a start a computer asked for may take before it is no longer
+     * "starting". The daemon waits as long for it on the computer's behalf.
+     */
+    private static final long DESKTOP_START_MS = 120_000;
 
     private static RemoteHost instance;
 
@@ -119,6 +137,14 @@ final class RemoteHost {
     private long provisionKickedAt;
     /** A reset is deleting the container: sshd stays stopped until it is done. */
     private boolean sshHeld;
+
+    // ── the desktop ──
+    /** The last `desktop` line sent: it goes again only when it changes. */
+    private String desktopLine = "";
+    /** When a computer last asked for the desktop to start (wall clock, ms), or 0. */
+    private long desktopAskedAt;
+    /** When the session it asked for was first seen running (wall clock, ms), or 0. */
+    private long desktopUpAt;
 
     // ── pairing ──
     /** The code on screen, or "" for none. */
@@ -450,12 +476,13 @@ final class RemoteHost {
 
     /**
      * Write one command line, or hold it until the daemon is ready for it.
-     * `ssh`, `net` and `port` are never held: they describe the present, and
-     * `ready` sends the present whole.
+     * `ssh`, `net`, `port` and `desktop` are never held: they describe the
+     * present, and `ready` sends the present whole.
      */
     private void send(String line) {
         if (!ready || daemonIn == null) {
-            if (!line.startsWith("ssh ") && !line.startsWith("net") && !line.startsWith("port ")) {
+            if (!line.startsWith("ssh ") && !line.startsWith("net") && !line.startsWith("port ")
+                    && !line.startsWith("desktop ")) {
                 pending.add(line);
             }
             return;
@@ -484,6 +511,7 @@ final class RemoteHost {
                 String dns = dnsServers();
                 send(dns.isEmpty() ? "net" : "net " + dns);
                 sshState = "";
+                desktopLine = "";
                 evaluate();
                 List<String> queued = new ArrayList<>(pending);
                 pending.clear();
@@ -507,6 +535,9 @@ final class RemoteHost {
                 break;
             case "need-ssh":
                 onNeedSsh();
+                break;
+            case "desktop-start":
+                onDesktopStart(w);
                 break;
             case "pair-listening":
                 onPairListening(w);
@@ -686,6 +717,7 @@ final class RemoteHost {
             send("ssh " + state);
             DexLog.step("remote", "sshd is " + state);
         }
+        reportDesktop(st);
     }
 
     /** Ask for a provisioning run, unless one was asked for within {@code minGapMs}. */
@@ -840,6 +872,82 @@ final class RemoteHost {
         } catch (Exception e) {
             DexLog.warn("remote", "sshd group kill", e);
         }
+    }
+
+    // ── the desktop ──
+
+    /**
+     * `desktop-start <W> <H>`: a computer opened the desktop, and as far as
+     * the daemon knows it is not running. The daemon has already held the size
+     * to what a phone can carry.
+     */
+    private void onDesktopStart(String[] w) {
+        int width = w.length > 2 ? parseInt(w[1]) : 0;
+        int height = w.length > 2 ? parseInt(w[2]) : 0;
+        if (width <= 0 || height <= 0) return;
+        desktopAskedAt = System.currentTimeMillis();
+        desktopUpAt = 0;
+        DexLog.step("remote", "a computer opened the desktop — starting it at " + width + "x" + height);
+        Listener l = listener;
+        if (l != null) l.startDesktop(width, height);
+        // `starting` now rather than at the next tick: the daemon reads a
+        // `failed` that is still there seconds after asking as the answer.
+        evaluate();
+    }
+
+    /** Tell the daemon about the desktop when anything about it changed. */
+    private void reportDesktop(Linux.Status st) {
+        String state = desktopState(st);
+        String pass = st.pass.isEmpty() ? "-" : st.pass;
+        String size = "-";
+        if ("running".equals(state)) {
+            String geo = Linux.readFile(new File(Linux.root(ctx), "geometry")).trim();
+            if (geo.matches("\\d+x\\d+")) size = geo;
+        }
+        String line = "desktop " + state + " " + pass + " " + size;
+        if (line.equals(desktopLine)) return;
+        boolean stateChanged = !desktopLine.startsWith("desktop " + state + " ");
+        desktopLine = line;
+        send(line);
+        // The state only: the line carries Xvnc's password.
+        if (stateChanged) DexLog.step("remote", "desktop is " + state);
+    }
+
+    /**
+     * What a computer opening the desktop would find. Files only: whether
+     * websockify answers is the daemon's to find out, when someone asks — a
+     * probe on every tick would be a connection websockify forks for, under
+     * ptrace, every three seconds.
+     */
+    private String desktopState(Linux.Status st) {
+        if (!Linux.isInstalled(ctx) || "none".equals(st.phase)) return "missing";
+        // A reset is deleting the container under it.
+        if (sshHeld) return "installing";
+        // Before the phase: a setup run on a guest whose desktop is open
+        // rewrites the phase, and the desktop goes on working through it.
+        // And not rt.pid alone, which a runtime killed with the app process
+        // leaves behind: read on its own it would hold a computer waiting on
+        // a desktop that is gone, and never ask for one to be started.
+        if (st.running && LinuxService.runtimeAlive()) {
+            if (desktopAskedAt > 0 && desktopUpAt == 0) desktopUpAt = System.currentTimeMillis();
+            return "running";
+        }
+        if ("error".equals(st.phase)) return "unfinished";
+        if (!"ready".equals(st.phase)) return "installing";
+        long asked = desktopAskedAt;
+        if (asked > 0) {
+            // The start clears the marker before it spawns, so a marker newer
+            // than the request belongs to the session it asked for. That
+            // session ending inside the start window, before it had lasted
+            // half a minute, is a start that failed; one that had been up for
+            // longer was ended by someone, and is only stopped.
+            File exit = Linux.rtExit(ctx);
+            long ended = exit.exists() ? exit.lastModified() : 0;
+            boolean brief = desktopUpAt == 0 || ended - desktopUpAt < 30_000;
+            if (ended >= asked && ended - asked < DESKTOP_START_MS && brief) return "failed";
+            if (System.currentTimeMillis() - asked < DESKTOP_START_MS && ended < asked) return "starting";
+        }
+        return "stopped";
     }
 
     /** The preferred port when it is free, else whatever the kernel hands out. */

@@ -583,7 +583,7 @@ export function initInput(api) {
      round. Ctrl+wheel is the viewer's zoom; a plain wheel is the guest's and
      is not touched. */
   stage.addEventListener('wheel', (ev) => {
-    if (!ev.isTrusted || !ev.ctrlKey) return;
+    if (!ev.isTrusted || !ev.ctrlKey || api.pc) return;
     ev.preventDefault();
     ev.stopPropagation();
     const cur = api.ui.zoom === 'fit' ? api.zNow() : api.ui.zoom;

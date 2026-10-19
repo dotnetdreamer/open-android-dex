@@ -15,6 +15,10 @@ What a person does:
    Or, with the phone on the cable, *Set up SSH to …* and nothing to type.
 3. From then on: `ssh <phone>` in any terminal; VS Code's Remote-SSH lists the
    phone; scp, rsync and git work against it by name.
+4. And the desktop: *Phone Linux* → *Desktop* opens the phone's XFCE in a
+   window on the computer — see [The desktop, in a window](#the-desktop-in-a-window).
+   Copy on one side and paste on the other; drop files on the window and
+   they land on the guest's Desktop.
 
 This record exists for the same reason `custom-titlebar-v2.md` and
 `web-viewer.md` do: several decisions below look arbitrary until you know what
@@ -36,6 +40,10 @@ was measured, or what the platform refuses.
 | Coming back | `RemoteResumeReceiver.java` | boot, updates, the desktop app's teardown |
 | The guest's sshd | `openandroiddex-linux/linux-ssh.sh`, `setup_ssh` in `linux-setup.sh` | OpenSSH in a proot of its own |
 | Desktop app | `src-tauri/src/remote.rs`, `src/features/remote/RemotePanel.tsx` | Phone Linux panel, `ssh-proxy` |
+| The desktop's window | `src-tauri/src/remote_desktop.rs`, `src/features/remote/DesktopWindow.tsx` | the window, its local port, reconnecting, fullscreen, drops |
+| The desktop's page | `assets/linux/novnc/dex.js` (`ctx=pc`) | the phone's own viewer, in that window |
+| The clipboard | `src/features/remote/clipboardShare.ts` | when it crosses, which way, and the switch |
+| Files onto the phone | `openandroiddex-remote/src/sftp.rs` | SFTP in the tunnel, never over anything; `dexremote put` |
 | Check | `test/remote-test.js` | both ends against each other, real relays, real OpenSSH |
 
 ## Why iroh
@@ -263,6 +271,7 @@ One line each way, over the daemon's stdin and stdout:
 | `net [DNS,…]` | the network changed, and its resolvers | `pair-request <ID> <NAME64> <OS> <KEY64> <PAIRING>` | save this computer? |
 | `ssh <STATE>` | up, starting, down, failed, missing, installing | `paired <ID> <PAIRING>` / `pair-failed <WHY> [<PAIRING>]` / `pair-closed <PAIRING>` | how it went |
 | `port <N>` | sshd moved | `sessions <N>` | wake lock |
+| `desktop <STATE> <PASS> <W>x<H>` | running, starting, stopped, failed, unfinished, installing, missing; `-` for unknown | `desktop-start <W> <H>` | a computer opened it; start it |
 | `quit` | stop | `need-ssh` · `revoked <ID>` | start sshd · a removal took effect |
 
 stdin closing means the service is gone, and the daemon goes too: an orphaned
@@ -303,10 +312,325 @@ so an update or a move does not orphan it. A computer without the app uses
 `dexremote` instead — `dexremote pair <CODE>` writes the same setup with itself
 as the ProxyCommand, and `dexremote forward` gives PuTTY and WinSCP a local port.
 
+## The desktop, in a window
+
+SSH reaches everything in the guest except its desktop. *Phone Linux* →
+*Desktop* opens that too: the phone's XFCE in a window on the computer, through
+the same tunnel, wherever the two are.
+
+**It is the phone's own viewer.** websockify already serves noVNC's page and
+the VNC WebSocket on one loopback port (6080, linux-rt.sh) for the Linux window
+on the phone. A fourth ALPN, `desktop/1`, splices streams onto that port the way
+`ssh/1` splices them onto sshd, and the computer serves them on a port of its
+own loopback. The page, its modules and the WebSocket keep the one origin they
+need — noVNC imports from `/core/`, and websockify sends no CORS headers — and
+the computer needs no copy of noVNC. Xvnc's 5901 straight through would have
+needed one, and a WebSocket server of the app's own to feed it.
+
+**One connection per window.** The `open`, every file the page loads and the
+WebSocket are streams on one QUIC connection: a page load costs no handshakes,
+and no file waits behind the picture. The phone counts the connection as one
+session — for the wake lock and the notification — however many streams it
+opens, for as long as it is open: a viewer on an unchanging desktop moves no
+bytes, and still wants the phone awake.
+
+**Starting it.** An `open` that says `start` — with the window's size in
+logical pixels, held to 800×600–3840×2400 — makes the daemon print
+`desktop-start <W> <H>`; RemoteHost hands that to LinuxService, which starts the
+runtime exactly as the Linux window would. Three rules:
+
+- *A running desktop is never restarted*, whatever size was asked for. It has
+  someone's windows in it; it is resized instead (below).
+- *Only `start` starts.* A window coming back after a drop opens without it,
+  so a desktop someone logged out of on the phone is not booted up again
+  behind them; the window says it is not running and offers to start it.
+- *Up means websockify answers*, not that rt.pid exists: it comes up a few
+  seconds after Xvnc. The daemon tries the port twice a second while the app
+  says `running`, and answers only then.
+
+The app describes the desktop to the daemon on every change (`desktop <STATE>
+<PASS> <W>x<H>`), from files alone: probing websockify on every tick would be a
+connection it forks for, under ptrace, every three seconds. `failed` is an
+`rt.exit` newer than the request, inside its two minutes, from a session that
+had not lasted half a minute — the start clears the marker before it spawns, so
+one written after the request is that session's, and one that had been up
+longer was logged out of, which is only `stopped`. As with `need-ssh`, a
+`failed` still there three seconds after asking is the answer to the asking.
+
+`running` is rt.pid *and* a runtime this process started that is still alive
+(`LinuxService.runtimeAlive`). rt.pid alone outlives a runtime killed along
+with the app process — an update, a force-stop, the desktop app's
+end-of-session clean-up — and on the phone, straight after an update, it read
+`running` for a desktop that was gone: the daemon would have waited two
+minutes on websockify and never asked for a start. A runtime always dies with
+the process that started it, so one this process did not start is not running.
+
+**The size follows the window.** The page asks Xvnc to match its box
+(noVNC's `resizeSession`, the ExtendedDesktopSize extension) once connected
+and after every resize, half a second after the last; on a computer the box is
+the whole window below the bar, so the desktop is always one pixel per pixel —
+windowed, maximised, or fullscreen with the bar folded away. XFCE re-lays
+itself out on RandR like any X desktop. The ceiling is the start's,
+3840×2400. The keys row is laid over the picture rather than taken out of it,
+so opening it does not re-lay the desktop out. A phone that is also showing
+the desktop sees the new size, letterboxed.
+
+**The password rides the answer.** Xvnc's password (`vncpass`, made at setup)
+reaches the daemon on the `desktop` line and the computer in the `open` answer,
+and the window gives it to the page in its URL, as LinuxActivity does. Nobody
+types it.
+
+**Sound stays off.** A desktop started from a computer does not start the
+phone's audio pump: the phone may be in a bag in another room, and a video
+playing on the laptop must not come out of it. The Linux window opening on the
+phone brings the sound on.
+
+### Who gets in, on the computer's side
+
+The tunnel's lock is unchanged, and Xvnc's password is the second. The third is
+new, because the computer's end is a TCP port and **loopback is not private to
+the app**: any web page in any browser on the computer can open a WebSocket to
+`127.0.0.1`, and websockify checks nothing. So the forward reads each request's
+head first, and passes it on only if `Host` is that port on `127.0.0.1` or
+`localhost`, and `Origin`, when there is one, is that same address; anything
+else gets a 403. A page from another site names itself in `Origin`, and a
+DNS-rebinding page carries its own name in `Host`. What is left to the password
+is a program running on the computer — the job it already had on the phone,
+where every app can reach websockify.
+
+### The window
+
+The page comes from the guest, where anything running as root can rewrite it,
+so it is not the window's own page. The window loads one of the app's
+(`DesktopWindow.tsx`) with the viewer in a **frame** of another origin, which
+Tauri gives no IPC: no capability names a remote origin
+(`capabilities/phone-desktop.json` covers the window's own page), every command
+from one is refused, and Tauri's scripts — the invoke key with them — go into
+the main frame only. The frame is sandboxed to scripts and its own origin, which
+its modules and its WebSocket need; the window navigates only to its own page
+and its viewer's port, and opens no other windows. A rewritten page can draw in
+its rectangle and post messages, which the window checks for source and origin.
+
+The two talk in those messages (dex.js, "the window around a computer's page"):
+
+| page → window | | window → page | |
+| --- | --- | --- | --- |
+| `status` | the words LinuxActivity reads from `#status` | `quality`, `compression` | noVNC's two knobs, from the path |
+| `fullscreen: "toggle"` | F11, or the bar's button | `fullscreen` | it is, or is not: fold the bar |
+| `clip` | the guest's clipboard changed: its text | `link` | "Direct · 23 ms", on the status dot |
+| `share: "toggle"` | the clipboard switch was pressed | `focus` | keys go to the desktop |
+| | | `share` | the clipboard is shared, or not: draw the switch |
+| | | `paste` | the computer's clipboard, for the guest |
+
+`ctx=pc` is a third context beside `phone` and `desktop`: Direct and nothing
+else, no on-screen keyboard, no zoom (the desktop is the window's size), no
+Remote access button, and a fullscreen button. F11 is the window's, as in a
+browser: dex.js takes a bare one in the capture phase, ahead of noVNC, and
+passes it up, so the guest never gets half a key. Fullscreen folds the bar into
+the bubble, and the desktop grows to the whole screen. Escape is left alone:
+it is vim's, and every dialog's, and F11 always gets back out.
+
+**Coming back.** The page never reconnects itself — on the phone LinuxActivity
+owns the retry ladder — so on a computer the window does. On `closed` or
+`broke` it opens without `start` after 0.3 s, then backs off to every 15 s, on
+a new connection if the old one has gone; up again is a fresh frame on the same
+port, so the page's origin never changes under it. A refusal that will not pass
+by itself — the computer removed, Linux uninstalled, the desktop stopped — ends
+the retrying and says so. `failed` from the page is Xvnc refusing the password,
+which means Linux was reinstalled since; the window asks once for the new one.
+
+The window also **pings** the phone every 5 s on its connection (`ping`, a
+stream the daemon answers and nothing more), and hangs up when 12 s go by with
+no answer. A daemon started again — the app updated, a DeX session's clean-up
+force-stopping it — is back at the same address, the relay hands it the old
+connection's packets, and nothing ever says that connection is dead: measured
+on the phone, the viewer sat on its last frame, looking connected, for three
+minutes. Hanging up ends the page's socket, and the ordinary coming-back
+above takes over. Twelve seconds rides out the phone changing networks, which
+the connection would have followed.
+
+A DeX session ending on the same computer — its scrcpy window closed — runs
+the desktop app's end-of-session clean-up, which force-stops the launcher, and
+the Linux desktop goes with it, as open SSH sessions do. The window then says
+the desktop is not running and offers to start it.
+
+**Speed.** On a direct path (17–49 ms on the phone that was measured) the
+desktop is fine at noVNC's own settings; through the relay (113 ms, and shared
+and rate-limited) it is usable but sluggish. So the window sets noVNC's JPEG
+quality and zlib effort from the path: its defaults (6, 2) direct, quality 3
+and compression 6 on the relay or past 80 ms. The first path is always the
+relay and hole punching usually moves it within seconds, so the picture
+sharpens by itself.
+
+**Without the app**, `dexremote desktop <phone>` does the same in a browser
+tab: starts the desktop if asked, prints the page's address with the password,
+serves it on `127.0.0.1:6080` (or any free port) behind the same checks, and
+hangs up on Ctrl+C — the phone stays awake for as long as it believes someone
+is looking, so a closed viewer must say so rather than time out.
+
+### The clipboard
+
+Text, both ways. The frame cannot reach this computer's clipboard, and must
+not be the one to decide when it may: anything running as root in the guest
+can rewrite it. So the window does it (`clipboardShare.ts`, through the
+clipboard plugin's read-text and write-text, which `phone-desktop.json` grants
+the window's own page and nothing else), and the page only carries the text
+to Xvnc and back: noVNC's `clipboardPasteFrom` one way, its `clipboard` event
+the other.
+
+**When it crosses** — the rules of TigerVNC's own viewer:
+
+- *Computer → Linux when the window comes to the front*, and when the page
+  connects with the window in front, if the clipboard changed since the two
+  last agreed. That is the moment someone who copied something elsewhere comes
+  back to paste it. It is the native window's focus, not the page's: focus
+  moving into the frame blurs the page.
+- *Linux → computer while the window is in front.* What the guest copies
+  while the window is elsewhere — a program in Linux, not a person — waits for
+  the window to come back, and is dropped if this computer's clipboard changed
+  meanwhile: the newer copy wins.
+- A selection being dragged out in the guest announces itself many times a
+  second; the clipboard gets the last of them, 150 ms after.
+
+**Xvnc already does its half.** TigerVNC 1.13.1, as Ubuntu 24.04 ships it,
+keeps the clipboard itself (no `vncconfig`), and its defaults are the ones
+wanted — read off the phone with `Xvnc -help`: `SendCutText=1`,
+`AcceptCutText=1`, `SendPrimary=1`, `SetPrimary=1`, `MaxCutText=262144`. So
+linux-rt.sh's Xvnc line is unchanged. What the computer pastes becomes both
+CLIPBOARD and PRIMARY in the guest, so Ctrl+V and a middle click both paste
+it, and both selections are sent back. SendPrimary has one consequence a Mac
+or Windows user will notice: text *selected* in Linux, without Ctrl+C, lands
+on the computer's clipboard too, as it does in any Linux VNC viewer.
+`-SendPrimary=0` on the Xvnc line would make only Ctrl+C count.
+
+It is UTF-8 throughout: noVNC 1.3 and TigerVNC both speak the extended
+clipboard (UTF-8, CRLF line ends, zlib), and the old Latin-1 one is only the
+fallback. Two of noVNC 1.3's quirks are the page's to work around:
+
+- **A paste waits for the server's answer.** noVNC chooses between the two by
+  what Xvnc said it can take, which Xvnc says in answer to the encodings — a
+  round trip after `connect`. A paste sent sooner goes the Latin-1 way, and
+  everything outside Latin-1 arrives as a byte of nonsense: the browser check
+  measured "—" landing as U+0014 and 日本語 as junk. The canvas is no clue (it
+  is sized from ServerInit, before the answer) and nothing public says when it
+  came, so a paste waits for noVNC 1.3's own record of it
+  (`_clipboardServerCapabilitiesFormats`), polled every 50 ms, for up to 5 s;
+  on a noVNC without that field, for a second and a half.
+- **Line ends.** noVNC 1.3 turns only the *first* CRLF from Xvnc into a LF
+  (`replace("\r\n", "\n")`); the page turns them all. The window writes LF on
+  a Mac and on Linux, and CRLF on Windows.
+
+Xvnc drops an update from a client over 256 KB (MaxCutText, counted as UTF-8
+with CRLF and a NUL), so the window does not send one, and says so once.
+What the guest may put on this computer's clipboard is held to 4 MB.
+
+**Privacy, and the switch.** Whatever is on this computer's clipboard when
+the window comes to the front becomes readable by every program in the guest
+— Xvnc hands it to any X client that asks — and whatever is copied in Linux
+lands on this computer's clipboard, ready to be pasted somewhere that
+matters. That is the feature, and it is also its cost, so the viewer's bar
+has a switch for it (`ctx=pc` only: the clipboard icon, struck through while
+off), and it is on by default.
+
+The page draws the switch; the window keeps it. Pressing it asks the window
+to flip it (`share: "toggle"`); the window remembers it per phone (the store
+plugin, `phone-desktop.json` — the window is incognito, so its own storage
+would not outlast it), tells the page which way it is, and says so in its own
+words over the picture. A page rewritten in the guest can ask for the switch
+to flip, then, but not without being seen to; and with it off the window
+neither reads this computer's clipboard nor takes the guest's, whatever the
+page sends. Turning it off also takes back the computer's text if that is
+what the guest is still holding (an empty paste), so the last thing shared
+does not sit in Linux waiting to be pasted. Nothing is handed over before the
+setting has been read.
+
+Reading the clipboard when the window comes to the front is a programmatic
+read. macOS 15.4 previewed a prompt for exactly that, opt-in
+(`EnablePasteboardPrivacyDeveloperPreview`); it is not on by default in
+macOS 26. If Apple turns it on, the first read will ask, once per app.
+
+### Files, dropped on the window
+
+Dragging files or folders over the window covers it with "Drop to copy to the
+Desktop on ‹phone›"; dropping them copies them — a folder with everything in
+it — into the guest's `~/Desktop`, where XFCE shows them as they land. A card
+in the window's corner shows how far it has got, with a Cancel; a drop made
+during a copy waits its turn, and a cancel takes the waiting ones with it.
+
+The drag is the webview's own (`onDragDropEvent`), so it covers the frame's
+rectangle as well as the page's, gives real paths, and the frame never sees a
+drop. Only a drag that carries files covers the window, and one that arrives
+while the desktop is not up says so and copies nothing.
+
+**The transport is SFTP, inside SSH, inside the tunnel** (`dexremote::sftp`):
+an SSH stream opened exactly as `ssh` opens one (`Client::open_ssh`), a login
+with the pairing's key (`~/.ssh/openandroiddex_ed25519`), the phone's host key
+checked against the one the pairing pinned — anything else is refused before a
+byte of a file is sent — and SFTP in the guest's sshd, the `sftp-server` that
+`sftp-shim` already makes work under proot. What was weighed:
+
+- **A `put` op on the desktop connection, written by the daemon.** No SSH on
+  the computer — but the daemon runs outside proot, as the app, so every write
+  would land on the phone's real filesystem through a path the guest controls.
+  `~/Desktop` itself can be a link the guest made, and a link planted under a
+  name about to be written carries the write wherever it points: into
+  `linux-remote/`, the endpoint key and the list of computers included. It
+  would need the no-follow discipline `ssh/` gets (temporaries made outside,
+  renames in, links replaced rather than followed) at every component of every
+  path, and a new phone build before anyone could use it.
+- **SFTP — chosen.** sftp-server runs under proot as the guest's root, so
+  every path is resolved inside the container, where a link can only lead
+  somewhere in Linux, and the guest's own permissions apply. It needs nothing
+  new on the phone: any phone that takes `ssh` takes this, from any paired
+  computer — `dexremote put <phone> <files>` does the same from a terminal. The
+  cost is an SSH client in the desktop app.
+
+That client is russh 0.64 with russh-sftp 2.4, in process. Both are
+maintained: russh 0.64.1 and russh-sftp 3.0.1 came out in October and
+September 2026. It is built on ring, which iroh brings anyway, rather than
+russh's default aws-lc-rs, a C build that wants CMake and NASM on Windows.
+russh-sftp 2.4 rather than 3, because 3.0 raised its floor for log, thiserror
+and the whole wasm-bindgen family past what the app's lockfile holds, and 2.4
+has the same pipelined writes. It adds 65 crates to the app's lockfile and
+moves none. The phone's binary is built without it (`--no-default-features`):
+the phone never dials anyone.
+
+**Nothing is ever overwritten.** Every file is created with `O_EXCL` and every
+folder with `mkdir`, and both fail rather than replace — a dangling link in
+the way included — so it is the server that says whether a name is free, with
+no race. A name already taken gets the one Thunar 4.18 gives a copy: "report
+(copy 1).pdf", then "(copy 2)", by Thunar's own idea of an extension ("backup
+(copy 1).tar.gz"; a folder has none). Not "report (2).pdf", which is what the
+File transfer window does on the phone's own storage: on an XFCE desktop,
+Thunar's names are the native ones.
+
+**A cancel takes back the item in progress** — the file, or the folder and
+everything already in it — and leaves the items that had finished. A failure
+does the same and says which file and why. The guest's free space is checked
+first (`statvfs@openssh.com`).
+
+**Links inside a folder are not followed.** A link dropped on its own is
+copied as what it points to — someone picked it — but links met inside a
+folder are left out, which also keeps one pointing back up the tree from
+walking forever; they are counted and reported, as are files this computer
+would not let the copy read. Times and the executable bit come along. A
+folder's files go eight at a time — each costs three round trips that carry
+no data — and each file's bytes go in writes as large as the phone's
+sftp-server takes (255 KB), as many in flight as SSH's 2 MB window holds.
+
+### Files the other way
+
+Not built. A real drag out of the window cannot work: the drag happens inside
+X, and VNC carries no drag and no files. The nearest native equivalent —
+Thunar's *Send To → ‹this computer›*, and a drop target in the XFCE panel,
+copying into an outbox in the guest that the computer pulls over the same
+SFTP into `~/Downloads` and announces as "Saved to Downloads — Show" — is
+proposed and waiting on a decision.
+
 ## Verified, and not yet
 
 Verified, on a Mac, over the real public relays and address lookup
-(`node test/remote-test.js`, 38 checks): an unpaired computer is turned away
+(`node test/remote-test.js`, 73 checks): an unpaired computer is turned away
 with a sentence; pairing by code (typed lower-case, with a dash); the generated
 SSH setup; direct and relay-only paths; 4 MB through intact, half-close passed
 on; removal closing a live session within ~2 s; a restarted daemon keeping its
@@ -315,14 +639,48 @@ in with the pairing's files and no prompt; exit status; scp; three sessions at
 once, direct and over the relay alone; the daemon on its own resolver, taking
 new DNS servers from a `net` and staying reachable; a reopened code ending at
 its first deadline and pairing nobody after it; a changed host key refused.
+Files onto it with `dexremote put`, against the same sshd: a file and a
+folder of 27 byte for byte, times and the executable bit kept; a link inside
+the folder left out, and said so; a second and a third drop named "(copy 1)"
+and "(copy 2)" with the first untouched; the relay alone; Ctrl+C half way
+through taking back the whole folder it was in; a host key other than the
+paired one refused before a byte was sent; and every copy's session let go.
+And the desktop, with `dexremote desktop` against a stand-in websockify: no
+Linux refused in a sentence; a stopped desktop not started unless asked; a
+start the app reports failed, reported as one; an oversized request held to
+3840 wide; the password handed over; the page, and 1 MB each way through the
+WebSocket, as one session however many streams; another site's `Origin` and
+another `Host` refused; a daemon killed and started again under the same
+identity noticed by the ping in seconds, and the next request reaching its
+replacement; Ctrl+C ending the session on the phone at once.
 Unit tests cover HMAC and PBKDF2 against RFC 4231 and RFC 7914, the key files
 against real `ssh-keygen` output, eight simultaneous first starts agreeing on
 one identity (they do not without the lock), and the links the guest can plant
-in its directory never being followed. The Android build runs on an Android 16 arm64
+in its directory never being followed, and Thunar's copy names, extensions
+and all. The Android build runs on an Android 16 arm64
 emulator (as the shell user) and reaches a relay within a second. The desktop
 app, Windows-only code included, type-checks for `x86_64-pc-windows-msvc` from
 macOS — which is how a lockfile that paired wmi's `windows` 0.61 with
-`windows-core` 0.62 was caught: it builds everywhere except Windows.
+`windows-core` 0.62 was caught: it builds everywhere except Windows. It still
+does with russh in it.
+
+The clipboard and the window, in headless Chrome, off the phone: the real
+dex.html and noVNC 1.3.0 against a stand-in Xvnc that speaks TigerVNC's
+extended clipboard (its capabilities sent 400 ms late, as a round trip makes
+them), framed by a page of another origin running the window's own
+`clipboardShare.ts` — 24 checks: UTF-8 both ways and never the Latin-1 path
+(which is how the early paste was found: "—" arrived as U+0014), every CRLF
+undone, one write for a selection dragged out, the guest's copy held while
+the window was elsewhere and the computer's newer one winning, the switch
+asking, the window saving it and saying so, the guest's copy of the
+computer's text taken back, nothing crossing while off, the 256 KB cap, no
+paste taken from anything but the window, and no switch in a plain tab. Then
+`DesktopWindow.tsx` itself, from the dev server, with Tauri's IPC mocked
+under it and the frame in a process of its own — 24 checks: the switch read
+before the clipboard, the clipboard on connect and on Tauri's focus event,
+the drop cover, `remote_desktop_put` with the dropped paths, the card's
+progress, a drop queued behind a copy, Cancel, and a copy that finished and
+one that failed.
 
 Verified on a phone (Galaxy S25 Ultra, Android 16, 2026-10-19): USB pairing
 by `dexremote pair-adb` switching remote access on; the daemon as the app's
@@ -334,7 +692,34 @@ reinstalled; and, with the phone's Wi-Fi off, the phone on its carrier's
 network and the computer on home broadband, SSH and scp **direct**, hole
 punched through the mobile network, at ~30 ms.
 
-The phone found two things no computer test could:
+The desktop, the same evening, on the same phone over a direct path: started
+from a computer in under six seconds at the size asked for (2560×1440); the
+page, its modules and the WebSocket through the tunnel in 1.6–1.8 s; Xvnc
+taking the password it was handed; the guest's screen made the window's size
+as the page connected, and following the window down to 1500×856 0.4 s after
+it shrank; a click opening XFCE's Applications menu; no sound on the phone;
+and the desktop app's own window (WKWebView, the viewer in its frame) showing
+the desktop within a second of the button.
+
+The clipboard and drops on the same phone, later that evening, through the
+page the new launcher staged (`dexremote desktop` on the app's own pairing,
+headless Chrome, the guest's selections read and set with libX11 over ssh):
+what the computer had copied — "Grüße vom Computer ✓ — 日本語", two lines — was
+the guest's CLIPBOARD and PRIMARY as the window connected; the switch off
+emptied it and on put it back; a program owning CLIPBOARD, and another only
+PRIMARY, both reached the computer's clipboard; and coming back to the window
+handed the guest what had been copied since. `dexremote put` put a folder of
+42 files and a `.tar.gz` (26 MB in all, one link left out) on the guest's
+Desktop byte for byte, XFCE showing both icons as they landed; a second drop landed as
+"oadx-drop-folder (copy 1)" and "oadx-drop-note (copy 1).tar.gz"; and Ctrl+C
+during a 160 MB file took the folder back. Over the direct Wi-Fi path (45 ms)
+copies ran at 1–6 MB/s, in the same band as OpenSSH's own scp through the
+same tunnel (0.8–6.7 MB/s, in alternating runs), so the path and the phone,
+not the client, are the limit. Files land as the guest's umask has them —
+077, Android's, so `0700` for a script — which is how Linux's own programs
+make theirs there.
+
+The phone found five things no computer test could:
 
 - **SFTP fails under proot.** OpenSSH's SFTP server makes itself undumpable
   and treats failure as fatal; proot swallows `prctl(PR_SET_DUMPABLE)` on
@@ -347,6 +732,18 @@ The phone found two things no computer test could:
   (sessions gone within ~2 s), and the phone ends a session 2 s after sshd
   closes its side, for clients that kill the proxy outright — checked on the
   phone with a connection that sshd rejected and the computer held open.
+- **rt.pid outlives the runtime.** Straight after the launcher was updated the
+  phone said its desktop was `running` — rt.pid, from a runtime the update had
+  killed. The desktop now counts as running only while a runtime this process
+  started is alive (`LinuxService.runtimeAlive`).
+- **A restarted daemon leaves the old connection hanging.** The DeX session's
+  clean-up force-stopped the launcher; the daemon came back under the same
+  identity, the relay handed it the old connection's packets, and the
+  computer's viewer sat on a frozen frame, its dot green, for three minutes.
+  The window pings now, and hangs up after 12 s without an answer.
+- **A phone from before the desktop** refuses its ALPN in the handshake (TLS
+  alert 120), which the computer used to report as "the phone did not
+  answer". It now says the app on the phone is too old.
 
 Not yet verified on a device:
 
@@ -359,3 +756,15 @@ Not yet verified on a device:
 - VS Code Remote-SSH's server running inside proot;
 - the SIGQUIT teardown on a phone: a tmux started over SSH gone after remote
   access is switched off, and no proot left behind.
+- the desktop on WebView2 and WebKitGTK; F11 from inside the frame in the
+  app's window; the quality stepping up when the path goes direct; and how it
+  feels through the relay.
+- a real drag in the app's real window: that wry delivers drag-and-drop
+  events over the frame's rectangle as it does over the page — on WKWebView,
+  and on WebView2 and WebKitGTK above all — and the clipboard plugin's
+  read-text on a focus event. Everything on either side of those was run;
+  those two seams were not, since nothing here can drag a file onto a window;
+- the clipboard on Windows (CRLF written, and read back as the same text) and
+  on Linux;
+- macOS asking before a programmatic clipboard read, if Apple turns that on;
+- files the other way, from the guest to this computer: not built (below).

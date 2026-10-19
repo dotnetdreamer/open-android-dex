@@ -83,11 +83,16 @@ pub struct ProbeView {
     /// The guest sshd: up, starting, down, failed, missing, installing.
     pub ssh: String,
     pub sessions: u32,
+    /// The phone can open its desktop to this computer.
+    pub desktop_ok: bool,
+    /// The desktop: running, starting, stopped, failed, unfinished,
+    /// installing, missing — or empty from a phone too old to say.
+    pub desktop: String,
     /// A sentence, when it was not reachable.
     pub error: Option<String>,
 }
 
-fn computer() -> Result<Computer, String> {
+pub(crate) fn computer() -> Result<Computer, String> {
     Computer::open_default().map_err(|e| e.to_string())
 }
 
@@ -95,7 +100,7 @@ fn computer() -> Result<Computer, String> {
 /// would otherwise each pay for a fresh endpoint and a relay handshake.
 static CLIENT: OnceLock<Mutex<Option<Arc<Client>>>> = OnceLock::new();
 
-async fn client() -> Result<Arc<Client>, String> {
+pub(crate) async fn client() -> Result<Arc<Client>, String> {
     let mut slot = CLIENT.get_or_init(|| Mutex::new(None)).lock().await;
     if let Some(c) = slot.as_ref() {
         if !c.endpoint().is_closed() {
@@ -171,6 +176,8 @@ pub async fn remote_probe(id: String) -> Result<ProbeView, String> {
             rtt_ms: p.rtt_ms,
             ssh: p.status.ssh,
             sessions: p.status.sessions,
+            desktop_ok: p.status.features.iter().any(|f| f == dexremote::proto::FEATURE_DESKTOP),
+            desktop: p.status.desktop,
             error: None,
         },
         Err(e) => ProbeView {
@@ -179,6 +186,8 @@ pub async fn remote_probe(id: String) -> Result<ProbeView, String> {
             rtt_ms: 0,
             ssh: String::new(),
             sessions: 0,
+            desktop_ok: false,
+            desktop: String::new(),
             error: Some(e.to_string()),
         },
     })
@@ -273,7 +282,7 @@ pub fn phone_remote_enabled(app: &AppHandle, serial: &str) -> bool {
 
 // ── opening things ─────────────────────────────────────────────────────────
 
-fn find(id: &str) -> Result<Phone, String> {
+pub(crate) fn find(id: &str) -> Result<Phone, String> {
     computer()?
         .phones()
         .into_iter()

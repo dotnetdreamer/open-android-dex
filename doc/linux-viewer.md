@@ -166,6 +166,31 @@ and where the two displays agree on density and the platform sends a plain
 configuration change instead, `LinuxActivity` calls `window.dexContext(ctx)` on
 the live page, which lands on that window's remembered method or its default.
 
+**A third window is on a computer: `&ctx=pc`.** Through remote access, the same
+page is opened from a laptop (doc/remote-access.md, "The desktop, in a
+window"), framed by the desktop app or in a browser tab. There it is Direct and
+nothing else — a mouse and a keyboard of its own; a touchscreen laptop's finger
+is a pointer too — so the method, the on-screen keyboard and the Remote access
+button go, and a fullscreen button comes. Zoom goes too: there the picture's box
+is the whole stage and the guest's screen is resized to it (noVNC's
+`resizeSession`, here only), so the desktop is always one pixel per pixel and
+Ctrl+scroll belongs to the guest. F11 is taken in the capture phase and
+passed up to the window rather than to the guest, and the status words the
+health probe reads are posted to the window as well, because on a computer the
+window around the page is what reconnects.
+
+The clipboard crosses there too, and the window around the page is what
+decides when (remote-access.md, "The clipboard"): the page posts noVNC's
+`clipboard` events up, with every CRLF made a LF — noVNC 1.3 does only the
+first — and hands what the window posts down to `clipboardPasteFrom`. A paste
+waits until noVNC has heard which clipboard Xvnc speaks
+(`_clipboardServerCapabilitiesFormats`, private, like the 1.3.0 internals
+listed under "What is unproven"): sent sooner, it goes the Latin-1 way and
+mangles everything outside Latin-1. The bar gains a clipboard switch, hidden
+until the window says which way it is — so it never appears in a plain browser
+tab — and struck through while sharing is off. The window keeps the setting;
+the button only asks it to flip.
+
 noVNC's own vocabulary is fixed — one-finger drag is a left-drag, two fingers is
 scroll, and pinch holds Ctrl and asks the *remote app* to zoom. It is one mode,
 it has no viewer pan, and it cannot be reshaped into two, which is why Touch and

@@ -73,6 +73,19 @@
    never cleared — a device with both grammars keeps the smaller one. */
 body.is-desktop { --bar: 44px; --key: 38px; }
 
+/* On a computer (ctx=pc), through remote access: a mouse and a keyboard of its
+   own, and a desktop sized to the window. The touch methods, the on-screen
+   keyboard, zoom and the phone's Remote access button have nothing to do
+   there, and fullscreen is the only thing it adds. */
+body.is-pc #mode, body.is-pc #p-mode,
+body.is-pc #kb, body.is-pc #p-kb,
+body.is-pc #remote, body.is-pc #p-remote,
+body.is-pc #zoom, body.is-pc #p-zoom { display: none; }
+body:not(.is-pc) .pc-only { display: none; }
+
+/* The clipboard switch reads as off at a glance: struck through until it is on. */
+.on > svg .slash { display: none; }
+
 * { box-sizing: border-box; }
 [hidden] { display: none !important; }
 

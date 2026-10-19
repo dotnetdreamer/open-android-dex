@@ -75,6 +75,27 @@ public class LinuxService extends Service {
     /** Kept only so the runtime process is not GC-reaped mid-life. */
     private Process runtimeProc;
     /**
+     * The runtime this process spawned, for {@link #runtimeAlive}. Static
+     * because the runtime belongs to the process, which can outlive an
+     * instance of this service.
+     */
+    private static volatile Process liveRuntime;
+
+    /**
+     * A runtime this process started is still running.
+     *
+     * rt.pid alone cannot say so: linux-rt.sh removes it when the session
+     * ends, but a runtime killed along with this process — an app update, a
+     * force-stop, the PC's end-of-session clean-up — leaves the file behind,
+     * naming a desktop that is gone. Remote access asks this before telling a
+     * computer the desktop is up; a runtime always dies with the process that
+     * started it, so one this process did not start is not running.
+     */
+    static boolean runtimeAlive() {
+        Process p = liveRuntime;
+        return p != null && p.isAlive();
+    }
+    /**
      * True from the instant we spawn a runtime until we stop it. Guards against
      * the double-start race: two START intents can both see rt.pid absent
      * (the runtime writes it a beat after spawn), and the second Xvnc then
@@ -222,13 +243,28 @@ public class LinuxService extends Service {
     public void onCreate() {
         super.onCreate();
         remote = RemoteHost.of(this);
-        remote.setListener(() -> mainHandler.post(() -> {
-            refreshForeground();
-            // The host stops itself when it finds remote access switched off
-            // behind its back; with it gone this service may have nothing
-            // left to be foreground for.
-            if (!remote.running() && !LinuxRemote.isEnabled(this)) idleStopQueued();
-        }));
+        remote.setListener(new RemoteHost.Listener() {
+            @Override
+            public void remoteChanged() {
+                mainHandler.post(() -> {
+                    refreshForeground();
+                    // The host stops itself when it finds remote access switched
+                    // off behind its back; with it gone this service may have
+                    // nothing left to be foreground for.
+                    if (!remote.running() && !LinuxRemote.isEnabled(LinuxService.this)) idleStopQueued();
+                });
+            }
+
+            @Override
+            public void startDesktop(int w, int h) {
+                try {
+                    io.execute(() -> startRuntimeForComputer(w, h));
+                } catch (java.util.concurrent.RejectedExecutionException destroyed) {
+                    // onDestroy has run; the daemon's wait runs out and the
+                    // computer is told the desktop did not start.
+                }
+            }
+        });
         goForeground(getString(R.string.ln_installing));
     }
 
@@ -298,7 +334,7 @@ public class LinuxService extends Service {
         if (ACTION_START.equals(action)) {
             final int w = intent.getIntExtra(EXTRA_W, 1280);
             final int h = intent.getIntExtra(EXTRA_H, 800);
-            io.execute(() -> startRuntime(w, h));
+            io.execute(() -> startRuntime(w, h, true));
         } else if (ACTION_STOP.equals(action)) {
             io.execute(() -> {
                 stopRuntime();
@@ -606,11 +642,30 @@ public class LinuxService extends Service {
 
     // ── runtime ──
 
-    private void startRuntime(int w, int h) {
+    /**
+     * A computer opened the desktop through remote access, and it was not
+     * running. Never a restart: a session that is up, or was spawned moments
+     * ago and has not written its pid yet — the Linux window's own start, a
+     * beat ahead — is left alone, and the computer gets it at its size.
+     */
+    private void startRuntimeForComputer(int w, int h) {
+        long sinceSpawn = android.os.SystemClock.elapsedRealtime() - runtimeSpawnedAt;
+        if (runtimeUp && sinceSpawn < 15_000) return;
+        startRuntime(w, h, false);
+    }
+
+    /**
+     * @param withSound the guest's speakers come on with it. True for the
+     *     Linux window, false for a computer: the phone may be in a bag in
+     *     another room, and a video playing on a laptop must not come out of
+     *     it. The window opening later brings the sound on then.
+     */
+    private void startRuntime(int w, int h, boolean withSound) {
         try {
             Linux.Status st = Linux.readStatus(this);
             if (!"ready".equals(st.phase)) return; // nothing to start yet
             if (runtimeUp && st.running) {
+                if (withSound) LinuxAudio.start();
                 goForeground(getString(R.string.ln_label));
                 return; // already up — do NOT spawn a second one
             }
@@ -633,7 +688,10 @@ public class LinuxService extends Service {
                 // reason to abandon the container.
                 DexLog.step("linux", "viewer stage failed: " + e);
             }
-            writeFile(new File(dir, "geometry"), Math.max(w, 800) + "x" + Math.max(h, 600));
+            // The ceiling is the daemon's too: a computer's screen may ask for
+            // a desktop, and every pixel of it is drawn by this phone's CPU.
+            writeFile(new File(dir, "geometry"),
+                    Math.min(Math.max(w, 800), 3840) + "x" + Math.min(Math.max(h, 600), 2400));
             ProcessBuilder pb = new ProcessBuilder(
                     "/system/bin/sh", Linux.rtScript(this).getAbsolutePath());
             pb.directory(dir);
@@ -646,12 +704,13 @@ public class LinuxService extends Service {
             runtimeUp = true;
             runtimeSpawnedAt = android.os.SystemClock.elapsedRealtime();
             runtimeProc = pb.start();
+            liveRuntime = runtimeProc;
             // The guest has no audio device: it plays into a null sink and this
             // drains that sink's monitor into an AudioTrack. Started here rather
             // than when the window opens, because the container is what produces
             // the sound — a session put in the background with "keep running" is
             // still allowed to make noise. It retries while the guest boots.
-            LinuxAudio.start();
+            if (withSound) LinuxAudio.start();
             goForeground(getString(R.string.ln_label));
             DexLog.step("linux", "runtime started " + w + "x" + h);
         } catch (Exception e) {
@@ -711,6 +770,7 @@ public class LinuxService extends Service {
             }
         }
         runtimeProc = null;
+        liveRuntime = null;
         runtimeUp = false;
         DexLog.step("linux", "runtime stopped");
     }

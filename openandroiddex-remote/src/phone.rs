@@ -21,6 +21,12 @@
 //! what proves the id) and before a byte of application data is read. sshd's
 //! own public-key check then applies on top: the tunnel is the first lock, not
 //! the only one.
+//!
+//! The desktop is the same door with a different room behind it: a paired
+//! computer's streams go to websockify — the noVNC page and the VNC WebSocket
+//! on one port — instead of sshd, and Xvnc's password is the lock on top.
+//! Starting the desktop is the app's business, asked for with a line; see
+//! [`open_desktop`].
 
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
@@ -42,8 +48,9 @@ use tracing::{debug, info, warn};
 use crate::pairing::PairKeys;
 use crate::pipe::{splice, Traffic};
 use crate::proto::{
-    self, CtlRequest, CtlStatus, PairError, PairRequest, PairResponse, Refusal, SshHello, SshReady,
-    ALPN_CTL, ALPN_PAIR, ALPN_SSH, CLOSE_NOT_PAIRED, CLOSE_SHUTDOWN, CLOSE_UNPAIRED,
+    self, CtlRequest, CtlStatus, DesktopHello, DesktopOp, DesktopReply, DesktopSize, PairError, PairRequest,
+    PairResponse, Refusal, SshHello, SshReady, ALPN_CTL, ALPN_DESKTOP, ALPN_PAIR, ALPN_SSH, CLOSE_NOT_PAIRED,
+    CLOSE_SHUTDOWN, CLOSE_UNPAIRED,
 };
 use crate::{b64url, sshkey, unix_now};
 
@@ -52,10 +59,17 @@ use crate::{b64url, sshkey, unix_now};
 /// is, and an SSH session lands in the same home as the desktop's terminal.
 pub const GUEST_USER: &str = "root";
 
+/// websockify, as linux-rt.sh starts it: the noVNC web root and the VNC
+/// WebSocket on one loopback port, which is what the Linux window on the phone
+/// loads too.
+pub const DESKTOP_WEB_PORT: u16 = 6080;
+
 pub struct Config {
     pub dir: PathBuf,
     /// Where the guest's sshd listens, on 127.0.0.1.
     pub ssh_port: u16,
+    /// Where the desktop's websockify listens, on 127.0.0.1.
+    pub desktop_port: u16,
     /// The phone's name, shown on the computer.
     pub name: String,
     /// The active network's DNS servers, from Android's LinkProperties. Native
@@ -362,6 +376,85 @@ impl SshState {
     }
 }
 
+/// The XFCE desktop as LinuxService last described it (`desktop <state> …`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DesktopState {
+    /// Nothing said yet. The app describes it straight after `ready`.
+    Unknown,
+    /// There is no Linux on the phone.
+    Missing,
+    /// Linux is being installed, updated or reset.
+    Installing,
+    /// Linux's setup stopped with an error, and nothing starts until it is retried.
+    Unfinished,
+    /// Installed, with no desktop session running.
+    Stopped,
+    /// A session is on its way up.
+    Starting,
+    /// A session is running; its websockify may still be coming up.
+    Running,
+    /// The start a computer asked for ended by itself.
+    Failed,
+}
+
+impl DesktopState {
+    fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "missing" => DesktopState::Missing,
+            "installing" => DesktopState::Installing,
+            "unfinished" => DesktopState::Unfinished,
+            "stopped" => DesktopState::Stopped,
+            "starting" => DesktopState::Starting,
+            "running" => DesktopState::Running,
+            "failed" => DesktopState::Failed,
+            _ => return None,
+        })
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            DesktopState::Unknown => "unknown",
+            DesktopState::Missing => "missing",
+            DesktopState::Installing => "installing",
+            DesktopState::Unfinished => "unfinished",
+            DesktopState::Stopped => "stopped",
+            DesktopState::Starting => "starting",
+            DesktopState::Running => "running",
+            DesktopState::Failed => "failed",
+        }
+    }
+}
+
+/// The desktop, and what a computer needs to log in to it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Desktop {
+    state: DesktopState,
+    /// Xvnc's password, from the guest's setup; empty until the app has said.
+    password: String,
+    /// The size the running session was started at, when the app knows it.
+    size: Option<DesktopSize>,
+}
+
+/// What a computer may ask the desktop to be: a real screen's size, and no
+/// more than Xvnc on a phone carries comfortably — every pixel is drawn by the
+/// phone's CPU and encoded again for every viewer. The floor is the one the
+/// app has always held its own windows to.
+const DESKTOP_MIN: DesktopSize = DesktopSize { w: 800, h: 600 };
+const DESKTOP_MAX: DesktopSize = DesktopSize { w: 3840, h: 2400 };
+
+fn clamp_size(s: DesktopSize) -> DesktopSize {
+    DesktopSize {
+        w: s.w.clamp(DESKTOP_MIN.w, DESKTOP_MAX.w),
+        h: s.h.clamp(DESKTOP_MIN.h, DESKTOP_MAX.h),
+    }
+}
+
+/// "1512x982" → a size; anything else, including the app's "-", is none.
+fn parse_size(s: &str) -> Option<DesktopSize> {
+    let (w, h) = s.split_once('x')?;
+    Some(DesktopSize { w: w.parse().ok()?, h: h.parse().ok()? })
+}
+
 struct Session {
     peer: EndpointId,
     since: u64,
@@ -379,6 +472,8 @@ struct Shared {
     dir: PathBuf,
     /// Moves when the app restarts sshd on a different free port (`port <N>`).
     ssh_port: AtomicU16,
+    desktop_port: u16,
+    desktop: watch::Sender<Desktop>,
     name: String,
     host_key_line: String,
     dns: DnsServers,
@@ -618,15 +713,18 @@ pub async fn serve(cfg: Config) -> Result<()> {
     let identity = ensure_identity(&cfg.dir)?;
     let host_key_line = identity.host_key_line();
     let dns: DnsServers = Arc::new(RwLock::new(cfg.dns));
-    let ep = bind(identity.key.clone(), &[ALPN_SSH, ALPN_CTL], &dns, cfg.relay.as_ref()).await?;
+    let ep = bind(identity.key.clone(), &[ALPN_SSH, ALPN_CTL, ALPN_DESKTOP], &dns, cfg.relay.as_ref()).await?;
     let (events, writer) = Events::stdout();
     events.emit(format!("ready {} {}", ep.id(), b64url(&host_key_line)));
     info!("serving as {} (sshd on 127.0.0.1:{})", ep.id(), cfg.ssh_port);
 
     let (ssh, _) = watch::channel(SshState::Down);
+    let (desktop, _) = watch::channel(Desktop { state: DesktopState::Unknown, password: String::new(), size: None });
     let shared = Arc::new(Shared {
         dir: cfg.dir,
         ssh_port: AtomicU16::new(cfg.ssh_port),
+        desktop_port: cfg.desktop_port,
+        desktop,
         name: cfg.name,
         host_key_line,
         dns,
@@ -685,6 +783,7 @@ pub async fn serve(cfg: Config) -> Result<()> {
 /// | `net [DNS,…]` | Android saw the network change (iroh cannot, here), and the new network's DNS servers |
 /// | `ssh <STATE>` | the guest sshd is up, starting, down, failed, missing or installing |
 /// | `port <N>` | sshd now listens on 127.0.0.1:N |
+/// | `desktop <STATE> <PASSWORD> <W>x<H>` | the desktop is running, starting, stopped, failed, unfinished, installing or missing; `-` for a part not known |
 /// | `quit` | stop |
 async fn command_loop(shared: Arc<Shared>) -> Result<()> {
     let mut lines = BufReader::new(tokio::io::stdin()).lines();
@@ -754,6 +853,19 @@ async fn command_loop(shared: Arc<Shared>) -> Result<()> {
                 Ok(port) if port > 0 => shared.ssh_port.store(port, Ordering::Relaxed),
                 _ => warn!("bad port {port:?}"),
             },
+            (Some("desktop"), Some(state), password) => match DesktopState::parse(state) {
+                Some(state) => {
+                    let password = password.filter(|p| *p != "-").unwrap_or("").to_string();
+                    let size = words.next().and_then(parse_size);
+                    shared.desktop.send_if_modified(|d| {
+                        let now = Desktop { state, password, size };
+                        let changed = *d != now;
+                        *d = now;
+                        changed
+                    });
+                }
+                None => warn!("unknown desktop state {state:?}"),
+            },
             (Some("quit"), _, _) => break,
             (None, _, _) => {}
             _ => warn!("unknown command {line:?}"),
@@ -794,22 +906,31 @@ async fn accept_loop(shared: Arc<Shared>) {
                 },
                 Err(e) => return debug!("incoming refused: {e}"),
             };
-            let ssh = match conn.alpn() {
-                a if a == ALPN_SSH => true,
-                a if a == ALPN_CTL => false,
+            let kind = match conn.alpn() {
+                a if a == ALPN_SSH => Kind::Ssh,
+                a if a == ALPN_CTL => Kind::Ctl,
+                a if a == ALPN_DESKTOP => Kind::Desktop,
                 _ => return conn.close(CLOSE_NOT_PAIRED.into(), b"unknown protocol"),
             };
-            serve_conn(shared, conn, ssh).await;
+            serve_conn(shared, conn, kind).await;
         });
     }
 }
 
+/// What a connection is for, by its ALPN.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    Ssh,
+    Ctl,
+    Desktop,
+}
+
 /// Every stream on a connection is one SSH connection (or one status
-/// question), each authorised on its first frame — see
-/// [`Shared::computer_for`]. A connection that has not produced an authorised
-/// stream within fifteen seconds is closed: nobody gets to hold one open for
-/// free on the strength of a handshake alone.
-async fn serve_conn(shared: Arc<Shared>, conn: Connection, ssh: bool) {
+/// question, or one desktop request), each authorised on its first frame —
+/// see [`Shared::computer_for`]. A connection that has not produced an
+/// authorised stream within fifteen seconds is closed: nobody gets to hold one
+/// open for free on the strength of a handshake alone.
+async fn serve_conn(shared: Arc<Shared>, conn: Connection, kind: Kind) {
     let remote = conn.remote_id();
     let authorised = Arc::new(Notify::new());
     {
@@ -822,6 +943,7 @@ async fn serve_conn(shared: Arc<Shared>, conn: Connection, ssh: bool) {
             }
         });
     }
+    let desktop = Arc::new(DesktopLink::default());
     loop {
         let (send, recv) = match conn.accept_bi().await {
             Ok(pair) => pair,
@@ -831,10 +953,46 @@ async fn serve_conn(shared: Arc<Shared>, conn: Connection, ssh: bool) {
             }
         };
         let (shared, conn, authorised) = (shared.clone(), conn.clone(), authorised.clone());
-        if ssh {
-            tokio::spawn(ssh_stream(shared, conn, send, recv, authorised));
-        } else {
-            tokio::spawn(ctl_stream(shared, conn, send, recv, authorised));
+        match kind {
+            Kind::Ssh => {
+                tokio::spawn(ssh_stream(shared, conn, send, recv, authorised));
+            }
+            Kind::Ctl => {
+                tokio::spawn(ctl_stream(shared, conn, send, recv, authorised));
+            }
+            Kind::Desktop => {
+                tokio::spawn(desktop_stream(shared, conn, send, recv, authorised, desktop.clone()));
+            }
+        }
+    }
+    desktop.end(&shared);
+}
+
+/// A desktop connection is one session, however many streams it opens — a
+/// page load alone is dozens — and it lasts exactly as long as the connection:
+/// a viewer sitting on an unchanging desktop moves no bytes, and is still
+/// someone the phone has to stay awake for.
+#[derive(Default)]
+struct DesktopLink {
+    /// The session, once a stream has been admitted; and whether the
+    /// connection is over, so a stream admitted as it closed opens nothing.
+    session: Mutex<(Option<u64>, bool)>,
+    traffic: Arc<Traffic>,
+}
+
+impl DesktopLink {
+    fn join(&self, shared: &Shared, peer: EndpointId, conn: &Connection) {
+        let mut slot = self.session.lock().unwrap();
+        if slot.0.is_none() && !slot.1 {
+            slot.0 = Some(shared.open_session(peer, conn.clone(), self.traffic.clone()));
+        }
+    }
+
+    fn end(&self, shared: &Shared) {
+        let mut slot = self.session.lock().unwrap();
+        slot.1 = true;
+        if let Some(id) = slot.0.take() {
+            shared.close_session(id);
         }
     }
 }
@@ -946,10 +1104,173 @@ async fn ctl_stream(shared: Arc<Shared>, conn: Connection, mut send: SendStream,
         ssh: shared.ssh.borrow().as_str().to_string(),
         sessions: shared.sessions.lock().unwrap().len() as u32,
         version: env!("CARGO_PKG_VERSION").to_string(),
+        features: vec![proto::FEATURE_DESKTOP.to_string()],
+        desktop: shared.desktop.borrow().state.as_str().to_string(),
     };
     let _ = proto::write_frame(&mut send, &status).await;
     let _ = send.finish();
     let _ = tokio::time::timeout(Duration::from_secs(5), send.stopped()).await;
+}
+
+// ── the desktop ───────────────────────────────────────────────────────────
+
+/// How long an `open` that asked for a start waits for the desktop. XFCE under
+/// proot takes five to fifteen seconds to come up on a phone, and the first
+/// start after an install a good deal longer.
+const DESKTOP_START_WAIT: Duration = Duration::from_secs(120);
+/// How long an `open` that did not ask for one waits for a desktop that is
+/// already on its way up — someone else's start.
+const DESKTOP_JOIN_WAIT: Duration = Duration::from_secs(30);
+
+/// One desktop stream: an `open`, answered with how to log in, or a `web`
+/// stream put through to websockify. Admitted on its first frame like every
+/// other stream; the first one admitted makes the connection a session.
+async fn desktop_stream(
+    shared: Arc<Shared>,
+    conn: Connection,
+    mut send: SendStream,
+    mut recv: RecvStream,
+    authorised: Arc<Notify>,
+    link: Arc<DesktopLink>,
+) {
+    let hello = match tokio::time::timeout(Duration::from_secs(15), proto::read_frame::<_, DesktopHello>(&mut recv)).await {
+        Ok(Ok(hello)) => hello,
+        _ => return debug!("{}: no desktop hello", conn.remote_id().fmt_short()),
+    };
+    let Some(peer) = admit(&shared, &conn, hello.auth.as_ref(), &authorised) else {
+        return;
+    };
+    link.join(&shared, peer, &conn);
+    match hello.op {
+        DesktopOp::Open => {
+            let reply = match open_desktop(&shared, hello.start, &mut send).await {
+                Ok(desktop) => {
+                    info!("{}: the desktop is up for it", peer.fmt_short());
+                    DesktopReply { ok: true, password: Some(desktop.password), size: desktop.size, ..Default::default() }
+                }
+                Err(refusal) => {
+                    info!("{}: no desktop, {refusal:?}", peer.fmt_short());
+                    DesktopReply::refused(refusal)
+                }
+            };
+            let _ = proto::write_frame(&mut send, &reply).await;
+            let _ = send.finish();
+            let _ = tokio::time::timeout(Duration::from_secs(5), send.stopped()).await;
+        }
+        DesktopOp::Ping => {
+            let _ = proto::write_frame(&mut send, &DesktopReply { ok: true, ..Default::default() }).await;
+            let _ = send.finish();
+        }
+        DesktopOp::Web => {
+            let tcp = match connect_desktop(&shared).await {
+                Ok(tcp) => tcp,
+                Err(refusal) => {
+                    let _ = proto::write_frame(&mut send, &DesktopReply::refused(refusal)).await;
+                    let _ = send.finish();
+                    let _ = tokio::time::timeout(Duration::from_secs(5), send.stopped()).await;
+                    return;
+                }
+            };
+            if proto::write_frame(&mut send, &DesktopReply { ok: true, ..Default::default() }).await.is_err() {
+                return;
+            }
+            let (r, w) = tcp.into_split();
+            // websockify closes the socket when it has answered, as sshd does
+            // when a session is over; see splice.
+            if let Err(e) = splice(r, w, send, recv, &link.traffic, Some(Duration::from_secs(2))).await {
+                debug!("{}: desktop stream ended with {e}", peer.fmt_short());
+            }
+        }
+    }
+}
+
+/// The desktop, up and answering — asking the app to start it first when the
+/// computer said to.
+///
+/// Starting is the app's: it owns the container, and the Linux window on the
+/// phone starts the same session the same way. So this asks with a line,
+/// `desktop-start <W> <H>`, and watches what the app says back. Three rules:
+///
+/// * **A running desktop is never restarted**, whatever size was asked for —
+///   it has someone's windows in it. The computer gets it at its own size.
+/// * **Only an `open` that says `start` starts anything.** A computer whose
+///   viewer lost the connection asks without it, so a desktop the user logged
+///   out of is not booted straight back up behind them.
+/// * **Up means websockify answers**, not merely that the app has a session:
+///   it comes up a few seconds after Xvnc, and a page loaded before it would
+///   fail. While the app says `running` the port is tried twice a second.
+async fn open_desktop(shared: &Shared, start: Option<DesktopSize>, send: &mut SendStream) -> Result<Desktop, Refusal> {
+    let mut changes = shared.desktop.subscribe();
+    let deadline = Instant::now() + if start.is_some() { DESKTOP_START_WAIT } else { DESKTOP_JOIN_WAIT };
+    let mut asked: Option<Instant> = None;
+    let mut told = false;
+    loop {
+        let now = changes.borrow_and_update().clone();
+        if now.state == DesktopState::Running && !now.password.is_empty() && desktop_answers(shared).await {
+            return Ok(now);
+        }
+        match now.state {
+            DesktopState::Missing => return Err(Refusal::LinuxMissing),
+            DesktopState::Installing => return Err(Refusal::LinuxInstalling),
+            DesktopState::Unfinished => return Err(Refusal::LinuxUnfinished),
+            // The app answers a start with `starting` straight away, so a
+            // Failed still there seconds after asking is the answer to this
+            // request rather than what was said before it.
+            DesktopState::Failed if asked.is_some_and(|at| at.elapsed() > Duration::from_secs(3)) => {
+                return Err(Refusal::DesktopFailed)
+            }
+            DesktopState::Stopped | DesktopState::Failed if asked.is_none() => match start {
+                None if now.state == DesktopState::Failed => return Err(Refusal::DesktopFailed),
+                None => return Err(Refusal::DesktopStopped),
+                Some(size) => {
+                    let size = clamp_size(size);
+                    shared.events.emit(format!("desktop-start {} {}", size.w, size.h));
+                    asked = Some(Instant::now());
+                }
+            },
+            _ => {}
+        }
+        // Said once, whoever is doing the starting: the computer's window has
+        // something better to show for a minute than a spinner.
+        if !told && (asked.is_some() || matches!(now.state, DesktopState::Starting | DesktopState::Running)) {
+            told = true;
+            proto::write_frame(send, &DesktopReply { starting: true, ..Default::default() })
+                .await
+                .map_err(|_| Refusal::DesktopFailed)?;
+        }
+        if Instant::now() >= deadline {
+            return Err(Refusal::DesktopFailed);
+        }
+        let _ = tokio::time::timeout(Duration::from_millis(500), changes.changed()).await;
+    }
+}
+
+/// websockify is accepting connections.
+async fn desktop_answers(shared: &Shared) -> bool {
+    let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, shared.desktop_port));
+    matches!(tokio::time::timeout(Duration::from_secs(2), TcpStream::connect(addr)).await, Ok(Ok(_)))
+}
+
+/// A socket to websockify for one `web` stream. A desktop that is up answers
+/// at once; the short wait is for one that is still coming up, or whose
+/// websockify is being restarted with it.
+async fn connect_desktop(shared: &Shared) -> Result<TcpStream, Refusal> {
+    let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, shared.desktop_port));
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Ok(tcp) = TcpStream::connect(addr).await {
+            // Pointer moves and keystrokes: an interactive stream, like SSH.
+            let _ = tcp.set_nodelay(true);
+            return Ok(tcp);
+        }
+        match shared.desktop.borrow().state {
+            DesktopState::Missing => return Err(Refusal::LinuxMissing),
+            DesktopState::Installing => return Err(Refusal::LinuxInstalling),
+            DesktopState::Running | DesktopState::Starting | DesktopState::Unknown if Instant::now() < deadline => {}
+            _ => return Err(Refusal::DesktopStopped),
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
 }
 
 // ── background watchers ───────────────────────────────────────────────────
@@ -1384,6 +1705,18 @@ mod tests {
         assert!(peers.refresh(&path));
         assert!(peers.names.is_empty());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn desktop_sizes_are_read_and_kept_to_what_a_phone_can_carry() {
+        assert_eq!(parse_size("1512x982"), Some(DesktopSize { w: 1512, h: 982 }));
+        assert_eq!(parse_size("-"), None);
+        assert_eq!(parse_size("1512x"), None);
+        assert_eq!(clamp_size(DesktopSize { w: 1512, h: 982 }), DesktopSize { w: 1512, h: 982 });
+        assert_eq!(clamp_size(DesktopSize { w: 99_999, h: 99_999 }), DESKTOP_MAX);
+        assert_eq!(clamp_size(DesktopSize { w: 0, h: 0 }), DESKTOP_MIN);
+        assert_eq!(DesktopState::parse("running").map(DesktopState::as_str), Some("running"));
+        assert_eq!(DesktopState::parse("unknown"), None, "unknown is ours to say, never the app's");
     }
 
     #[test]

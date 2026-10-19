@@ -320,6 +320,40 @@ pub struct DeviceInfo {
 /// runs every 2.5s for as long as the app is open.
 static LAST_SEEN: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 
+/// Every state `adb devices` reports, and the first word of "no permissions".
+const ADB_STATES: [&str; 13] = [
+    "device", "offline", "unauthorized", "authorizing", "connecting", "recovery", "rescue",
+    "sideload", "bootloader", "host", "detached", "unknown", "no",
+];
+
+/// One line of `adb devices -l`, split into the serial and the rest — state
+/// first.
+///
+/// The serial is not one token. A phone on wireless debugging is named after
+/// its mDNS service, and mDNS hands a name that is already taken back with a
+/// " (2)" on the end — Android announcing the service again after wireless
+/// debugging restarts is enough — so adb lists
+/// `adb-R5CT30…-vWgJpq (2)._adb-tls-connect._tcp device product:…`, with a
+/// space inside the serial and a single one after it. Cut at the first space,
+/// the phone became `adb-R5CT30…-vWgJpq` in the state "(2)._adb-tls-connect._tcp",
+/// never "device", and the app sat at "No device detected" with it attached.
+/// So the serial runs up to the first word that is a state.
+fn split_device_line(line: &str) -> (&str, &str) {
+    let mut from = 0;
+    let mut first = true;
+    for token in line.split_whitespace() {
+        let Some(at) = line[from..].find(token).map(|i| from + i) else { break };
+        if !first && ADB_STATES.contains(&token) {
+            return (line[..at].trim_end(), &line[at..]);
+        }
+        first = false;
+        from = at + token.len();
+    }
+    // Nothing that reads as a state: what this parser always did.
+    let serial = line.split_whitespace().next().unwrap_or("");
+    (serial, line[serial.len()..].trim_start())
+}
+
 /// Parse `adb devices -l` into structured entries, enriched with
 /// brand / Android version for devices that are actually online.
 #[tauri::command(async)]
@@ -331,8 +365,8 @@ pub fn adb_list_devices(app: tauri::AppHandle) -> Result<Vec<DeviceInfo>, String
         if line.is_empty() || line.starts_with('*') {
             continue;
         }
-        let mut parts = line.split_whitespace();
-        let Some(serial) = parts.next() else { continue };
+        let (serial, rest) = split_device_line(line);
+        let mut parts = rest.split_whitespace();
         // `adb devices -l` writes the state as one token for every state but
         // one. A phone this machine is not allowed to open prints
         //
@@ -344,7 +378,6 @@ pub fn adb_list_devices(app: tauri::AppHandle) -> Result<Vec<DeviceInfo>, String
         // Linux, where a phone with no matching udev rule lands here on every
         // poll, so it is named rather than passed through. The remedy is in
         // `NO_PERMISSIONS_HINT` (host.ts), next to the text that shows it.
-        let rest = line[serial.len()..].trim_start();
         let state = if rest.starts_with("no permissions") {
             "no-permissions".to_string()
         } else {
@@ -2209,6 +2242,27 @@ pub fn adb_launch_on_display(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_serial_with_a_space_in_it_stays_whole() {
+        // Verbatim from a Galaxy S25 Ultra on wireless debugging, 2026-10-19.
+        let line = "adb-RFCY10FRKBK-JGcERD (2)._adb-tls-connect._tcp device product:pa3qxeea \
+                    model:SM_S938B device:pa3q transport_id:9";
+        let (serial, rest) = split_device_line(line);
+        assert_eq!(serial, "adb-RFCY10FRKBK-JGcERD (2)._adb-tls-connect._tcp");
+        assert!(rest.starts_with("device product:pa3qxeea"));
+
+        let usb = "R5CT30ABCDE            device usb:1-1 product:x model:SM_G991B transport_id:2";
+        assert_eq!(split_device_line(usb), ("R5CT30ABCDE", "device usb:1-1 product:x model:SM_G991B transport_id:2"));
+        let tcp = "192.168.2.12:41409     unauthorized transport_id:3";
+        assert_eq!(split_device_line(tcp).0, "192.168.2.12:41409");
+        let locked = "0123456789ABCDEF       no permissions; see [http://developer.android.com/tools/device.html]";
+        let (serial, rest) = split_device_line(locked);
+        assert_eq!(serial, "0123456789ABCDEF");
+        assert!(rest.starts_with("no permissions"));
+        // A line that reads as nothing known keeps the old first-token split.
+        assert_eq!(split_device_line("weird-serial whatever"), ("weird-serial", "whatever"));
+    }
 
     /// Verbatim from a user report on the 0.3.0 portable build — the string
     /// this detector exists for.

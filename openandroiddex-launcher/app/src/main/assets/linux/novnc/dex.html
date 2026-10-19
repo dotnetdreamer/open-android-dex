@@ -91,6 +91,21 @@
               title="Remote access" aria-label="Remote access">
         <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><rect x="2.5" y="7" width="13" height="11" rx="2" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M5.5 11l2 1.6-2 1.6M9.5 15h3" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/><path d="M18 9.5a4 4 0 0 1 0 5M20.5 7a7.5 7.5 0 0 1 0 10" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
       </button>
+      <!-- On a computer only, and only once the window around this page has
+           said which way it is: whether the clipboard is shared with that
+           computer, both ways. The window keeps the setting; pressing this
+           asks it to flip, and it says so in its own words. -->
+      <button id="clip" class="key pc-only" type="button" tabindex="-1" hidden
+              title="Clipboard" aria-label="Clipboard" aria-pressed="false">
+        <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M9 4.5H7.2A2.2 2.2 0 0 0 5 6.7v11.6a2.2 2.2 0 0 0 2.2 2.2h9.6a2.2 2.2 0 0 0 2.2-2.2V6.7a2.2 2.2 0 0 0-2.2-2.2H15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/><rect x="9" y="3" width="6" height="3.2" rx="1.1" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M8.6 11h6.8M8.6 14.6h4.6" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/><path class="slash" d="M3.5 3.5l17 17" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/></svg>
+      </button>
+      <!-- On a computer only (ctx=pc): the window's fullscreen, which belongs
+           to the desktop app around this page — or, in a plain browser tab,
+           to the browser. F11 does the same. -->
+      <button id="full" class="key pc-only" type="button" tabindex="-1"
+              title="Fullscreen (F11)" aria-label="Fullscreen">
+        <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </button>
       <button id="collapse" class="key" type="button" tabindex="-1"
               title="Hide the bar" aria-label="Hide the bar">
         <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M6 14.5 12 8.5l6 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
@@ -137,6 +152,12 @@
     </button>
     <button id="p-remote" class="pkey" type="button" tabindex="-1" title="Remote access" aria-label="Remote access">
       <svg viewBox="0 0 24 24" width="21" height="21" aria-hidden="true"><rect x="2.5" y="7" width="13" height="11" rx="2" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M5.5 11l2 1.6-2 1.6M9.5 15h3" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/><path d="M18 9.5a4 4 0 0 1 0 5M20.5 7a7.5 7.5 0 0 1 0 10" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
+    </button>
+    <button id="p-clip" class="pkey pc-only" type="button" tabindex="-1" hidden title="Clipboard" aria-label="Clipboard" aria-pressed="false">
+      <svg viewBox="0 0 24 24" width="21" height="21" aria-hidden="true"><path d="M9 4.5H7.2A2.2 2.2 0 0 0 5 6.7v11.6a2.2 2.2 0 0 0 2.2 2.2h9.6a2.2 2.2 0 0 0 2.2-2.2V6.7a2.2 2.2 0 0 0-2.2-2.2H15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/><rect x="9" y="3" width="6" height="3.2" rx="1.1" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M8.6 11h6.8M8.6 14.6h4.6" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/><path class="slash" d="M3.5 3.5l17 17" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/></svg>
+    </button>
+    <button id="p-full" class="pkey pc-only" type="button" tabindex="-1" title="Fullscreen (F11)" aria-label="Fullscreen">
+      <svg viewBox="0 0 24 24" width="21" height="21" aria-hidden="true"><path d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
     </button>
     <span class="pkey-sep" aria-hidden="true"></span>
     <button id="dock" class="pkey" type="button" tabindex="-1" title="Dock to the top" aria-label="Dock to the top">

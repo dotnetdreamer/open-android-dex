@@ -185,8 +185,79 @@ export interface RemoteProbe {
   /** The guest sshd: up, starting, down, failed, missing, installing. */
   ssh: string;
   sessions: number;
+  /** The phone can open its desktop to this computer (its app is new enough). */
+  desktopOk: boolean;
+  /**
+   * The desktop: running, starting, stopped, failed, unfinished, installing,
+   * missing — or empty from a phone too old to say.
+   */
+  desktop: string;
   /** Why it could not be reached, as a sentence. */
   error?: string | null;
+}
+
+/** What a phone's desktop window hears while it is open (remote_desktop.rs). */
+export type DesktopEvent =
+  /** The phone is starting the desktop, which can take a minute. */
+  | { kind: "starting" }
+  /** The path to the phone, which sets the picture's quality. */
+  | { kind: "path"; direct: boolean; rttMs: number }
+  /** Linux sent this computer something, and it is on its way. */
+  | { kind: "receiving"; name: string }
+  /** …and here it is, in Downloads. */
+  | ({ kind: "received" } & DesktopReceived);
+
+/** What Linux sent, as it landed (dexremote::outbox::Received). */
+export interface DesktopReceived {
+  /** Where: this computer's Downloads. */
+  dir: string;
+  /** Each item under the name it landed with: "report (2).pdf". */
+  landed: string[];
+  /** The first of them, whole, for "Show". */
+  first: string | null;
+  files: number;
+  bytes: number;
+  /** Links and devices inside a folder, left out. */
+  links: number;
+  /** Gone from Linux, or unreadable there, by the time it was fetched. */
+  missing: number;
+  /** Not saved here: what, and why. */
+  failed: string[];
+}
+
+/** How opening a phone's desktop went. */
+export type DesktopOpened =
+  /** Up: the viewer page to load in the frame, password included. */
+  | { kind: "up"; url: string }
+  /** Not running, and this did not ask for it to start. */
+  | { kind: "stopped" }
+  /** Not now. `again`: it may pass by itself, so trying later is worth it. */
+  | { kind: "failed"; message: string; again: boolean };
+
+/** Files dropped on a desktop window, on their way to its Desktop (dexremote::sftp::Progress). */
+export interface PutProgress {
+  /** The file being copied now, without the folders above it. */
+  current: string;
+  filesDone: number;
+  filesTotal: number;
+  bytesDone: number;
+  bytesTotal: number;
+}
+
+/** How a drop's copy went (dexremote::sftp::Report). */
+export interface PutReport {
+  /** Where it all went, as Linux names it: /root/Desktop. */
+  dir: string;
+  /** Each dropped item under the name it landed with: "report (copy 1).pdf". */
+  landed: string[];
+  files: number;
+  bytes: number;
+  /** Links and devices, which are not copied. */
+  links: number;
+  /** What this computer would not let the copy read. */
+  unreadable: number;
+  /** Stopped part way; the item in progress was taken back. */
+  cancelled: boolean;
 }
 
 /** What the launcher on a plugged-in phone says about remote access. */

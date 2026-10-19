@@ -639,9 +639,11 @@ fn attached_as(app: &tauri::AppHandle, guid: &str) -> Option<String> {
         return None;
     }
     let raw = run_adb_quiet(app, &["devices"]).unwrap_or_default();
+    // Split at the tab, not at whitespace: a serial named after an mDNS
+    // service can have a space in it ("… (2)._adb-tls-connect._tcp").
     raw.lines()
         .filter(|l| l.ends_with("device"))
-        .filter_map(|l| l.split_whitespace().next())
+        .filter_map(|l| l.split('\t').next())
         .find(|serial| serial.contains(guid))
         .map(str::to_string)
 }

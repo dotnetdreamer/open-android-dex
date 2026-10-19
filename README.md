@@ -158,12 +158,17 @@ data in your bag. Nothing to open on a router, no account, no server to run.
    phone plugged in there is no code at all.
 3. Then, in any terminal: `ssh galaxy-s25-ultra` (or whatever your phone is
    called). VS Code's Remote-SSH, scp, rsync and git find it by name too.
+4. Or the whole desktop: **Phone Linux** → **Desktop** opens the phone's XFCE in
+   a window. The desktop takes the window's size and follows it when you
+   resize it; F11 makes it fullscreen. It is started for you if it is not
+   running, and its password is handed over, so there is nothing to type.
 
 Only computers you pair can get in, each with a key of its own, and the
 connection is end-to-end encrypted. It goes straight between the two devices
 whenever the networks allow it and through a relay — which cannot read it —
 when they do not. No desktop app on that computer? The `dexremote` command does
-the same job. How it works, and what was ruled out on the way:
+the same job, the desktop included (`dexremote desktop`, in a browser tab). How
+it works, and what was ruled out on the way:
 [doc/remote-access.md](doc/remote-access.md).
 
 A control strip sits along the top wherever Linux is running, on the phone or in
@@ -468,7 +473,7 @@ gh workflow run desktop.yml -f bump=patch      # or -f version=0.4.0, or -f dry_
 | [openandroiddex-launcher/](openandroiddex-launcher/) | The desktop shell that runs on the phone. Everything you see |
 | [openandroiddex-wmd/](openandroiddex-wmd/) | The small window daemon that moves and resizes app windows |
 | [openandroiddex-linux/](openandroiddex-linux/) | Ubuntu provisioning and runtime scripts |
-| [openandroiddex-remote/](openandroiddex-remote/) | Remote access: SSH into the phone's Linux from any network. Rust, both ends — the phone's daemon and the computer's side |
+| [openandroiddex-remote/](openandroiddex-remote/) | Remote access: SSH into the phone's Linux, or open its desktop, from any network. Rust, both ends — the phone's daemon and the computer's side |
 | [openandroiddex-docker/](openandroiddex-docker/) | The Alpine VM scripts and QEMU build |
 | [openandroiddex-signal/](openandroiddex-signal/) | Optional relay for reaching a phone from anywhere. One Node file with no dependencies |
 | [test/](test/) | End to end checks that run without a phone |

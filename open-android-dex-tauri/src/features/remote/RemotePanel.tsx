@@ -12,8 +12,10 @@ import type { DeviceInfo, RemotePhone, RemoteProbe, RemoteUsbStatus } from "../.
  * The whole point of the panel is to make itself unnecessary. Pairing writes a
  * `Host` block for the phone into ~/.ssh, so from then on `ssh <name>` works in
  * any terminal and VS Code's Remote-SSH lists it — this window is for adding a
- * phone, seeing whether it is reachable right now, and the two buttons that
- * save typing. Nothing here has to stay open for a session to work.
+ * phone, seeing whether it is reachable right now, and the buttons that save
+ * typing. Nothing here has to stay open for a session to work. The one thing
+ * ssh cannot give is the phone's XFCE desktop, so Desktop opens that in a
+ * window of its own (DesktopWindow.tsx), over the same tunnel.
  *
  * Pairing over the cable comes first when a phone is plugged in, for the same
  * reason the Wi-Fi panel leads with it: adb has already proved which computer
@@ -45,6 +47,7 @@ function StatusLine({ probe }: { probe: ProbeState | undefined }) {
       return (
         <span className="text-teal-300">
           ● Online · {path}
+          {probe.desktop === "running" ? " · desktop running" : ""}
           {probe.sessions > 0 ? ` · ${probe.sessions} open` : ""}
         </span>
       );
@@ -57,6 +60,29 @@ function StatusLine({ probe }: { probe: ProbeState | undefined }) {
     default:
       return <span className="text-teal-300">● Online · {path} · SSH starting</span>;
   }
+}
+
+/**
+ * The phone's desktop, in a window of its own. Offered until a probe says the
+ * phone cannot: a phone that is merely unreachable may be back by the time the
+ * window has dialled it, and the window says so in words if it is not.
+ */
+function DesktopButton({ probe, onOpen }: { probe: ProbeState | undefined; onOpen: () => void }) {
+  const tooOld = !!probe && probe !== "probing" && probe.reachable && !probe.desktopOk;
+  return (
+    <button
+      className="btn-ghost !px-3 !py-1.5 text-[12px] disabled:opacity-40"
+      onClick={onOpen}
+      disabled={tooOld}
+      title={
+        tooOld
+          ? "Update Open Android DeX on the phone to open its desktop from here"
+          : "Open the phone's Linux desktop in a window — F11 for fullscreen"
+      }
+    >
+      <span aria-hidden="true">🖥</span> Desktop
+    </button>
+  );
 }
 
 export function RemotePanel({ devices, onClose }: { devices: DeviceInfo[]; onClose: () => void }) {
@@ -209,8 +235,8 @@ export function RemotePanel({ devices, onClose }: { devices: DeviceInfo[]; onClo
           <div>
             <p className="text-[15px] font-semibold text-slate-100">Linux on your phones</p>
             <p className="mt-1 text-[12px] leading-relaxed text-slate-400">
-              Log in to the Ubuntu on a paired phone with ssh, from {THIS_COMPUTER}, wherever the
-              phone is — the same Wi-Fi, a different one, or mobile data.
+              Log in to the Ubuntu on a paired phone with ssh, or open its desktop, from{" "}
+              {THIS_COMPUTER}, wherever the phone is — the same Wi-Fi, a different one, or mobile data.
             </p>
           </div>
           <button className="link-btn muted shrink-0 text-[13px]" onClick={onClose} title="Close (Esc)">
@@ -235,6 +261,7 @@ export function RemotePanel({ devices, onClose }: { devices: DeviceInfo[]; onClo
                     </div>
                   </div>
                   <div className="mt-2.5 flex flex-wrap items-center gap-2">
+                    <DesktopButton probe={probes[p.id]} onOpen={() => invoke("remote_open_desktop", { id: p.id }).catch(fail)} />
                     <button
                       className="btn-ghost !px-3 !py-1.5 text-[12px]"
                       onClick={() => invoke("remote_open_terminal", { id: p.id }).catch(fail)}

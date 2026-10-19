@@ -1,5 +1,6 @@
 //! Remote access to the phone's Linux: `ssh <phone>` from any computer, on any
-//! network, with nothing opened on any router and no account anywhere.
+//! network, with nothing opened on any router and no account anywhere — and
+//! its XFCE desktop, served on the computer's loopback ([`pc::Desktop`]).
 //!
 //! The phone runs Ubuntu under proot with an sshd on loopback. Reaching that
 //! sshd from a computer somewhere else is the whole problem — the phone may be
@@ -18,6 +19,9 @@
 //! * [`pairing`] — turning an eight-character code into a meeting place.
 //! * [`proto`] — the ALPNs and the handful of messages.
 //! * [`pipe`] — joining a QUIC stream to a socket or to stdio.
+//! * [`sftp`] — files onto the phone's Linux, over SFTP in the same tunnel
+//!   (feature `sftp`; a computer's build only).
+//! * [`outbox`] — and files back: Send To in the guest, fetched into Downloads.
 //! * [`sshkey`] — OpenSSH key files, written and read without `ssh-keygen`.
 //! * [`usb`] — pairing over adb, with the launcher's RemoteProvider.
 //! * [`crypto`] — HMAC and PBKDF2 over the tree's own SHA-256.
@@ -27,11 +31,15 @@
 
 pub mod computer;
 pub mod crypto;
+#[cfg(feature = "sftp")]
+pub mod outbox;
 pub mod pairing;
 pub mod pc;
 pub mod phone;
 pub mod pipe;
 pub mod proto;
+#[cfg(feature = "sftp")]
+pub mod sftp;
 pub mod sshkey;
 pub mod usb;
 

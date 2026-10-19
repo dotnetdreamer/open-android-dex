@@ -74,6 +74,10 @@ const TEXT = Object.freeze({
   /* The markup's own wording, so the footnote can go back to it if this window
      stops being a mouse-driven one (see setDesktopChrome). */
   footTouch: 'A keyboard or mouse plugged into the desktop always works as it normally does.',
+  fullOn: 'Leave fullscreen',
+  fullOff: 'Fullscreen',
+  clipOn: 'Clipboard shared with this computer',
+  clipOff: 'Clipboard not shared',
 });
 
 /* ── constants ──────────────────────────────────────────────────────────── */
@@ -81,6 +85,11 @@ const TEXT = Object.freeze({
 const ZOOM_STEP = 1.25;
 const ZOOM_MIN = 0.25;
 const ZOOM_MAX = 4.0;
+/* The most a computer's window may ask the guest's screen to be — the daemon
+   holds a start to the same, because every pixel is drawn by the phone's CPU
+   and encoded again for every viewer. */
+const PC_MAX_W = 3840;
+const PC_MAX_H = 2400;
 const IDLE_TUCK_MS = 3000;
 const COACH_MS = 7000;
 const TOAST_MS = 4000;
@@ -123,14 +132,186 @@ const store = {
  * the viewport is phone-narrow in CSS px on a 1440p desktop at three of the
  * five display-size presets. An unmarked URL means desktop, which is what every
  * page load before this parameter existed was.
+ *
+ * 'pc' is the third window, on a computer rather than on the phone: the desktop
+ * app's (or a browser tab, from `dexremote desktop`), reached through remote
+ * access. A mouse and a keyboard of its own, so Direct and nothing else — see
+ * the window section below.
  */
 let ctx = 'desktop';
 
 function readCtx() {
   try {
-    return new URLSearchParams(location.search).get('ctx') === 'phone'
-      ? 'phone' : 'desktop';
+    const c = new URLSearchParams(location.search).get('ctx');
+    return c === 'phone' || c === 'pc' ? c : 'desktop';
   } catch (e) { return 'desktop'; }
+}
+
+/* ── the window around a computer's page ────────────────────────────────── */
+
+/*
+ * On a computer this page is an iframe in the desktop app's window, from
+ * another origin, so neither can reach into the other: they post messages,
+ * all small and none secret. This page says how the connection is and passes
+ * up the key that belongs to the window; the window says what the path to the
+ * phone can carry and whether it is fullscreen. A message is acted on only if
+ * that window sent it. In a plain browser tab there is no window around the
+ * page, and the browser's own fullscreen stands in.
+ */
+let host = null;
+
+function tellHost(msg) {
+  if (!host) return;
+  try { host.postMessage(Object.assign({ oadx: 1 }, msg), '*'); } catch (e) { /* closing */ }
+}
+
+/* What the path can carry, in noVNC's two documented knobs. Until the window
+   says, noVNC's own defaults stand. */
+let quality = null;
+
+function applyQuality() {
+  if (!rfb || !quality) return;
+  rfb.qualityLevel = quality.q;
+  rfb.compressionLevel = quality.c;
+}
+
+function onHostMessage(e) {
+  if (!host || e.source !== host) return;
+  const m = e.data;
+  if (!m || m.oadx !== 1) return;
+  if (Number.isInteger(m.quality) && Number.isInteger(m.compression)) {
+    quality = { q: clamp(m.quality, 0, 9), c: clamp(m.compression, 0, 9) };
+    applyQuality();
+  }
+  if (typeof m.fullscreen === 'boolean') setFullscreenChrome(m.fullscreen);
+  if (typeof m.link === 'string') document.querySelector('.status-pill').title = m.link;
+  if (m.focus === true) refocus();
+  if (typeof m.share === 'boolean') setShare(m.share);
+  if (typeof m.paste === 'string') paste(m.paste);
+}
+
+/*
+ * The clipboard, both ways. The window holds the computer's clipboard and the
+ * switch; this page holds the guest's end. Text from the window goes to Xvnc
+ * as this client's clipboard — Xvnc then owns CLIPBOARD and PRIMARY in the
+ * guest and hands it to whichever program pastes — and whatever Xvnc
+ * announces from the guest goes up to the window. Nothing here can read or
+ * write the computer's clipboard, and the switch is the window's to keep:
+ * this page draws it and asks for it to flip.
+ */
+let share = null;           // the window's word; until it says, no button
+let pasteWaiting = null;    // what came before the guest could take it whole
+let pasteTimer = 0;
+let connectedAt = 0;
+let fromHost = false;       // the guest is holding, right now, what the window gave it
+
+function setShare(on) {
+  const was = share;
+  share = on;
+  for (const id of ['clip', 'p-clip']) {
+    const el = $(id);
+    el.hidden = false;
+    el.classList.toggle('on', on);
+    el.setAttribute('aria-pressed', String(on));
+    el.setAttribute('aria-label', on ? TEXT.clipOn : TEXT.clipOff);
+    el.title = on ? TEXT.clipOn : TEXT.clipOff;
+  }
+  if (on) return;
+  pasteWaiting = null;
+  /* Off means off: the computer's text, if that is what the guest has, does
+     not stay there to be pasted. The guest's own clipboard is left alone. */
+  if (was && fromHost && rfb && !ui.down) rfb.clipboardPasteFrom('');
+  fromHost = false;
+}
+
+/*
+ * noVNC has two ways to hand Xvnc a paste and picks by what the server said it
+ * can take — which Xvnc says in answer to the encodings, a round trip after
+ * 'connect'. Asked sooner, noVNC takes the old way, Latin-1, and every other
+ * character arrives as a byte of nonsense (measured: "—" landed as U+0014).
+ * Nothing public says when that answer came, and the canvas is no clue — it is
+ * sized from ServerInit, before it — so a paste waits for noVNC 1.3's own
+ * record of it, or, where that is missing, for a second and a half.
+ */
+function guestTakesUtf8() {
+  const formats = rfb && rfb._clipboardServerCapabilitiesFormats;
+  if (formats === undefined || formats === null) return Date.now() - connectedAt > 1500;
+  return !!formats[1] || Date.now() - connectedAt > 5000;
+}
+
+function paste(text) {
+  if (!share || !rfb || ui.down) return;
+  pasteWaiting = text;
+  flushPaste();
+}
+
+function flushPaste() {
+  clearTimeout(pasteTimer);
+  if (pasteWaiting === null || !rfb || ui.down || !share) return;
+  if (!connectedAt || !guestTakesUtf8()) {
+    pasteTimer = setTimeout(flushPaste, 50);
+    return;
+  }
+  const text = pasteWaiting;
+  pasteWaiting = null;
+  rfb.clipboardPasteFrom(text);
+  fromHost = true;
+}
+
+function onGuestClipboard(e) {
+  const text = e.detail && typeof e.detail.text === 'string' ? e.detail.text : null;
+  if (text === null) return;
+  fromHost = false;
+  /* noVNC 1.3 turns only the first CRLF Xvnc sends into a LF. */
+  if (share) tellHost({ clip: text.replace(/\r\n?/g, '\n') });
+}
+
+/*
+ * F11 is the window's, as it is in every browser: passed up and never to the
+ * guest. Bare only — with a modifier it is a shortcut meant for an app in the
+ * desktop. Its repeats and its release go nowhere either, so the guest is
+ * never handed half a key.
+ */
+function onHostKey(e) {
+  if (e.key !== 'F11' || e.ctrlKey || e.altKey || e.metaKey || e.shiftKey) return;
+  e.preventDefault();
+  e.stopImmediatePropagation();
+  if (e.type === 'keydown' && !e.repeat) toggleFullscreen();
+}
+
+function toggleFullscreen() {
+  if (host) {
+    tellHost({ fullscreen: 'toggle' });
+    return;
+  }
+  if (document.fullscreenElement) {
+    document.exitFullscreen().catch(() => {});
+  } else if (document.documentElement.requestFullscreen) {
+    document.documentElement.requestFullscreen().catch(() => {});
+  }
+}
+
+/*
+ * Fullscreen is for the picture. The bar folds into the bubble, so a desktop
+ * started at the screen's size fills it at one pixel per pixel, and comes back
+ * as it was when fullscreen ends. Neither is a choice the user made, so
+ * neither is remembered.
+ */
+let chromeBeforeFull = null;
+
+function setFullscreenChrome(on) {
+  for (const id of ['full', 'p-full']) {
+    $(id).classList.toggle('on', on);
+    $(id).setAttribute('aria-label', on ? TEXT.fullOn : TEXT.fullOff);
+  }
+  if (on && chromeBeforeFull === null) {
+    chromeBeforeFull = ui.chrome === 'docked' ? 'docked' : 'bubble';
+    if (ui.chrome === 'docked') setChrome('bubble', false);
+  } else if (!on && chromeBeforeFull !== null) {
+    const back = chromeBeforeFull;
+    chromeBeforeFull = null;
+    if (back === 'docked' && ui.chrome !== 'docked') setChrome('docked', false);
+  }
 }
 
 /* ── state ──────────────────────────────────────────────────────────────── */
@@ -194,17 +375,26 @@ function connect() {
      divides by the framebuffer size and there is not one yet. */
   rfb.clipViewport = false;    // mutually exclusive with scaleViewport by design
   rfb.scaleViewport = false;
-  rfb.resizeSession = false;   // sends CSS px: a portrait phone would drag XFCE to ~360x760
+  /* On a computer the guest's screen follows the window: noVNC asks Xvnc for
+     the box's size once it is connected and after every resize, half a second
+     after the last. Nowhere else — it sends CSS px, and a portrait phone would
+     drag XFCE to ~360x760. */
+  rfb.resizeSession = ctx === 'pc';
   rfb.dragViewport = false;    // hijacks button 0 wholesale
   rfb.focusOnClick = false;    // we own focus — a tap must not steal it from the sink
   rfb.showDotCursor = false;
+  applyQuality();
 
   canvas = screenEl.querySelector('canvas');
 
   rfb.addEventListener('connect', () => {
+    connectedAt = Date.now();
     setStatus('connected', TEXT.connecting, '');
     canvas = canvas || screenEl.querySelector('canvas');
     watchFramebuffer();
+    /* A computer's keyboard types into the desktop from the first key, with
+       no click on the picture first. */
+    if (ctx === 'pc') rfb.focus();
   });
 
   /*
@@ -220,6 +410,8 @@ function connect() {
   });
   rfb.addEventListener('securityfailure', () => down('failed'));
   rfb.addEventListener('credentialsrequired', () => down('failed'));
+  /* Only a computer's window has anywhere to put it. */
+  if (host) rfb.addEventListener('clipboard', onGuestClipboard);
 
   /* The desktop name is server-supplied text. It may go on the visible label;
      it may never go near #status. */
@@ -289,6 +481,9 @@ function down(kind) {
  */
 function setStatus(machineKey, visible, dotClass) {
   statusEl.textContent = MACHINE[machineKey];
+  /* The app's window reconnects on a computer, the way LinuxActivity's retry
+     ladder does on the phone, and this is the only way it can tell. */
+  tellHost({ status: machineKey });
   label.textContent = visible;
   label.classList.remove('quiet');
   dot.classList.remove('live', 'bad');
@@ -351,6 +546,10 @@ function stageInsets() {
 }
 
 function layout() {
+  if (ctx === 'pc') {
+    layoutToFill();
+    return;
+  }
   const { w: fw, h: fh } = fb();
   if (!fw) return;
   const ins = stageInsets();
@@ -384,6 +583,33 @@ function layout() {
   paintZoomValue();
   /* The ring is placed in client coordinates, so anything that moves the
      picture has to move it too. */
+  if (input) input.paintCursor();
+}
+
+/*
+ * On a computer the box is not fitted to the picture: the box is the stage, and
+ * the guest's screen is made its size (resizeSession), so the desktop fills the
+ * window at one pixel per pixel — and follows it through every resize, the bar
+ * folding away in fullscreen included. Until the guest has caught up, noVNC
+ * scales the old picture into the new box. Sized before there is a framebuffer
+ * too: noVNC asks for this box's size the moment it learns the guest can
+ * resize, which is before the first frame.
+ *
+ * Only the bar takes height off it. The keys row and an IME are passing
+ * things, laid over the picture rather than re-laying XFCE out every time one
+ * opens.
+ */
+function layoutToFill() {
+  const top = stageInsets().top;
+  stage.style.paddingTop = top + 'px';
+  stage.style.paddingBottom = '0px';
+  availH = Math.max(1, stage.clientHeight - top);
+  screenEl.style.width = Math.min(Math.max(1, stage.clientWidth), PC_MAX_W) + 'px';
+  screenEl.style.height = Math.min(availH, PC_MAX_H) + 'px';
+  if (rfb && rfb.scaleViewport) rfb.scaleViewport = true;
+  panX = 0;
+  panY = 0;
+  applyPan();
   if (input) input.paintCursor();
 }
 
@@ -730,6 +956,7 @@ function refocus() {
 }
 
 function openRemote() {
+  if (ctx === 'pc') return;   // LinuxActivity's; nothing on a computer catches it
   location.href = 'dexremote:open';
 }
 
@@ -767,6 +994,21 @@ function wire() {
   // Activity intercepts opens its window. See LinuxActivity's WebViewClient.
   control($('remote'), openRemote);
   control($('p-remote'), openRemote);
+  control($('full'), toggleFullscreen);
+  control($('p-full'), toggleFullscreen);
+  control($('clip'), () => tellHost({ share: 'toggle' }));
+  control($('p-clip'), () => tellHost({ share: 'toggle' }));
+  if (ctx === 'pc') {
+    window.addEventListener('message', onHostMessage);
+    if (host) {
+      /* Capture, on window: ahead of noVNC's own handler on the canvas. */
+      window.addEventListener('keydown', onHostKey, true);
+      window.addEventListener('keyup', onHostKey, true);
+    } else {
+      document.addEventListener('fullscreenchange',
+        () => setFullscreenChrome(!!document.fullscreenElement));
+    }
+  }
 
   control($('zoom-in'), () => zoomBy(ZOOM_STEP));
   control($('zoom-out'), () => zoomBy(1 / ZOOM_STEP));
@@ -924,6 +1166,9 @@ let keys = null;
 
 const api = {
   ui,
+  /* A computer's window: the desktop is sized to it, so the viewer has no
+     zoom of its own and Ctrl+scroll belongs to the guest. */
+  get pc() { return ctx === 'pc'; },
   get rfb() { return rfb; },
   get canvas() { return canvas; },
   stage, screenEl,
@@ -983,8 +1228,14 @@ window.dexContext = function (next) {
 
 function boot() {
   ctx = readCtx();
-  if (ctx === 'desktop') setDesktopChrome(true);
-  ui.mode = savedMode();
+  if (ctx === 'pc') {
+    document.body.classList.add('is-pc');
+    host = window.parent !== window ? window.parent : null;
+  }
+  if (ctx !== 'phone') setDesktopChrome(true);
+  /* No touch methods on a computer: Direct is the only one that does not
+     remap anything, and a touchscreen laptop's finger is a pointer there. */
+  ui.mode = ctx === 'pc' ? 'direct' : savedMode();
   document.body.dataset.mode = ui.mode;
   setScroll(api.scroll === 'reverse' ? 'reverse' : 'natural');
   $('sens').value = String(api.sens);
