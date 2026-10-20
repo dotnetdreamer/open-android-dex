@@ -858,6 +858,14 @@ fn spawn_display_watchdog(
     });
 }
 
+/// The phone's window daemon is still running: whatever the session switched on
+/// over there has not been undone by its watchdog.
+fn wmd_alive(app: &AppHandle, serial: &str) -> bool {
+    // `[W]` so the pattern does not find this very shell's command line.
+    crate::adb::run_adb(app, &["-s", serial, "shell", "pgrep -f '[W]mDaemon' >/dev/null && echo up"])
+        .is_ok_and(|out| out.trim() == "up")
+}
+
 /// Block until the device is back in "device" state, or timeout / user stop.
 fn wait_for_device(app: &AppHandle, serial: &str, stop: &AtomicBool) -> bool {
     let deadline = Instant::now() + Duration::from_secs(90);
@@ -1688,14 +1696,21 @@ fn reclaim_enabled() -> bool {
 /// How long the on-device watchdog waits, hearing nothing from here, before it
 /// concludes the PC is gone and undoes the session itself.
 ///
-/// Generous on purpose. The cost of firing late is that a phone keeps a desktop
-/// profile it is not using for another minute; the cost of firing early is
-/// tearing down a session that was only briefly quiet. There is no hurry — the
-/// user has already walked away with the cable.
-const WATCHDOG_TTL_SECS: u32 = 60;
+/// Ten seconds: a phone unplugged mid-session should be its own again about
+/// as soon as someone looks at it — it was a minute, and that minute was spent
+/// in DeX's settings with no DeX (2026-10-20, at the user's request). What
+/// keeps a briefly quiet session from being torn down is the margin below
+/// (five re-arms missed before it acts), the watchdog's second condition (the
+/// desktop display gone too), and a deliberate restart arming for longer
+/// first ([`RESTART_TTL_SECS`]).
+const WATCHDOG_TTL_SECS: u32 = 10;
 /// Enforcer ticks between re-arms. The tick is ~100ms plus ~70ms of dump, so
-/// this is roughly every 5 seconds.
-const ARM_EVERY_TICKS: u32 = 30;
+/// this is roughly every 2 seconds: five to a TTL.
+const ARM_EVERY_TICKS: u32 = 12;
+/// What a restart the desktop asked for arms the watchdog with before the
+/// session goes: the old one is torn down and the new one spawned with no
+/// enforcer re-arming in between, and that gap must not read as a pulled cable.
+const RESTART_TTL_SECS: u32 = 60;
 
 /// How many times one steal of one window is fought before letting it go.
 ///
@@ -2667,6 +2682,11 @@ impl RequestPump {
                 } else {
                     *last = Some(Instant::now());
                     log::info!("request-pump [{}] desktop restart requested", self.key);
+                    // Quiet for as long as the restart takes, which is longer
+                    // than the watchdog waits for a pulled cable: said first.
+                    let serial = self.key.split('|').next().unwrap_or("").to_string();
+                    let undo = crate::adb::undo_globals_script(&self.app, &serial);
+                    let _ = self.wm.arm(RESTART_TTL_SECS, &undo);
                     let _ = self
                         .app
                         .emit("desktop:restart", serde_json::json!({ "sessionKey": self.key }));
@@ -3058,8 +3078,8 @@ impl Enforcer {
         // any more — so the daemon does it once this goes quiet and the desktop
         // display has gone with it. See `wm::WmClient::arm`.
         //
-        // Every ~5s against a 60s TTL: a dozen missed arms before it acts, so a
-        // busy phone or a stalled poll is never mistaken for an unplugged cable.
+        // Every ~2s against a 10s TTL: five missed arms before it acts, so a
+        // busy phone or a stalled poll is not mistaken for an unplugged cable.
         // The snapshot on disk can gain a row mid-session (the pointer speed is
         // the only one that does), and the copy armed into the daemon was read
         // before it existed. Re-read it here rather than per arm: this fires
@@ -3531,7 +3551,17 @@ fn monitor(app: AppHandle, mut opts: MirrorOptions, attempt: Attempt, stop: Arc<
                 },
             );
             log::info!("mirror [{key}] waiting for the phone to come back");
-            if wait_for_device(&app, &opts.serial, &stop) && !stop.load(Ordering::SeqCst) {
+            // A desktop whose phone undid it while the cable was out — the
+            // window daemon's watchdog does that WATCHDOG_TTL_SECS after the PC
+            // goes quiet — has lost its display profile, its grants and the
+            // daemon itself. A new display on its own would be a desktop half
+            // set up, with nothing on the phone left to take it off again; the
+            // window starts it over instead, as a fresh connect does.
+            let back = wait_for_device(&app, &opts.serial, &stop) && !stop.load(Ordering::SeqCst);
+            if back && opts.new_display.is_some() && opts.app_package.is_none() && !wmd_alive(&app, &opts.serial) {
+                log::info!("mirror [{key}] the phone undid the session while it was away — setting it up again");
+                let _ = app.emit("desktop:relaunch", serde_json::json!({ "sessionKey": key }));
+            } else if back {
                 // A size or stream setting picked mid-session must survive the
                 // reconnect — unless this session only got going by dropping
                 // those very settings, in which case restoring them from the

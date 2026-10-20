@@ -799,7 +799,9 @@ public final class WmDaemon {
     private static void watchdog() {
         while (true) {
             try {
-                Thread.sleep(5000L);
+                // Every second: the PC's TTL is ten seconds now (WATCHDOG_TTL_SECS),
+                // and a five-second tick would make that anything up to fifteen.
+                Thread.sleep(1000L);
             } catch (InterruptedException e) {
                 return;
             }

@@ -200,6 +200,8 @@ export default function App() {
    * Without it the session ending would land on the "desktop closed" screen.
    */
   const restarting = useRef(false);
+  /** The session ended because the phone undid it while unplugged: launch it again. */
+  const relaunching = useRef(false);
   /**
    * Set when the phone asked to leave DeX ("Exit DeX" in the taskbar or in the
    * in-desktop Settings window). Only changes the wording of the screen this
@@ -419,6 +421,20 @@ export default function App() {
     };
   }, []);
 
+  // ── The phone undid the desktop while the cable was out ──
+  // Its watchdog takes the session off ten seconds after the PC goes quiet, so
+  // a phone plugged back in after that has nothing of it left: the session ends
+  // here, and is set up again the way a fresh connect sets it up.
+  useEffect(() => {
+    const un = listen<{ sessionKey: string }>("desktop:relaunch", () => {
+      logInfo("launch: the phone undid the desktop while it was away — setting it up again");
+      relaunching.current = true;
+    });
+    return () => {
+      un.then((f) => f());
+    };
+  }, []);
+
   // ── "Exit DeX", pressed on the phone ──
   // The desktop cannot end itself: the display belongs to scrcpy over here,
   // and so does everything the launch switched on over there.
@@ -441,9 +457,11 @@ export default function App() {
     if (phase.kind !== "ready") return;
     const key = `${phase.device.serial}|desktop`;
     if (sawDesktop.current && !sessions[key]) {
-      if (restarting.current) {
+      if (restarting.current || relaunching.current) {
+        const again = relaunching.current;
         restarting.current = false;
-        setDexStep({ state: "busy", text: "Applying stream settings…" });
+        relaunching.current = false;
+        setDexStep({ state: "busy", text: again ? "Setting the desktop up again…" : "Applying stream settings…" });
         launch(phase.device);
         return;
       }

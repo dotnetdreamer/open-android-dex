@@ -285,12 +285,16 @@ client's clipboard only while that client stays — and the new connection gets
 it.
 
 A DeX session on the same cable is another matter: pulling the cable ends it,
-and a minute later the window daemon's dead-man switch undoes the session on the
-phone, force-stopping the launcher — the Linux desktop with it. That switch now
-sends the same "bring remote access back" broadcast the PC sends after its own
-force-stop (`WmDaemon.cleanup`); before, a phone unplugged mid-session stayed
-unreachable over SSH and the desktop window until something else restarted the
-app.
+and ten seconds later the window daemon's dead-man switch undoes the session on
+the phone — its settings, the caption service, the grants — force-stopping the
+launcher, the Linux desktop with it. (It was a minute; ten seconds is the PC
+re-arming it every two, `WATCHDOG_TTL_SECS`, and the daemon looking every
+second.) That switch sends the same "bring remote access back" broadcast the PC
+sends after its own force-stop (`WmDaemon.cleanup`); before, a phone unplugged
+mid-session stayed unreachable over SSH and the desktop window until something
+else restarted the app. A phone plugged back in after the switch went off gets
+its DeX session set up again from the start (`desktop:relaunch`), not just a
+new display over a profile that is no longer there.
 
 ## Verified, and not yet
 
