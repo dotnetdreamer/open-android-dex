@@ -768,6 +768,7 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
         theme = DexTheme.of(this);
         loadRecents();
         rememberBaseDpi(getIntent());
+        holdWifi(getIntent());
         reapplyDensity();
         reapplyPerfMode();
         reapplyPointerSpeed();
@@ -1025,6 +1026,9 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
     @Override
     protected void onDestroy() {
         super.onDestroy();
+        // The desktop's display has gone, or this window is being made again
+        // (whose onCreate takes the hold back from the same intent).
+        WifiLow.hold(this, "desktop", false);
         // Drops the sampler's view references. The gauge lives in the
         // activity's own view tree now, so it goes with the window either way.
         detachPerfGauge();
@@ -1164,6 +1168,18 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
     }
 
     /**
+     * Keep the phone's Wi-Fi out of power save while the desktop app reaches
+     * this desktop over it ({@code wifi_lock}, said on every start: wireless
+     * debugging true, the cable false). A frame or a click that waits for a
+     * dozing radio is felt as lag, however fast the rest is (WifiLow). An
+     * older desktop app says nothing, and nothing changes.
+     */
+    private void holdWifi(Intent intent) {
+        if (intent == null || !intent.hasExtra("wifi_lock")) return;
+        WifiLow.hold(this, "desktop", !onPhone() && intent.getBooleanExtra("wifi_lock", false));
+    }
+
+    /**
      * Keep the Default density in step with a density the desktop app moved.
      *
      * Every density this display gets is the Default times the Display size
@@ -1190,6 +1206,7 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
         super.onNewIntent(intent);
         setIntent(intent);
         if (rememberBaseDpi(intent)) reapplyDensity();
+        holdWifi(intent);
     }
 
     /**

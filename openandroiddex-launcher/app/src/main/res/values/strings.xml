@@ -274,6 +274,12 @@
     <string name="st_perf_stream_sub">Bitrate capped at 4 Mbps — steadier over a wireless connection</string>
     <string name="st_perf_note">Your glass, blur and grain settings are kept exactly as they are, and come back when you turn this off.</string>
 
+    <string name="st_window">Desktop window</string>
+    <string name="st_window_own">Smooth</string>
+    <string name="st_window_own_sub">Shown by the Open Android DeX app on the computer. Keeps pace with Wi-Fi: frames are skipped, never delayed.</string>
+    <string name="st_window_scrcpy">Classic</string>
+    <string name="st_window_scrcpy_sub">Shown by scrcpy, as before. Pick it if the smooth window gives you trouble. The codec and encoder below apply to it only.</string>
+    <string name="st_window_note">When the phone draws the pointer (Mouse &amp; Cursor), the desktop always opens in the classic window.</string>
     <string name="st_resolution">Display resolution</string>
     <string name="st_res_note">Changing this keeps your display-size preset, recomputed for the new resolution.</string>
     <string name="st_res_auto">Match the computer’s screen</string>

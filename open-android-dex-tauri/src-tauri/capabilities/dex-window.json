@@ -1,0 +1,15 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "dex-window",
+  "description": "The phone's Android desktop in a window of this app's own (dex.rs, DexWindow.tsx): its own page and nothing else. It goes fullscreen, comes to the front and closes; the clipboard is its to share with the phone, by clipboardShare.ts's rules and the phone's own Clipboard setting.",
+  "windows": ["dex-*"],
+  "permissions": [
+    "core:default",
+    "log:default",
+    "core:window:allow-set-fullscreen",
+    "core:window:allow-set-focus",
+    "core:window:allow-close",
+    "clipboard-manager:allow-read-text",
+    "clipboard-manager:allow-write-text"
+  ]
+}

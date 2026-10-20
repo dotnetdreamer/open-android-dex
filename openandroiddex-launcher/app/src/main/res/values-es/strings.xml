@@ -336,6 +336,12 @@
     <string name="st_nav_stream_sub">Resolución · Códec · Rendimiento</string>
     <string name="st_nav_clipboard">Portapapeles</string>
     <string name="st_nav_clipboard_sub">Sincronización · Actual · Historial</string>
+    <string name="st_window">Ventana del escritorio</string>
+    <string name="st_window_own">Fluida</string>
+    <string name="st_window_own_sub">La muestra la app Open Android DeX en el ordenador. Sigue el ritmo de la Wi-Fi: se saltan fotogramas, nunca se retrasan.</string>
+    <string name="st_window_scrcpy">Clásica</string>
+    <string name="st_window_scrcpy_sub">La muestra scrcpy, como hasta ahora. Elígela si la ventana fluida te da problemas. El códec y el codificador de abajo solo se aplican a esta.</string>
+    <string name="st_window_note">Cuando el teléfono dibuja el puntero (Ratón y cursor), el escritorio se abre siempre en la ventana clásica.</string>
     <string name="st_resolution">Resolución de pantalla</string>
     <string name="st_res_note">Cambiarla mantiene tu preajuste de tamaño de pantalla, recalculado para la nueva resolución.</string>
     <string name="st_res_auto">Igual que la pantalla del ordenador</string>

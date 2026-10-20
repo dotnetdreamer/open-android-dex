@@ -336,6 +336,12 @@
     <string name="st_nav_stream_sub">分辨率 · 编码 · 性能</string>
     <string name="st_nav_clipboard">剪贴板管理</string>
     <string name="st_nav_clipboard_sub">同步 · 当前内容 · 历史</string>
+    <string name="st_window">桌面窗口</string>
+    <string name="st_window_own">流畅</string>
+    <string name="st_window_own_sub">由电脑上的 Open Android DeX 应用显示。跟得上 Wi-Fi 的速度：宁可跳帧，绝不延迟。</string>
+    <string name="st_window_scrcpy">经典</string>
+    <string name="st_window_scrcpy_sub">由 scrcpy 显示，和以前一样。如果流畅窗口有问题，请选择它。下方的视频编解码和视频编码器只对它生效。</string>
+    <string name="st_window_note">手机绘制指针时（鼠标与光标），桌面总是在经典窗口中打开。</string>
     <string name="st_resolution">显示分辨率</string>
     <string name="st_res_note">更改分辨率会保留你的显示尺寸预设，并按新分辨率重新计算。</string>
     <string name="st_res_auto">与电脑屏幕一致</string>

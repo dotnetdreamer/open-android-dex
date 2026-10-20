@@ -15,23 +15,27 @@ import android.util.Log;
  *
  * Keep it to steps and state, not to per-frame chatter: this is a shared log,
  * and a noisy tag drowns the one line that mattered.
+ *
+ * <p>Public because the window daemon's dex compiles it too, with the stream
+ * classes it shares (openandroiddex-wmd/build.sh): the Android desktop's
+ * stream logs to the same tag, into the same timeline.
  */
-final class DexLog {
-    static final String TAG = "OpenDeX";
+public final class DexLog {
+    public static final String TAG = "OpenDeX";
 
     private DexLog() {
     }
 
     /** One step, attributed to the part of the launcher that took it. */
-    static void step(String area, String message) {
+    public static void step(String area, String message) {
         Log.i(TAG, "[" + area + "] " + message);
     }
 
-    static void warn(String area, String message) {
+    public static void warn(String area, String message) {
         Log.w(TAG, "[" + area + "] " + message);
     }
 
-    static void warn(String area, String message, Throwable t) {
+    public static void warn(String area, String message, Throwable t) {
         Log.w(TAG, "[" + area + "] " + message, t);
     }
 }

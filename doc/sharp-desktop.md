@@ -81,6 +81,12 @@ screen's scale").
   phone's preset) so the UI stays the size it was. The launcher re-derives its
   Default from the new density (`followBaseDpi`).
 
+The desktop's own window ([dex-video.md](dex-video.md)), which is now the
+default, needs none of this: it says its size in device pixels to its own
+server, which resizes the display, and the density follows the screen the
+window is on the same way (`move_density`). The patched server, the scale file
+and `watch_window_scale` are scrcpy's window's.
+
 A resolution picked in Settings is a fixed display, as before, and Linux hosts
 keep the display fitted once (below): X11 and Wayland measure windows
 differently and neither has been tried.

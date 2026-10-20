@@ -329,6 +329,11 @@ public class LinuxService extends Service {
             }
 
             @Override
+            public void streamingOverWifi(boolean on) {
+                streamOverWifi(on);
+            }
+
+            @Override
             public String phoneId() {
                 LinuxRemote.Identity id = LinuxRemote.available(LinuxService.this)
                         ? LinuxRemote.identity(LinuxService.this) : null;
@@ -1043,6 +1048,14 @@ public class LinuxService extends Service {
         } catch (Exception e) {
             DexLog.warn("stream", "wake lock", e);
         }
+    }
+
+    /** Sessions over Wi-Fi, counted for the same reason as {@link #streamSessions}. */
+    private int streamWifiSessions;
+
+    private synchronized void streamOverWifi(boolean on) {
+        streamWifiSessions = Math.max(0, streamWifiSessions + (on ? 1 : -1));
+        WifiLow.hold(this, "linux-stream", streamWifiSessions > 0);
     }
 
     // ── foreground plumbing ──

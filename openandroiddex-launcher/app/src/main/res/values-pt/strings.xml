@@ -336,6 +336,12 @@
     <string name="st_nav_stream_sub">Resolução · Codec · Desempenho</string>
     <string name="st_nav_clipboard">Área de transferência</string>
     <string name="st_nav_clipboard_sub">Sincronização · Atual · Histórico</string>
+    <string name="st_window">Janela do ambiente de trabalho</string>
+    <string name="st_window_own">Fluida</string>
+    <string name="st_window_own_sub">Mostrada pela app Open Android DeX no computador. Acompanha o ritmo do Wi-Fi: salta imagens, nunca as atrasa.</string>
+    <string name="st_window_scrcpy">Clássica</string>
+    <string name="st_window_scrcpy_sub">Mostrada pelo scrcpy, como antes. Escolha-a se a janela fluida lhe der problemas. O codec e o codificador abaixo só se aplicam a esta.</string>
+    <string name="st_window_note">Quando o telemóvel desenha o ponteiro (Rato e cursor), o ambiente de trabalho abre sempre na janela clássica.</string>
     <string name="st_resolution">Resolução da tela</string>
     <string name="st_res_note">Mudar isto mantém o seu preset de tamanho da tela, recalculado para a nova resolução.</string>
     <string name="st_res_auto">Igual ao ecrã do computador</string>

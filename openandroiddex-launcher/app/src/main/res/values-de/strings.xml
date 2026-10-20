@@ -336,6 +336,12 @@
     <string name="st_nav_stream_sub">Auflösung · Codec · Leistung</string>
     <string name="st_nav_clipboard">Zwischenablage</string>
     <string name="st_nav_clipboard_sub">Sync · Inhalt · Verlauf</string>
+    <string name="st_window">Desktop-Fenster</string>
+    <string name="st_window_own">Flüssig</string>
+    <string name="st_window_own_sub">Angezeigt von der App Open Android DeX auf dem Computer. Hält mit dem WLAN Schritt: Bilder werden ausgelassen, nie verzögert.</string>
+    <string name="st_window_scrcpy">Klassisch</string>
+    <string name="st_window_scrcpy_sub">Angezeigt von scrcpy, wie bisher. Wählen Sie es, wenn das flüssige Fenster Probleme macht. Video-Codec und Video-Encoder unten gelten nur dafür.</string>
+    <string name="st_window_note">Wenn das Telefon den Zeiger zeichnet (Maus &amp; Zeiger), öffnet sich der Desktop immer im klassischen Fenster.</string>
     <string name="st_resolution">Anzeigeauflösung</string>
     <string name="st_res_note">Eine andere Auflösung behält deine Anzeigegröße bei — sie wird dafür neu berechnet.</string>
     <string name="st_res_auto">Wie der Bildschirm des Computers</string>

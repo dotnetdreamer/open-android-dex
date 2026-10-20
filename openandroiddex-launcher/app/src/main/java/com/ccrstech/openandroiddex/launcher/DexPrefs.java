@@ -229,6 +229,13 @@ final class DexPrefs {
      * {@link DexCursors} renders shows up.
      */
     static final String KEY_MOUSE_MODE = PC_PREFIX + "mouse";
+    /**
+     * Which window shows the desktop on the computer: "own", the desktop app's
+     * own (doc/dex-video.md) — the picture keeping pace with the link — or
+     * "scrcpy", the classic window. Pointer rendering on the phone (uhid) is
+     * scrcpy's alone and overrides this on the PC's side.
+     */
+    static final String KEY_VIDEO = PC_PREFIX + "video";
     // ── Touchpad gestures ──
     // Also PC-side, and pushed over the same queue — but unlike everything
     // above they are NOT scrcpy arguments. The desktop app reads them off disk
@@ -343,6 +350,8 @@ final class DexPrefs {
     static final int DEF_PAD_HEIGHT = 28;
     /** Stays scrcpy's own default: uhid captures the PC's mouse, so it is opt-in. */
     static final String DEF_MOUSE_MODE = "sdk";
+    /** The desktop app's own window; scrcpy's when that cannot start (scrcpy.rs own_video_wanted). */
+    static final String DEF_VIDEO = "own";
     static final String DEF_FONT = "default";
     /**
      * These four MUST match what the desktop app does when nothing was picked:

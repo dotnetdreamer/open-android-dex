@@ -47,7 +47,7 @@ import java.nio.ByteBuffer;
  *
  * <p>The wire, after a WebSocket upgrade on {@code /stream} ({@link LinuxStreamSocket}):
  * <pre>
- * computer → phone   text   {"t":"hello","v":1,"start":bool,"w":..,"h":..,"bitrate":..,"fps":..}
+ * computer → phone   text   {"t":"hello","v":1,"start":bool,"w":..,"h":..,"bitrate":..,"fps":..,"tier":..}
  *                    text   {"t":"resize","w":..,"h":..} | {"t":"clip","text":..}
  *                           | {"t":"keyframe"} | {"t":"ping","n":..} | {"t":"bitrate","bitrate":..}
  *                    binary 0x10 buttons u8, x u16, y u16       — the pointer, in desktop pixels
@@ -56,11 +56,13 @@ import java.nio.ByteBuffer;
  * phone → computer   text   {"t":"state","state":..,"message"?}  — running, starting, stopped,
  *                           failed, missing, installing, unfinished
  *                    text   {"t":"video",..} before the first frame of every encoder
- *                    text   {"t":"clip","text":..} | {"t":"stats",..} | {"t":"pong","n":..}
+ *                    text   {"t":"clip","text":..} | {"t":"stats",..} | {"t":"pong","n":..,"at":µs}
  *                    binary 0x01 flags u8, pts µs u64, H.264 Annex B  — 1 key frame, 2 codec config
  *                    binary 0x02 hotX u16, hotY u16, w u16, h u16, RGBA — the pointer's shape
  * </pre>
- * All numbers big-endian.
+ * All numbers big-endian. The "tier" is the route the window reaches us by
+ * (cable, wifi, remote, relay); "at" is this phone's CLOCK_MONOTONIC, the clock
+ * every pts is on, so the window can tell how old each frame is when it shows.
  *
  * <p><b>Over the tunnel too.</b> The remote-access daemon puts a computer's
  * stream through to this socket when the phone is not on adb ({@code desktop/1}'s
@@ -90,6 +92,13 @@ final class LinuxStream {
          * screen off is still drawing the desktop for someone.
          */
         void streaming(boolean on);
+
+        /**
+         * A session that comes over Wi-Fi — wireless debugging, or the tunnel —
+         * began or ended: the radio must not doze under it (WifiLow).
+         */
+        default void streamingOverWifi(boolean on) {
+        }
 
         /** The id this phone has for remote access, or "" before it has one. */
         String phoneId();
@@ -366,6 +375,7 @@ final class LinuxStream {
 
         private void run() {
             boolean counted = false;
+            boolean overWifi = false;
             try {
                 sock.setSoTimeout(15_000);
                 LinuxStreamSocket conn = new LinuxStreamSocket(sock.getInputStream(), sock.getOutputStream(), sock);
@@ -394,12 +404,21 @@ final class LinuxStream {
                 ceiling = bitrate;
                 fps = clamp(hello.optInt("fps", 60), 10, 60);
                 acks = hello.optBoolean("acks");
+                // The window says its route; one that does not is through the
+                // tunnel when it is our own uid (the remote-access daemon).
+                String tier = hello.optString("tier", "");
+                boolean wireless = tier.isEmpty() ? peerUid == Process.myUid() : !"cable".equals(tier);
                 sock.setSoTimeout(0);
                 claim(this);
                 DexLog.step("stream", "a computer connected (uid " + peerUid + ", " + wantW + "x" + wantH
-                        + ", " + bitrate / 1_000_000 + " Mb/s" + (start ? ", start" : "") + ")");
+                        + ", " + bitrate / 1_000_000 + " Mb/s" + (start ? ", start" : "")
+                        + (tier.isEmpty() ? "" : ", " + tier) + ")");
                 host.streaming(true);
                 counted = true;
+                if (wireless) {
+                    host.streamingOverWifi(true);
+                    overWifi = true;
+                }
                 if (!awaitDesktop()) return;
                 rfb = connectXvnc();
                 if (rfb == null) return;
@@ -420,6 +439,7 @@ final class LinuxStream {
                     }
                 }
                 ended(this);
+                if (overWifi) host.streamingOverWifi(false);
                 if (counted) {
                     host.streaming(false);
                     DexLog.step("stream", "the computer's session ended");
@@ -846,7 +866,7 @@ final class LinuxStream {
                     case "ping": {
                         JSONObject p = new JSONObject();
                         try {
-                            p.put("t", "pong").put("n", j.opt("n"));
+                            p.put("t", "pong").put("n", j.opt("n")).put("at", System.nanoTime() / 1000);
                         } catch (Exception ignored) {
                         }
                         send(p);

@@ -212,6 +212,10 @@ fn touches(event: &CGEvent) -> Vec<(f32, f32)> {
 /// process showing one window, which is the assumption `embed/macos.rs` is
 /// already built on.
 fn desktop_is_foreground(app: &AppHandle, key: &str) -> bool {
+    // The desktop in this app's own window: whether that window has the keyboard.
+    if crate::dex::window_in_front(key) {
+        return true;
+    }
     let Some(pid) = crate::scrcpy::session_pid(app, key) else {
         return false;
     };

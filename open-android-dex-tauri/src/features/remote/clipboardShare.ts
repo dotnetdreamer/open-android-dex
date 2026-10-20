@@ -50,6 +50,18 @@ export const GUEST_MAX = 262144;
 /** What the guest may put on this computer's clipboard at once. */
 export const COMPUTER_MAX = 4 * 1024 * 1024;
 
+/**
+ * Who the clipboard is shared with, as the window's sentences name it, and the
+ * most it takes at once by its own count — Linux's (Xvnc's) unless the window
+ * says otherwise: the Android desktop's window says "the phone", and counts
+ * UTF-8 bytes against what a binder call carries.
+ */
+export interface Guest {
+  name: string;
+  max: number;
+  size: (text: string) => number;
+}
+
 /** One line ending, whichever side the text came from. */
 export const lf = (text: string) => text.replace(/\r\n?/g, "\n");
 
@@ -57,6 +69,8 @@ export const lf = (text: string) => text.replace(/\r\n?/g, "\n");
 export function guestSize(text: string) {
   return new TextEncoder().encode(lf(text).replace(/\n/g, "\r\n")).length + 1;
 }
+
+const LINUX: Guest = { name: "Linux", max: GUEST_MAX, size: (t) => guestSize(t) };
 
 export class ClipboardShare {
   private on: boolean;
@@ -78,6 +92,7 @@ export class ClipboardShare {
   constructor(
     private readonly host: ClipboardHost,
     on: boolean,
+    private readonly guest: Guest = LINUX,
   ) {
     this.on = on;
   }
@@ -108,10 +123,10 @@ export class ClipboardShare {
       // Copied on this computer while the window was elsewhere: newer than
       // anything the guest said in the meantime.
       this.pending = null;
-      if (guestSize(text) > GUEST_MAX) {
+      if (this.guest.size(text) > this.guest.max) {
         if (this.refused !== text) {
           this.refused = text;
-          this.host.say("The clipboard is too large to share with Linux (over 256 KB).");
+          this.host.say(`The clipboard is too large to share with ${this.guest.name} (over ${Math.round(this.guest.max / 1024)} KB).`);
         }
         return;
       }
@@ -153,12 +168,12 @@ export class ClipboardShare {
     this.host.save(this.on);
     this.host.post({ share: this.on });
     if (this.on) {
-      this.host.say("Clipboard shared with Linux: what you copy here can be pasted there, and the other way.");
+      this.host.say(`Clipboard shared with ${this.guest.name}: what you copy here can be pasted there, and the other way.`);
       // The page took back what it had been given when this went off.
       this.synced = null;
       if (this.host.focused()) void this.focus();
     } else {
-      this.host.say("Clipboard not shared with Linux.");
+      this.host.say(`Clipboard not shared with ${this.guest.name}.`);
       this.pending = null;
       this.latest = null;
       if (this.timer !== null) clearTimeout(this.timer);

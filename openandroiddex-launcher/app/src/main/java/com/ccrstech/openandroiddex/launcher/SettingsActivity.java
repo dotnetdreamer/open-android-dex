@@ -2281,6 +2281,24 @@ public class SettingsActivity extends Activity {
     }
 
     private void buildStreamSection(LinearLayout body) {
+        // First, because it decides what the rest of the section is for: the
+        // codec and encoder are scrcpy's, and the window the desktop app draws
+        // itself takes its bit rate and frame rate from the link it measures.
+        LinearLayout windowCard = card(body);
+        cardHeader(windowCard, s(R.string.st_window));
+        String window = DexPrefs.getString(this, DexPrefs.KEY_VIDEO, DexPrefs.DEF_VIDEO);
+        String[][] windows = {
+                {"own", s(R.string.st_window_own), s(R.string.st_window_own_sub)},
+                {"scrcpy", s(R.string.st_window_scrcpy), s(R.string.st_window_scrcpy_sub)},
+        };
+        for (String[] entry : windows) {
+            choiceRow(windowCard, null, entry[1], entry[2], entry[0].equals(window), () -> {
+                pcConfig(DexPrefs.KEY_VIDEO, entry[0]);
+                showSection(SEC_STREAM, false);
+            });
+        }
+        note(windowCard, s(R.string.st_window_note));
+
         LinearLayout resCard = card(body);
         cardHeader(resCard, s(R.string.st_resolution));
         String res = DexPrefs.getString(this, DexPrefs.KEY_RESOLUTION, DexPrefs.DEF_RESOLUTION);
@@ -2819,7 +2837,7 @@ public class SettingsActivity extends Activity {
                 DexPrefs.KEY_BITRATE, DexPrefs.KEY_FPS, DexPrefs.KEY_CODEC,
                 DexPrefs.KEY_ENCODER, DexPrefs.KEY_AUDIO, DexPrefs.KEY_AUDIO_DUP,
                 DexPrefs.KEY_CLIP_SYNC,
-                DexPrefs.KEY_CLIP_HISTORY, DexPrefs.KEY_MOUSE_MODE,
+                DexPrefs.KEY_CLIP_HISTORY, DexPrefs.KEY_MOUSE_MODE, DexPrefs.KEY_VIDEO,
                 DexPrefs.KEY_GESTURES, DexPrefs.KEY_GESTURE_3UP,
                 DexPrefs.KEY_GESTURE_3DOWN, DexPrefs.KEY_GESTURE_3LEFT,
                 DexPrefs.KEY_GESTURE_3RIGHT, DexPrefs.KEY_GESTURE_3TAP));

@@ -6,6 +6,7 @@ import type { ToGuest } from "../clipboardShare";
 import { Icon } from "../../../ui/Icon";
 import { DesktopCover, type DesktopHost } from "../DesktopCards";
 import { avcC, codecString, sameBytes, splitAccessUnit } from "./h264";
+import { FrameClock, median } from "./latency";
 import { ALTS, isModifier, keyDown, XK_ISO_LEVEL3_SHIFT } from "./keysym";
 
 /**
@@ -56,6 +57,8 @@ interface Stats {
   mbps: number;
   encodeMs: number;
   rttMs: number;
+  /** How old a frame is when it shows (latency.ts); null for a phone whose pongs carry no clock. */
+  latencyMs: number | null;
   encoder: string;
 }
 
@@ -152,6 +155,8 @@ export function UsbDesktop({
     let phoneStats = { fps: 0, kbps: 0, encodeMs: 0 };
     let rtt = 0;
     let encoder = "";
+    const clock = new FrameClock();
+    let ages: number[] = [];
 
     const send = (m: string | Uint8Array) => {
       if (ws && ws.readyState === WebSocket.OPEN) ws.send(m);
@@ -174,6 +179,8 @@ export function UsbDesktop({
         }
         ctx.drawImage(frame, 0, 0, cw || frame.displayWidth, ch || frame.displayHeight, 0, 0, dw, dh);
         drawn++;
+        const age = clock.age(frame.timestamp, performance.now());
+        if (age !== null) ages.push(age);
         if (!up) {
           up = true;
           setPhase({ kind: "up" });
@@ -452,7 +459,18 @@ export function UsbDesktop({
       socket.onopen = () => {
         const [w, h] = sizeFor(window.innerWidth, window.innerHeight);
         socket.send(
-          JSON.stringify({ t: "hello", v: 1, start: asStart, w, h, bitrate: bitrateFor(w, h, tierRef.current), fps: 60, acks: true }),
+          JSON.stringify({
+            t: "hello",
+            v: 1,
+            start: asStart,
+            w,
+            h,
+            bitrate: bitrateFor(w, h, tierRef.current),
+            fps: 60,
+            acks: true,
+            // The phone keeps its Wi-Fi out of power save for a route that is not the cable.
+            tier: tierRef.current,
+          }),
         );
       };
       socket.onmessage = (ev) => {
@@ -542,7 +560,11 @@ export function UsbDesktop({
           phoneStats = { fps: Number(m.fps) || 0, kbps: Number(m.kbps) || 0, encodeMs: Number(m.encodeMs) || 0 };
           break;
         case "pong":
-          if (typeof m.n === "number") rtt = Math.round(performance.now() - m.n);
+          if (typeof m.n === "number") {
+            const now = performance.now();
+            rtt = Math.round(now - m.n);
+            clock.pong(m.n, now, m.at);
+          }
           break;
       }
     };
@@ -553,6 +575,8 @@ export function UsbDesktop({
       const fps = Math.round((drawn * 1000) / Math.max(1, now - shownAt));
       drawn = 0;
       shownAt = now;
+      const latency = median(ages);
+      ages = [];
       if (up) {
         setStats({
           size: `${dw}×${dh}`,
@@ -560,6 +584,7 @@ export function UsbDesktop({
           mbps: Math.round(phoneStats.kbps / 100) / 10,
           encodeMs: phoneStats.encodeMs,
           rttMs: rtt,
+          latencyMs: latency === null ? null : Math.round(latency),
           encoder,
         });
       }
@@ -644,7 +669,7 @@ export function UsbDesktop({
             <span className="font-semibold">{route}</span>
             {stats && (
               <span className="ml-2 hidden tabular-nums text-[var(--ink-3)] sm:inline">
-                {stats.size} · {stats.fps} fps · {stats.mbps} Mb/s · {stats.rttMs} ms
+                {stats.size} · {stats.fps} fps · {stats.mbps} Mb/s · {stats.latencyMs ?? stats.rttMs} ms
               </span>
             )}
             <span className="mx-1.5 h-4 w-px bg-[var(--line-2)]" aria-hidden="true" />

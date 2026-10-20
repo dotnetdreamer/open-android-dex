@@ -336,6 +336,12 @@
     <string name="st_nav_stream_sub">الدقة · الترميز · الأداء</string>
     <string name="st_nav_clipboard">مدير الحافظة</string>
     <string name="st_nav_clipboard_sub">المزامنة · المحتوى · السجل</string>
+    <string name="st_window">نافذة سطح المكتب</string>
+    <string name="st_window_own">سلسة</string>
+    <string name="st_window_own_sub">يعرضها تطبيق Open Android DeX على الكمبيوتر. تواكب سرعة واي فاي: تُتخطّى الإطارات ولا تتأخّر أبدًا.</string>
+    <string name="st_window_scrcpy">كلاسيكية</string>
+    <string name="st_window_scrcpy_sub">يعرضها scrcpy كما في السابق. اخترها إذا واجهت مشكلة في النافذة السلسة. لا ينطبق ترميز الفيديو ومُرمِّز الفيديو أدناه إلا عليها.</string>
+    <string name="st_window_note">عندما يرسم الهاتف المؤشر (الفأرة والمؤشر)، يُفتح سطح المكتب دائمًا في النافذة الكلاسيكية.</string>
     <string name="st_resolution">دقة العرض</string>
     <string name="st_res_note">تغييرها يحافظ على إعداد حجم العرض لديك، مع إعادة حسابه للدقة الجديدة.</string>
     <string name="st_res_auto">مطابقة شاشة الكمبيوتر</string>

@@ -1,4 +1,5 @@
 mod adb;
+mod dex;
 mod diag;
 mod display;
 mod embed;
@@ -82,6 +83,10 @@ pub fn run() {
             scrcpy::stop_mirror,
             scrcpy::focus_session,
             scrcpy::list_mirror_sessions,
+            // The desktop in a window of this app's own (doc/dex-video.md).
+            dex::dex_link,
+            dex::dex_drop,
+            dex::dex_fallback,
             embed::embed_session,
             embed::move_session,
             embed::set_session_visible,
@@ -106,11 +111,13 @@ pub fn run() {
             remote_desktop::remote_desktop_reveal,
             remote_usb::remote_desktop_usb
         ])
-        // A phone's desktop window takes its local port and its tunnel with it.
+        // A phone's desktop window takes its local port and its tunnel with it;
+        // the Android desktop's window, its session (dex.rs).
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::Destroyed = event {
                 remote_desktop::window_closed(window.label());
             }
+            dex::on_window_event(window, event);
         })
         .setup(|app| {
             diag::log_startup(&app.handle().clone());
