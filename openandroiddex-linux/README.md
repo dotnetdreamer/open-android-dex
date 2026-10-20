@@ -334,6 +334,8 @@ every other phase sends a plain dash-separated token and reads unchanged.
 | 4713 | the PulseAudio control protocol, for `pavucontrol`, the panel plugin and anything linking libpulse |
 | 7022 | sshd, while remote access is on — from `linux-ssh.sh`, in a proot of its own. Keys only; reached from outside the phone only through the dexremote tunnel. Another free port when 7022 is taken |
 | 5902 | Xvnc `:2`, the window display (`linux-win.sh`), for a VNC viewer if anyone wants to see it bare — VncAuth, the desktop's password. Its X socket is the abstract `@/tmp/.X11-unix/X2`, where the launcher is the window manager; every X client needs the session's cookie (`/tmp/.oadx-win.xauth`) |
+| 6082 | the window session's PulseAudio tap, read by `LinuxAudio` like 6081 — a daemon of its own (`/tmp/.oadx-win.pa`: `dex.pa` with each port one higher), so neither session's sound depends on the other |
+| 4714 | the window session's PulseAudio control protocol; `PULSE_SERVER` for every app opened as a window |
 
 ## Sound
 
@@ -343,6 +345,8 @@ its audio nodes belong to the media uid — so the guest gets a PulseAudio
 an `AudioTrack`. `setup_audio` installs pulseaudio, pavucontrol and the panel
 plugin and writes `/etc/pulse/dex.pa`; `linux-rt.sh` starts the daemon with
 `-n --file=` that, in its own process group, and kills it with the session.
+`linux-win.sh` runs a second daemon from the same file, each port one higher,
+for apps opened as windows of their own (`doc/linux-windows.md`).
 Design record: `doc/linux-audio.md`.
 
 Two consequences worth knowing before changing any of it. The control protocol

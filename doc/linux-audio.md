@@ -21,6 +21,7 @@ unproven".
 | Starting and killing the daemon | `linux-rt.sh` | the session's audio lifetime |
 | Socket → speaker | `LinuxAudio.java` | reconnection, the silence gate, the drift cap |
 | Start/stop with the container | `LinuxService.startRuntime` / `stopRuntime` | that the pump cannot outlive the guest |
+| The window session's own daemon | `linux-win.sh`, `LinuxService.startWin` / `stopWin` | the same file with each port one higher (4714, 6082), for Linux apps opened as windows — see `doc/linux-windows.md` |
 
 ```
 XFCE apps ──libpulse──▶ pulseaudio ──▶ null sink "dex"

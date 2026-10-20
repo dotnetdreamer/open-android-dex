@@ -22,10 +22,11 @@
 #               XFCE desktop's: apps that keep one instance (a terminal, the
 #               file manager, Firefox) hand a second launch to the first one
 #               over the bus, and one on :1 would open the window on :1.
-#   pulseaudio  only when the app asks (LINUX_WIN_SOUND=1): the desktop on
-#               :1 is not running, so nothing else is giving these apps sound.
-#               The same daemon and the same ports linux-rt.sh uses, so the
-#               app's LinuxAudio reads it the same way.
+#   pulseaudio  tcp 4714 control, tcp 6082 the tap the app's LinuxAudio
+#               plays — the desktop's /etc/pulse/dex.pa with each port one
+#               higher. A daemon of its own, never the desktop's: either
+#               session can end while the other runs on, and a shared daemon
+#               dies with whichever session started it.
 #
 # Two facts load-bearing in linux-rt.sh hold here too:
 #  1. This script makes itself a session leader, so its pid is a process-group
@@ -79,8 +80,6 @@ if [ -n "$SHARED" ]; then
   fi
 fi
 
-SOUND=${LINUX_WIN_SOUND:-0}
-
 # The guest side, as one single-quoted string. NO APOSTROPHES ANYWHERE IN IT,
 # prose included — see the same warning in linux-rt.sh.
 #
@@ -111,22 +110,45 @@ done
 xset r off 2>/dev/null
 dbus-daemon --session --address=unix:abstract=dex-win-bus --nofork &
 DBUS=$!
+# Sound: the desktop daemon script with its two ports moved, and a runtime
+# directory of its own, because the pid file in there is how pulseaudio tells
+# that one is already running, and the desktop daemon may well be. Not
+# daemonised, for the group kill, and the directory cleared first for a pid
+# file a killed session left behind, both exactly as in linux-rt.sh. The bus
+# is named because DISPLAY is set by now, and without one D-Bus would try to
+# launch a bus of its own off the X display.
 PULSE=
-if [ SOUNDVALUE = 1 ] && [ -x /usr/bin/pulseaudio ] && [ -f /etc/pulse/dex.pa ]; then
-  rm -rf /tmp/runtime-root/pulse
-  XDG_RUNTIME_DIR=/tmp/runtime-root pulseaudio -n --file=/etc/pulse/dex.pa \
+if [ -x /usr/bin/pulseaudio ] && [ -f /etc/pulse/dex.pa ] && \
+    sed -e s/port=4713/port=4714/ -e s/port=6081/port=6082/ /etc/pulse/dex.pa \
+      >/tmp/.oadx-win.pa && grep -q port=6082 /tmp/.oadx-win.pa; then
+  rm -rf /tmp/runtime-root/pulse-win
+  XDG_RUNTIME_DIR=/tmp/runtime-root PULSE_RUNTIME_PATH=/tmp/runtime-root/pulse-win \
+    DBUS_SESSION_BUS_ADDRESS=unix:abstract=dex-win-bus \
+    pulseaudio -n --file=/tmp/.oadx-win.pa \
     --exit-idle-time=-1 --disallow-exit=1 --disable-shm=1 &
   PULSE=$!
 fi
 export DBUS_SESSION_BUS_ADDRESS=unix:abstract=dex-win-bus \
   XDG_RUNTIME_DIR=/tmp/runtime-root XDG_SESSION_TYPE=x11 \
   XDG_CURRENT_DESKTOP=XFCE LANG=C.UTF-8 \
-  PULSE_SERVER=tcp:127.0.0.1:4713 \
+  PULSE_SERVER=tcp:127.0.0.1:4714 \
   GDK_BACKEND=x11 QT_QPA_PLATFORM=xcb NO_AT_BRIDGE=1 \
   MOZ_DISABLE_CONTENT_SANDBOX=1 MOZ_DISABLE_GMP_SANDBOX=1 \
   MOZ_DISABLE_RDD_SANDBOX=1 MOZ_DISABLE_SOCKET_PROCESS_SANDBOX=1 \
   MOZ_DISABLE_UTILITY_SANDBOX=1 MOZ_DISABLE_GPU_SANDBOX=1 \
   MOZ_CRASHREPORTER_DISABLE=1 MOZ_ENABLE_WAYLAND=0
+# The first app waits for the sound server, a few seconds at most: a browser
+# picks its audio output once, at start, and one that found no server then
+# stays silent until it is restarted.
+if [ -n "$PULSE" ] && [ -x /usr/bin/pactl ]; then
+  n=0
+  until pactl info >/dev/null 2>&1; do
+    n=$((n + 1))
+    [ $n -gt 25 ] && break
+    kill -0 $PULSE 2>/dev/null || break
+    sleep 0.2
+  done
+fi
 echo "window session up on :2"
 while read -r verb arg; do
   case "$verb" in
@@ -144,7 +166,7 @@ done
 kill -9 $DBUS $XVNC $PULSE 2>/dev/null
 exit 0'
 
-SESSION=$(echo "$SESSION" | sed -e "s/GEOMETRY/$GEO/" -e "s/DPIVALUE/$DPI/" -e "s/SOUNDVALUE/$SOUND/")
+SESSION=$(echo "$SESSION" | sed -e "s/GEOMETRY/$GEO/" -e "s/DPIVALUE/$DPI/")
 
 # Not exec'd, for the same reason as linux-rt.sh: this script outlives proot
 # by exactly long enough to clear win.pid. --kill-on-exit takes every app

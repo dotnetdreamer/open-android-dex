@@ -29,17 +29,27 @@ import java.net.Socket;
  * {@link AudioTrack}. Both ends are fixed at the rate AudioTrack takes natively,
  * so nothing resamples anywhere.
  *
- * <p>Lives in the {@code :linux} process with {@link LinuxService}, started and
- * stopped with the runtime, so the audio path cannot outlive the container that
- * feeds it.
+ * <p>There are two taps, one per session, each with a daemon of its own: the
+ * desktop's ({@link #DESKTOP}, {@code linux-rt.sh}) and the window session's
+ * ({@link #WINDOWS}, {@code linux-win.sh}, where Linux apps open as windows of
+ * their own). Either session runs without the other and either can end first,
+ * so neither's sound may depend on the other being up. Android mixes the two
+ * tracks like any other two.
+ *
+ * <p>Lives in the {@code :linux} process with {@link LinuxService}; each pump is
+ * started and stopped with its session, so the audio path cannot outlive the
+ * container that feeds it.
  */
 final class LinuxAudio {
 
     private LinuxAudio() {
     }
 
-    /** The guest's {@code module-simple-protocol-tcp} tap, loopback only. */
-    static final int PORT = 6081;
+    /** The desktop's {@code module-simple-protocol-tcp} tap, loopback only. */
+    static final int DESKTOP = 6081;
+
+    /** The window session's tap, from a daemon of its own: dex.pa, each port one higher. */
+    static final int WINDOWS = 6082;
 
     private static final int RATE = 48000;
 
@@ -85,21 +95,21 @@ final class LinuxAudio {
      */
     private static final int MAX_LAG = RATE / 4 * 4;
 
-    /** The live pump, or null. Guards against two running at once. */
-    private static Pump current;
+    /** The live pump of each tap. Guards against two draining one tap. */
+    private static final java.util.Map<Integer, Pump> pumps = new java.util.HashMap<>();
 
     /**
-     * Start draining the guest's tap, if nothing is draining it already.
+     * Start draining {@code port}, if nothing is draining it already.
      *
      * Safe to call before the container is up: the pump retries the connect
      * while the guest boots, which takes several seconds and is well inside
      * {@link #RETRY_BUDGET}.
      */
-    static synchronized void start() {
-        if (current != null) return;
-        Pump p = new Pump();
-        current = p;
-        Thread t = new Thread(p, "linux-audio");
+    static synchronized void start(int port) {
+        if (pumps.containsKey(port)) return;
+        Pump p = new Pump(port);
+        pumps.put(port, p);
+        Thread t = new Thread(p, "linux-audio-" + port);
         // Daemon: the pump must never be the reason the :linux process stays
         // alive. The service's foreground notification is what does that.
         t.setDaemon(true);
@@ -107,15 +117,27 @@ final class LinuxAudio {
     }
 
     /**
-     * Stop, and unblock the pump wherever it is waiting.
+     * Stop draining {@code port}, and unblock the pump wherever it is waiting.
      *
      * Closing the socket from here is the point: the pump spends its life
      * inside a blocking read, which an interrupt does not touch.
      */
-    static synchronized void stop() {
-        Pump p = current;
-        current = null;
+    static synchronized void stop(int port) {
+        Pump p = pumps.remove(port);
         if (p != null) p.cancel();
+    }
+
+    static synchronized void stopAll() {
+        for (Pump p : pumps.values()) p.cancel();
+        pumps.clear();
+    }
+
+    /**
+     * A pump that gave up takes itself out, so the next start of its session
+     * gets a new one. Left in, it would turn every later start into a no-op.
+     */
+    private static synchronized void ended(Pump p) {
+        if (pumps.get(p.port) == p) pumps.remove(p.port);
     }
 
     /**
@@ -126,8 +148,13 @@ final class LinuxAudio {
      */
     private static final class Pump implements Runnable {
 
+        final int port;
         private volatile boolean live = true;
         private volatile Socket sock;
+
+        Pump(int port) {
+            this.port = port;
+        }
 
         void cancel() {
             live = false;
@@ -143,19 +170,20 @@ final class LinuxAudio {
                 try {
                     s = new Socket();
                     sock = s;
-                    s.connect(new InetSocketAddress("127.0.0.1", PORT), CONNECT_TIMEOUT_MS);
+                    s.connect(new InetSocketAddress("127.0.0.1", port), CONNECT_TIMEOUT_MS);
                     s.setTcpNoDelay(true);
                     misses = 0;
                     announced = false;
-                    DexLog.step("linux", "audio: playing the guest tap from " + PORT);
+                    DexLog.step("linux", "audio: playing the guest tap from " + port);
                     drain(s.getInputStream());
-                    DexLog.step("linux", "audio: tap closed");
+                    DexLog.step("linux", "audio: tap " + port + " closed");
                 } catch (Exception e) {
                     // Once per outage, not once per second: a container that is
                     // still booting refuses this connect every time round.
                     if (live && !announced) {
                         announced = true;
-                        DexLog.step("linux", "audio: waiting for the guest tap (" + e + ")");
+                        DexLog.step("linux", "audio: waiting for the guest tap on " + port
+                                + " (" + e + ")");
                     }
                 } finally {
                     close(s);
@@ -171,8 +199,9 @@ final class LinuxAudio {
                 }
             }
             if (live) {
-                DexLog.step("linux", "audio: no tap after " + (RETRY_BUDGET * RETRY_MS / 1000)
-                        + "s — giving up until the runtime restarts");
+                DexLog.step("linux", "audio: no tap on " + port + " after "
+                        + (RETRY_BUDGET * RETRY_MS / 1000) + "s — giving up until its session restarts");
+                ended(this);
             }
         }
 

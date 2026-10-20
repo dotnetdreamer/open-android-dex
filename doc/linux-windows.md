@@ -210,8 +210,18 @@ the desktop display's density, so a Linux app is the size an Android one is
 beside it. Apps run in `C.UTF-8`: without a UTF-8 locale a terminal shows an
 accented letter, a dash or any CJK as nothing at all.
 
-**Sound** comes from the desktop's PulseAudio when the XFCE desktop is running,
-and the window session starts the same daemon on the same ports when it is not.
+**Sound** is the window session's own: a PulseAudio daemon of its own, run
+from the desktop's `/etc/pulse/dex.pa` with each port one higher — 4714 for
+clients, 6082 for the tap that `LinuxAudio` plays — and a runtime directory of
+its own, since the pid file in there is how PulseAudio refuses a second
+instance. It used to borrow the desktop's daemon whenever the desktop was up,
+and that was wrong twice over. Either session can end while the other runs on,
+and a shared daemon dies with whichever session started it. And "the desktop
+is up" was read from `rt.pid`, which a runtime that was killed rather than
+ended (an app update, a force-stop) leaves behind: Chromium in a window was
+silent, on the phone, beside a desktop that was not there. The first app waits
+until the daemon answers, a few seconds at most, because a browser picks its
+audio output once, when it starts.
 
 ## Verified, and not yet
 
@@ -266,6 +276,11 @@ On the phone (Galaxy S25 Ultra, Android 16, the desktop app from `tauri dev`,
   and Wikipedia loaded, the caption following the page's title.
 - The terminal reopened where the last terminal had been left (the window
   memory, by window class).
+- Sound: YouTube in Chromium heard on the computer (the phone's output set to
+  "Computer only"), from the window session's own PulseAudio — the app was
+  playing its tap on 6082 a second after the session started. Before this,
+  the same video was silent: the session had trusted a stale `rt.pid` and
+  started no sound at all.
 
 Found on the phone, and not this feature's: **Firefox 158's tabs crash under
 proot** — "IPDL protocol error: Shared memory PlatformHandle is not safe to
@@ -289,4 +304,6 @@ Not yet:
 - a display that grows (RANDR), the launcher's process restarting under a
   running session (`resume`), the session ending three minutes after its last
   window;
+- the XFCE desktop and Linux windows playing sound at the same time (two
+  daemons side by side, 4713/6081 and 4714/6082);
 - Android 10 and older (no `memfd_create`: images over the socket).

@@ -489,9 +489,9 @@ public class LinuxService extends Service {
         // reporting to a service that is gone.
         remote.stop();
         remote.setListener(null);
-        // The pump is a daemon thread, so the process usually takes it with it.
-        // This is for the case where the service goes and the process does not.
-        LinuxAudio.stop();
+        // The pumps are daemon threads, so the process usually takes them with
+        // it. This is for the case where the service goes and the process does not.
+        LinuxAudio.stopAll();
     }
 
     // ── provisioning ──
@@ -769,7 +769,7 @@ public class LinuxService extends Service {
             Linux.Status st = Linux.readStatus(this);
             if (!"ready".equals(st.phase)) return; // nothing to start yet
             if (runtimeUp && st.running) {
-                if (withSound) LinuxAudio.start();
+                if (withSound) LinuxAudio.start(LinuxAudio.DESKTOP);
                 goForeground(getString(R.string.ln_label));
                 return; // already up — do NOT spawn a second one
             }
@@ -814,7 +814,7 @@ public class LinuxService extends Service {
             // than when the window opens, because the container is what produces
             // the sound — a session put in the background with "keep running" is
             // still allowed to make noise. It retries while the guest boots.
-            if (withSound) LinuxAudio.start();
+            if (withSound) LinuxAudio.start(LinuxAudio.DESKTOP);
             goForeground(getString(R.string.ln_label));
             DexLog.step("linux", "runtime started " + w + "x" + h);
         } catch (Exception e) {
@@ -844,15 +844,15 @@ public class LinuxService extends Service {
     private void stopRuntime() {
         // Before the kill, so the pump's socket dies with the guest that feeds
         // it rather than a second later, on a read of a container that is gone.
-        LinuxAudio.stop();
+        LinuxAudio.stop(LinuxAudio.DESKTOP);
         File dir = Linux.root(this);
         // /system/bin/kill, not the builtin: toybox sh's own kill rejects a
         // negative pid outright ("arguments must be jobs or process IDs"), so
         // the group kill has to go to the real binary. Measured on device.
         // The window session (linux-win.sh) runs Linux apps beside this
-        // desktop, xfce4-terminal and Thunar among them, and may own the one
-        // PulseAudio: while it is up, the belts that match by name stay
-        // narrow enough to miss it. The group kill above them is exact either way.
+        // desktop, xfce4-terminal and Thunar among them, and a PulseAudio of
+        // its own: the belts that match by name stay narrow enough to miss
+        // them. The group kill above them is exact either way.
         boolean win = winAlive();
         String script =
                 "P=$(cat " + q(dir) + "/rt.pid 2>/dev/null); "
@@ -862,7 +862,7 @@ public class LinuxService extends Service {
                         + "rm -f " + q(dir) + "/rt.pid " + q(dir) + "/rt.exit; "
                         + "pkill -l KILL -f '[X]vnc :1' 2>/dev/null; "
                         + "pkill -l KILL -f '[w]ebsockify --web' 2>/dev/null; "
-                        + (win ? "" : "pkill -l KILL -f '[p]ulseaudio -n' 2>/dev/null; ")
+                        + "pkill -l KILL -f '[p]ulseaudio -n --file=/etc/pulse/dex.pa' 2>/dev/null; "
                         + "pkill -l KILL -f '[d]ex-session-bus' 2>/dev/null; "
                         + (win ? "pkill -l KILL -f '[x]fce4-session' 2>/dev/null; "
                                 + "pkill -l KILL -f '[x]fce4-panel' 2>/dev/null; "
@@ -895,8 +895,6 @@ public class LinuxService extends Service {
     private static volatile Process liveWin;
     /** Its stdin, where each app to start is one line. io thread. */
     private java.io.OutputStream winInput;
-    /** It started the guest's sound itself, because the desktop on :1 was not running. */
-    private boolean winSound;
 
     static boolean winAlive() {
         Process p = liveWin;
@@ -922,7 +920,14 @@ public class LinuxService extends Service {
     /**
      * Start linux-win.sh: the second X display, at the desktop display's size,
      * with a cookie of its own (the launcher reads it from the same file to
-     * connect), and sound when nothing else is giving the guest any. io thread.
+     * connect), and sound of its own. io thread.
+     *
+     * <p>Its own sound, always, and not the desktop's when that is up: either
+     * session can end while the other runs on, and the one that owned a shared
+     * daemon would take everyone's sound with it. Nor can this side tell
+     * reliably that the desktop is up — rt.pid outlives a runtime that was
+     * killed rather than ended (an app update, a force-stop), and trusting it
+     * left Linux windows silent beside a desktop that was not there.
      */
     private boolean startWin(int w, int h, int dpi) {
         try {
@@ -945,14 +950,12 @@ public class LinuxService extends Service {
             ProcessBuilder pb = new ProcessBuilder("/system/bin/sh", Linux.winScript(this).getAbsolutePath());
             pb.directory(dir);
             pb.environment().putAll(Linux.scriptEnv(this));
-            winSound = !st.running;
-            if (winSound) pb.environment().put("LINUX_WIN_SOUND", "1");
             pb.redirectErrorStream(true);
             pb.redirectOutput(new File(dir, "win.log"));
             Process p = pb.start();
             winInput = p.getOutputStream();
             liveWin = p;
-            if (winSound) LinuxAudio.start();
+            LinuxAudio.start(LinuxAudio.WINDOWS);
             goForeground(getString(R.string.ln_label));
             DexLog.step("linux", "window session started " + w + "x" + h + " at " + dpi + " dpi");
             return true;
@@ -964,6 +967,10 @@ public class LinuxService extends Service {
 
     /** End the window session: asked first, then the group kill — linux-rt.sh's rule. io thread. */
     private void stopWin() {
+        // First, as stopRuntime does: the pump's socket goes with the session.
+        // Ahead of the test below too, because a session that ended by itself
+        // leaves its pump retrying.
+        LinuxAudio.stop(LinuxAudio.WINDOWS);
         Process p = liveWin;
         File dir = Linux.root(this);
         if (p == null && !new File(dir, "win.pid").exists()) return;
@@ -987,7 +994,8 @@ public class LinuxService extends Service {
                         + "/system/bin/kill -9 \"$P\" 2>/dev/null; fi; "
                         + "rm -f " + q(dir) + "/win.pid; "
                         + "pkill -l KILL -f '[X]vnc :2' 2>/dev/null; "
-                        + "pkill -l KILL -f '[d]ex-win-bus' 2>/dev/null; true";
+                        + "pkill -l KILL -f '[d]ex-win-bus' 2>/dev/null; "
+                        + "pkill -l KILL -f '[o]adx-win.pa' 2>/dev/null; true";
         try {
             new ProcessBuilder("/system/bin/sh", "-c", script).redirectErrorStream(true).start().waitFor();
         } catch (Exception e) {
@@ -1000,8 +1008,6 @@ public class LinuxService extends Service {
             }
         }
         liveWin = null;
-        if (winSound && !Linux.readStatus(this).running) LinuxAudio.stop();
-        winSound = false;
         DexLog.step("linux", "window session stopped");
     }
 
