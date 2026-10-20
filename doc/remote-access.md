@@ -464,6 +464,12 @@ and compression 6 on the relay or past 80 ms. The first path is always the
 relay and hole punching usually moves it within seconds, so the picture
 sharpens by itself.
 
+**Over adb it is not VNC at all.** With the phone on the cable, or on wireless
+debugging, the same window takes the desktop as video from the phone's hardware
+encoder, decoded on the computer's GPU, with the computer's own pointer — and
+moves between that and this tunnel as the cable comes and goes. See
+[usb-desktop.md](usb-desktop.md).
+
 **Without the app**, `dexremote desktop <phone>` does the same in a browser
 tab: starts the desktop if asked, prints the page's address with the password,
 serves it on `127.0.0.1:6080` (or any free port) behind the same checks, and

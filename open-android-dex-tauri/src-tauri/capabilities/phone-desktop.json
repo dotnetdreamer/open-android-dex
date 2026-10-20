@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "phone-desktop",
-  "description": "A phone's Linux desktop window (remote_desktop.rs). Its own page only: the phone's viewer page inside it is another origin, which no capability names, so it can call nothing. The clipboard is this page's to share with the guest, by its own rules (clipboardShare.ts), and the store keeps the switch for it.",
+  "description": "A phone's Linux desktop window (remote_desktop.rs, remote_usb.rs). Its own page only: the phone's viewer page inside it is another origin, which no capability names, so it can call nothing. The clipboard is this page's to share with the guest, by its own rules (clipboardShare.ts) — through the viewer page on the tunnel, by itself on the video path — and the store keeps the switch for it.",
   "windows": ["desktop-*"],
   "permissions": [
     "core:default",

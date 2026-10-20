@@ -452,6 +452,56 @@ fn selected_path(conn: &Connection) -> (bool, u64) {
         .unwrap_or((false, 0))
 }
 
+/// Where a connection's chosen path runs: through a relay, straight across
+/// the local network, or straight across the internet — a hole punched
+/// through the phone's mobile network, say. Direct alone cannot tell the
+/// last two apart, and they are the difference a person notices.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PathKind {
+    Relay,
+    Local,
+    Internet,
+}
+
+fn selected_path_kind(conn: &Connection) -> Option<PathKind> {
+    conn.paths().iter().find(|p| p.is_selected()).map(|p| match p.remote_addr() {
+        iroh::TransportAddr::Ip(remote) => {
+            let local = match p.local_addr() {
+                iroh::endpoint::LocalTransportAddr::Ip(ip) => *ip,
+                _ => None,
+            };
+            if on_local_network(remote.ip(), local) {
+                PathKind::Local
+            } else {
+                PathKind::Internet
+            }
+        }
+        _ => PathKind::Relay,
+    })
+}
+
+/// A direct path stays on the local network when the phone's address is a
+/// private one — RFC 1918, link-local, an IPv6 ULA — or, IPv6 having no NAT
+/// to give it away, when it shares this computer's /64: the one prefix a home
+/// network hands everything on it. Carrier-grade NAT's 100.64/10 is the
+/// carrier's, not the room's.
+pub fn on_local_network(remote: std::net::IpAddr, local: Option<std::net::IpAddr>) -> bool {
+    use std::net::IpAddr;
+    match remote {
+        IpAddr::V4(v4) => v4.is_private() || v4.is_link_local() || v4.is_loopback(),
+        IpAddr::V6(v6) => {
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return on_local_network(IpAddr::V4(v4), local);
+            }
+            let s = v6.segments();
+            (s[0] & 0xfe00) == 0xfc00
+                || (s[0] & 0xffc0) == 0xfe80
+                || v6.is_loopback()
+                || matches!(local, Some(IpAddr::V6(l)) if l.segments()[..4] == s[..4])
+        }
+    }
+}
+
 // ── the desktop ───────────────────────────────────────────────────────────
 
 /// How to log in to a phone's desktop, as its `open` answered.
@@ -601,6 +651,11 @@ impl Desktop {
     /// The live connection's path: direct or not, and its round trip.
     pub fn path(&self) -> Option<(bool, u64)> {
         self.live().map(|c| selected_path(&c))
+    }
+
+    /// Where the live connection's path runs, for the window's title.
+    pub fn path_kind(&self) -> Option<PathKind> {
+        self.live().and_then(|c| selected_path_kind(&c))
     }
 
     /// Why the connection closed, once it has; `None` while it is up or
@@ -770,6 +825,24 @@ mod tests {
         let mut text = lines.join("\r\n");
         text.push_str("\r\n\r\n");
         text.into_bytes()
+    }
+
+    #[test]
+    fn a_direct_path_is_local_when_its_address_says_so() {
+        let ip = |s: &str| s.parse::<std::net::IpAddr>().unwrap();
+        assert!(on_local_network(ip("192.168.2.12"), None));
+        assert!(on_local_network(ip("10.0.0.5"), None));
+        assert!(on_local_network(ip("172.20.1.1"), None));
+        assert!(on_local_network(ip("fe80::1"), None));
+        assert!(on_local_network(ip("fd12:3456::1"), None));
+        assert!(on_local_network(ip("::ffff:192.168.1.4"), None));
+        assert!(!on_local_network(ip("77.165.215.32"), None));
+        assert!(!on_local_network(ip("100.64.1.2"), None), "carrier-grade NAT is the carrier's");
+        // Measured: the phone and this computer on one home network, by IPv6.
+        let mine = Some(ip("2a02:a44b:4c7:0:f082:8d42:1bd6:81e7"));
+        assert!(on_local_network(ip("2a02:a44b:4c7:0:4ce9:32ff:fee0:e2db"), mine), "the same /64");
+        assert!(!on_local_network(ip("2a02:a44b:4c7:1::5"), mine), "another /64");
+        assert!(!on_local_network(ip("2001:db8::1"), None));
     }
 
     #[test]

@@ -35,6 +35,9 @@ import java.nio.charset.StandardCharsets;
  * <li>{@code pair} — trust {@code {id, name, os, ssh}}, optionally turning
  *     remote access on, and answer with this phone's id and host key.</li>
  * <li>{@code forget} — stop trusting {@code {id}}.</li>
+ * <li>{@code stream} — the desktop as video over this same cable
+ *     ({@link LinuxStream}): wake the service that serves it, and name the
+ *     socket to dial.</li>
  * </ul>
  *
  * <b>Only the shell may call this.</b> Twice over: the manifest gives the
@@ -83,6 +86,9 @@ public class RemoteProvider extends ContentProvider {
                     break;
                 case "forget":
                     out.put("ok", LinuxRemote.removePeer(ctx, in.optString("id")));
+                    break;
+                case "stream":
+                    stream(ctx, out);
                     break;
                 default:
                     out.put("ok", false);
@@ -169,6 +175,22 @@ public class RemoteProvider extends ContentProvider {
         }
         describe(ctx, out);
         if (started != null) out.put("started", started.booleanValue());
+    }
+
+    /**
+     * A computer on the cable wants the desktop as video. The socket lives in
+     * {@link LinuxService}'s process, so that is woken to listen; it stays for
+     * as long as a session is open. {@code started} false means Android
+     * refused to start it from the background — the same wall a pairing hits,
+     * with the same way round: open Linux on the phone once.
+     */
+    private static void stream(Context ctx, JSONObject out) throws Exception {
+        boolean ok = LinuxRemote.available(ctx) && Linux.isInstalled(ctx);
+        out.put("ok", ok);
+        out.put("socket", LinuxStream.socketName(ctx));
+        out.put("linux", linuxState(ctx));
+        out.put("name", LinuxRemote.phoneName(ctx));
+        if (ok) out.put("started", LinuxService.wakeForStream(ctx));
     }
 
     /**

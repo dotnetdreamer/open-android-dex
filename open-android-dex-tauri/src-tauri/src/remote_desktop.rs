@@ -35,7 +35,7 @@ use std::time::{Duration, Instant};
 use dexremote::computer::Phone;
 use dexremote::iroh::EndpointId;
 use dexremote::outbox::{self, Received};
-use dexremote::pc::{self, Desktop, DialError};
+use dexremote::pc::{self, Desktop, DialError, PathKind};
 use dexremote::proto::{DesktopSize, Refusal};
 use dexremote::sftp::{self, CancellationToken, Guest, Progress, Report};
 use serde::Serialize;
@@ -94,17 +94,37 @@ fn links() -> &'static Mutex<HashMap<String, Link>> {
 }
 
 /// One window per phone, named after it.
-fn label_for(id: &str) -> String {
+pub(crate) fn label_for(id: &str) -> String {
     format!("desktop-{}", &id[..id.len().min(16)])
+}
+
+/// A desktop window's title: the phone, and how the window reaches it.
+pub(crate) fn title_for(name: &str, route: Option<&str>) -> String {
+    match route {
+        Some(route) => format!("{name} — Linux · {route}"),
+        None => format!("{name} — Linux"),
+    }
+}
+
+/// The tunnel's path, in the words of a title. A direct path on the local
+/// network is Wi-Fi — the phone's half of it always is — and one across the
+/// internet is remote, whether the phone is on mobile data or someone else's
+/// Wi-Fi.
+fn route_for(kind: PathKind) -> &'static str {
+    match kind {
+        PathKind::Local => "Wi-Fi",
+        PathKind::Internet => "Remote",
+        PathKind::Relay => "Remote (relay)",
+    }
 }
 
 /// The window's link, made on its first connect.
 async fn link(
-    app: &AppHandle,
-    label: &str,
+    window: &WebviewWindow,
     paired: &Phone,
     phone: EndpointId,
 ) -> Result<(Arc<Desktop>, u16, Arc<Mutex<Option<Channel<DesktopEvent>>>>), String> {
+    let label = window.label();
     let existing = |map: &HashMap<String, Link>| map.get(label).map(|l| (l.desktop.clone(), l.port, l.events.clone()));
     if let Some(found) = existing(&links().lock().unwrap()) {
         return Ok(found);
@@ -131,13 +151,13 @@ async fn link(
             }
         })
     };
-    let watch = tauri::async_runtime::spawn(watch_path(desktop.clone(), events.clone()));
+    let watch = tauri::async_runtime::spawn(watch_path(desktop.clone(), events.clone(), window.clone(), paired.name.clone()));
     // A phone whose daemon was started again — the app updated, the end of a
     // DeX session — never says the old connection died; this notices.
     let alive = tauri::async_runtime::spawn(desktop.clone().keep_alive());
     let inbox = CancellationToken::new();
     let received: Arc<Mutex<Vec<PathBuf>>> = Arc::default();
-    tauri::async_runtime::spawn(self::inbox(app.clone(), paired.clone(), events.clone(), received.clone(), inbox.clone()));
+    tauri::async_runtime::spawn(self::inbox(window.app_handle().clone(), paired.clone(), events.clone(), received.clone(), inbox.clone()));
     map.insert(
         label.to_string(),
         Link { desktop: desktop.clone(), port, events: events.clone(), tasks: [serve, watch, alive], inbox, received },
@@ -266,11 +286,26 @@ async fn inbox(
 
 /// The path, to the window, when it changes enough to matter: from relayed to
 /// direct (hole punching gets there a few seconds after every connect) or by
-/// a noticeable step in round trip.
-async fn watch_path(desktop: Arc<Desktop>, events: Arc<Mutex<Option<Channel<DesktopEvent>>>>) {
+/// a noticeable step in round trip. And to its title — while the window is on
+/// the tunnel: on adb, remote_usb.rs says so itself.
+async fn watch_path(
+    desktop: Arc<Desktop>,
+    events: Arc<Mutex<Option<Channel<DesktopEvent>>>>,
+    window: WebviewWindow,
+    name: String,
+) {
     let mut last: Option<(bool, u64)> = None;
+    let mut titled: Option<&'static str> = None;
     loop {
         tokio::time::sleep(Duration::from_secs(2)).await;
+        if crate::remote_usb::streaming(window.label()) {
+            titled = None;
+        } else if let Some(route) = desktop.path_kind().map(route_for) {
+            if titled != Some(route) {
+                let _ = window.set_title(&title_for(&name, Some(route)));
+                titled = Some(route);
+            }
+        }
         let Some((direct, rtt)) = desktop.path() else { continue };
         let moved = match last {
             Some((was_direct, was_rtt)) => was_direct != direct || was_rtt.abs_diff(rtt) >= 10,
@@ -302,6 +337,8 @@ pub fn window_closed(label: &str) {
     if let Some((_, copy)) = copies().lock().unwrap().remove(label) {
         copy.cancel();
     }
+    // Its port over adb too, when it had one.
+    crate::remote_usb::window_closed(label);
     let Some(link) = links().lock().unwrap().remove(label) else { return };
     link.inbox.cancel();
     for task in &link.tasks {
@@ -372,7 +409,7 @@ pub async fn remote_open_desktop(app: AppHandle, id: String) -> Result<(), Strin
     let rule = label.clone();
     let dev = if tauri::is_dev() { app.config().build.dev_url.clone() } else { None };
     WebviewWindowBuilder::new(&app, &label, WebviewUrl::App(format!("index.html#desktop={}", phone.id).into()))
-        .title(format!("{} — Linux", phone.name))
+        .title(title_for(&phone.name, None))
         .inner_size(w, h)
         .min_inner_size(640.0, 420.0)
         .center()
@@ -409,7 +446,7 @@ pub async fn remote_desktop_connect(
     }
     let paired = crate::remote::find(&id)?;
     let phone: EndpointId = id.parse().map_err(|_| "not a phone id".to_string())?;
-    let (desktop, port, channel) = link(window.app_handle(), window.label(), &paired, phone).await?;
+    let (desktop, port, channel) = link(&window, &paired, phone).await?;
     *channel.lock().unwrap() = Some(events.clone());
     let size = start.then_some(DesktopSize { w: width, h: height });
     let result = desktop

@@ -7,6 +7,7 @@ mod hotkeys;
 mod projection;
 mod remote;
 mod remote_desktop;
+mod remote_usb;
 mod scrcpy;
 mod shell;
 mod transfer;
@@ -99,7 +100,8 @@ pub fn run() {
             remote_desktop::remote_desktop_connect,
             remote_desktop::remote_desktop_put,
             remote_desktop::remote_desktop_put_cancel,
-            remote_desktop::remote_desktop_reveal
+            remote_desktop::remote_desktop_reveal,
+            remote_usb::remote_desktop_usb
         ])
         // A phone's desktop window takes its local port and its tunnel with it.
         .on_window_event(|window, event| {

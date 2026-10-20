@@ -54,6 +54,8 @@ public class LinuxService extends Service {
     /** Open "Add a computer" with the code in {@link #EXTRA_CODE}. */
     static final String ACTION_REMOTE_PAIR = "com.ccrstech.openandroiddex.launcher.linux.REMOTE_PAIR";
     static final String ACTION_REMOTE_PAIR_CANCEL = "com.ccrstech.openandroiddex.launcher.linux.REMOTE_PAIR_CANCEL";
+    /** A computer on the cable is about to open the desktop as video: be up to answer. See {@link LinuxStream}. */
+    static final String ACTION_STREAM = "com.ccrstech.openandroiddex.launcher.linux.STREAM";
     static final String EXTRA_W = "w";
     static final String EXTRA_H = "h";
     static final String EXTRA_CODE = "code";
@@ -207,6 +209,17 @@ public class LinuxService extends Service {
         send(ctx, ACTION_REMOTE_PAIR_CANCEL, 0, 0);
     }
 
+    /**
+     * Have the service up, listening for a computer on the cable
+     * ({@link LinuxStream}). It stays for as long as a session is open, and
+     * idles out shortly after one never comes.
+     *
+     * @return false when Android refused to start it from where we are
+     */
+    static boolean wakeForStream(Context ctx) {
+        return send(ctx, ACTION_STREAM, 0, 0);
+    }
+
     private static boolean send(Context ctx, String action, int w, int h) {
         Intent i = new Intent(ctx, LinuxService.class).setAction(action);
         if (w > 0) i.putExtra(EXTRA_W, w).putExtra(EXTRA_H, h);
@@ -263,6 +276,44 @@ public class LinuxService extends Service {
                     // onDestroy has run; the daemon's wait runs out and the
                     // computer is told the desktop did not start.
                 }
+            }
+        });
+        // The desktop as video for a computer on the cable. Up for as long as
+        // this service is, whatever remote access is doing: the cable needs
+        // no tunnel, and adb has already said who is on the other end.
+        LinuxStream.start(this, new LinuxStream.Host() {
+            @Override
+            public String desktopState() {
+                return remote.desktopForCable();
+            }
+
+            @Override
+            public void startDesktop(int w, int h) {
+                remote.startDesktopForCable(w, h);
+            }
+
+            @Override
+            public String vncPassword() {
+                return Linux.readStatus(LinuxService.this).pass;
+            }
+
+            @Override
+            public void streaming(boolean on) {
+                streamAwake(on);
+                // A session that ended may have been the last reason to be up.
+                if (!on) idleStopQueued();
+            }
+
+            @Override
+            public String phoneId() {
+                LinuxRemote.Identity id = LinuxRemote.available(LinuxService.this)
+                        ? LinuxRemote.identity(LinuxService.this) : null;
+                return id != null ? id.id : "";
+            }
+
+            @Override
+            public String phoneName() {
+                return LinuxRemote.phoneName(LinuxService.this);
             }
         });
         goForeground(getString(R.string.ln_installing));
@@ -330,6 +381,15 @@ public class LinuxService extends Service {
             remote.cancelPair();
             if (!remoteWanted) idleStopQueued();
             return stickiness();
+        } else if (ACTION_STREAM.equals(action)) {
+            // Nothing to do but be here: LinuxStream listens for as long as
+            // the service lives. A computer that never connects leaves it to
+            // idle out like any other start with nothing to keep it.
+            // "Linux" rather than the placeholder every start begins with,
+            // unless an install is what is really going on.
+            if (!provisioning.get()) goForeground(getString(R.string.ln_label));
+            mainHandler.postDelayed(this::idleStopQueued, 30_000);
+            return stickiness();
         }
         if (ACTION_START.equals(action)) {
             final int w = intent.getIntExtra(EXTRA_W, 1280);
@@ -381,6 +441,7 @@ public class LinuxService extends Service {
     @Override
     public void onDestroy() {
         super.onDestroy();
+        LinuxStream.stop();
         io.shutdownNow();
         // The host is the process's, not this instance's: stopped (in order,
         // ahead of whatever start a next instance sends it) and told to stop
@@ -775,6 +836,30 @@ public class LinuxService extends Service {
         DexLog.step("linux", "runtime stopped");
     }
 
+    /**
+     * Held while a computer on the cable is watching the desktop
+     * (LinuxStream). Counted: a session replaced by the next one ends after
+     * the new one has begun.
+     */
+    private android.os.PowerManager.WakeLock streamWake;
+    private int streamSessions;
+
+    private synchronized void streamAwake(boolean on) {
+        streamSessions = Math.max(0, streamSessions + (on ? 1 : -1));
+        try {
+            if (streamWake == null) {
+                android.os.PowerManager pm = getSystemService(android.os.PowerManager.class);
+                if (pm == null) return;
+                streamWake = pm.newWakeLock(android.os.PowerManager.PARTIAL_WAKE_LOCK, "OpenDeX:linux-stream");
+                streamWake.setReferenceCounted(false);
+            }
+            if (streamSessions > 0 && !streamWake.isHeld()) streamWake.acquire();
+            else if (streamSessions == 0 && streamWake.isHeld()) streamWake.release();
+        } catch (Exception e) {
+            DexLog.warn("stream", "wake lock", e);
+        }
+    }
+
     // ── foreground plumbing ──
 
     /** Repost the notification with what remote access says now. Main thread. */
@@ -891,6 +976,8 @@ public class LinuxService extends Service {
         // the host's thread gets going cannot idle the service out from under it.
         if (remote != null && remote.running()) return;
         if (LinuxRemote.isEnabled(this) && LinuxRemote.available(this)) return;
+        // A computer on the cable is watching the desktop, or about to.
+        if (LinuxStream.active()) return;
         if (stopSelfResult(lastStartId)) {
             stopForeground(STOP_FOREGROUND_REMOVE);
         }

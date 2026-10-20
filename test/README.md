@@ -52,5 +52,25 @@ phone can carry, the password handed over, the page and 1 MB of WebSocket
 through the tunnel as one session, requests from other sites and other host
 names turned away, and Ctrl+C letting the phone go at once.
 
-Everything else needs a device. `doc/web-viewer.md` and `doc/remote-access.md`
-list what is still unverified there.
+The desktop over adb (`doc/usb-desktop.md`) has its own, with Node 24 and a JDK:
+
+```sh
+node test/usb-desktop-test.mjs
+node test/usb-desktop-test.mjs --device [serial] [--size 2560x1440]
+```
+
+The first runs the window's H.264 handling and key mapping as they are (Node
+imports the `.ts` files), and the launcher's own `LinuxStreamRfb` and
+`LinuxStreamSocket`, compiled for this JVM, against a stand-in Xvnc in Node:
+VncAuth, the encodings asked for, every sampled pixel, the cursor, a resize,
+input and the clipboard, the probe and the WebSocket. `--device` then runs the
+stream classes on a phone under `app_process` as the shell user — nothing is
+installed and the launcher is not touched — against a stand-in Xvnc on the
+phone's own loopback that changes every pixel of every frame, and a headless
+Chrome decodes the hardware-encoded stream with WebCodecs, sends input and a
+resize, and prints the frame rate and where the time goes. It cleans up after
+itself; the frame rate is checked only on a cable, since wireless debugging's
+is the link's.
+
+Everything else needs a device. `doc/web-viewer.md`, `doc/remote-access.md`
+and `doc/usb-desktop.md` list what is still unverified there.

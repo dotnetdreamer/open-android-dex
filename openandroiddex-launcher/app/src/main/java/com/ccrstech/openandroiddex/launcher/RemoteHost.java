@@ -895,6 +895,29 @@ final class RemoteHost {
         evaluate();
     }
 
+    /**
+     * The desktop as a computer on the cable finds it ({@link LinuxStream}):
+     * the same reading the daemon is given, taken on this host's own thread
+     * because the start bookkeeping it reads lives there. Works with remote
+     * access off — the cable needs no tunnel.
+     */
+    String desktopForCable() {
+        try {
+            return worker.submit(() -> desktopState(Linux.readStatus(ctx))).get(5, TimeUnit.SECONDS);
+        } catch (Exception e) {
+            return "stopped";
+        }
+    }
+
+    /**
+     * A computer on the cable opened the desktop and it is not running: the
+     * very start a `desktop-start` from the daemon makes, so `starting` and
+     * `failed` read the same whichever way the computer came in.
+     */
+    void startDesktopForCable(int w, int h) {
+        worker.execute(() -> onDesktopStart(new String[]{"desktop-start", String.valueOf(w), String.valueOf(h)}));
+    }
+
     /** Tell the daemon about the desktop when anything about it changed. */
     private void reportDesktop(Linux.Status st) {
         String state = desktopState(st);

@@ -893,7 +893,22 @@ public final class WmDaemon {
                 + "cmd appwidget revokebind --package " + LAUNCHER + " --user 0");
 
         sh("am force-stop " + LAUNCHER);
+
+        // The force-stop took Linux's remote access down with everything else,
+        // and on a phone whose user left it on, the broadcast right behind it is
+        // what brings it back — restore_phone in adb.rs sends the same one after
+        // its own force-stop; this is the cable-pulled twin. Without it a phone
+        // unplugged mid-session stayed unreachable over SSH and the desktop
+        // window until something else restarted the app. The receiver does
+        // nothing for a phone that has remote access off. 0x20 is
+        // FLAG_INCLUDE_STOPPED_PACKAGES (a force-stopped package is skipped by
+        // broadcasts otherwise), 0x10000000 FLAG_RECEIVER_FOREGROUND.
+        sh("am broadcast -n " + LAUNCHER + "/.RemoteResumeReceiver -a " + REMOTE_RESUME
+                + " -f 0x10000020 >/dev/null 2>&1");
     }
+
+    /** RemoteResumeReceiver's action: "bring Remote access back if it was on". */
+    private static final String REMOTE_RESUME = LAUNCHER + ".remote.RESUME";
 
     /**
      * Drop our caption service from a colon-separated accessibility list, leaving every
