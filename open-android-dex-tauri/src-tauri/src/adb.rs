@@ -607,6 +607,11 @@ pub fn adb_list_apps(app: tauri::AppHandle, serial: String) -> Result<Vec<AppInf
 /// The `Settings.Global` keys the desktop profile writes. Putting these back
 /// is most of what "Exit DeX" means: freeform windowing and a relaxed
 /// hidden-API policy are ours, not the phone's.
+///
+/// These, [`TOUCH_GLOBAL`] and [`PERF_GLOBALS`] are every setting the undo
+/// chain armed into the window daemon can carry, and the launcher's cable-out
+/// undo writes nothing else: a key added to any of the three MUST be added to
+/// UnplugWatch.ARMED_KEYS too.
 const DESKTOP_GLOBALS: [&str; 4] = [
     "force_desktop_mode_on_external_displays",
     "enable_freeform_support",

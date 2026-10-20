@@ -260,9 +260,9 @@ is the whole reason a forged beacon buys an attacker nothing.
 What is genuinely exposed, stated plainly rather than argued away:
 
 - **The reversed device port is reachable by any app on the phone.** Loopback on
-  Android is not per-uid. This is the *same* exposure `wmd` already accepts on
-  7191 — and 7191 speaks with shell authority, so 7192 is strictly the smaller
-  of the two.
+  Android is not per-uid. `wmd` had the same exposure on 7191, with shell
+  authority behind it, and now refuses any caller but adb and the launcher by
+  uid (`doc/sharp-desktop.md`); 7192's guard is the per-session HELLO token.
 - **`ACTION_FILES` is an exported receiver**, because the sender is
   `am broadcast` from another uid and there is no way for it not to be. Another
   app can therefore forge a beacon. What it gains: the window tries to connect

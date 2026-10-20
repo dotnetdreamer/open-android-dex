@@ -337,11 +337,12 @@ Design notes:
 **Daemon.** `ServerSocket(7191, 8, InetAddress.getByName("127.0.0.1"))`, thread per
 connection, `TCP_NODELAY` (a drag is many tiny writes; Nagle would batch them into
 latency). Loopback-only bind is a security requirement: this socket speaks with
-shell authority. It is not enough on its own, and that is a known, open gap:
-any app on the phone can connect, and the watchdog runs `ARM`'s settings chain
-as the shell. The fix is to check each caller's uid — `/proc/net/tcp` maps the
-client's port to it — and take `ARM` only from the shell's 2000 (adb), the
-other verbs from 2000 or the launcher. Per-connection `Grab` state needs no
+shell authority. It was not enough on its own — any app on the phone could
+connect, and the watchdog runs `ARM`'s settings chain as the shell — so each
+caller's uid is now checked: `/proc/net/tcp` maps the client's port to it, `ARM`
+(with `REQGET` and `REQACK`) is taken only from the shell's 2000 (adb), the other
+verbs from 2000 or the launcher, and anyone else is hung up on. See
+`doc/sharp-desktop.md`, "Who may talk to the window daemon". Per-connection `Grab` state needs no
 locking. No `Looper` is
 prepared — outgoing binder transactions are synchronous on the calling thread, and
 the daemon registers no callbacks.

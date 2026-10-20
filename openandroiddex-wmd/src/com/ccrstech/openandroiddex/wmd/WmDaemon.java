@@ -22,6 +22,11 @@ import java.util.List;
  * untrusted_app and a shell-domain abstract socket is not dependable, whereas
  * app -> 127.0.0.1 is. The cost is that the launcher must declare INTERNET.
  *
+ * Loopback TCP takes anyone on the phone, so each connection is put to the kernel
+ * first (Peers): the shell uid — the PC's `adb forward`, or adb shell itself — and root
+ * may use every verb, the launcher every verb but the PC's own three (PC_ONLY), and any
+ * other app is answered "ERR not allowed" and hung up on.
+ *
  * Line-oriented ASCII so it can be driven by hand with `nc` during diagnosis:
  *
  *   PING                                      -> OK <uid>
@@ -121,13 +126,18 @@ public final class WmDaemon {
         try (Socket s = socket;
              BufferedReader in = new BufferedReader(new InputStreamReader(s.getInputStream()));
              PrintWriter out = new PrintWriter(s.getOutputStream(), true)) {
+            Caller caller = callerOf(s);
+            if (caller == null) {
+                out.println("ERR not allowed");
+                return;
+            }
             String line;
             while ((line = in.readLine()) != null) {
                 line = line.trim();
                 if (line.isEmpty()) continue;
                 if ("BYE".equalsIgnoreCase(line)) return;
                 try {
-                    handle(line.split("\\s+"), out);
+                    handle(line.split("\\s+"), out, caller);
                 } catch (Throwable t) {
                     out.println("ERR " + t.getMessage());
                 }
@@ -137,8 +147,95 @@ public final class WmDaemon {
         }
     }
 
-    private static void handle(String[] a, PrintWriter out) {
-        switch (a[0].toUpperCase()) {
+    // ── who may connect ─────────────────────────────────────────────────────
+
+    /** What a connection may do. A caller that is neither is refused outright. */
+    private enum Caller {
+        /** uid 2000 or 0: the PC through `adb forward`, or adb shell itself. Everything. */
+        PC,
+        /** The launcher app, in any of its processes, Linux included. All but PC_ONLY. */
+        LAUNCHER
+    }
+
+    /**
+     * Verbs only the PC sends, closed to the launcher's uid as well as to strangers.
+     *
+     * ARM is the reason. Its argument is a shell command this process runs as uid 2000
+     * once the PC has gone quiet; the launcher only ever READS it (ARMED), and its uid
+     * is shared with the Linux guest, where any program the user installs runs. REQGET
+     * and REQACK drain the launcher's own requests to the PC, so the launcher has no use
+     * for them, and a guest that could ack would make taskbar presses vanish.
+     */
+    private static final java.util.Set<String> PC_ONLY =
+            new java.util.HashSet<>(java.util.Arrays.asList("ARM", "REQGET", "REQACK"));
+
+    /** The launcher's app id, once looked up; -1 before that. See isLauncher. */
+    private static volatile int launcherAppId = -1;
+    private static long launcherLookedUpAt = 0L;
+
+    /**
+     * Least time between two lookups of the launcher's uid. A reinstall gives it a new
+     * one — the PC uninstalls and reinstalls when the signature differs, with this
+     * process still running — so an unknown app uid asks again; but every such
+     * connection forks `cmd`, and an app knocking in a loop must not turn that into a
+     * fork loop.
+     */
+    private static final long LAUNCHER_LOOKUP_GAP_MS = 2000L;
+
+    private static volatile boolean unreadableSaid = false;
+    private static final java.util.Map<Integer, Long> refusalSaid = new java.util.HashMap<>();
+
+    private static Caller callerOf(Socket s) {
+        int uid = Peers.uidOf(s.getPort(), s.getLocalPort());
+        if (uid == Peers.UNREADABLE) {
+            // No phone measured so far denies shell these tables. One that did would
+            // have the daemon as open as it always was, rather than a desktop with no
+            // window chrome at all, and the log says which it is.
+            if (!unreadableSaid) {
+                unreadableSaid = true;
+                log("peers: /proc/net/tcp cannot be read — every caller is let in, as before");
+            }
+            return Caller.PC;
+        }
+        if (uid == Peers.ROOT_UID || uid == Peers.SHELL_UID) return Caller.PC;
+        if (uid >= 0 && isLauncher(uid)) return Caller.LAUNCHER;
+        synchronized (refusalSaid) {
+            long now = System.currentTimeMillis();
+            Long last = refusalSaid.get(uid);
+            if (last == null || now - last > 10_000L) {
+                refusalSaid.put(uid, now);
+                log("peers: refused " + (uid == Peers.UNKNOWN
+                        ? "a caller with no live socket (port " + s.getPort() + ")"
+                        : "uid " + uid));
+            }
+        }
+        return null;
+    }
+
+    private static boolean isLauncher(int uid) {
+        if (Peers.sameApp(uid, launcherAppId)) return true;
+        if (uid % Peers.PER_USER_RANGE < Peers.FIRST_APPLICATION_UID) return false;
+        synchronized (WmDaemon.class) {
+            long now = System.currentTimeMillis();
+            if (launcherAppId < 0 || now - launcherLookedUpAt >= LAUNCHER_LOOKUP_GAP_MS) {
+                launcherLookedUpAt = now;
+                int id = Peers.appIdFromList(
+                        sh("cmd package list packages -U --user 0 " + LAUNCHER), LAUNCHER);
+                if (id < 0) id = Peers.appIdFromDump(sh("dumpsys package " + LAUNCHER));
+                if (id != launcherAppId) log("peers: the launcher is app id " + id);
+                launcherAppId = id;
+            }
+        }
+        return Peers.sameApp(uid, launcherAppId);
+    }
+
+    private static void handle(String[] a, PrintWriter out, Caller caller) {
+        String verb = a[0].toUpperCase();
+        if (caller != Caller.PC && PC_ONLY.contains(verb)) {
+            out.println("ERR not allowed: " + verb);
+            return;
+        }
+        switch (verb) {
             case "PING":
                 out.println("OK " + Wm.uid());
                 return;
@@ -170,9 +267,10 @@ public final class WmDaemon {
                 // afford this and nothing else does it.
                 int display = i(a, 1);
                 String comp = a.length > 2 ? a[2] : "";
-                // This socket is reachable by any app on the phone, so the component is
-                // held to the character set of a real one before it goes near a shell.
-                // No quote can get through, so the quoting below cannot be escaped out of.
+                // The launcher's uid is also the Linux guest's, where anything the user
+                // installs runs, so the component is held to the character set of a real
+                // one before it goes near a shell. No quote can get through, so the
+                // quoting below cannot be escaped out of.
                 if (!COMPONENT.matcher(comp).matches()) {
                     out.println("ERR not a component: " + comp);
                     return;

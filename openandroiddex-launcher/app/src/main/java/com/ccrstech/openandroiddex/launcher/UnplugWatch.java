@@ -161,23 +161,45 @@ final class UnplugWatch {
     }
 
     /**
-     * One step of the PC's undo, which is `settings put|delete <namespace> <key>
-     * [value]` with values of letters, digits and dots (adb.rs, restorable). Only
-     * the global and secure namespaces: an app is refused the private system
+     * The only settings the PC ever arms — DESKTOP_GLOBALS, TOUCH_GLOBAL and
+     * PERF_GLOBALS in adb.rs, which this MUST match. All Settings.Global; the
+     * pointer speed rides the same chain but is a system setting no app may
+     * write, and is left for the computer.
+     *
+     * A list rather than whatever the chain says, because the chain comes over
+     * the window daemon's socket and this writes it with WRITE_SECURE_SETTINGS.
+     * The daemon refuses strangers, but an app that bound 127.0.0.1:7191 before
+     * the daemon could would be answering ARMED itself — and without this list
+     * it could have any global or secure setting written for it.
+     */
+    private static final java.util.Set<String> ARMED_KEYS = new java.util.HashSet<>(
+            java.util.Arrays.asList(
+                    "force_desktop_mode_on_external_displays",
+                    "enable_freeform_support",
+                    "force_resizable_activities",
+                    "hidden_api_policy",
+                    "block_untrusted_touches",
+                    "window_animation_scale",
+                    "transition_animation_scale",
+                    "animator_duration_scale"));
+
+    /**
+     * One step of the PC's undo, which is `settings put|delete global <key>
+     * [value]` with values of letters, digits and dots (adb.rs, restorable), for
+     * a key in {@link #ARMED_KEYS}. An app is refused the private system
      * settings, pointer_speed among them, even holding WRITE_SECURE_SETTINGS.
      */
     private static boolean apply(ContentResolver cr, String[] w) {
         if (w.length < 4 || !"settings".equals(w[0])) return false;
-        String ns = w[2];
-        boolean global = "global".equals(ns);
-        if (!global && !"secure".equals(ns)) return false;
+        if (!"global".equals(w[2])) return false;
         String key = w[3];
+        if (!ARMED_KEYS.contains(key)) return false;
         if ("put".equals(w[1]) && w.length == 5) {
-            return global ? Settings.Global.putString(cr, key, w[4]) : Settings.Secure.putString(cr, key, w[4]);
+            return Settings.Global.putString(cr, key, w[4]);
         }
         if ("delete".equals(w[1]) && w.length == 4) {
             // Settings has no public delete; this is the provider call `settings delete` makes.
-            cr.call(Uri.parse("content://settings"), "DELETE_" + ns, key, null);
+            cr.call(Uri.parse("content://settings"), "DELETE_global", key, null);
             return true;
         }
         return false;
