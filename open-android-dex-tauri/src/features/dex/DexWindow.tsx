@@ -130,7 +130,7 @@ export function DexWindow({ sessionKey }: { sessionKey: string }) {
     let rtt = 0;
     const clock = new FrameClock();
     let ages: number[] = [];
-    let logged = { at: performance.now(), frames: 0, ages: [] as number[], rtts: [] as number[], kbps: [] as number[] };
+    let logged = { at: performance.now(), frames: 0, ages: [] as number[], rtts: [] as number[], kbps: [] as number[], hidden: false };
 
     const send = (m: string | Uint8Array) => {
       if (ws && ws.readyState === WebSocket.OPEN) ws.send(m);
@@ -538,16 +538,19 @@ export function DexWindow({ sessionKey }: { sessionKey: string }) {
       if (up) {
         setStats({ size: `${dw}×${dh}`, fps, mbps: Math.round(phone.kbps / 100) / 10, latency: latency === null ? null : Math.round(latency), rtt });
       }
+      // A hidden window's page is run late by the webview, and so are its
+      // frames: half a minute of that is not a measurement of the link.
+      if (document.visibilityState !== "visible") logged.hidden = true;
       if (now - logged.at >= LOG_EVERY_MS) {
         const secs = (now - logged.at) / 1000;
-        if (up && logged.frames > 0) {
+        if (up && logged.frames > 0 && !logged.hidden) {
           const lat = median(logged.ages);
           logInfo(
             `dex: ${dw}x${dh}, ${(logged.frames / secs).toFixed(1)} fps shown, ${((median(logged.kbps) ?? 0) / 1000).toFixed(1)} Mb/s, ` +
               `latency ${lat === null ? "?" : Math.round(lat)} ms, link ${median(logged.rtts) ?? "?"} ms (${link?.route ?? "?"})`,
           );
         }
-        logged = { at: now, frames: 0, ages: [], rtts: [], kbps: [] };
+        logged = { at: now, frames: 0, ages: [], rtts: [], kbps: [], hidden: false };
       }
     }, 1000);
     const pingTimer = window.setInterval(() => send(JSON.stringify({ t: "ping", n: performance.now() })), 1000);

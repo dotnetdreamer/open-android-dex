@@ -270,7 +270,10 @@ after the draw.
 
 Both windows show it in their pill, and the Android desktop's window writes a
 line to the app's log every half minute: size, frames shown, bitrate, latency,
-round trip, route. scrcpy's window cannot be measured that way; its frame
+round trip, route — but not for a half minute it spent hidden. The webview
+runs a hidden window's page late, its frames with it: measured, a window left
+behind another app read 46–50 ms where it had read 19 in front, with the same
+round trip. scrcpy's window cannot be measured that way; its frame
 count (`--print-fps`) is summed into one log line every half minute instead,
 so the two can be read against each other.
 
@@ -329,4 +332,7 @@ Not yet:
 - a portrait-only app fullscreen on the desktop (ROTATES_WITH_CONTENT, kept
   from scrcpy's flags; a rotated display is not handled here);
 - whether reading the clipboard as the shell shows Android 12's "pasted from
-  your clipboard" toast.
+  your clipboard" toast;
+- a hidden window: the phone keeps encoding every change for it, as for
+  scrcpy's (its acknowledgements come late, so the pace slows and the bitrate
+  falls by itself); pausing the stream while hidden is not done.
