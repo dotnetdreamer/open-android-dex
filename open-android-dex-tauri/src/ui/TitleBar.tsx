@@ -31,7 +31,8 @@ export function TitleBar({
   const win = getCurrentWindow();
   return (
     <header data-tauri-drag-region="deep" className="titlebar">
-      <div className={`pointer-events-none flex min-w-0 flex-1 items-center ${TITLEBAR_LEAD}`}>
+      <div className={`pointer-events-none flex min-w-0 flex-1 items-center gap-2 ${TITLEBAR_LEAD}`}>
+        <img src="/logo.svg" alt="" width={16} height={16} className="shrink-0" draggable={false} />
         <span className="titlebar-name truncate">Open Android DeX</span>
       </div>
       <Segmented

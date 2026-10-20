@@ -1,5 +1,7 @@
 <div align="center">
 
+<img src="doc/img/logo.png" width="112" height="112" alt="Open Android DeX">
+
 # Open Android DeX
 
 ### Your phone is already a computer. This gives it a desktop
