@@ -201,7 +201,10 @@ export type DesktopEvent =
   /** The phone is starting the desktop, which can take a minute. */
   | { kind: "starting" }
   /** The path to the phone, which sets the picture's quality. */
-  | { kind: "path"; direct: boolean; rttMs: number }
+  | { kind: "path"; direct: boolean; rttMs: number };
+
+/** What a desktop window hears of what Linux sends this computer (remote_desktop_inbox). */
+export type InboxEvent =
   /** Linux sent this computer something, and it is on its way. */
   | { kind: "receiving"; name: string }
   /** …and here it is, in Downloads. */

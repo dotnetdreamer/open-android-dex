@@ -27,8 +27,8 @@ look arbitrary until you know what was measured.
 | The socket | `LinuxStreamSocket.java` | the server end of a WebSocket, and `GET /probe` |
 | Waking it | `RemoteProvider.java`, method `stream` | one `content call` that starts the service the socket lives in |
 | The computer's end | `src-tauri/src/remote_usb.rs` | adb's own protocol, which phone is which, the window's port and its checks |
-| Which way | `src/features/remote/DesktopRouter.tsx` | adb or the tunnel, and moving between them |
-| The window | `src/features/remote/usb/UsbDesktop.tsx` | decoding, the cursor, input, the size, the clipboard, the status pill |
+| Which way | `src/features/remote/DesktopRouter.tsx` | adb or the tunnel, and moving between them; and what is the window's either way — the clipboard, drops, what Linux sends |
+| The window | `src/features/remote/usb/UsbDesktop.tsx` | decoding, the cursor, input, the size, the clipboard's guest end, the status pill |
 | Pure parts | `usb/h264.ts`, `usb/keysym.ts` | Annex B → WebCodecs; keys → keysyms |
 | Check | `test/usb-desktop-test.mjs`, `test/usb-desktop/` | everything off the phone, and the stream classes on one |
 
@@ -168,9 +168,18 @@ the characters. Held keys and buttons are let go when the window loses focus,
 and on a Mac every key goes up with Cmd, which reports no keyup for them. F11 is
 the window's fullscreen.
 
-The clipboard follows TigerVNC's viewer: this computer's to Linux when the window
-comes to the front, Linux's to this computer while it is there. Standard cut text
-only, so Latin-1 — see below.
+The clipboard is the window's, the same one the tunnel's page uses
+(`clipboardShare.ts`, remote-access.md's "The clipboard"): this computer's to
+Linux when the window comes to the front, Linux's to this computer while it is
+there, and the switch for it — on the status pill here, as on the viewer's bar
+through the tunnel — remembered per phone. The stream only carries the text
+(`clip`, both ways) and the phone hands it to Xvnc. Standard cut text only, so
+Latin-1 — see below.
+
+Files dropped on the window, and what Linux sends this computer, are the
+window's too (`DesktopRouter.tsx`): they go through the tunnel whichever way
+the picture comes — SFTP into the guest's Desktop, and from its outbox into
+Downloads — so a copy under way carries on when the cable is pulled.
 
 **The title says how the window gets there**: `<phone> — Linux · USB` on the
 cable, `· Wi-Fi` on wireless debugging, and through the tunnel `· Wi-Fi` on the
@@ -192,6 +201,12 @@ otherwise goes through the tunnel. The desktop lives on the phone, so nothing in
 it is lost either way. While on the tunnel the window probes adb every three
 seconds, and moves back when the phone is there.
 
+What the window owns rather than the route goes along unchanged: a copy in
+progress, the cards in the corner, the clipboard's switch. Only the guest's
+copy of this computer's clipboard has to be given again — Xvnc holds a
+client's clipboard only while that client stays — and the new connection gets
+it.
+
 A DeX session on the same cable is another matter: pulling the cable ends it,
 and a minute later the window daemon's dead-man switch undoes the session on the
 phone, force-stopping the launcher — the Linux desktop with it. That switch now
@@ -201,6 +216,13 @@ unreachable over SSH and the desktop window until something else restarted the
 app.
 
 ## Verified, and not yet
+
+The window in headless Chrome, off the phone, Tauri's IPC mocked and the adb
+end a stand-in LinuxStream (41 checks, the same run as remote-access.md's):
+the route chosen and the stream asked for at the cable's rate, the clipboard
+and its switch over the stream, a drop on the video, the cable pulled in the
+middle of a copy and the copy finishing on the tunnel, the clipboard given
+again on the new connection, and the move back to adb within three seconds.
 
 Off the phone (`node test/usb-desktop-test.mjs`, 50 checks): the window's H.264
 handling and key mapping; the launcher's own `LinuxStreamRfb` against a stand-in

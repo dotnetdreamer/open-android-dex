@@ -1,14 +1,16 @@
 /**
  * The clipboard between this computer and a phone's Linux desktop, for one
- * desktop window (DesktopWindow.tsx).
+ * desktop window (DesktopRouter.tsx), whichever way the window reaches it.
  *
- * The frame — the phone's own viewer page — cannot touch this computer's
- * clipboard, and must not be trusted to decide when it may: anything running
- * as root in the guest can rewrite it. So everything that reads or writes the
- * clipboard, and the switch that says whether it may, is here, on the window's
- * side. The frame hands the guest's clipboard up (`clip`) and asks for the
- * switch to flip (`share: "toggle"`); this hands the computer's down (`paste`)
- * and says which way the switch is (`share: true|false`).
+ * Through the tunnel the guest's end is a frame — the phone's own viewer page
+ * — which cannot touch this computer's clipboard, and must not be trusted to
+ * decide when it may: anything running as root in the guest can rewrite it.
+ * Over adb it is the video's socket (usb/UsbDesktop.tsx). Either way
+ * everything that reads or writes the clipboard, and the switch that says
+ * whether it may, is here, on the window's side. The guest's end hands the
+ * guest's clipboard up (`fromGuest`) and asks for the switch to flip
+ * (`toggle`); this hands the computer's down (`paste`) and says which way the
+ * switch is (`share: true|false`).
  *
  * The rules, which are TigerVNC's own viewer's:
  *
@@ -23,12 +25,15 @@
  * Pure logic, so the browser check runs this very file against the real page.
  */
 
+/** What goes to the guest's end: the computer's clipboard, or the switch. */
+export type ToGuest = { paste: string } | { share: boolean };
+
 export interface ClipboardHost {
   /** The computer's clipboard as text; null when it holds none. */
   read(): Promise<string | null>;
   write(text: string): Promise<void>;
-  /** To the frame. */
-  post(msg: { paste: string } | { share: boolean }): void;
+  /** To the guest's end, whichever it is now. */
+  post(msg: ToGuest): void;
   /** This window is the one in front. */
   focused(): boolean;
   /** A sentence over the picture: the window's own words, never the frame's. */
@@ -57,6 +62,12 @@ export class ClipboardShare {
   private on: boolean;
   /** What both sides last agreed the clipboard says, with LF line ends. */
   private synced: string | null = null;
+  /**
+   * What the two agreed on came from this computer, so the guest holds it
+   * only through the connection it came by: Xvnc keeps a client's clipboard
+   * for as long as that client stays, and lets it go when it leaves.
+   */
+  private fromComputer = false;
   /** The guest's, from while the window was elsewhere. */
   private pending: string | null = null;
   /** Too large for the guest, said once. */
@@ -75,8 +86,14 @@ export class ClipboardShare {
     return this.on;
   }
 
-  /** The page connected: tell it the switch, and give the guest the clipboard if the window is in front. */
+  /** The guest's end connected: tell it the switch, and give the guest the clipboard if the window is in front. */
   connected() {
+    // A new connection — the cable pulled and the tunnel taking over, or the
+    // way back — finds the guest without what the old one had given it.
+    if (this.fromComputer) {
+      this.synced = null;
+      this.fromComputer = false;
+    }
     this.host.post({ share: this.on });
     if (this.host.focused()) void this.focus();
   }
@@ -99,6 +116,7 @@ export class ClipboardShare {
         return;
       }
       this.synced = text;
+      this.fromComputer = true;
       this.host.post({ paste: text });
       return;
     }
@@ -129,7 +147,7 @@ export class ClipboardShare {
     }, 150);
   }
 
-  /** The page's button. */
+  /** The switch, pressed on either end. */
   toggle() {
     this.on = !this.on;
     this.host.save(this.on);
@@ -156,6 +174,7 @@ export class ClipboardShare {
   private async commit(text: string) {
     if (text === this.synced) return;
     this.synced = text;
+    this.fromComputer = false;
     try {
       await this.host.write(text);
     } catch {

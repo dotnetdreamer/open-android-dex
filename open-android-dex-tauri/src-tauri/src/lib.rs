@@ -100,6 +100,7 @@ pub fn run() {
             remote_desktop::remote_desktop_connect,
             remote_desktop::remote_desktop_put,
             remote_desktop::remote_desktop_put_cancel,
+            remote_desktop::remote_desktop_inbox,
             remote_desktop::remote_desktop_reveal,
             remote_usb::remote_desktop_usb
         ])

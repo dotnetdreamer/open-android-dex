@@ -41,7 +41,8 @@ was measured, or what the platform refuses.
 | Coming back | `RemoteResumeReceiver.java` | boot, updates, the desktop app's teardown |
 | The guest's sshd | `openandroiddex-linux/linux-ssh.sh`, `setup_ssh` in `linux-setup.sh` | OpenSSH in a proot of its own |
 | Desktop app | `src-tauri/src/remote.rs`, `src/features/remote/RemotePanel.tsx` | Phone Linux panel, `ssh-proxy` |
-| The desktop's window | `src-tauri/src/remote_desktop.rs`, `src/features/remote/DesktopWindow.tsx` | the window, its local port, reconnecting, fullscreen, drops |
+| The desktop's window | `src-tauri/src/remote_desktop.rs`, `src/features/remote/DesktopWindow.tsx` | the window, its local port, reconnecting, fullscreen |
+| What crosses, either way | `src/features/remote/DesktopRouter.tsx`, `DesktopCards.tsx` | the clipboard's switch, drops and what Linux sends, over adb or the tunnel |
 | The desktop's page | `assets/linux/novnc/dex.js` (`ctx=pc`) | the phone's own viewer, in that window |
 | The clipboard | `src/features/remote/clipboardShare.ts` | when it crosses, which way, and the switch |
 | Files onto the phone | `openandroiddex-remote/src/sftp.rs` | SFTP in the tunnel, never over anything; `dexremote put` |
@@ -413,6 +414,11 @@ its modules and its WebSocket need; the window navigates only to its own page
 and its viewer's port, and opens no other windows. A rewritten page can draw in
 its rectangle and post messages, which the window checks for source and origin.
 
+What crosses between the computer and the guest — the clipboard, files
+dropped on the window, what Linux sends back — belongs to the window, not to
+this page (`DesktopRouter.tsx`): the window also shows the desktop over adb
+([usb-desktop.md](usb-desktop.md)), and those outlast a move between the two.
+
 The two talk in those messages (dex.js, "the window around a computer's page"):
 
 | page → window | | window → page | |
@@ -499,6 +505,11 @@ the other.
   meanwhile: the newer copy wins.
 - A selection being dragged out in the guest announces itself many times a
   second; the clipboard gets the last of them, 150 ms after.
+- *A new connection gets the computer's text again* if that is what the guest
+  last had. Xvnc holds a client's clipboard only while that client stays —
+  when it leaves, Xvnc lets the selection go — so a reconnect, or the window
+  moving between adb and the tunnel, would otherwise leave Linux with nothing
+  to paste.
 
 **Xvnc already does its half.** TigerVNC 1.13.1, as Ubuntu 24.04 ships it,
 keeps the clipboard itself (no `vncconfig`), and its defaults are the ones
@@ -559,7 +570,9 @@ macOS 26. If Apple turns it on, the first read will ask, once per app.
 
 ### Files, dropped on the window
 
-Dragging files or folders over the window covers it with "Drop to copy to the
+Dragging files or folders over the window — over adb or through the tunnel,
+the copy goes this way either way, and a cable pulled during one does not stop
+it — covers it with "Drop to copy to the
 Desktop on ‹phone›"; dropping them copies them — a folder with everything in
 it — into the guest's `~/Desktop`, where XFCE shows them as they land. A card
 in the window's corner shows how far it has got, with a Cancel; a drop made
@@ -742,7 +755,14 @@ under it and the frame in a process of its own — 24 checks: the switch read
 before the clipboard, the clipboard on connect and on Tauri's focus event,
 the drop cover, `remote_desktop_put` with the dropped paths, the card's
 progress, a drop queued behind a copy, Cancel, and a copy that finished and
-one that failed.
+one that failed. And again once the window took the desktop over adb too
+(`DesktopRouter.tsx`, 41 checks, the adb end a stand-in LinuxStream): the
+clipboard and its switch over the stream as through the frame, a drop over
+the video, the cable pulled in the middle of a copy — the window on the
+tunnel within a look at adb, the copy carrying on and finishing there, the
+guest given the computer's text again on the new connection — and the cable
+back, the window on adb within its three seconds, what Linux sends asked for
+once per window and its card kept.
 
 Verified on a phone (Galaxy S25 Ultra, Android 16, 2026-10-19): USB pairing
 by `dexremote pair-adb` switching remote access on; the daemon as the app's

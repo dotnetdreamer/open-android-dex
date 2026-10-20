@@ -21,6 +21,8 @@
 //! same tunnel ([`dexremote::sftp`]); and while the window is open, what Linux
 //! sends this computer — Thunar's Send To, the dock's "Send to computer" — is
 //! fetched from its outbox into Downloads ([`dexremote::outbox`], [`inbox`]).
+//! Both go through the tunnel whichever way the picture comes (remote_usb.rs
+//! brings it over adb), so they belong to the window, not to the viewer.
 //! The clipboard is the window page's own business (clipboardShare.ts),
 //! through the clipboard plugin.
 //!
@@ -53,6 +55,12 @@ pub enum DesktopEvent {
     /// The path to the phone: straight there or through a relay, and its
     /// round trip. The window sets the picture's quality from it.
     Path { direct: bool, rtt_ms: u64 },
+}
+
+/// What a desktop window hears of what Linux sends this computer.
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
+pub enum InboxEvent {
     /// Linux sent this computer something, and it is on its way: its name.
     Receiving { name: String },
     /// …and here it is, in Downloads.
@@ -81,16 +89,27 @@ struct Link {
     port: u16,
     events: Arc<Mutex<Option<Channel<DesktopEvent>>>>,
     tasks: [JoinHandle<()>; 3],
-    /// The outbox fetch: cancelled, never aborted, so that a file half
-    /// fetched is taken back rather than left in Downloads.
-    inbox: CancellationToken,
-    /// What this window has saved, the only paths its "Show" may reveal.
-    received: Arc<Mutex<Vec<PathBuf>>>,
 }
 
 fn links() -> &'static Mutex<HashMap<String, Link>> {
     static LINKS: OnceLock<Mutex<HashMap<String, Link>>> = OnceLock::new();
     LINKS.get_or_init(Default::default)
+}
+
+/// One window's fetching of what Linux sends it, for as long as the window is
+/// open — over adb or through the tunnel, the files come the same way.
+struct Inbox {
+    /// Cancelled, never aborted, so that a file half fetched is taken back
+    /// rather than left in Downloads.
+    cancel: CancellationToken,
+    events: Arc<Mutex<Option<Channel<InboxEvent>>>>,
+    /// What this window has saved, the only paths its "Show" may reveal.
+    received: Arc<Mutex<Vec<PathBuf>>>,
+}
+
+fn inboxes() -> &'static Mutex<HashMap<String, Inbox>> {
+    static INBOXES: OnceLock<Mutex<HashMap<String, Inbox>>> = OnceLock::new();
+    INBOXES.get_or_init(Default::default)
 }
 
 /// One window per phone, named after it.
@@ -155,13 +174,7 @@ async fn link(
     // A phone whose daemon was started again — the app updated, the end of a
     // DeX session — never says the old connection died; this notices.
     let alive = tauri::async_runtime::spawn(desktop.clone().keep_alive());
-    let inbox = CancellationToken::new();
-    let received: Arc<Mutex<Vec<PathBuf>>> = Arc::default();
-    tauri::async_runtime::spawn(self::inbox(window.app_handle().clone(), paired.clone(), events.clone(), received.clone(), inbox.clone()));
-    map.insert(
-        label.to_string(),
-        Link { desktop: desktop.clone(), port, events: events.clone(), tasks: [serve, watch, alive], inbox, received },
-    );
+    map.insert(label.to_string(), Link { desktop: desktop.clone(), port, events: events.clone(), tasks: [serve, watch, alive] });
     Ok((desktop, port, events))
 }
 
@@ -179,7 +192,7 @@ const INBOX_RETRY: Duration = Duration::from_secs(15);
 async fn inbox(
     app: AppHandle,
     phone: Phone,
-    events: Arc<Mutex<Option<Channel<DesktopEvent>>>>,
+    events: Arc<Mutex<Option<Channel<InboxEvent>>>>,
     received: Arc<Mutex<Vec<PathBuf>>>,
     cancel: CancellationToken,
 ) {
@@ -197,7 +210,7 @@ async fn inbox(
         Ok(me) => me,
         Err(e) => return log::warn!("remote: cannot fetch what Linux sends: {e}"),
     };
-    let tell = |event: DesktopEvent| {
+    let tell = |event: InboxEvent| {
         if let Some(channel) = events.lock().unwrap().as_ref() {
             let _ = channel.send(event);
         }
@@ -256,7 +269,7 @@ async fn inbox(
         };
         let fetched = match beat {
             Ok(()) => {
-                outbox::fetch(guest, home, &me, &downloads, |name| tell(DesktopEvent::Receiving { name: name.to_string() }), &cancel)
+                outbox::fetch(guest, home, &me, &downloads, |name| tell(InboxEvent::Receiving { name: name.to_string() }), &cancel)
                     .await
             }
             Err(e) => Err(e),
@@ -267,7 +280,7 @@ async fn inbox(
                     let dir = Path::new(&batch.dir);
                     received.lock().unwrap().extend(batch.landed.iter().map(|name| dir.join(name)));
                     log::info!("remote: saved {} item(s) from {} to {}", batch.landed.len(), phone.name, batch.dir);
-                    tell(DesktopEvent::Received(batch));
+                    tell(InboxEvent::Received(batch));
                 }
             }
             Err(e) => {
@@ -332,15 +345,17 @@ fn copies() -> &'static Mutex<HashMap<String, (u64, CancellationToken)>> {
 /// The window is gone: so is its port, and the phone is told rather than left
 /// to time the connection out — it stays awake for as long as it believes
 /// someone is looking. A copy still going is stopped, and takes back what it
-/// was in the middle of.
+/// was in the middle of; so does a fetch from the outbox.
 pub fn window_closed(label: &str) {
     if let Some((_, copy)) = copies().lock().unwrap().remove(label) {
         copy.cancel();
     }
+    if let Some(inbox) = inboxes().lock().unwrap().remove(label) {
+        inbox.cancel.cancel();
+    }
     // Its port over adb too, when it had one.
     crate::remote_usb::window_closed(label);
     let Some(link) = links().lock().unwrap().remove(label) else { return };
-    link.inbox.cancel();
     for task in &link.tasks {
         task.abort();
     }
@@ -348,9 +363,13 @@ pub fn window_closed(label: &str) {
     log::info!("remote: closed the desktop window {label}");
 }
 
-/// The app is exiting.
+/// The app is exiting. A window that only ever went over adb has an inbox and
+/// no link.
 pub fn close_all() {
-    let labels: Vec<String> = links().lock().unwrap().keys().cloned().collect();
+    let mut labels: Vec<String> = links().lock().unwrap().keys().cloned().collect();
+    labels.extend(inboxes().lock().unwrap().keys().cloned());
+    labels.sort();
+    labels.dedup();
     for label in labels {
         window_closed(&label);
     }
@@ -548,16 +567,44 @@ pub fn remote_desktop_put_cancel(window: WebviewWindow) {
     }
 }
 
+/// From a desktop window, once it is open, whichever way it reaches its
+/// phone: fetch what Linux sends this computer into Downloads for as long as
+/// the window stays open, and tell `events` (see [`inbox`]). Asked again — the
+/// page reloaded — the fetching goes on, and tells the new page.
+#[tauri::command]
+pub async fn remote_desktop_inbox(window: WebviewWindow, id: String, events: Channel<InboxEvent>) -> Result<(), String> {
+    let label = window.label().to_string();
+    if label != label_for(&id) {
+        return Err("this window belongs to another phone".into());
+    }
+    let paired = crate::remote::find(&id)?;
+    let mut inboxes = inboxes().lock().unwrap();
+    if let Some(inbox) = inboxes.get(&label) {
+        *inbox.events.lock().unwrap() = Some(events);
+        return Ok(());
+    }
+    let inbox = Inbox { cancel: CancellationToken::new(), events: Arc::new(Mutex::new(Some(events))), received: Arc::default() };
+    tauri::async_runtime::spawn(self::inbox(
+        window.app_handle().clone(),
+        paired,
+        inbox.events.clone(),
+        inbox.received.clone(),
+        inbox.cancel.clone(),
+    ));
+    inboxes.insert(label, inbox);
+    Ok(())
+}
+
 /// "Show": what Linux sent, in Finder or Explorer — only ever something this
 /// window itself saved.
 #[tauri::command]
 pub fn remote_desktop_reveal(window: WebviewWindow, path: String) -> Result<(), String> {
     let wanted = PathBuf::from(&path);
-    let ours = links()
+    let ours = inboxes()
         .lock()
         .unwrap()
         .get(window.label())
-        .is_some_and(|link| link.received.lock().unwrap().iter().any(|p| *p == wanted));
+        .is_some_and(|inbox| inbox.received.lock().unwrap().iter().any(|p| *p == wanted));
     if !ours {
         return Err("that is not something this window saved".into());
     }
@@ -598,10 +645,10 @@ mod tests {
         for key in ["dir", "landed", "files", "bytes", "links", "unreadable", "cancelled"] {
             assert!(report.get(key).is_some(), "the window reads {key}");
         }
-        let receiving = serde_json::to_string(&DesktopEvent::Receiving { name: "a.pdf".into() }).unwrap();
+        let receiving = serde_json::to_string(&InboxEvent::Receiving { name: "a.pdf".into() }).unwrap();
         assert_eq!(receiving, r#"{"kind":"receiving","name":"a.pdf"}"#);
         let got = Received { dir: "/Users/me/Downloads".into(), landed: vec!["a.pdf".into()], first: Some("/Users/me/Downloads/a.pdf".into()), ..Default::default() };
-        let got = serde_json::to_value(DesktopEvent::Received(got)).unwrap();
+        let got = serde_json::to_value(InboxEvent::Received(got)).unwrap();
         assert_eq!(got["kind"], "received");
         for key in ["dir", "landed", "first", "files", "bytes", "links", "missing", "failed"] {
             assert!(got.get(key).is_some(), "the window reads {key}");

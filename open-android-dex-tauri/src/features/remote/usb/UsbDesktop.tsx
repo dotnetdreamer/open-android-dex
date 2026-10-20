@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { readText, writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { error as logError, info as logInfo } from "@tauri-apps/plugin-log";
 import { IS_MAC } from "../../../lib/host";
+import type { ToGuest } from "../clipboardShare";
+import type { DesktopHost } from "../DesktopCards";
 import { avcC, codecString, sameBytes, splitAccessUnit } from "./h264";
 import { ALTS, isModifier, keyDown, XK_ISO_LEVEL3_SHIFT } from "./keysym";
 
@@ -14,9 +15,9 @@ import { ALTS, isModifier, keyDown, XK_ISO_LEVEL3_SHIFT } from "./keysym";
  * a canvas the size of the window. The pointer is this computer's own, wearing
  * the shape Xvnc sends — it moves at this screen's rate whatever the video is
  * doing, which is most of why it feels like a local desktop. Keys go as
- * keysyms (keysym.ts), the window's size goes as the desktop's, and the
- * clipboard follows TigerVNC's viewer: this computer's to Linux when the
- * window comes to the front, Linux's to this computer while it is there.
+ * keysyms (keysym.ts), and the window's size goes as the desktop's. The
+ * clipboard, files dropped on the window and what Linux sends back are the
+ * window's (DesktopRouter.tsx); this is only the guest's end of the clipboard.
  *
  * Nothing in the guest reaches this page's code: what comes in is video, a
  * cursor bitmap, clipboard text and a few numbers.
@@ -76,6 +77,7 @@ export function UsbDesktop({
   wireless,
   name,
   start,
+  host,
   onLost,
 }: {
   url: string;
@@ -83,6 +85,8 @@ export function UsbDesktop({
   name: string;
   /** Start the desktop if it is not running: a window's first open, never its comebacks. */
   start: boolean;
+  /** The window around this view: the clipboard, and where drops go. */
+  host: DesktopHost;
   /** The stream went without the phone saying why: the cable, most likely. */
   onLost: () => void;
 }) {
@@ -90,7 +94,9 @@ export function UsbDesktop({
   const [phase, setPhase] = useState<Phase>({ kind: "connecting" });
   const [stats, setStats] = useState<Stats | null>(null);
   const [pill, setPill] = useState(true);
-  const actions = useRef({ again: () => {}, fullscreen: () => {} });
+  /** The clipboard's switch, as the window last said it; null until it has. */
+  const [share, setShare] = useState<boolean | null>(null);
+  const actions = useRef({ again: () => {}, fullscreen: () => {}, clipboard: () => {} });
   const lostRef = useRef(onLost);
   lostRef.current = onLost;
 
@@ -148,6 +154,10 @@ export function UsbDesktop({
         if (!up) {
           up = true;
           setPhase({ kind: "up" });
+          host.showing(true);
+          detach?.();
+          detach = host.attach(toGuest);
+          void host.clipboard.then((c) => c.connected());
           pillShown = true;
           setPill(true);
           window.setTimeout(() => {
@@ -356,40 +366,36 @@ export function UsbDesktop({
       }
     };
 
-    // ── the clipboard ──
-    /** What both sides last agreed the clipboard says. */
-    let synced: string | null = null;
-    /** The guest's, from while the window was elsewhere. */
-    let guestPending: string | null = null;
-    const lf = (t: string) => t.replace(/\r\n?/g, "\n");
-    const onFocus = async () => {
-      if (!up) return;
-      let mine: string | null = null;
-      try {
-        mine = await readText();
-      } catch {
-        mine = null;
+    // ── the clipboard's guest end (the rest is clipboardShare.ts, the window's) ──
+    /** Lets go of the clipboard's word for the guest, while this view has it. */
+    let detach: (() => void) | null = null;
+    let shared: boolean | null = null;
+    /** The guest is holding, right now, what the window gave it. */
+    let fromHost = false;
+    const toGuest = (msg: ToGuest) => {
+      if ("paste" in msg) {
+        send(JSON.stringify({ t: "clip", text: msg.paste }));
+        fromHost = true;
+        return;
       }
-      if (mine !== null && lf(mine) !== synced) {
-        synced = lf(mine);
-        guestPending = null;
-        send(JSON.stringify({ t: "clip", text: synced }));
-      } else if (guestPending !== null) {
-        const text = guestPending;
-        guestPending = null;
-        synced = text;
-        writeText(text).catch(() => {});
-      }
+      const was = shared;
+      shared = msg.share;
+      if (live) setShare(msg.share);
+      if (msg.share) return;
+      // Off means off: the computer's text, if that is what the guest has,
+      // does not stay there to be pasted. The guest's own is left alone.
+      if (was && fromHost) send(JSON.stringify({ t: "clip", text: "" }));
+      fromHost = false;
     };
     const fromGuest = (text: string) => {
-      const t = lf(text);
-      if (t === synced) return;
-      if (document.hasFocus()) {
-        synced = t;
-        writeText(t).catch(() => {});
-      } else {
-        guestPending = t;
-      }
+      fromHost = false;
+      void host.clipboard.then((c) => c.fromGuest(text));
+    };
+    /** The picture has gone: no drop lands on it, and the clipboard waits for the next view. */
+    const gone = () => {
+      detach?.();
+      detach = null;
+      host.showing(false);
     };
 
     // ── the window's size is the desktop's ──
@@ -457,6 +463,7 @@ export function UsbDesktop({
         if (socket !== ws || !live) return;
         ws = null;
         releaseAllLocal();
+        gone();
         if (!told) lostRef.current();
       };
     };
@@ -476,10 +483,12 @@ export function UsbDesktop({
           else if (state === "stopped") {
             told = true;
             up = false;
+            gone();
             setPhase({ kind: "stopped" });
           } else {
             told = true;
             up = false;
+            gone();
             const why: Record<string, string> = {
               missing: "Linux is not installed on the phone yet.",
               installing: "Linux on the phone is still being set up.",
@@ -543,12 +552,13 @@ export function UsbDesktop({
     window.addEventListener("keydown", onKeyDown);
     window.addEventListener("keyup", onKeyUp);
     window.addEventListener("blur", releaseAll);
-    window.addEventListener("focus", onFocus);
     window.addEventListener("resize", onResize);
 
     actions.current = {
       again: () => connect(true),
       fullscreen: () => void toggleFullscreen(),
+      // The window keeps the switch, and says it moved.
+      clipboard: () => void host.clipboard.then((c) => c.toggle()),
     };
     connect(start);
 
@@ -566,14 +576,14 @@ export function UsbDesktop({
       window.removeEventListener("keydown", onKeyDown);
       window.removeEventListener("keyup", onKeyUp);
       window.removeEventListener("blur", releaseAll);
-      window.removeEventListener("focus", onFocus);
       window.removeEventListener("resize", onResize);
+      gone();
       const s = ws;
       ws = null;
       s?.close();
       if (decoder && decoder.state !== "closed") decoder.close();
     };
-  }, [url, wireless, start]);
+  }, [url, wireless, start, host]);
 
   const covered = phase.kind !== "up";
   return (
@@ -597,6 +607,16 @@ export function UsbDesktop({
               <span className="tabular-nums text-slate-400">
                 {stats.size} · {stats.fps} fps · {stats.mbps} Mb/s · {stats.rttMs} ms
               </span>
+            )}
+            {share !== null && (
+              <button
+                className={`link-btn ${share ? "" : "muted"}`}
+                onClick={() => actions.current.clipboard()}
+                title={share ? "Clipboard shared with this computer" : "Clipboard not shared"}
+                aria-pressed={share}
+              >
+                {share ? "Clipboard on" : "Clipboard off"}
+              </button>
             )}
             <button className="link-btn" onClick={() => actions.current.fullscreen()} title="Fullscreen (F11)">
               Fullscreen
