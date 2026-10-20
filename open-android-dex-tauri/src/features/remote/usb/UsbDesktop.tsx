@@ -3,7 +3,8 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { error as logError, info as logInfo } from "@tauri-apps/plugin-log";
 import { IS_MAC } from "../../../lib/host";
 import type { ToGuest } from "../clipboardShare";
-import type { DesktopHost } from "../DesktopCards";
+import { Icon } from "../../../ui/Icon";
+import { DesktopCover, type DesktopHost } from "../DesktopCards";
 import { avcC, codecString, sameBytes, splitAccessUnit } from "./h264";
 import { ALTS, isModifier, keyDown, XK_ISO_LEVEL3_SHIFT } from "./keysym";
 
@@ -624,69 +625,51 @@ export function UsbDesktop({
         style={{ objectFit: "contain", imageRendering: "pixelated", touchAction: "none" }}
         aria-label={`The Linux desktop on ${name}`}
       />
-      {covered && <UsbCover phase={phase} name={name} onAgain={() => actions.current.again()} />}
+      {covered && (
+        <DesktopCover
+          name={name}
+          state={phase.kind}
+          message={phase.kind === "failed" ? phase.message : undefined}
+          via={tier === "cable" ? "usb" : "wifi"}
+          onAgain={() => actions.current.again()}
+          onClose={() => void getCurrentWindow().close()}
+        />
+      )}
       {!covered && (
         <div
           className={`pointer-events-none absolute inset-x-0 top-2 flex justify-center transition-opacity duration-200 ${pill ? "opacity-100" : "opacity-0"}`}
         >
-          <div className="glass pointer-events-auto flex items-center gap-3 px-3.5 py-1.5 text-[12px] text-slate-200 shadow-lg">
-            <span className="h-2 w-2 rounded-full bg-emerald-400" aria-hidden="true" />
+          <div className="toast card-raised pointer-events-auto !w-auto max-w-full !items-center !gap-1 !rounded-full !py-1 !pl-3.5 !pr-1 text-[12px]">
+            <span className="dot dot-ok mr-1" aria-hidden="true" />
             <span className="font-semibold">{route}</span>
             {stats && (
-              <span className="tabular-nums text-slate-400">
+              <span className="ml-2 hidden tabular-nums text-[var(--ink-3)] sm:inline">
                 {stats.size} · {stats.fps} fps · {stats.mbps} Mb/s · {stats.rttMs} ms
               </span>
             )}
+            <span className="mx-1.5 h-4 w-px bg-[var(--line-2)]" aria-hidden="true" />
             {share !== null && (
               <button
-                className={`link-btn ${share ? "" : "muted"}`}
+                className={`btn btn-quiet btn-sm !rounded-full ${share ? "!text-[var(--accent-ink)]" : ""}`}
                 onClick={() => actions.current.clipboard()}
                 title={share ? "Clipboard shared with this computer" : "Clipboard not shared"}
                 aria-pressed={share}
               >
+                <Icon name="clipboard" size={14} />
                 {share ? "Clipboard on" : "Clipboard off"}
               </button>
             )}
-            <button className="link-btn" onClick={() => actions.current.fullscreen()} title="Fullscreen (F11)">
-              Fullscreen
+            <button
+              className="btn btn-quiet btn-sm btn-icon !rounded-full"
+              onClick={() => actions.current.fullscreen()}
+              title="Full screen (F11)"
+              aria-label="Full screen"
+            >
+              <Icon name="fullscreen" size={14} />
             </button>
           </div>
         </div>
       )}
-    </div>
-  );
-}
-
-function UsbCover({ phase, name, onAgain }: { phase: Exclude<Phase, { kind: "up" }>; name: string; onAgain: () => void }) {
-  const busy = phase.kind === "connecting" || phase.kind === "starting";
-  const copy: Record<typeof phase.kind, [string, string]> = {
-    connecting: [`Reaching ${name}…`, ""],
-    starting: [`Starting the desktop on ${name}…`, "The first start can take a minute."],
-    stopped: [`The desktop is not running on ${name}`, "It was shut down, or logged out of, on the phone."],
-    failed: [`No desktop from ${name}`, phase.kind === "failed" ? phase.message : ""],
-  };
-  const [title, detail] = copy[phase.kind];
-  return (
-    <div className="fade-in absolute inset-0 flex items-center justify-center bg-[var(--bg)] p-6">
-      <div className="glass flex w-[440px] max-w-full flex-col items-center gap-2 px-7 py-6 text-center">
-        <p className="text-[15px] font-semibold text-slate-100">{title}</p>
-        {detail && <p className="text-[12.5px] leading-relaxed text-slate-400">{detail}</p>}
-        {busy ? (
-          <span
-            className="mt-2 h-5 w-5 animate-spin rounded-full border-2 border-white/15 border-t-[var(--accent)]"
-            aria-hidden="true"
-          />
-        ) : (
-          <div className="mt-3 flex gap-2">
-            <button className="btn-accent" onClick={onAgain}>
-              {phase.kind === "stopped" ? "Start it" : "Try again"}
-            </button>
-            <button className="btn-ghost" onClick={() => void getCurrentWindow().close()}>
-              Close
-            </button>
-          </div>
-        )}
-      </div>
     </div>
   );
 }

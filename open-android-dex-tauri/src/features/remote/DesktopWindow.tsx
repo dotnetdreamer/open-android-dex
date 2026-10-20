@@ -3,7 +3,8 @@ import { Channel, invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { error as logError } from "@tauri-apps/plugin-log";
 import type { DesktopEvent, DesktopOpened } from "../../lib/types";
-import type { DesktopHost } from "./DesktopCards";
+import { Icon } from "../../ui/Icon";
+import { DesktopCover, type DesktopHost } from "./DesktopCards";
 
 /**
  * A paired phone's Linux desktop through the tunnel (remote_desktop.rs): one
@@ -48,50 +49,6 @@ type View =
   | { kind: "up" }
   | { kind: "stopped" }
   | { kind: "failed"; message: string };
-
-function Cover({
-  view,
-  name,
-  onStart,
-  onClose,
-}: {
-  view: Exclude<View, { kind: "up" }>;
-  name: string;
-  onStart: () => void;
-  onClose: () => void;
-}) {
-  const busy = view.kind === "connecting" || view.kind === "starting";
-  const copy: Record<typeof view.kind, [string, string]> = {
-    connecting: [`Reaching ${name}…`, ""],
-    starting: [`Starting the desktop on ${name}…`, "The first start can take a minute."],
-    stopped: [`The desktop is not running on ${name}`, "It was shut down, or logged out of, on the phone."],
-    failed: [`No desktop from ${name}`, view.kind === "failed" ? view.message : ""],
-  };
-  const [title, detail] = copy[view.kind];
-  return (
-    <div className="fade-in absolute inset-0 flex items-center justify-center p-6">
-      <div className="glass flex w-[440px] max-w-full flex-col items-center gap-2 px-7 py-6 text-center">
-        <p className="text-[15px] font-semibold text-slate-100">{title}</p>
-        {detail && <p className="text-[12.5px] leading-relaxed text-slate-400">{detail}</p>}
-        {busy ? (
-          <span
-            className="mt-2 h-5 w-5 animate-spin rounded-full border-2 border-white/15 border-t-[var(--accent)]"
-            aria-hidden="true"
-          />
-        ) : (
-          <div className="mt-3 flex gap-2">
-            <button className="btn-accent" onClick={onStart}>
-              {view.kind === "stopped" ? "Start it" : "Try again"}
-            </button>
-            <button className="btn-ghost" onClick={onClose}>
-              Close
-            </button>
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
 
 export function DesktopWindow({ phoneId, name, host }: { phoneId: string; name: string; host: DesktopHost }) {
   const [view, setView] = useState<View>({ kind: "connecting" });
@@ -334,18 +291,22 @@ export function DesktopWindow({ phoneId, name, host }: { phoneId: string; name: 
         />
       )}
       {view.kind !== "up" && (
-        <Cover view={view} name={name} onStart={() => actions.current.begin()} onClose={() => actions.current.close()} />
+        <DesktopCover
+          name={name}
+          state={view.kind}
+          message={view.kind === "failed" ? view.message : undefined}
+          onAgain={() => actions.current.begin()}
+          onClose={() => actions.current.close()}
+        />
       )}
       {view.kind === "up" && lost !== null && (
-        <div className="fade-in pointer-events-none absolute inset-x-0 top-3 flex justify-center px-4">
-          <div className="pointer-events-auto flex max-w-full items-center gap-3 rounded-xl border border-white/10 bg-black/85 px-4 py-2 text-[12.5px] text-slate-200 shadow-lg">
-            <span
-              className="h-3.5 w-3.5 shrink-0 animate-spin rounded-full border-2 border-white/15 border-t-[var(--accent)]"
-              aria-hidden="true"
-            />
-            <span className="shrink-0">Reconnecting to {name}…</span>
-            {lost && <span className="truncate text-amber-300/90">{lost}</span>}
-            <button className="link-btn shrink-0" onClick={() => actions.current.now()}>
+        <div className="pointer-events-none absolute inset-x-0 top-3 flex justify-center px-4">
+          <div className="toast card-raised pointer-events-auto !w-auto max-w-full !items-center !rounded-full !py-1.5 !pl-3.5 !pr-1.5">
+            <span className="spinner !h-3.5 !w-3.5 !border-[1.5px]" aria-hidden="true" />
+            <span className="shrink-0 font-semibold">Reconnecting to {name}…</span>
+            {lost && <span className="truncate text-[#f3dcb2]">{lost}</span>}
+            <button className="btn btn-quiet btn-sm shrink-0 !rounded-full" onClick={() => actions.current.now()}>
+              <Icon name="refresh" size={13} />
               Try now
             </button>
           </div>

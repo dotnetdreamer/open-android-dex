@@ -154,11 +154,11 @@ desktop anywhere — the same Wi-Fi, a different one, or with the phone on mobil
 data in your bag. Nothing to open on a router, no account, no server to run.
 
 1. On the phone: Linux → **Remote access** → *Turn on* → *Add a computer*.
-2. On the computer: Open Android DeX → **Phone Linux** → type the code. With the
+2. On the computer: Open Android DeX → the **Linux** tab → type the code. With the
    phone plugged in there is no code at all.
 3. Then, in any terminal: `ssh galaxy-s25-ultra` (or whatever your phone is
    called). VS Code's Remote-SSH, scp, rsync and git find it by name too.
-4. Or the whole desktop: **Phone Linux** → **Desktop** opens the phone's XFCE in
+4. Or the whole desktop: **Linux** → **Open desktop** opens the phone's XFCE in
    a window. The desktop takes the window's size and follows it when you
    resize it; F11 makes it fullscreen. It is started for you if it is not
    running, and its password is handed over, so there is nothing to type.
@@ -395,8 +395,9 @@ access code never do.
 <details>
 <summary><b>Something went wrong. What do I send you?</b></summary>
 
-Press the **Diagnostics** button in the app. It writes one file with everything
-needed to work out what happened, so attach that to an issue.
+Open the **?** menu at the top right of the app and choose **Create a
+diagnostics report**. It writes one file with everything needed to work out
+what happened, so attach that to an issue.
 
 The plain log lives here if you want to read it yourself:
 

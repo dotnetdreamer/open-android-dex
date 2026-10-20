@@ -1,12 +1,18 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { getVersion } from "@tauri-apps/api/app";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { error as logError, info as logInfo, warn as logWarn } from "@tauri-apps/plugin-log";
+import { openUrl } from "@tauri-apps/plugin-opener";
+import { DesktopPage, type Method } from "./features/desktop/DesktopPage";
+import { deviceName, type AdbState, type LaunchMode, type Phase, type Progress } from "./features/desktop/model";
 import { useSessions } from "./features/mirror/useSessions";
 import { RemotePanel } from "./features/remote/RemotePanel";
 import { WirelessPanel } from "./features/wireless/WirelessPanel";
-import { IS_MAC, NO_PERMISSIONS_HINT, TITLEBAR_LEAD } from "./lib/host";
+import { Icon } from "./ui/Icon";
+import { Menu, MenuItem, Toast, useToast } from "./ui/kit";
+import { TitleBar, type Tab } from "./ui/TitleBar";
 import type {
   DeviceInfo,
   KnownDevice,
@@ -28,9 +34,7 @@ const DESKTOP_RES = "1920x1080";
  */
 const LAUNCH_TIMEOUT_MS = 45_000;
 
-function deviceName(d: DeviceInfo): string {
-  return [d.brand, d.model].filter(Boolean).join(" ") || d.serial;
-}
+const ISSUES_URL = "https://github.com/dotnetdreamer/open-android-dex/issues";
 
 function desktopOptions(d: DeviceInfo): MirrorOptions {
   return {
@@ -62,103 +66,31 @@ function desktopOptions(d: DeviceInfo): MirrorOptions {
   };
 }
 
-interface Step {
-  state: "idle" | "busy" | "done" | "error";
-  text: string;
-}
-
-type Phase =
-  | { kind: "boot" }
-  | { kind: "connect"; error?: string }
-  | { kind: "launching"; device: DeviceInfo }
-  | { kind: "ready"; device: DeviceInfo }
-  /** `requested` = the desktop asked to be closed, rather than being closed on it. */
-  | { kind: "ended"; device: DeviceInfo; requested: boolean };
-
-// ── Boot/stage widgets ──────────────────────────────────────────────
-
-function StageRow({ tag, step }: { tag: string; step: Step }) {
-  return (
-    <div className={`stage-row ${step.state}`}>
-      <span className={`stage-ring ${step.state}`} />
-      <span className="stage-tag">{tag}</span>
-      <span className="stage-sep">–</span>
-      <span className="stage-text">{step.text}</span>
-    </div>
-  );
-}
-
-/**
- * The way out of a fullscreen app, on a phone that cannot draw a titlebar to
- * close it with.
- *
- * Rendered on BOTH screens on purpose. The desktop keeps running when this app
- * restarts or loses track of its session — a rebuild, a reconnect, a scrcpy that
- * outlived its launch — and the moment a person needs these is exactly the moment
- * the "Desktop is live" screen may not be the one in front of them. The commands
- * ask the phone what is running rather than trusting this window's own idea of it,
- * so an escape hatch behind a stale state is no escape hatch at all.
- */
-function EscapeButtons({ onHome, onClose }: { onHome: () => void; onClose: () => void }) {
-  return (
-    <>
-      <button
-        className="btn-ghost"
-        onClick={onHome}
-        title="Bring the DeX launcher back in front of whatever is covering it"
-      >
-        <span aria-hidden="true">🏠</span>
-        Back to launcher
-      </button>
-      <button
-        className="btn-ghost"
-        onClick={onClose}
-        title="Close the front-most app window on the desktop"
-      >
-        <span aria-hidden="true">✕</span>
-        Close top window
-      </button>
-    </>
-  );
-}
-
-/**
- * The way into Phone Linux. On every screen, because SSH into a phone's Linux
- * does not depend on a desktop session at all: the phone may be on mobile data
- * in another city, with nothing plugged in here.
- */
-function RemoteButton({ onClick }: { onClick: () => void }) {
-  return (
-    <button
-      className="btn-ghost"
-      onClick={onClick}
-      title="SSH into the Linux on a paired phone, from any network"
-    >
-      <span aria-hidden="true">📡</span>
-      Phone Linux
-    </button>
-  );
-}
-
-function Wordmark() {
-  return (
-    <div className="wordmark">
-      <span className="wordmark-light">OPEN ANDROID</span>
-      <span className="wordmark-bold">DeX</span>
-    </div>
-  );
-}
-
 // ── App ─────────────────────────────────────────────────────────────
 
 export default function App() {
   const sessions = useSessions();
   const [phase, setPhase] = useState<Phase>({ kind: "boot" });
-  const [adbStep, setAdbStep] = useState<Step>({ state: "busy", text: "Starting ADB server…" });
-  const [dexStep, setDexStep] = useState<Step>({ state: "idle", text: "Waiting for bridge…" });
+  const [adb, setAdb] = useState<AdbState>({ state: "busy" });
+  /** Bumped by "Try again" on the start-up error, to ask adb once more. */
+  const [adbAttempt, setAdbAttempt] = useState(0);
+  /** A remembered phone is being called back over Wi-Fi, at boot. */
+  const [reconnecting, setReconnecting] = useState(false);
+  const [progress, setProgress] = useState<Progress>({ step: 0, mode: "open" });
+  /** A running desktop is being moved off the cable onto Wi-Fi. */
+  const [switching, setSwitching] = useState(false);
   const [devices, setDevices] = useState<DeviceInfo[]>([]);
-  /** Non-fatal thing worth telling the user about the current launch. */
+  /**
+   * What the launch wants said, which stays for as long as the session: a
+   * phone that cannot draw window titlebars, a retry with fewer options.
+   * One-off feedback to a click goes to the toast instead.
+   */
   const [notice, setNotice] = useState("");
+  const { toast, say, dismiss } = useToast();
+  const [tab, setTab] = useState<Tab>("desktop");
+  /** Cable or Wi-Fi, on the connect screen. Wi-Fi first for someone who has used it before. */
+  const [method, setMethod] = useState<Method>("usb");
+  const [version, setVersion] = useState("");
   /**
    * Whether the one-shot attempt to reach a remembered phone has finished.
    * Nothing may conclude "no device" before it has: the whole point is that a
@@ -166,8 +98,6 @@ export default function App() {
    * up first would make it look like it hadn't.
    */
   const [reconnectDone, setReconnectDone] = useState(false);
-  /** The Phone Linux sheet — SSH into a paired phone's Ubuntu (remote.rs). */
-  const [showRemote, setShowRemote] = useState(false);
 
   const phaseRef = useRef(phase);
   phaseRef.current = phase;
@@ -213,17 +143,29 @@ export default function App() {
 
   // ── ADB server boot ──
   useEffect(() => {
+    let live = true;
+    setAdb({ state: "busy" });
     logInfo("boot: starting the ADB bridge");
     invoke<string>("adb_version")
       .then((v) => {
+        if (!live) return;
         logInfo(`boot: adb online — ${String(v).split("\n")[0]}`);
-        setAdbStep({ state: "done", text: "ADB bridge online" });
-        setDexStep((s) => (s.state === "idle" ? { state: "busy", text: "Scanning for devices…" } : s));
+        setAdb({ state: "done" });
       })
       .catch((e) => {
+        if (!live) return;
         logError(`boot: adb unusable — ${String(e)}`);
-        setAdbStep({ state: "error", text: String(e) });
+        setAdb({ state: "error", error: String(e) });
       });
+    return () => {
+      live = false;
+    };
+  }, [adbAttempt]);
+
+  useEffect(() => {
+    getVersion()
+      .then(setVersion)
+      .catch(() => {});
   }, []);
 
   // ── Bring back a phone that has been set up before ──
@@ -235,7 +177,8 @@ export default function App() {
       .then(async (saved) => {
         if (!live || saved.length === 0) return;
         logInfo(`boot: trying ${saved.length} remembered phone(s)`);
-        setDexStep({ state: "busy", text: "Reconnecting over Wi-Fi…" });
+        setMethod("wifi");
+        setReconnecting(true);
         const back = await invoke<string[]>("wireless_reconnect_known", { only: null }).catch(
           () => [],
         );
@@ -245,7 +188,11 @@ export default function App() {
         }
       })
       .catch(() => {})
-      .finally(() => live && setReconnectDone(true));
+      .finally(() => {
+        if (!live) return;
+        setReconnecting(false);
+        setReconnectDone(true);
+      });
     return () => {
       live = false;
     };
@@ -254,7 +201,13 @@ export default function App() {
   // ── Device polling (always on — plugging a phone in is the trigger) ──
   useEffect(() => {
     let cancelled = false;
+    // One list at a time. A poll can outlast the 2.5s tick — the first one to
+    // see a phone reads its name, which starts a process on it — and two in
+    // flight can land out of order, an older list over a newer one.
+    let inFlight = false;
     const poll = async () => {
+      if (inFlight) return;
+      inFlight = true;
       try {
         const list = await invoke<DeviceInfo[]>("adb_list_devices");
         if (!cancelled) {
@@ -263,6 +216,8 @@ export default function App() {
         }
       } catch {
         // adb still starting — next tick retries
+      } finally {
+        inFlight = false;
       }
     };
     poll();
@@ -274,21 +229,21 @@ export default function App() {
   }, []);
 
   // ── Desktop launch pipeline ──
-  const launch = useCallback(async (device: DeviceInfo, resume = false) => {
+  const launch = useCallback(async (device: DeviceInfo, resume = false, mode: LaunchMode = "open") => {
     resumeLauncher.current = resume;
     armedRef.current = false;
     deployedFor.current = null;
     sawDesktop.current = false;
     exiting.current = false;
     setNotice("");
+    setSwitching(false);
+    setProgress({ step: 0, mode });
     setPhase({ kind: "launching", device });
-    setDexStep({ state: "busy", text: `Linking ${deviceName(device)}…` });
     logInfo(
       `launch: ${deviceName(device)} (${device.serial}, ${device.connection}, ` +
         `Android ${device.androidVersion ?? "?"})`,
     );
     try {
-      setDexStep({ state: "busy", text: "Preparing desktop profile…" });
       // FIRED, NOT AWAITED. The profile is a chain of `settings` round trips —
       // measured at ~1.2s on a Redmi Note 7 over USB, because each `settings`
       // boots its own process on the phone — and awaiting it put every one of
@@ -302,21 +257,22 @@ export default function App() {
         serial: device.serial,
         samsungDesktop: false,
       }).catch((e) => logWarn(`launch: prepare_desktop failed (continuing) — ${String(e)}`));
-      setDexStep({ state: "busy", text: "Creating virtual display…" });
       const info = await invoke<SessionInfo>("start_mirror", { options: desktopOptions(device) });
       logInfo(`launch: scrcpy started (pid ${info.pid}), waiting for the display id`);
+      // The phone is linked and making the display. Never backwards: the
+      // display id can beat this answer here, and the deploy has moved on.
+      setProgress((p) => (p.step < 1 ? { ...p, step: 1 } : p));
       // the display id arrives via the mirror:display event; the effect
       // below continues with the launcher deployment
     } catch (e) {
       logError(`launch: start_mirror failed — ${String(e)}`);
-      setDexStep({ state: "error", text: String(e) });
       setPhase({ kind: "connect", error: String(e) });
     }
   }, []);
 
   /** A launch that cannot continue: show why, and where the trace is. */
   const failLaunch = useCallback((message: string) => {
-    setDexStep({ state: "error", text: message });
+    setSwitching(false);
     setPhase((p) =>
       p.kind === "launching" || p.kind === "ready"
         ? { kind: "connect", error: message }
@@ -347,8 +303,9 @@ export default function App() {
       if (phaseRef.current.kind !== "launching") return;
       logError(`launch: nothing happened for ${LAUNCH_TIMEOUT_MS / 1000}s — giving up`);
       failLaunch(
-        "The desktop did not start. The log for this run has the whole sequence — " +
-          "open it below and send it with a bug report.",
+        "The desktop took too long to start.\n" +
+          "Unplug the phone, plug it back in and try again. If it keeps happening, the log " +
+          "has every step of this attempt — attach it to a bug report.",
       );
     }, LAUNCH_TIMEOUT_MS);
     return () => clearTimeout(timer);
@@ -366,10 +323,20 @@ export default function App() {
     if (ready && armedRef.current) {
       launch(ready);
     } else if (current.kind === "boot" && scannedOnce.current && reconnectDone && !ready) {
-      setDexStep({ state: "idle", text: "No device detected" });
       setPhase({ kind: "connect" });
     }
   }, [devices, launch, reconnectDone]);
+
+  // ── A phone on the cable that needs something done ──
+  // Plugging one in is choosing the cable: the connect screen turns to it, so
+  // "Tap Allow" is in front of the person who just plugged in, whichever way
+  // they were looking. Once per phone, so choosing Wi-Fi again sticks.
+  const pendingUsb = devices.find((d) => d.connection === "usb" && d.state !== "device")?.serial ?? null;
+  const shownPending = useRef<string | null>(null);
+  useEffect(() => {
+    if (pendingUsb && pendingUsb !== shownPending.current) setMethod("usb");
+    shownPending.current = pendingUsb;
+  }, [pendingUsb]);
 
   // ── Once the virtual display exists, deploy the DeX launcher ──
   useEffect(() => {
@@ -392,7 +359,7 @@ export default function App() {
     }
     sawDesktop.current = true;
     logInfo(`launch: display ${displayId} is up — deploying the launcher`);
-    setDexStep({ state: "busy", text: "Deploying DeX launcher…" });
+    setProgress((p) => ({ ...p, step: 2, waiting: false }));
     // The desktop profile has been writing itself while the display came up.
     // By here it is almost always already done, and this await costs nothing —
     // but it is what makes "fired, not awaited" above safe rather than a race.
@@ -400,7 +367,7 @@ export default function App() {
       .then(() => invoke("adb_start_launcher", { serial: device.serial, displayId, resume: resumeLauncher.current }))
       .then(() => {
         logInfo("launch: desktop ready");
-        setDexStep({ state: "done", text: "Desktop ready" });
+        setProgress((p) => ({ ...p, step: 3, waiting: false }));
         setPhase({ kind: "ready", device });
         // the scrcpy desktop window is the star — tuck this one away
         setTimeout(() => appWindow.minimize().catch(() => {}), 1400);
@@ -415,19 +382,15 @@ export default function App() {
         // the session-ended effect below takes up).
         if (/device '[^']*' not found|device offline|no devices\/emulators found/.test(String(e))) {
           logInfo("launch: the phone dropped off adb part way through — deploying again once it is back");
-          setDexStep({ state: "busy", text: "Waiting for the phone to come back…" });
+          setProgress((p) => ({ ...p, waiting: true }));
           return;
         }
         logError(`launch: launcher deployment failed — ${String(e)}`);
         invoke("stop_mirror", { sessionKey: key }).catch(() => {});
-        // The stage row is one line in a fixed-width span; the guidance errors
-        // out of install_launcher are paragraphs, and dropping a whole one in
-        // there renders as a smear. Their first line is written to stand on its
-        // own, so it becomes the status and the full text goes to the block
-        // below, which is a <pre> and keeps the line breaks.
-        const full = String(e);
-        setDexStep({ state: "error", text: full.split("\n")[0] });
-        setPhase({ kind: "connect", error: full });
+        // The guidance errors out of install_launcher are paragraphs whose
+        // first line is written to stand on its own: the screen makes that
+        // line its sentence and sets the rest out underneath, line breaks kept.
+        setPhase({ kind: "connect", error: String(e) });
       });
   }, [phase, sessions]);
 
@@ -489,10 +452,9 @@ export default function App() {
         const again = relaunching.current;
         restarting.current = false;
         relaunching.current = false;
-        setDexStep({ state: "busy", text: again ? "Setting the desktop up again…" : "Applying stream settings…" });
         // After the phone's own clean-up the launcher may still be running its
         // Linux; resuming sets DeX up around it instead of reinstalling it.
-        launch(phase.device, again);
+        launch(phase.device, again, again ? "again" : "settings");
         return;
       }
       // Moving a running desktop onto Wi-Fi. The session had to end first —
@@ -502,20 +464,21 @@ export default function App() {
       // it, which is why the restore that the ordinary path runs is skipped.
       if (switchingToWireless.current) {
         switchingToWireless.current = false;
-        setDexStep({ state: "busy", text: "Switching to Wi-Fi…" });
         appWindow.unminimize().catch(() => {});
         invoke<WirelessResult>("wireless_go_wireless", { serial: phase.device.serial })
           .then(async (result) => {
             logInfo(`wireless: ${phase.device.serial} is now reachable at ${result.address}`);
             preferredSerial.current = result.serial;
             const list = await invoke<DeviceInfo[]>("adb_list_devices").catch(() => []);
-            setNotice("Wireless is set up — you can unplug the cable.");
+            say("Wi‑Fi is set up — you can unplug the cable.", "ok");
             launch(
               list.find((d) => d.serial === result.serial) ?? {
                 ...phase.device,
                 serial: result.serial,
                 connection: "wifi",
               },
+              false,
+              "wireless",
             );
           })
           .catch((e) => {
@@ -526,7 +489,6 @@ export default function App() {
       }
       const requested = exiting.current;
       exiting.current = false;
-      setDexStep({ state: "idle", text: requested ? "DeX closed" : "Desktop session ended" });
       // The desktop's own warnings go with it: a banner about how windows behave
       // on a display that no longer exists is read as a complaint about the app.
       setNotice("");
@@ -540,40 +502,42 @@ export default function App() {
       appWindow.unminimize().catch(() => {});
       appWindow.setFocus().catch(() => {});
     }
-  }, [phase, sessions, launch, failLaunch]);
+  }, [phase, sessions, launch, failLaunch, say]);
 
-  // ── Where the trace for this run lives ──
-  const [logPath, setLogPath] = useState("");
+  // ── Help ──
   const [diagBusy, setDiagBusy] = useState(false);
-  useEffect(() => {
-    invoke<string>("diag_log_path")
-      .then(setLogPath)
-      .catch(() => {});
-  }, []);
 
   const openLog = useCallback(() => {
-    invoke("diag_reveal", { path: null }).catch((e) => logWarn(`could not open the log: ${e}`));
-  }, []);
+    invoke("diag_reveal", { path: null }).catch((e) => {
+      logWarn(`could not open the log: ${e}`);
+      say("Couldn't open the log", "bad", String(e));
+    });
+  }, [say]);
 
   /** Host + phone state in one file, for attaching to a bug report. */
   const collectDiagnostics = useCallback(async () => {
     setDiagBusy(true);
-    setNotice("Collecting diagnostics…");
+    say("Creating a diagnostics report…", "info");
     try {
       const serial = devices.find((d) => d.state === "device")?.serial ?? null;
       const path = await invoke<string>("diag_collect", { serial });
-      setNotice(`Diagnostics written to ${path}`);
+      say("Diagnostics report saved", "ok", path);
       invoke("diag_reveal", { path }).catch(() => {});
     } catch (e) {
       logError(`diagnostics failed: ${String(e)}`);
-      setNotice(`Could not collect diagnostics: ${String(e)}`);
+      say("Couldn't create the diagnostics report", "bad", String(e));
     } finally {
       setDiagBusy(false);
     }
-  }, [devices]);
+  }, [devices, say]);
 
   const refresh = useCallback(() => {
-    armedRef.current = true;
+    // Re-armed only where auto-launch acts. Armed mid-launch, a launch that
+    // then failed would be relaunched by the next poll before its error could
+    // be read; armed while a desktop runs, "Use another phone" after it would
+    // open the same one straight away.
+    const now = phaseRef.current.kind;
+    if (now === "boot" || now === "connect") armedRef.current = true;
     invoke<DeviceInfo[]>("adb_list_devices")
       .then((list) => {
         scannedOnce.current = true;
@@ -581,6 +545,19 @@ export default function App() {
       })
       .catch(() => {});
   }, []);
+
+  /** After a launch failed: straight back in if the phone is still there, otherwise wait for it. */
+  const retry = useCallback(() => {
+    const ready =
+      devices.find((d) => d.state === "device" && d.serial === preferredSerial.current) ??
+      devices.find((d) => d.state === "device");
+    if (ready) {
+      launch(ready);
+    } else {
+      setPhase({ kind: "connect" });
+      refresh();
+    }
+  }, [devices, launch, refresh]);
 
   /** A phone became reachable over Wi-Fi — take the desktop there. */
   const onWirelessConnected = useCallback(
@@ -594,15 +571,20 @@ export default function App() {
   );
 
   /** "Lose the cable", from a desktop that is already running on one. */
-  const switchToWireless = useCallback((device: DeviceInfo) => {
-    switchingToWireless.current = true;
-    setNotice("");
-    setDexStep({ state: "busy", text: "Switching to Wi-Fi…" });
-    invoke("stop_mirror", { sessionKey: `${device.serial}|desktop` }).catch((e) => {
-      switchingToWireless.current = false;
-      logWarn(`wireless: could not stop the session to switch — ${String(e)}`);
-    });
-  }, []);
+  const switchToWireless = useCallback(
+    (device: DeviceInfo) => {
+      switchingToWireless.current = true;
+      setNotice("");
+      setSwitching(true);
+      invoke("stop_mirror", { sessionKey: `${device.serial}|desktop` }).catch((e) => {
+        switchingToWireless.current = false;
+        setSwitching(false);
+        logWarn(`wireless: could not stop the session to switch — ${String(e)}`);
+        say("Couldn't switch to Wi‑Fi", "bad", String(e));
+      });
+    },
+    [say],
+  );
 
   const stopDesktop = useCallback((device: DeviceInfo) => {
     // Same thing the phone's "Exit DeX" does, asked for from this end.
@@ -625,208 +607,133 @@ export default function App() {
    * there is nothing left on screen to press, and these are the only way back.
    * Both go through the uid-2000 daemon, which needs neither a trusted display
    * nor a focused window. See wm.rs.
+   *
+   * Offered from the help menu on every screen, not only the "running" one:
+   * the desktop keeps running when this app restarts or loses track of its
+   * session, and the moment a person needs these is exactly the moment the
+   * "running" screen may not be the one in front of them. The commands ask the
+   * phone what is running rather than trusting this window's idea of it.
    */
   const backToLauncher = useCallback(() => {
     invoke<boolean>("desktop_home")
       .then((done) => {
-        if (!done) setNotice("The phone would not bring the launcher forward");
+        if (!done) say("The desktop didn't answer. Is it running?", "warn");
       })
-      .catch((e) => setNotice(String(e)));
-  }, []);
+      .catch((e) => say("Couldn't reach the desktop", "bad", String(e)));
+  }, [say]);
 
   const closeTopWindow = useCallback(() => {
     invoke<boolean>("desktop_close_top")
       .then((done) => {
-        if (!done) setNotice("There is no app window open on the desktop");
+        if (!done) say("No app window to close", "info");
       })
-      .catch((e) => setNotice(String(e)));
-  }, []);
+      .catch((e) => say("Couldn't reach the desktop", "bad", String(e)));
+  }, [say]);
 
-  // ── Screens ──
-  const pendingDevices = devices.filter((d) => d.state !== "device");
+  /** The phone "Open desktop" means: the one asked for, as auto-launch and retry choose it. */
+  const readyDevice =
+    devices.find((d) => d.state === "device" && d.serial === preferredSerial.current) ??
+    devices.find((d) => d.state === "device");
+  /** The stream dropped and scrcpy is bringing it back by itself. */
+  const stalled =
+    phase.kind === "ready" && sessions[`${phase.device.serial}|desktop`]?.status === "reconnecting";
+
+  const helpMenu = (
+    <Menu
+      label="Help"
+      trigger={({ open, toggle, ref }) => (
+        <button
+          ref={ref}
+          className={`btn btn-quiet btn-sm btn-icon ${open ? "!bg-[var(--surface-3)] !text-[var(--ink-1)]" : ""}`}
+          onClick={toggle}
+          aria-haspopup="menu"
+          aria-expanded={open}
+          aria-label="Help and troubleshooting"
+          title="Help and troubleshooting"
+        >
+          <Icon name="help" size={17} />
+        </button>
+      )}
+    >
+      {(close) => {
+        const pick = (f: () => void) => () => {
+          close();
+          f();
+        };
+        return (
+          <>
+            <MenuItem icon="refresh" onSelect={pick(refresh)}>
+              Look for phones again
+            </MenuItem>
+            <MenuItem icon="doc" onSelect={pick(openLog)}>
+              Open the log
+            </MenuItem>
+            <MenuItem icon="activity" disabled={diagBusy} onSelect={pick(collectDiagnostics)}>
+              {diagBusy ? "Creating report…" : "Create a diagnostics report"}
+            </MenuItem>
+            <div className="menu-sep" />
+            <p className="menu-label">If the desktop is stuck</p>
+            <MenuItem icon="home" onSelect={pick(backToLauncher)}>
+              Home screen
+            </MenuItem>
+            <MenuItem icon="windowClose" onSelect={pick(closeTopWindow)}>
+              Close the front app
+            </MenuItem>
+            <div className="menu-sep" />
+            <MenuItem
+              icon="arrowUpRight"
+              onSelect={pick(() => {
+                openUrl(ISSUES_URL).catch((e) => say("Couldn't open the browser", "bad", String(e)));
+              })}
+            >
+              Report a problem
+            </MenuItem>
+            {version && <p className="px-2.5 pb-1 pt-1.5 text-[11px] text-[var(--ink-3)]">Open Android DeX {version}</p>}
+          </>
+        );
+      }}
+    </Menu>
+  );
 
   return (
-    <div className="boot-backdrop flex h-screen flex-col">
-      {/*
-        The caption buttons are ours on Windows and the system's on macOS,
-        where `titleBarStyle: "Overlay"` floats the real traffic lights over
-        this strip — so the label is padded clear of them and no second set of
-        controls is drawn. `deep` walks into the children, which keeps the whole
-        34px band draggable; buttons still short-circuit the walk, so the
-        Windows controls stay clickable.
-      */}
-      <header
-        data-tauri-drag-region="deep"
-        className="z-10 flex h-[34px] shrink-0 items-center justify-between"
-      >
-        <div
-          className={`pointer-events-none flex items-center gap-2 pr-3 text-[12.5px] text-slate-400 ${TITLEBAR_LEAD}`}
-        >
-          <span>📱</span>
-          <span>Open Android DeX</span>
-        </div>
-        {!IS_MAC && (
-          <div className="flex">
-            <button className="titlebar-btn" onClick={() => appWindow.minimize()} title="Minimize">
-              <svg width="10" height="10" viewBox="0 0 10 10"><line x1="0" y1="5" x2="10" y2="5" stroke="currentColor" /></svg>
-            </button>
-            <button className="titlebar-btn close" onClick={() => appWindow.close()} title="Close">
-              <svg width="10" height="10" viewBox="0 0 10 10"><path d="M0 0 L10 10 M10 0 L0 10" stroke="currentColor" /></svg>
-            </button>
-          </div>
-        )}
-      </header>
-
-      {phase.kind === "connect" ? (
-        // Centred by auto margins, not by `justify-center`: the Wi-Fi panel
-        // grows with a QR code, a list of saved phones and an error block, and
-        // centring a flex child the usual way pushes its top edge off the top
-        // of the scroll box once it outgrows the window. Auto margins collapse
-        // to zero at that point, so the card sits in the middle while it fits
-        // and scrolls from its top once it doesn't.
-        <div className="fade-in flex min-h-0 flex-1 flex-col overflow-y-auto p-6">
-          <div className="glass m-auto flex w-[620px] max-w-full shrink-0 flex-col overflow-hidden">
-            <div className="px-5 py-5">
-              {pendingDevices.length > 0 && (
-                <div className="flex flex-col gap-2">
-                  {pendingDevices.map((d) => (
-                    <div key={d.serial} className="flex items-center gap-3 rounded-xl bg-white/[0.04] px-4 py-3">
-                      <span className="text-xl">📱</span>
-                      <div className="min-w-0 flex-1">
-                        <p className="truncate text-[13px] font-medium text-slate-200">
-                          {deviceName(d)}
-                        </p>
-                        <p className="text-[11.5px] text-slate-500">
-                          {d.state === "unauthorized"
-                            ? "Confirm the USB-debugging prompt on the phone"
-                            : d.state === "no-permissions"
-                              ? `This computer is not allowed to open the phone. ${NO_PERMISSIONS_HINT}`
-                              : d.state === "offline"
-                                ? "Device is offline — reconnect the cable"
-                                : d.state}
-                        </p>
-                      </div>
-                      <span className={`badge ${d.state === "unauthorized" ? "badge-warn" : ""}`}>
-                        {d.connection === "wifi" ? "Wi-Fi" : "USB"}
-                      </span>
-                    </div>
-                  ))}
-                </div>
-              )}
-
-              {phase.error && (
-                <>
-                  <pre className="console mt-3 rounded-lg bg-amber-950/40 p-3 text-amber-300">{phase.error}</pre>
-                  <p className="mt-2 text-[11.5px] text-slate-500">
-                    Every step of this attempt was written to{" "}
-                    <button className="underline hover:text-slate-300" onClick={openLog}>
-                      {logPath || "the log file"}
-                    </button>
-                    .
-                  </p>
-                </>
-              )}
-
-              <WirelessPanel devices={devices} onConnected={onWirelessConnected} />
-            </div>
-
-            {/* The three buttons already fill the card's width, so the status
-                line goes underneath them rather than beside them — sharing the
-                row is what pushed both into wrapping over each other. */}
-            <div className="flex flex-col gap-2 border-t border-white/10 px-5 py-3">
-              <div className="flex flex-wrap gap-2">
-                <button className="btn-ghost" onClick={refresh}>
-                  <span aria-hidden="true">⟳</span>
-                  Refresh devices
-                </button>
-                <button className="btn-ghost" onClick={openLog} title={logPath}>
-                  <span aria-hidden="true">🗒</span>
-                  Open log
-                </button>
-                <button className="btn-ghost" onClick={collectDiagnostics} disabled={diagBusy}>
-                  <span aria-hidden="true">🩺</span>
-                  {diagBusy ? "Collecting…" : "Diagnostics"}
-                </button>
-                <EscapeButtons onHome={backToLauncher} onClose={closeTopWindow} />
-                <RemoteButton onClick={() => setShowRemote(true)} />
-              </div>
-              <span className="text-[11.5px] text-slate-500">scanning in the background…</span>
-            </div>
-            {notice && (
-              <div className="border-t border-white/10 px-5 py-2 text-[11.5px] text-amber-300/90">
-                {notice}
-              </div>
-            )}
-          </div>
-        </div>
-      ) : (
-        <div className="fade-in flex min-h-0 flex-1 flex-col items-center justify-center gap-10 pb-10">
-          <Wordmark />
-          <div className="flex flex-col gap-4">
-            <StageRow tag="ADB" step={adbStep} />
-            <StageRow tag="DEX" step={dexStep} />
-          </div>
-
-          {notice && <p className="text-[11.5px] text-amber-300/90">{notice}</p>}
-
-          {phase.kind === "ready" && (
-            <div className="fade-in flex flex-col items-center gap-3">
-              <p className="text-[12.5px] text-slate-500">
-                Desktop is live on {deviceName(phase.device)} — this window stays out of the way
-              </p>
-              <div className="flex flex-wrap justify-center gap-2">
-                <button className="btn-ghost" onClick={() => showDesktop(phase.device)}>
-                  Show desktop
-                </button>
-                <EscapeButtons onHome={backToLauncher} onClose={closeTopWindow} />
-                {/* Only offered on a cable: the point is to get rid of it. */}
-                {phase.device.connection === "usb" && (
-                  <button
-                    className="btn-ghost"
-                    onClick={() => switchToWireless(phase.device)}
-                    title="Move this session onto Wi-Fi so the cable can come out"
-                  >
-                    <span aria-hidden="true">📶</span>
-                    Go wireless
-                  </button>
-                )}
-                <RemoteButton onClick={() => setShowRemote(true)} />
-                <button className="btn-danger" onClick={() => stopDesktop(phase.device)}>
-                  Exit DeX
-                </button>
-              </div>
-            </div>
-          )}
-
-          {phase.kind === "ended" && (
-            <div className="fade-in flex flex-col items-center gap-3">
-              <p className="text-[12.5px] text-slate-500">
-                {phase.requested
-                  ? "DeX closed — the phone is back to normal"
-                  : "The desktop window was closed"}
-              </p>
-              <div className="flex gap-2">
-                <button className="btn-accent" onClick={() => launch(phase.device)}>
-                  <span aria-hidden="true">▶</span>
-                  Relaunch desktop
-                </button>
-                <button
-                  className="btn-ghost"
-                  onClick={() => {
-                    setDexStep({ state: "idle", text: "No device selected" });
-                    setPhase({ kind: "connect" });
-                  }}
-                >
-                  Devices
-                </button>
-                <RemoteButton onClick={() => setShowRemote(true)} />
-              </div>
-            </div>
+    <div className="app-backdrop flex h-screen flex-col">
+      <TitleBar tab={tab} onTab={setTab} menu={helpMenu} desktopBusy={phase.kind === "launching" || switching} />
+      <main className="relative min-h-0 flex-1 overflow-y-auto">
+        <div key={tab} className="fade-in min-h-full">
+          {tab === "desktop" ? (
+            <DesktopPage
+              phase={phase}
+              adb={adb}
+              reconnecting={reconnecting}
+              progress={progress}
+              switching={switching}
+              devices={devices}
+              ready={readyDevice}
+              stalled={stalled}
+              notice={notice}
+              method={method}
+              onMethod={setMethod}
+              wireless={<WirelessPanel devices={devices} onConnected={onWirelessConnected} />}
+              actions={{
+                launch: (d) => launch(d),
+                retry,
+                retryAdb: () => setAdbAttempt((n) => n + 1),
+                openLog,
+                diagnostics: collectDiagnostics,
+                showDesktop,
+                goWireless: switchToWireless,
+                home: backToLauncher,
+                closeTop: closeTopWindow,
+                disconnect: stopDesktop,
+                chooseAnother: () => setPhase({ kind: "connect" }),
+              }}
+            />
+          ) : (
+            <RemotePanel devices={devices} />
           )}
         </div>
-      )}
-
-      {showRemote && <RemotePanel devices={devices} onClose={() => setShowRemote(false)} />}
+      </main>
+      <Toast toast={toast} onDismiss={dismiss} />
     </div>
   );
 }

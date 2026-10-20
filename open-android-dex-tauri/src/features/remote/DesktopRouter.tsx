@@ -7,7 +7,7 @@ import { error as logError, info as logInfo } from "@tauri-apps/plugin-log";
 import { load, type Store } from "@tauri-apps/plugin-store";
 import type { DesktopEvent, InboxEvent, PutProgress, PutReport, RemotePhone, TunnelVideo } from "../../lib/types";
 import { ClipboardShare, type ToGuest } from "./clipboardShare";
-import { CopyCard, DropCover, InboxCard, merge, Notice, type Copy, type DesktopHost, type Inbox } from "./DesktopCards";
+import { CopyCard, DesktopCover, DropCover, InboxCard, merge, Notice, type Copy, type DesktopHost, type Inbox } from "./DesktopCards";
 import { DesktopWindow } from "./DesktopWindow";
 import { UsbDesktop, type Tier } from "./usb/UsbDesktop";
 
@@ -463,17 +463,7 @@ export function DesktopRouter({ phoneId }: { phoneId: string }) {
   } else if (host && route.kind === "tunnel") {
     view = <DesktopWindow key={route.key} phoneId={phoneId} name={name} host={host} />;
   } else {
-    view = (
-      <div className="relative flex h-full w-full items-center justify-center overflow-hidden bg-[var(--bg)] p-6">
-        <div className="glass flex w-[440px] max-w-full flex-col items-center gap-2 px-7 py-6 text-center">
-          <p className="text-[15px] font-semibold text-slate-100">Reaching {name}…</p>
-          <span
-            className="mt-2 h-5 w-5 animate-spin rounded-full border-2 border-white/15 border-t-[var(--accent)]"
-            aria-hidden="true"
-          />
-        </div>
-      </div>
-    );
+    view = <DesktopCover name={name} state="connecting" />;
   }
 
   return (

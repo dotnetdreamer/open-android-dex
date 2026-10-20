@@ -1,363 +1,1258 @@
 @import "tailwindcss";
 
+/*
+ * The design system for every window this app draws.
+ *
+ * Four of these are the settings surface's to drive — --accent,
+ * --item-radius, --glass-blur and --surface-alpha — so everything here is
+ * written in terms of them, never around them: a radius is the item radius
+ * plus or minus a step, a tint is the accent mixed down, a card is the surface
+ * alpha. Change one and the whole app follows.
+ *
+ * Component classes live in the components layer so a Tailwind utility on the
+ * same element still wins, the way it would in any Tailwind project; nothing
+ * here needs `!important` to be overridden.
+ */
+
 :root {
+  color-scheme: dark;
+
+  /* ── driven by the settings surface ── */
   --accent: #4d9fff;
-  --bg: #090b10;
   --item-radius: 14px;
+  --glass-blur: 24px;
+  --surface-alpha: 0.035;
+
+  /* ── canvas ── */
+  --bg: #090b10;
+  --bg-raised: #0f1218;
+  --bg-overlay: #141821;
+
+  /* ── ink, strongest to faintest ── */
+  --ink-1: #f3f5f9;
+  --ink-2: #a9b2c1;
+  --ink-3: #7b8495;
+  --ink-4: #4f5765;
+
+  /* ── hairlines ── */
+  --line: rgba(255, 255, 255, 0.07);
+  --line-2: rgba(255, 255, 255, 0.12);
+
+  /* ── surfaces, from the settings surface's alpha ── */
+  --surface-1: rgba(255, 255, 255, var(--surface-alpha));
+  --surface-2: rgba(255, 255, 255, calc(var(--surface-alpha) + 0.03));
+  --surface-3: rgba(255, 255, 255, calc(var(--surface-alpha) + 0.065));
+
+  /* ── meaning ── */
+  --ok: #3ddc97;
+  --warn: #f5b74f;
+  --bad: #ff6b6b;
+  --accent-ink: color-mix(in srgb, var(--accent) 72%, white);
+  --accent-soft: color-mix(in srgb, var(--accent) 15%, transparent);
+  --accent-line: color-mix(in srgb, var(--accent) 42%, transparent);
+
+  /* ── radii, all from the one setting ── */
+  --r-xs: max(4px, calc(var(--item-radius) - 8px));
+  --r-sm: max(6px, calc(var(--item-radius) - 5px));
+  --r-md: max(8px, calc(var(--item-radius) - 3px));
+  --r-lg: calc(var(--item-radius) + 2px);
+  --r-xl: calc(var(--item-radius) + 8px);
+
+  --ease-out: cubic-bezier(0.22, 0.8, 0.24, 1);
+  --ease-spring: cubic-bezier(0.34, 1.4, 0.5, 1);
+
+  --font-ui: -apple-system, BlinkMacSystemFont, "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+  --font-display: -apple-system, BlinkMacSystemFont, "Segoe UI Variable Display", "Segoe UI", system-ui, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", Menlo, "Cascadia Mono", Consolas, monospace;
 }
 
-html,
-body,
-#root {
-  height: 100%;
-  margin: 0;
-  overflow: hidden;
-  /* Each host's own UI face first, then the other's, then the generic. A stack
-     that named only Segoe fell through to system-ui on macOS, which is right by
-     accident — spelling it out keeps it right on purpose. */
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI Variable Text", "Segoe UI",
-    system-ui, sans-serif;
-  background: var(--bg);
-  color: #e7ecf3;
-  -webkit-user-select: none;
-  user-select: none;
-  cursor: default;
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+    margin: 0;
+    overflow: hidden;
+    /* Each host's own UI face first, then the other's, then the generic. A
+       stack that named only Segoe fell through to system-ui on macOS, which
+       is right by accident — spelling it out keeps it right on purpose. */
+    font-family: var(--font-ui);
+    font-size: 13px;
+    line-height: 1.45;
+    background: var(--bg);
+    color: var(--ink-1);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
+    -webkit-user-select: none;
+    user-select: none;
+    cursor: default;
+  }
+
+  /* …but never in a field the user has to type into. The rule above is
+     inherited, and WebKit — the engine on macOS — honours it inside inputs too,
+     so the pairing code could be typed but not selected, corrected or copied. */
+  input,
+  textarea {
+    -webkit-user-select: text;
+    user-select: text;
+    cursor: text;
+  }
+
+  button {
+    cursor: default;
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  :focus {
+    outline: none;
+  }
+  :focus-visible {
+    outline: 2px solid var(--accent-ink);
+    outline-offset: 2px;
+  }
+
+  ::selection {
+    background: color-mix(in srgb, var(--accent) 40%, transparent);
+  }
+
+  /* Thin, quiet scrollbars that only show on the scroll box itself. */
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.1);
+    border: 3px solid transparent;
+    background-clip: padding-box;
+    border-radius: 999px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background-color: rgba(255, 255, 255, 0.18);
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
 }
 
-/* …but never in a field the user has to type into. The rule above is inherited,
-   and WebKit — the engine on macOS — honours it inside inputs too, so the
-   pairing code could be typed but not selected, corrected or copied. */
-input,
-textarea {
-  -webkit-user-select: text;
-  user-select: text;
-  cursor: text;
+@layer components {
+  /* ── The window ───────────────────────────────────────────────────── */
+
+  /* Near-black with the accent's light falling from the top, as if from the
+     screen the desktop is about to appear on. */
+  .app-backdrop {
+    background:
+      radial-gradient(1100px 520px at 50% -16%, color-mix(in srgb, var(--accent) 13%, transparent), transparent 62%),
+      radial-gradient(700px 420px at 100% 108%, rgba(45, 212, 191, 0.05), transparent 60%),
+      var(--bg);
+  }
+
+  .titlebar {
+    position: relative;
+    z-index: 30;
+    display: flex;
+    align-items: center;
+    height: 38px;
+    flex-shrink: 0;
+  }
+  .titlebar-name {
+    font-size: 12.5px;
+    font-weight: 600;
+    letter-spacing: -0.005em;
+    color: var(--ink-3);
+    white-space: nowrap;
+  }
+
+  /* Windows and Linux draw no caption buttons; these are ours. */
+  .caption-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 46px;
+    height: 38px;
+    color: var(--ink-2);
+    transition:
+      background 100ms ease,
+      color 100ms ease;
+  }
+  .caption-btn:hover {
+    background: rgba(255, 255, 255, 0.08);
+    color: #ffffff;
+  }
+  .caption-btn.close:hover {
+    background: #e81123;
+    color: #ffffff;
+  }
+
+  /* ── Type ─────────────────────────────────────────────────────────── */
+
+  .display {
+    font-family: var(--font-display);
+    font-size: 25px;
+    line-height: 31px;
+    font-weight: 650;
+    letter-spacing: -0.022em;
+    color: var(--ink-1);
+    text-wrap: balance;
+  }
+  .lede {
+    font-size: 14px;
+    line-height: 21px;
+    color: var(--ink-2);
+    text-wrap: pretty;
+  }
+  .heading {
+    font-size: 13.5px;
+    line-height: 19px;
+    font-weight: 600;
+    letter-spacing: -0.006em;
+    color: var(--ink-1);
+  }
+  .body {
+    font-size: 13px;
+    line-height: 19px;
+    color: var(--ink-2);
+    text-wrap: pretty;
+  }
+  .caption {
+    font-size: 12px;
+    line-height: 17px;
+    color: var(--ink-3);
+    text-wrap: pretty;
+  }
+  .section-label {
+    font-size: 11.5px;
+    line-height: 16px;
+    font-weight: 600;
+    letter-spacing: 0.01em;
+    color: var(--ink-3);
+  }
+  .mono {
+    font-family: var(--font-mono);
+    font-size: 0.92em;
+  }
+  kbd,
+  .kbd {
+    display: inline-flex;
+    align-items: center;
+    padding: 0 5px;
+    min-width: 18px;
+    height: 18px;
+    border-radius: 5px;
+    font-family: var(--font-ui);
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--ink-2);
+    background: rgba(255, 255, 255, 0.07);
+    box-shadow: inset 0 -1px 0 rgba(255, 255, 255, 0.06);
+  }
+  /* A place on the phone, the way its Settings screens spell it. */
+  .ui-path {
+    color: var(--ink-1);
+    font-weight: 550;
+  }
+
+  /* ── Buttons ──────────────────────────────────────────────────────── */
+
+  /* Every button here is "glyph, then label". Laid out as flex with a gap, the
+     two stay on ONE line: as plain inline text the label wraps under its own
+     icon as soon as the row is tight. */
+  .btn {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 7px;
+    height: 32px;
+    padding: 0 13px;
+    border-radius: var(--r-md);
+    font-size: 13px;
+    font-weight: 600;
+    letter-spacing: -0.003em;
+    white-space: nowrap;
+    color: var(--ink-1);
+    transition:
+      background 140ms ease,
+      border-color 140ms ease,
+      color 140ms ease,
+      box-shadow 140ms ease,
+      filter 140ms ease,
+      transform 120ms ease;
+  }
+  .btn:active:not(:disabled) {
+    transform: translateY(0.5px) scale(0.985);
+  }
+  .btn:disabled {
+    opacity: 0.45;
+  }
+  .btn .icon {
+    flex-shrink: 0;
+  }
+
+  .btn-lg {
+    height: 38px;
+    padding: 0 17px;
+    font-size: 13.5px;
+    border-radius: var(--r-md);
+  }
+  .btn-sm {
+    height: 28px;
+    padding: 0 10px;
+    gap: 6px;
+    font-size: 12.5px;
+    border-radius: var(--r-sm);
+  }
+  .btn-icon {
+    width: 32px;
+    padding: 0;
+  }
+  .btn-icon.btn-sm {
+    width: 28px;
+  }
+
+  .btn-primary {
+    color: #ffffff;
+    background: linear-gradient(180deg, color-mix(in srgb, var(--accent) 88%, white), var(--accent));
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.22),
+      0 0 0 1px color-mix(in srgb, var(--accent) 70%, black),
+      0 2px 6px -1px color-mix(in srgb, var(--accent) 45%, transparent);
+  }
+  .btn-primary:hover:not(:disabled) {
+    filter: brightness(1.08) saturate(1.05);
+  }
+  /* Not yet: grey, not a dimmed blue — a faded accent on a dark ground reads
+     as a muddy button that is still asking to be pressed. */
+  .btn-primary:disabled {
+    opacity: 1;
+    color: var(--ink-3);
+    background: var(--surface-2);
+    box-shadow: inset 0 0 0 1px var(--line);
+  }
+
+  .btn-secondary {
+    background: var(--surface-2);
+    box-shadow:
+      inset 0 0 0 1px var(--line-2),
+      inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  }
+  .btn-secondary:hover:not(:disabled) {
+    background: var(--surface-3);
+  }
+
+  .btn-quiet {
+    color: var(--ink-2);
+  }
+  .btn-quiet:hover:not(:disabled) {
+    color: var(--ink-1);
+    background: var(--surface-2);
+  }
+
+  .btn-danger {
+    color: #ff9b9b;
+    background: rgba(255, 107, 107, 0.09);
+    box-shadow: inset 0 0 0 1px rgba(255, 107, 107, 0.22);
+  }
+  .btn-danger:hover:not(:disabled) {
+    color: #ffc2c2;
+    background: rgba(255, 107, 107, 0.15);
+  }
+
+  /* Text that acts. Underlined only on hover: in a sentence it is coloured,
+     in a row of actions it lines up with the buttons. */
+  .link {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    font-weight: 600;
+    color: var(--accent-ink);
+    border-radius: 4px;
+    transition: color 120ms ease;
+  }
+  .link:hover:not(:disabled) {
+    color: color-mix(in srgb, var(--accent) 45%, white);
+  }
+  .link:disabled {
+    opacity: 0.45;
+  }
+  .link.muted {
+    color: var(--ink-3);
+  }
+  .link.muted:hover:not(:disabled) {
+    color: var(--ink-1);
+  }
+
+  /* ── Surfaces ─────────────────────────────────────────────────────── */
+
+  .card {
+    position: relative;
+    border-radius: var(--r-lg);
+    background: var(--surface-1);
+    box-shadow:
+      inset 0 0 0 1px var(--line),
+      inset 0 1px 0 rgba(255, 255, 255, 0.025);
+  }
+  .card-raised {
+    background: color-mix(in srgb, var(--bg-overlay) 97%, transparent);
+    box-shadow:
+      inset 0 0 0 1px var(--line-2),
+      inset 0 1px 0 rgba(255, 255, 255, 0.04),
+      0 18px 40px -12px rgba(0, 0, 0, 0.7),
+      0 4px 12px -4px rgba(0, 0, 0, 0.5);
+    -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(1.3);
+    backdrop-filter: blur(var(--glass-blur)) saturate(1.3);
+  }
+  /* Rows inside a card, divided by hairlines that stop short of the edges. */
+  .rows > * + * {
+    box-shadow: 0 -1px 0 var(--line);
+  }
+
+  /* A row that is a button: the whole width answers the pointer. */
+  .row-btn {
+    display: flex;
+    width: 100%;
+    align-items: center;
+    gap: 12px;
+    padding: 11px 14px;
+    text-align: left;
+    transition: background 120ms ease;
+  }
+  .row-btn:hover:not(:disabled) {
+    background: var(--surface-1);
+  }
+  .row-btn:first-child {
+    border-top-left-radius: inherit;
+    border-top-right-radius: inherit;
+  }
+  .row-btn:last-child {
+    border-bottom-left-radius: inherit;
+    border-bottom-right-radius: inherit;
+  }
+
+  /* The square an icon sits in at the head of a row. */
+  .tile {
+    display: inline-flex;
+    flex-shrink: 0;
+    align-items: center;
+    justify-content: center;
+    width: 32px;
+    height: 32px;
+    border-radius: var(--r-sm);
+    color: var(--ink-2);
+    background: var(--surface-2);
+    box-shadow: inset 0 0 0 1px var(--line);
+  }
+  .tile-accent {
+    color: var(--accent-ink);
+    background: var(--accent-soft);
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 25%, transparent);
+  }
+  .tile-ok {
+    color: var(--ok);
+    background: rgba(61, 220, 151, 0.1);
+    box-shadow: inset 0 0 0 1px rgba(61, 220, 151, 0.2);
+  }
+  .tile-warn {
+    color: var(--warn);
+    background: rgba(245, 183, 79, 0.1);
+    box-shadow: inset 0 0 0 1px rgba(245, 183, 79, 0.22);
+  }
+  .tile-lg {
+    width: 40px;
+    height: 40px;
+    border-radius: var(--r-md);
+  }
+
+  /* ── Callouts ─────────────────────────────────────────────────────── */
+
+  .callout {
+    display: flex;
+    gap: 10px;
+    padding: 11px 13px;
+    border-radius: var(--r-md);
+    font-size: 12.5px;
+    line-height: 18px;
+    color: var(--ink-2);
+    background: var(--surface-1);
+    box-shadow: inset 0 0 0 1px var(--line);
+  }
+  .callout > .icon {
+    margin-top: 1px;
+    flex-shrink: 0;
+  }
+  .callout-warn {
+    color: #f3dcb2;
+    background: rgba(245, 183, 79, 0.07);
+    box-shadow: inset 0 0 0 1px rgba(245, 183, 79, 0.2);
+  }
+  .callout-warn > .icon {
+    color: var(--warn);
+  }
+  .callout-ok {
+    color: #c6f1dc;
+    background: rgba(61, 220, 151, 0.07);
+    box-shadow: inset 0 0 0 1px rgba(61, 220, 151, 0.2);
+  }
+  .callout-ok > .icon {
+    color: var(--ok);
+  }
+  .callout-bad {
+    color: #ffd0d0;
+    background: rgba(255, 107, 107, 0.07);
+    box-shadow: inset 0 0 0 1px rgba(255, 107, 107, 0.2);
+  }
+  .callout-bad > .icon {
+    color: var(--bad);
+  }
+
+  /* Text from adb or the phone, verbatim: selectable, wrapped, never styled. */
+  pre.console {
+    margin: 0;
+    padding: 10px 12px;
+    border-radius: var(--r-sm);
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    line-height: 1.6;
+    color: var(--ink-2);
+    background: rgba(0, 0, 0, 0.32);
+    box-shadow: inset 0 0 0 1px var(--line);
+    white-space: pre-wrap;
+    word-break: break-word;
+    -webkit-user-select: text;
+    user-select: text;
+    cursor: text;
+  }
+
+  /* ── Status ───────────────────────────────────────────────────────── */
+
+  .dot {
+    position: relative;
+    display: inline-block;
+    width: 7px;
+    height: 7px;
+    flex-shrink: 0;
+    border-radius: 50%;
+    background: var(--ink-4);
+  }
+  .dot-ok {
+    background: var(--ok);
+    box-shadow: 0 0 0 3px rgba(61, 220, 151, 0.14);
+  }
+  .dot-warn {
+    background: var(--warn);
+    box-shadow: 0 0 0 3px rgba(245, 183, 79, 0.14);
+  }
+  .dot-bad {
+    background: var(--bad);
+    box-shadow: 0 0 0 3px rgba(255, 107, 107, 0.14);
+  }
+  .dot-accent {
+    background: var(--accent);
+    box-shadow: 0 0 0 3px var(--accent-soft);
+  }
+  .dot-live::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: 50%;
+    background: inherit;
+    animation: ping 1.8s var(--ease-out) infinite;
+  }
+
+  .pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    height: 22px;
+    padding: 0 9px;
+    border-radius: 999px;
+    font-size: 11.5px;
+    font-weight: 600;
+    white-space: nowrap;
+    color: var(--ink-2);
+    background: var(--surface-2);
+    box-shadow: inset 0 0 0 1px var(--line);
+  }
+  .pill-ok {
+    color: #9ff0c9;
+    background: rgba(61, 220, 151, 0.09);
+    box-shadow: inset 0 0 0 1px rgba(61, 220, 151, 0.2);
+  }
+  .pill-warn {
+    color: #f7d595;
+    background: rgba(245, 183, 79, 0.09);
+    box-shadow: inset 0 0 0 1px rgba(245, 183, 79, 0.22);
+  }
+  .pill-accent {
+    color: var(--accent-ink);
+    background: var(--accent-soft);
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 25%, transparent);
+  }
+
+  .spinner {
+    display: inline-block;
+    flex-shrink: 0;
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    border: 2px solid rgba(255, 255, 255, 0.12);
+    border-top-color: var(--accent);
+    animation: spin 0.8s linear infinite;
+  }
+  .spinner-lg {
+    width: 18px;
+    height: 18px;
+  }
+
+  /* ── Segmented control ────────────────────────────────────────────── */
+
+  .segmented {
+    position: relative;
+    display: inline-grid;
+    grid-auto-flow: column;
+    grid-auto-columns: 1fr;
+    padding: 2px;
+    border-radius: calc(var(--r-sm) + 2px);
+    background: rgba(255, 255, 255, 0.045);
+    box-shadow: inset 0 0 0 1px var(--line);
+  }
+  .segmented-thumb {
+    position: absolute;
+    top: 2px;
+    bottom: 2px;
+    left: 0;
+    border-radius: var(--r-sm);
+    background: rgba(255, 255, 255, 0.1);
+    box-shadow:
+      inset 0 0 0 1px rgba(255, 255, 255, 0.07),
+      inset 0 1px 0 rgba(255, 255, 255, 0.06),
+      0 1px 3px rgba(0, 0, 0, 0.4);
+    transition:
+      transform 260ms var(--ease-out),
+      width 260ms var(--ease-out);
+  }
+  .segmented-item {
+    position: relative;
+    z-index: 1;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    height: 26px;
+    padding: 0 14px;
+    border-radius: var(--r-sm);
+    font-size: 12.5px;
+    font-weight: 600;
+    white-space: nowrap;
+    color: var(--ink-3);
+    transition: color 160ms ease;
+  }
+  .segmented-item:hover {
+    color: var(--ink-2);
+  }
+  .segmented-item[aria-selected="true"],
+  .segmented-item[aria-checked="true"] {
+    color: var(--ink-1);
+  }
+  /* Navigation, not a choice: no track, just the place you are. */
+  .segmented-nav {
+    background: transparent;
+    box-shadow: none;
+    gap: 2px;
+  }
+  .segmented-nav .segmented-thumb {
+    background: rgba(255, 255, 255, 0.075);
+    box-shadow:
+      inset 0 0 0 1px rgba(255, 255, 255, 0.06),
+      inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  }
+  .segmented-nav .segmented-item {
+    padding: 0 12px;
+  }
+  .segmented-lg .segmented-item {
+    height: 30px;
+    padding: 0 16px;
+    font-size: 13px;
+  }
+
+  /* ── Choice cards (pick one of a few ways) ────────────────────────── */
+
+  .choice {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 8px;
+    padding: 11px 12px 12px;
+    border-radius: var(--r-md);
+    text-align: left;
+    background: var(--surface-1);
+    box-shadow: inset 0 0 0 1px var(--line);
+    transition:
+      background 140ms ease,
+      box-shadow 140ms ease;
+  }
+  .choice:hover {
+    background: var(--surface-2);
+  }
+  .choice[aria-checked="true"] {
+    background: color-mix(in srgb, var(--accent) 9%, transparent);
+    box-shadow: inset 0 0 0 1.5px var(--accent-line);
+  }
+  .choice-title {
+    font-size: 12.5px;
+    font-weight: 600;
+    line-height: 16px;
+    color: var(--ink-1);
+  }
+  .choice-hint {
+    font-size: 11.5px;
+    line-height: 15px;
+    color: var(--ink-3);
+  }
+  .choice .icon {
+    color: var(--ink-2);
+  }
+  .choice[aria-checked="true"] .icon {
+    color: var(--accent-ink);
+  }
+
+  /* ── Fields ───────────────────────────────────────────────────────── */
+
+  .field {
+    appearance: none;
+    height: 36px;
+    padding: 0 12px;
+    border-radius: var(--r-md);
+    font-size: 13px;
+    color: var(--ink-1);
+    background: rgba(0, 0, 0, 0.28);
+    box-shadow: inset 0 0 0 1px var(--line-2);
+    transition: box-shadow 140ms ease;
+  }
+  .field:hover {
+    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.18);
+  }
+  .field:focus {
+    box-shadow:
+      inset 0 0 0 1px var(--accent),
+      0 0 0 3px var(--accent-soft);
+  }
+  .field::placeholder {
+    color: var(--ink-4);
+  }
+
+  /* A code read off a phone screen — spaced out so it can be checked against
+     the phone a character at a time. */
+  .code-input {
+    height: 44px;
+    font-family: var(--font-mono);
+    font-size: 19px;
+    font-weight: 500;
+    letter-spacing: 0.32em;
+    text-align: center;
+    text-indent: 0.32em;
+  }
+  .code-input::placeholder {
+    color: rgba(255, 255, 255, 0.14);
+  }
+
+  /* ── Step lists ───────────────────────────────────────────────────── */
+
+  .steps {
+    display: flex;
+    flex-direction: column;
+  }
+  .step {
+    position: relative;
+    display: flex;
+    gap: 12px;
+    padding: 12px 14px;
+  }
+  .step-marker {
+    position: relative;
+    z-index: 1;
+    display: inline-flex;
+    flex-shrink: 0;
+    align-items: center;
+    justify-content: center;
+    width: 22px;
+    height: 22px;
+    margin-top: -1px;
+    border-radius: 50%;
+    font-size: 11.5px;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    color: var(--ink-3);
+    background: var(--bg-raised);
+    box-shadow: inset 0 0 0 1.5px var(--line-2);
+    transition:
+      background 240ms ease,
+      color 240ms ease,
+      box-shadow 240ms ease;
+  }
+  .step[data-state="active"] .step-marker {
+    color: var(--accent-ink);
+    background: color-mix(in srgb, var(--accent) 16%, var(--bg-raised));
+    box-shadow: inset 0 0 0 1.5px var(--accent);
+  }
+  .step[data-state="active"] .step-marker::after {
+    content: "";
+    position: absolute;
+    inset: -1px;
+    border-radius: 50%;
+    box-shadow: 0 0 0 1.5px var(--accent);
+    animation: ping 2s var(--ease-out) infinite;
+  }
+  .step[data-state="done"] .step-marker {
+    color: #04110a;
+    background: var(--ok);
+    box-shadow: none;
+  }
+  .step[data-state="done"] .step-title {
+    color: var(--ink-2);
+  }
+  .step-title {
+    font-size: 13.5px;
+    line-height: 20px;
+    font-weight: 600;
+    color: var(--ink-1);
+  }
+  .step-detail {
+    margin-top: 1px;
+    font-size: 12.5px;
+    line-height: 18px;
+    color: var(--ink-3);
+  }
+  /* Working on it: an arc that circles the number instead of a ping. */
+  .step-marker.orbit::after {
+    animation: none;
+    box-shadow: none;
+  }
+  .step-marker.orbit::before {
+    content: "";
+    position: absolute;
+    inset: -4px;
+    border-radius: 50%;
+    border: 1.5px solid transparent;
+    border-top-color: var(--accent);
+    border-right-color: color-mix(in srgb, var(--accent) 35%, transparent);
+    animation: spin 0.9s linear infinite;
+  }
+  /* The thread between markers in a progress list. */
+  .steps-threaded .step:not(:last-child)::before {
+    content: "";
+    position: absolute;
+    left: 24.25px;
+    top: 34px;
+    bottom: -10px;
+    width: 1.5px;
+    background: var(--line-2);
+  }
+  .steps-threaded .step[data-state="done"]:not(:last-child)::before {
+    background: color-mix(in srgb, var(--ok) 55%, transparent);
+  }
+
+  /* Numbered instructions inside a card. */
+  ol.howto {
+    counter-reset: howto;
+    display: flex;
+    flex-direction: column;
+    gap: 9px;
+  }
+  ol.howto > li {
+    counter-increment: howto;
+    position: relative;
+    padding-left: 28px;
+    font-size: 12.5px;
+    line-height: 19px;
+    color: var(--ink-2);
+  }
+  ol.howto > li::before {
+    content: counter(howto);
+    position: absolute;
+    left: 0;
+    top: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 19px;
+    height: 19px;
+    border-radius: 50%;
+    font-size: 10.5px;
+    font-weight: 700;
+    color: var(--ink-2);
+    background: var(--surface-3);
+  }
+
+  /* ── Menus ────────────────────────────────────────────────────────── */
+
+  .menu {
+    position: absolute;
+    z-index: 50;
+    min-width: 248px;
+    padding: 5px;
+    border-radius: var(--r-md);
+    transform-origin: top right;
+    animation: menu-in 160ms var(--ease-out) both;
+  }
+  /* Focused only so the arrow keys have somewhere to start; the items show focus. */
+  .menu:focus-visible {
+    outline: none;
+  }
+  .menu-item {
+    display: flex;
+    width: 100%;
+    align-items: center;
+    gap: 10px;
+    height: 32px;
+    padding: 0 10px;
+    border-radius: var(--r-xs);
+    font-size: 13px;
+    font-weight: 500;
+    text-align: left;
+    white-space: nowrap;
+    color: var(--ink-1);
+  }
+  .menu-item .icon {
+    color: var(--ink-3);
+  }
+  .menu-item:hover:not(:disabled),
+  .menu-item:focus-visible {
+    outline: none;
+    background: color-mix(in srgb, var(--accent) 85%, black);
+    color: #ffffff;
+  }
+  .menu-item:hover:not(:disabled) .icon,
+  .menu-item:focus-visible .icon {
+    color: #ffffff;
+  }
+  .menu-item:disabled {
+    opacity: 0.45;
+  }
+  .menu-item.danger {
+    color: #ff9b9b;
+  }
+  .menu-label {
+    padding: 8px 10px 4px;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--ink-3);
+  }
+  .menu-sep {
+    height: 1px;
+    margin: 5px 6px;
+    background: var(--line);
+  }
+
+  /* ── Toasts ───────────────────────────────────────────────────────── */
+
+  .toast {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    width: min(460px, calc(100vw - 32px));
+    padding: 10px 10px 10px 13px;
+    border-radius: var(--r-md);
+    font-size: 12.5px;
+    line-height: 18px;
+    color: var(--ink-1);
+    animation: toast-in 280ms var(--ease-spring) both;
+  }
+  .toast > .icon {
+    margin-top: 1px;
+    flex-shrink: 0;
+  }
+
+  /* ── Motion helpers ───────────────────────────────────────────────── */
+
+  .fade-in {
+    animation: fade-in 320ms var(--ease-out) both;
+  }
+  .rise-in {
+    animation: rise-in 420ms var(--ease-out) both;
+  }
+  .stagger > * {
+    animation: rise-in 460ms var(--ease-out) both;
+  }
+  .stagger > *:nth-child(2) {
+    animation-delay: 50ms;
+  }
+  .stagger > *:nth-child(3) {
+    animation-delay: 100ms;
+  }
+  .stagger > *:nth-child(4) {
+    animation-delay: 150ms;
+  }
+  .stagger > *:nth-child(5) {
+    animation-delay: 200ms;
+  }
+  .stagger > *:nth-child(n + 6) {
+    animation-delay: 250ms;
+  }
+
+  /* Disclosure: a chevron that turns when its section is open. */
+  .chev {
+    transition: transform 200ms var(--ease-out);
+  }
+  [aria-expanded="true"] > .chev {
+    transform: rotate(90deg);
+  }
+
+  /* ── The stage (Stage.tsx) ────────────────────────────────────────── */
+
+  .stage {
+    display: block;
+    width: 100%;
+    height: auto;
+    overflow: visible;
+  }
+  .st-accent-stop {
+    stop-color: var(--accent);
+  }
+  .st-wall-a {
+    stop-color: color-mix(in srgb, var(--accent) 40%, #0a1222);
+  }
+  .st-accent-fill {
+    fill: var(--accent);
+  }
+  .st-accent-stroke {
+    stroke: var(--accent);
+  }
+  .st-fade {
+    transition: opacity 700ms var(--ease-out);
+  }
+  .st-fade.is-out {
+    opacity: 0;
+  }
+  .st-rise {
+    opacity: 0;
+    transform: translateY(12px);
+    transition:
+      opacity 600ms var(--ease-out),
+      transform 600ms var(--ease-out);
+  }
+  .st-rise.is-in {
+    opacity: 1;
+    transform: none;
+  }
+  .st-pop {
+    opacity: 0;
+    transform: translateY(6px) scale(0.97);
+    transform-box: view-box;
+    transform-origin: 272px 89px;
+    transition:
+      opacity 650ms var(--ease-out),
+      transform 650ms var(--ease-out);
+  }
+  .st-pop.is-in {
+    opacity: 1;
+    transform: none;
+  }
+
+  /* the cable */
+  .st-cable-line {
+    fill: none;
+    stroke: #2b303b;
+    stroke-width: 2.6;
+    stroke-linecap: round;
+  }
+  .st-cable-pulse {
+    fill: none;
+    stroke: var(--accent);
+    stroke-width: 2.6;
+    stroke-linecap: round;
+    stroke-dasharray: 7 58;
+    opacity: 0;
+    transition: opacity 400ms ease;
+    filter: drop-shadow(0 0 3px var(--accent));
+  }
+  .st-cable.is-flowing .st-cable-pulse {
+    opacity: 1;
+    animation: cable-flow 1.4s linear infinite;
+  }
+  .st-plug {
+    transition: transform 520ms var(--ease-spring);
+  }
+  .st-plug-tip {
+    fill: #9aa3b2;
+  }
+  .st-cable.is-waiting .st-plug {
+    animation: plug-bob 2.6s ease-in-out infinite;
+  }
+  .st-cable.is-plugged .st-plug {
+    transform: translateY(-6.6px);
+  }
+
+  /* the air between them */
+  .st-air-track {
+    fill: none;
+    stroke: rgba(255, 255, 255, 0.07);
+    stroke-width: 1.6;
+    stroke-linecap: round;
+    stroke-dasharray: 1 6;
+  }
+  .st-air-dots {
+    fill: none;
+    stroke: var(--accent);
+    stroke-width: 2.4;
+    stroke-linecap: round;
+    stroke-dasharray: 0.1 9;
+    opacity: 0.45;
+    animation: air-flow 2.4s linear infinite;
+  }
+  .st-air.is-flowing .st-air-dots {
+    opacity: 1;
+    animation-duration: 1.1s;
+    filter: drop-shadow(0 0 2px var(--accent));
+  }
+  .st-air.is-idle .st-air-dots {
+    opacity: 0.2;
+    animation: none;
+  }
+  .st-air-mark {
+    fill: none;
+    stroke: var(--accent);
+    stroke-width: 1.8;
+    stroke-linecap: round;
+  }
+  .st-air-mark circle {
+    fill: var(--accent);
+    stroke: none;
+  }
+  .st-air:not(.is-flowing) .st-air-mark {
+    animation: breathe 2.4s ease-in-out infinite;
+  }
+  .st-air.is-idle .st-air-mark {
+    animation: none;
+    opacity: 0.35;
+  }
+
+  .st-ping {
+    transform-box: fill-box;
+    transform-origin: center;
+    animation: allow-ping 1.6s var(--ease-out) infinite;
+  }
+  .st-caret {
+    animation: caret 1.1s steps(1) infinite;
+  }
 }
 
-/* ── Boot backdrop: near-black with a faint cool vignette ── */
-.boot-backdrop {
-  background:
-    radial-gradient(900px 560px at 50% 28%, rgba(38, 60, 110, 0.28), transparent 70%),
-    radial-gradient(700px 500px at 85% 110%, rgba(13, 148, 136, 0.1), transparent 60%),
-    #090b10;
-}
-
-.glass {
-  background: rgba(255, 255, 255, 0.05);
-  backdrop-filter: blur(24px);
-  -webkit-backdrop-filter: blur(24px);
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: var(--item-radius);
-}
-
-.titlebar-btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 44px;
-  height: 34px;
-  color: #aeb6c2;
-  transition: background 100ms ease, color 100ms ease;
-}
-.titlebar-btn:hover {
-  background: rgba(255, 255, 255, 0.08);
-  color: #ffffff;
-}
-.titlebar-btn.close:hover {
-  background: #e81123;
-  color: #ffffff;
-}
-
-/* ── Wordmark ── */
-.wordmark {
-  display: flex;
-  align-items: baseline;
-  gap: 12px;
-}
-.wordmark-light {
-  font-size: 17px;
-  font-weight: 600;
-  letter-spacing: 0.38em;
-  color: #b9c3d2;
-}
-.wordmark-bold {
-  font-size: 38px;
-  font-weight: 800;
-  letter-spacing: 0.01em;
-  color: #ffffff;
-  text-shadow: 0 0 34px rgba(77, 159, 255, 0.35);
-}
-
-/* ── Boot stage rows ── */
-.stage-row {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  min-width: 320px;
-}
-.stage-tag {
-  width: 34px;
-  font-size: 12px;
-  font-weight: 700;
-  letter-spacing: 0.08em;
-  color: #dbe2ec;
-}
-.stage-row.idle .stage-tag {
-  color: #64748b;
-}
-.stage-sep {
-  color: #475569;
-  font-size: 12px;
-}
-.stage-text {
-  font-size: 13px;
-  color: #94a3b8;
-}
-.stage-row.error .stage-text {
-  color: #fca5a5;
-}
-.stage-row.done .stage-text {
-  color: #7dd3c0;
-}
-
-.stage-ring {
-  width: 18px;
-  height: 18px;
-  flex-shrink: 0;
-  border-radius: 50%;
-  border: 2px solid rgba(255, 255, 255, 0.12);
-}
-.stage-ring.busy {
-  border-color: rgba(45, 212, 191, 0.18);
-  border-top-color: #2dd4bf;
-  animation: ring-spin 0.9s linear infinite;
-}
-.stage-ring.done {
-  border-color: #2dd4bf;
-  box-shadow: 0 0 12px rgba(45, 212, 191, 0.35);
-}
-.stage-ring.error {
-  border-color: #f87171;
-}
-@keyframes ring-spin {
+@keyframes spin {
   to {
     transform: rotate(360deg);
   }
 }
-
-.fade-in {
-  animation: fade-in 320ms ease both;
+@keyframes ping {
+  0% {
+    transform: scale(1);
+    opacity: 0.7;
+  }
+  80%,
+  100% {
+    transform: scale(2.4);
+    opacity: 0;
+  }
 }
 @keyframes fade-in {
   from {
     opacity: 0;
-    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+  }
+}
+@keyframes rise-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
   }
   to {
     opacity: 1;
     transform: none;
   }
 }
-
-/* ── Controls ── */
-
-/* Every button here is "glyph, then label". Laying that out as flex with a gap
-   is what keeps the two on ONE line: as plain inline text the label wraps under
-   its own icon as soon as the row is tight, which is how the footer ended up
-   two rows tall and overlapping the status line beside it. */
-.btn-accent,
-.btn-danger,
-.btn-ghost {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 7px;
-  white-space: nowrap;
+@keyframes menu-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px) scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(14px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@keyframes cable-flow {
+  /* toward the computer: the path is drawn from it to the phone */
+  from {
+    stroke-dashoffset: 0;
+  }
+  to {
+    stroke-dashoffset: 65;
+  }
+}
+@keyframes air-flow {
+  from {
+    stroke-dashoffset: 9.1;
+  }
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+@keyframes plug-bob {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-2.6px);
+  }
+}
+@keyframes breathe {
+  0%,
+  100% {
+    opacity: 0.45;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+@keyframes allow-ping {
+  0% {
+    transform: scale(1);
+    opacity: 0.9;
+  }
+  70%,
+  100% {
+    transform: scale(1.5, 1.9);
+    opacity: 0;
+  }
+}
+@keyframes caret {
+  50% {
+    opacity: 0;
+  }
 }
 
-.btn-accent {
-  padding: 9px 18px;
-  border-radius: var(--item-radius);
-  font-size: 13.5px;
-  font-weight: 600;
-  color: #ffffff;
-  background: linear-gradient(135deg, #2f7fe0, #4d9fff);
-  box-shadow: 0 4px 18px rgba(77, 159, 255, 0.35);
-  transition: filter 120ms ease, box-shadow 120ms ease;
-}
-.btn-accent:hover:not(:disabled) {
-  filter: brightness(1.1);
-  box-shadow: 0 4px 24px rgba(77, 159, 255, 0.5);
-}
-.btn-accent:disabled {
-  opacity: 0.4;
-  box-shadow: none;
-}
-
-.btn-danger {
-  padding: 9px 18px;
-  border-radius: var(--item-radius);
-  font-size: 13.5px;
-  font-weight: 600;
-  color: #ffb4b4;
-  background: rgba(232, 17, 35, 0.18);
-  border: 1px solid rgba(232, 17, 35, 0.35);
-  transition: background 120ms ease;
-}
-.btn-danger:hover:not(:disabled) {
-  background: rgba(232, 17, 35, 0.32);
-  color: #ffffff;
-}
-
-.btn-ghost {
-  padding: 9px 16px;
-  border-radius: var(--item-radius);
-  font-size: 13px;
-  font-weight: 600;
-  color: #d7dee8;
-  background: rgba(255, 255, 255, 0.08);
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  transition: background 120ms ease;
-}
-.btn-ghost:hover:not(:disabled) {
-  background: rgba(255, 255, 255, 0.16);
-}
-
-.info-btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 20px;
-  height: 20px;
-  border-radius: 50%;
-  color: #64748b;
-  transition: color 120ms ease, background 120ms ease;
-}
-.info-btn:hover {
-  color: #dbe2ec;
-  background: rgba(255, 255, 255, 0.1);
-}
-
-.badge {
-  display: inline-flex;
-  align-items: center;
-  padding: 2px 9px;
-  border-radius: 999px;
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.02em;
-  color: #aeb6c2;
-  background: rgba(255, 255, 255, 0.08);
-  border: 1px solid rgba(255, 255, 255, 0.1);
-}
-.badge-warn {
-  color: #fcd34d;
-  background: rgba(245, 158, 11, 0.14);
-  border-color: rgba(245, 158, 11, 0.3);
-}
-
-.field {
-  appearance: none;
-  padding: 9px 12px;
-  border-radius: calc(var(--item-radius) - 4px);
-  font-size: 13px;
-  color: #e7ecf3;
-  background: rgba(255, 255, 255, 0.07);
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  outline: none;
-}
-.field:focus {
-  border-color: rgba(77, 159, 255, 0.6);
-}
-.field::placeholder {
-  color: #5b6675;
-}
-
-/* ── Wireless panel ── */
-
-/* The ways onto Wi-Fi. Equal widths so no one route reads as the fallback,
-   and the active tab merges into the body below it.
-
-   Auto-columns rather than a fixed `repeat(4, …)`: macOS has no Miracast
-   receiver, so it gets three tabs, and a hard count would have left a quarter
-   of the row empty there. */
-.tabs {
-  display: grid;
-  grid-auto-flow: column;
-  grid-auto-columns: 1fr;
-  gap: 0;
-}
-.tab {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 5px;
-  padding: 8px 4px;
-  font-size: 11.5px;
-  font-weight: 600;
-  white-space: nowrap;
-  color: #8b95a5;
-  background: rgba(255, 255, 255, 0.03);
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  border-bottom: none;
-  transition: background 120ms ease, color 120ms ease;
-}
-.tab:first-child {
-  border-radius: var(--item-radius) 0 0 0;
-}
-.tab:last-child {
-  border-radius: 0 var(--item-radius) 0 0;
-}
-.tab:not(:first-child) {
-  border-left: none;
-}
-.tab:hover:not(.active) {
-  background: rgba(255, 255, 255, 0.07);
-  color: #d7dee8;
-}
-.tab.active {
-  color: #ffffff;
-  background: rgba(77, 159, 255, 0.14);
-  box-shadow: inset 0 2px 0 var(--accent);
-}
-
-/* Six digits read off a phone screen — spaced out so they can be checked
-   against it a character at a time. */
-.code-input {
-  font-family: ui-monospace, "SF Mono", Menlo, "Cascadia Mono", Consolas, monospace;
-  font-size: 17px;
-  letter-spacing: 0.36em;
-  text-align: center;
-  text-indent: 0.36em;
-}
-
-.link-btn {
-  padding: 2px 4px;
-  font-size: 11.5px;
-  font-weight: 600;
-  color: var(--accent);
-  transition: color 120ms ease;
-}
-.link-btn:hover:not(:disabled) {
-  color: #8fc2ff;
-  text-decoration: underline;
-}
-.link-btn:disabled {
-  opacity: 0.4;
-}
-.link-btn.muted {
-  color: #64748b;
-}
-.link-btn.muted:hover {
-  color: #aeb6c2;
-}
-
-pre.console {
-  user-select: text;
-  cursor: text;
-  font-family: ui-monospace, "SF Mono", Menlo, "Cascadia Mono", Consolas, monospace;
-  font-size: 12px;
-  line-height: 1.6;
-  white-space: pre-wrap;
-  word-break: break-all;
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 1ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 1ms !important;
+  }
+  .st-cable.is-flowing .st-cable-pulse {
+    stroke-dasharray: none;
+    opacity: 0.6;
+  }
 }

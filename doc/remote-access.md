@@ -11,11 +11,11 @@ What a person does:
 
 1. **Phone:** Linux → Remote access → *Turn on* → *Add a computer*. An
    eight-character code appears, good for ten minutes.
-2. **Computer:** Open Android DeX → *Phone Linux* → type the code → *Pair*.
-   Or, with the phone on the cable, *Set up SSH to …* and nothing to type.
+2. **Computer:** Open Android DeX → the *Linux* tab → type the code → *Pair*.
+   Or, with the phone on the cable, *Set up …* and nothing to type.
 3. From then on: `ssh <phone>` in any terminal; VS Code's Remote-SSH lists the
    phone; scp, rsync and git work against it by name.
-4. And the desktop: *Phone Linux* → *Desktop* opens the phone's XFCE in a
+4. And the desktop: *Linux* → *Open desktop* opens the phone's XFCE in a
    window on the computer — see [The desktop, in a window](#the-desktop-in-a-window).
    Copy on one side and paste on the other; drop files on the window and
    they land on the guest's Desktop; Send To this computer in Linux and they
@@ -40,7 +40,7 @@ was measured, or what the platform refuses.
 | USB pairing | `RemoteProvider.java` | one adb `content call` |
 | Coming back | `RemoteResumeReceiver.java` | boot, updates, the desktop app's teardown |
 | The guest's sshd | `openandroiddex-linux/linux-ssh.sh`, `setup_ssh` in `linux-setup.sh` | OpenSSH in a proot of its own |
-| Desktop app | `src-tauri/src/remote.rs`, `src/features/remote/RemotePanel.tsx` | Phone Linux panel, `ssh-proxy` |
+| Desktop app | `src-tauri/src/remote.rs`, `src/features/remote/RemotePanel.tsx` | Linux tab, `ssh-proxy` |
 | The desktop's window | `src-tauri/src/remote_desktop.rs`, `src/features/remote/DesktopWindow.tsx` | the window, its local port, reconnecting, fullscreen |
 | What crosses, either way | `src/features/remote/DesktopRouter.tsx`, `DesktopCards.tsx` | the clipboard's switch, drops and what Linux sends, over adb or the tunnel |
 | The desktop's page | `assets/linux/novnc/dex.js` (`ctx=pc`) | the phone's own viewer, in that window |
@@ -317,8 +317,8 @@ as the ProxyCommand, and `dexremote forward` gives PuTTY and WinSCP a local port
 
 ## The desktop, in a window
 
-SSH reaches everything in the guest except its desktop. *Phone Linux* →
-*Desktop* opens that too: the phone's XFCE in a window on the computer, through
+SSH reaches everything in the guest except its desktop. *Linux* →
+*Open desktop* opens that too: the phone's XFCE in a window on the computer, through
 the same tunnel, wherever the two are.
 
 **It is the phone's own viewer.** websockify already serves noVNC's page and

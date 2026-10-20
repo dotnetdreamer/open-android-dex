@@ -4,18 +4,21 @@ import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { error as logError, info as logInfo } from "@tauri-apps/plugin-log";
 import { THIS_COMPUTER } from "../../lib/host";
 import type { DeviceInfo, RemotePhone, RemoteProbe, RemoteUsbStatus } from "../../lib/types";
+import { Icon } from "../../ui/Icon";
+import { Menu, MenuItem } from "../../ui/kit";
+import { Stage } from "../../ui/Stage";
 
 /**
  * Phone Linux over SSH: the phones this computer can log in to, and the two
- * ways to add one.
+ * ways to add one — the window's second tab.
  *
- * The whole point of the panel is to make itself unnecessary. Pairing writes a
+ * The whole point of the page is to make itself unnecessary. Pairing writes a
  * `Host` block for the phone into ~/.ssh, so from then on `ssh <name>` works in
- * any terminal and VS Code's Remote-SSH lists it — this window is for adding a
+ * any terminal and VS Code's Remote-SSH lists it — this page is for adding a
  * phone, seeing whether it is reachable right now, and the buttons that save
  * typing. Nothing here has to stay open for a session to work. The one thing
- * ssh cannot give is the phone's XFCE desktop, so Desktop opens that in a
- * window of its own (DesktopWindow.tsx), over the same tunnel.
+ * ssh cannot give is the phone's XFCE desktop, so "Open desktop" opens that in
+ * a window of its own (DesktopWindow.tsx), over the same tunnel.
  *
  * Pairing over the cable comes first when a phone is plugged in, for the same
  * reason the Wi-Fi panel leads with it: adb has already proved which computer
@@ -23,7 +26,7 @@ import type { DeviceInfo, RemotePhone, RemoteProbe, RemoteUsbStatus } from "../.
  * that is somewhere else.
  */
 
-/** How often the list re-asks each phone how it is while the panel is open. */
+/** How often the list re-asks each phone how it is while the page is open. */
 const PROBE_MS = 20_000;
 
 type ProbeState = RemoteProbe | "probing";
@@ -34,59 +37,33 @@ function formatCode(raw: string): string {
   return clean.length > 4 ? `${clean.slice(0, 4)}-${clean.slice(4)}` : clean;
 }
 
-function StatusLine({ probe }: { probe: ProbeState | undefined }) {
-  if (!probe || probe === "probing") {
-    return <span className="text-slate-500">Checking…</span>;
-  }
-  if (!probe.reachable) {
-    return <span className="text-amber-300/90">{probe.error ?? "Not reachable right now"}</span>;
-  }
-  const path = `${probe.direct ? "direct" : "through a relay"} · ${probe.rttMs} ms`;
+/** How a phone is right now, as a pill and a line under its name. */
+function describe(probe: ProbeState | undefined): { pill: string; tone: "ok" | "warn" | "accent" | ""; line: string; busy?: boolean } {
+  if (!probe || probe === "probing") return { pill: "Checking", tone: "", line: "Reaching the phone…", busy: true };
+  if (!probe.reachable) return { pill: "Offline", tone: "", line: probe.error ?? "Not reachable right now" };
+  const path = `${probe.direct ? "Direct" : "Through a relay"} · ${probe.rttMs} ms`;
   switch (probe.ssh) {
     case "up":
-      return (
-        <span className="text-teal-300">
-          ● Online · {path}
-          {probe.desktop === "running" ? " · desktop running" : ""}
-          {probe.sessions > 0 ? ` · ${probe.sessions} open` : ""}
-        </span>
-      );
+      return {
+        pill: "Online",
+        tone: "ok",
+        line: [path, probe.desktop === "running" ? "Desktop running" : "", probe.sessions > 0 ? `${probe.sessions} open` : ""]
+          .filter(Boolean)
+          .join(" · "),
+      };
     case "installing":
-      return <span className="text-amber-300/90">Online · Linux is still being set up on the phone</span>;
+      return { pill: "Setting up", tone: "warn", line: "Linux is still being set up on the phone" };
     case "missing":
-      return <span className="text-amber-300/90">Online · Linux is not installed on the phone</span>;
+      return { pill: "No Linux", tone: "warn", line: "Linux isn't installed on the phone yet" };
     case "failed":
-      return <span className="text-amber-300/90">Online · the SSH server on the phone would not start</span>;
+      return { pill: "SSH stopped", tone: "warn", line: "The SSH server on the phone wouldn't start" };
     default:
-      return <span className="text-teal-300">● Online · {path} · SSH starting</span>;
+      return { pill: "Starting", tone: "accent", line: `${path} · SSH starting` };
   }
 }
 
-/**
- * The phone's desktop, in a window of its own. Offered until a probe says the
- * phone cannot: a phone that is merely unreachable may be back by the time the
- * window has dialled it, and the window says so in words if it is not.
- */
-function DesktopButton({ probe, onOpen }: { probe: ProbeState | undefined; onOpen: () => void }) {
-  const tooOld = !!probe && probe !== "probing" && probe.reachable && !probe.desktopOk;
-  return (
-    <button
-      className="btn-ghost !px-3 !py-1.5 text-[12px] disabled:opacity-40"
-      onClick={onOpen}
-      disabled={tooOld}
-      title={
-        tooOld
-          ? "Update Open Android DeX on the phone to open its desktop from here"
-          : "Open the phone's Linux desktop in a window — F11 for fullscreen"
-      }
-    >
-      <span aria-hidden="true">🖥</span> Desktop
-    </button>
-  );
-}
-
-export function RemotePanel({ devices, onClose }: { devices: DeviceInfo[]; onClose: () => void }) {
-  const [phones, setPhones] = useState<RemotePhone[]>([]);
+export function RemotePanel({ devices }: { devices: DeviceInfo[] }) {
+  const [phones, setPhones] = useState<RemotePhone[] | null>(null);
   const [probes, setProbes] = useState<Record<string, ProbeState>>({});
   const [code, setCode] = useState("");
   /** Which pairing is in flight, so its own button says so. */
@@ -100,22 +77,18 @@ export function RemotePanel({ devices, onClose }: { devices: DeviceInfo[]; onClo
   const refresh = useCallback(() => {
     invoke<RemotePhone[]>("remote_phones")
       .then(setPhones)
-      .catch((e) => setError(String(e)));
+      .catch((e) => {
+        setPhones([]);
+        setError(String(e));
+      });
   }, []);
 
   useEffect(() => {
     refresh();
   }, [refresh]);
 
-  // Escape closes, like every other sheet a desktop app has.
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
-
-  // ── how each phone is, re-asked while the panel is open ──
-  const ids = useMemo(() => phones.map((p) => p.id).join(","), [phones]);
+  // ── how each phone is, re-asked while the page is open ──
+  const ids = useMemo(() => (phones ?? []).map((p) => p.id).join(","), [phones]);
   useEffect(() => {
     if (!ids) return;
     let live = true;
@@ -150,7 +123,7 @@ export function RemotePanel({ devices, onClose }: { devices: DeviceInfo[]; onClo
     return () => {
       live = false;
     };
-  }, [adbSerial, phones.length]);
+  }, [adbSerial, phones?.length]);
 
   const succeed = useCallback(
     (phone: RemotePhone) => {
@@ -158,8 +131,7 @@ export function RemotePanel({ devices, onClose }: { devices: DeviceInfo[]; onClo
       setError("");
       setCode("");
       setNotice(
-        `Paired with ${phone.name}. Connect from any terminal with: ${phone.sshCommand}` +
-          (phone.note ? ` ${phone.note}` : ""),
+        `Paired with ${phone.name}. From any terminal: ${phone.sshCommand}` + (phone.note ? `. ${phone.note}` : ""),
       );
       logInfo(`remote: paired with ${phone.name} as ${phone.alias}`);
       refresh();
@@ -222,149 +194,256 @@ export function RemotePanel({ devices, onClose }: { devices: DeviceInfo[]; onClo
     [usb, refresh, fail],
   );
 
+  // Nothing until the list is read — a few milliseconds from a local file —
+  // rather than a header that lays itself out twice.
+  if (phones === null) return null;
+
   const codeReady = code.replace("-", "").length === 8;
-  const usbOffer = usb && usb.status.ok && usb.status.available && !usb.status.pairedHere;
+  const usbOffer = usb && usb.status.ok && usb.status.available && !usb.status.pairedHere ? usb : null;
+  const list = phones;
+  const empty = list.length === 0;
 
   return (
-    <div
-      className="fade-in fixed inset-0 z-20 flex flex-col overflow-y-auto bg-black/55 p-6 pt-[46px] backdrop-blur-sm"
-      onMouseDown={(e) => e.target === e.currentTarget && onClose()}
-    >
-      <div className="glass m-auto flex w-[640px] max-w-full shrink-0 flex-col overflow-hidden">
-        <div className="flex items-start justify-between gap-4 border-b border-white/10 px-5 py-4">
-          <div>
-            <p className="text-[15px] font-semibold text-slate-100">Linux on your phones</p>
-            <p className="mt-1 text-[12px] leading-relaxed text-slate-400">
-              Log in to the Ubuntu on a paired phone with ssh, or open its desktop, from{" "}
-              {THIS_COMPUTER}, wherever the phone is — the same Wi-Fi, a different one, or mobile data.
-            </p>
+    <div className="mx-auto flex w-full max-w-[600px] flex-col gap-6 px-6 pb-10 pt-5">
+      <header className={empty ? "flex flex-col items-center text-center" : ""}>
+        {empty && (
+          <div className="mb-4 w-[min(320px,64vw)]">
+            <Stage scene="remote" />
           </div>
-          <button className="link-btn muted shrink-0 text-[13px]" onClick={onClose} title="Close (Esc)">
-            ✕
-          </button>
-        </div>
+        )}
+        <h1 className="display">Linux on your phone</h1>
+        <p className={`lede mt-2 ${empty ? "max-w-[460px]" : ""}`}>
+          Open the Ubuntu desktop or a terminal on your phone from {THIS_COMPUTER} — on the same Wi‑Fi, another network,
+          or mobile data.
+        </p>
+      </header>
 
-        <div className="flex flex-col gap-4 px-5 py-4">
-          {phones.length > 0 && (
-            <div className="flex flex-col gap-2">
-              {phones.map((p) => (
-                <div key={p.id} className="rounded-xl bg-white/[0.04] px-4 py-3">
-                  <div className="flex items-center gap-3">
-                    <span className="text-xl" aria-hidden="true">
-                      📱
-                    </span>
-                    <div className="min-w-0 flex-1">
-                      <p className="truncate text-[13px] font-medium text-slate-200">{p.name}</p>
-                      <p className="truncate text-[11.5px]">
-                        <StatusLine probe={probes[p.id]} />
-                      </p>
+      {list.length > 0 && (
+        <section className="stagger flex flex-col gap-2.5">
+          {list.map((p) => {
+            const probe = probes[p.id];
+            const s = describe(probe);
+            const tooOld = !!probe && probe !== "probing" && probe.reachable && !probe.desktopOk;
+            return (
+              <article key={p.id} className="card px-4 pb-3.5 pt-3.5">
+                <div className="flex items-start gap-3">
+                  <span className={`tile tile-lg ${s.tone === "ok" ? "tile-ok" : ""}`}>
+                    <Icon name="phone" size={20} />
+                  </span>
+                  <div className="min-w-0 flex-1 pt-0.5">
+                    <div className="flex items-center gap-2">
+                      <p className="heading truncate text-[14px]">{p.name}</p>
+                      <span className={`pill ${s.tone ? `pill-${s.tone}` : ""}`}>
+                        {s.busy ? (
+                          <span className="spinner !h-2.5 !w-2.5 !border-[1.5px]" aria-hidden="true" />
+                        ) : (
+                          <span className={`dot ${s.tone === "ok" ? "dot-ok" : s.tone === "warn" ? "dot-warn" : s.tone === "accent" ? "dot-accent" : ""} !h-1.5 !w-1.5 !shadow-none`} aria-hidden="true" />
+                        )}
+                        {s.pill}
+                      </span>
                     </div>
+                    <p className="caption mt-0.5 truncate">{s.line}</p>
                   </div>
-                  <div className="mt-2.5 flex flex-wrap items-center gap-2">
-                    <DesktopButton probe={probes[p.id]} onOpen={() => invoke("remote_open_desktop", { id: p.id }).catch(fail)} />
+                  <Menu
+                    label={`${p.name} options`}
+                    trigger={({ open, toggle, ref }) => (
+                      <button
+                        ref={ref}
+                        className={`btn btn-quiet btn-sm btn-icon -mr-1.5 -mt-0.5 ${open ? "!bg-[var(--surface-2)]" : ""}`}
+                        onClick={toggle}
+                        aria-haspopup="menu"
+                        aria-expanded={open}
+                        aria-label={`More for ${p.name}`}
+                      >
+                        <Icon name="more" size={16} />
+                      </button>
+                    )}
+                  >
+                    {(close) => (
+                      <>
+                        <MenuItem
+                          icon="copy"
+                          onSelect={() => {
+                            close();
+                            copy(p.sshCommand);
+                          }}
+                        >
+                          Copy SSH command
+                        </MenuItem>
+                        <MenuItem
+                          icon="trash"
+                          danger
+                          onSelect={() => {
+                            close();
+                            setForgetting(p.id);
+                          }}
+                        >
+                          Forget this phone…
+                        </MenuItem>
+                      </>
+                    )}
+                  </Menu>
+                </div>
+
+                {forgetting === p.id ? (
+                  <div className="fade-in mt-3.5 flex flex-wrap items-center gap-2.5 rounded-[var(--r-md)] bg-[rgba(255,107,107,0.06)] px-3 py-2.5 shadow-[inset_0_0_0_1px_rgba(255,107,107,0.18)]">
+                    <p className="body min-w-0 flex-1">Forget {p.name}? You can pair it again later.</p>
+                    <button className="btn btn-danger btn-sm" onClick={() => forget(p)}>
+                      Forget
+                    </button>
+                    <button className="btn btn-quiet btn-sm" onClick={() => setForgetting(null)}>
+                      Keep
+                    </button>
+                  </div>
+                ) : (
+                  <div className="mt-3.5 flex flex-wrap items-center gap-2">
                     <button
-                      className="btn-ghost !px-3 !py-1.5 text-[12px]"
+                      className={`btn btn-sm ${s.tone === "ok" ? "btn-primary" : "btn-secondary"}`}
+                      onClick={() => invoke("remote_open_desktop", { id: p.id }).catch(fail)}
+                      disabled={tooOld}
+                      title={
+                        tooOld
+                          ? "Update Open Android DeX on the phone to open its desktop from here"
+                          : "Open the phone's Linux desktop in a window — F11 for full screen"
+                      }
+                    >
+                      <Icon name="monitor" size={14} />
+                      Open desktop
+                    </button>
+                    <button
+                      className="btn btn-secondary btn-sm"
                       onClick={() => invoke("remote_open_terminal", { id: p.id }).catch(fail)}
                       title={`Open a terminal running ${p.sshCommand}`}
                     >
-                      <span aria-hidden="true">⌨</span> Terminal
+                      <Icon name="terminal" size={14} />
+                      Terminal
                     </button>
                     <button
-                      className="btn-ghost !px-3 !py-1.5 text-[12px]"
+                      className="btn btn-secondary btn-sm"
                       onClick={() => invoke("remote_open_vscode", { id: p.id }).catch(fail)}
                       title="Open VS Code on the phone through Remote-SSH"
                     >
-                      <span aria-hidden="true">⧉</span> VS Code
-                    </button>
-                    <button
-                      className="rounded-lg bg-white/10 px-2 py-1 font-mono text-[11.5px] text-slate-200 hover:bg-white/15"
-                      onClick={() => copy(p.sshCommand)}
-                      title="Copy"
-                    >
-                      {copied === p.sshCommand ? "Copied" : p.sshCommand}
+                      <Icon name="code" size={14} />
+                      VS Code
                     </button>
                     <span className="flex-1" />
-                    {forgetting === p.id ? (
-                      <>
-                        <button className="link-btn" onClick={() => forget(p)}>
-                          Forget it
-                        </button>
-                        <button className="link-btn muted" onClick={() => setForgetting(null)}>
-                          Keep
-                        </button>
-                      </>
-                    ) : (
-                      <button className="link-btn muted" onClick={() => setForgetting(p.id)}>
-                        Forget
-                      </button>
-                    )}
+                    <button
+                      className="btn btn-quiet btn-sm mono !font-medium !text-[11.5px]"
+                      onClick={() => copy(p.sshCommand)}
+                      title="Copy — works in any terminal"
+                    >
+                      {copied === p.sshCommand ? (
+                        <>
+                          <Icon name="check" size={13} className="text-[var(--ok)]" />
+                          Copied
+                        </>
+                      ) : (
+                        <>
+                          <Icon name="copy" size={13} />
+                          {p.sshCommand}
+                        </>
+                      )}
+                    </button>
                   </div>
-                </div>
-              ))}
-            </div>
-          )}
+                )}
+                {tooOld && (
+                  <p className="caption mt-2.5">Update Open Android DeX on the phone to open its desktop from here.</p>
+                )}
+              </article>
+            );
+          })}
+        </section>
+      )}
 
-          {usbOffer && usb && (
-            <div className="rounded-xl border border-white/10 bg-white/[0.03] px-4 py-3">
-              <p className="text-[12.5px] leading-relaxed text-slate-300">
-                <strong className="font-semibold text-slate-100">{usb.status.name}</strong> is plugged
-                in. Pair it now and there is no code to type.
-                {usb.status.linux === "missing" &&
-                  " Linux is not installed on it yet — that is fine; SSH starts working once it is."}
-                {usb.status.linux === "failed" &&
-                  " Linux on it did not finish setting up. Pairing works now; open Linux on the phone to try the setup again."}
-                {usb.status.linux === "ssh-failed" &&
-                  " The SSH server would not install in its Linux. Setting up SSH from here tries again."}
+      {notice && (
+        <div className="callout callout-ok fade-in">
+          <Icon name="check" size={16} />
+          <p className="select-text">{notice}</p>
+        </div>
+      )}
+      {error && (
+        <div className="callout callout-warn fade-in">
+          <Icon name="alert" size={16} />
+          <p className="whitespace-pre-wrap select-text">{error}</p>
+        </div>
+      )}
+
+      {usbOffer && (
+        <section className="card overflow-hidden px-4 py-4 shadow-[inset_0_0_0_1px_var(--accent-line)]">
+          <div className="flex items-start gap-3">
+            <span className="tile tile-accent tile-lg">
+              <Icon name="cable" size={20} />
+            </span>
+            <div className="min-w-0 flex-1">
+              <p className="heading text-[14px]">{usbOffer.status.name} is plugged in</p>
+              <p className="body mt-0.5">
+                Set it up now — there's no code to type.
+                {usbOffer.status.linux === "missing" && " Linux isn't installed on it yet; that's fine, SSH starts working once it is."}
+                {usbOffer.status.linux === "failed" &&
+                  " Linux on it didn't finish setting up. Pairing works now; open Linux on the phone to try the setup again."}
+                {usbOffer.status.linux === "ssh-failed" && " The SSH server wouldn't install in its Linux. Setting up from here tries again."}
               </p>
-              <button className="btn-accent mt-3" onClick={pairUsb} disabled={!!busy}>
-                <span aria-hidden="true">🔌</span>
-                {busy?.kind === "usb" ? busy.text : `Set up SSH to ${usb.status.name}`}
-              </button>
-            </div>
-          )}
-
-          <div>
-            <p className="mb-2 text-[11.5px] font-semibold uppercase tracking-wide text-slate-500">
-              {phones.length ? "Pair another phone" : "Pair a phone"}
-            </p>
-            <ol className="mb-3 flex list-decimal flex-col gap-1 pl-4 text-[12px] leading-relaxed text-slate-400 marker:text-slate-600">
-              <li>
-                On the phone, open Linux, then <em>Remote access</em> — from the Linux tile's menu,
-                or the button in the Linux window's top bar.
-              </li>
-              <li>
-                Tap <em>Add a computer</em> and type the code it shows here.
-              </li>
-            </ol>
-            <div className="flex items-center gap-2">
-              <input
-                value={code}
-                onChange={(e) => setCode(formatCode(e.target.value))}
-                onKeyDown={(e) => e.key === "Enter" && codeReady && !busy && pairCode()}
-                placeholder="K7QM-29XV"
-                aria-label="Pairing code"
-                spellCheck={false}
-                autoCapitalize="characters"
-                className="field code-input w-[190px]"
-              />
-              <button className="btn-accent shrink-0" onClick={pairCode} disabled={!!busy || !codeReady}>
-                {busy?.kind === "code" ? busy.text : "Pair"}
+              <button className="btn btn-primary mt-3.5" onClick={pairUsb} disabled={!!busy}>
+                {busy?.kind === "usb" ? (
+                  <span className="spinner !h-3.5 !w-3.5 !border-[1.5px] !border-white/30 !border-t-white" aria-hidden="true" />
+                ) : (
+                  <Icon name="link" size={15} />
+                )}
+                {busy?.kind === "usb" ? busy.text : `Set up ${usbOffer.status.name}`}
               </button>
             </div>
           </div>
+        </section>
+      )}
 
-          {notice && <p className="text-[12px] leading-relaxed text-teal-300">✓ {notice}</p>}
-          {error && <pre className="console rounded-lg bg-amber-950/40 p-3 text-amber-300">{error}</pre>}
-
-          <p className="text-[11px] leading-relaxed text-slate-500">
-            Pairing adds the phone to ~/.ssh/config, so <span className="font-mono">ssh</span>,{" "}
-            <span className="font-mono">scp</span>, <span className="font-mono">rsync</span>, git and
-            VS Code's Remote-SSH all reach it by name, with no app open. The connection is
-            end-to-end encrypted; it goes straight between the two devices when the networks allow
-            it and through a public relay, which cannot read it, when they do not.
-          </p>
+      <section className="card px-4 py-4">
+        <div className="flex items-start gap-3">
+          <span className="tile tile-lg">
+            <Icon name="keypad" size={19} />
+          </span>
+          <div className="min-w-0 flex-1">
+            <p className="heading text-[14px]">{list.length ? "Pair another phone" : "Pair a phone"}</p>
+            <p className="body mt-0.5">Wherever it is — it doesn't need to be on the same network.</p>
+          </div>
         </div>
-      </div>
+        <ol className="howto mt-4">
+          <li>
+            On your phone, open <span className="ui-path">Linux</span>, then <span className="ui-path">Remote access</span> — from the Linux
+            tile's menu, or the button in the Linux window's top bar.
+          </li>
+          <li>
+            Tap <span className="ui-path">Add a computer</span> and type the code it shows here.
+          </li>
+        </ol>
+        <div className="mt-4 flex items-center gap-2.5">
+          <input
+            value={code}
+            onChange={(e) => setCode(formatCode(e.target.value))}
+            onKeyDown={(e) => e.key === "Enter" && codeReady && !busy && pairCode()}
+            placeholder="K7QM-29XV"
+            aria-label="Pairing code"
+            spellCheck={false}
+            autoCapitalize="characters"
+            className="field code-input w-[208px]"
+          />
+          <button className="btn btn-primary btn-lg" onClick={pairCode} disabled={!!busy || !codeReady}>
+            {busy?.kind === "code" && (
+              <span className="spinner !h-3.5 !w-3.5 !border-[1.5px] !border-white/30 !border-t-white" aria-hidden="true" />
+            )}
+            {busy?.kind === "code" ? busy.text : "Pair"}
+          </button>
+        </div>
+      </section>
+
+      <p className="caption flex gap-2.5 px-1">
+        <Icon name="lock" size={15} className="mt-px shrink-0 text-[var(--ink-3)]" />
+        <span>
+          End-to-end encrypted. It goes straight between the two when the networks allow it, and through a public relay —
+          which can't read it — when they don't. Pairing also adds the phone to <span className="mono">~/.ssh/config</span>, so{" "}
+          <span className="mono">ssh</span>, <span className="mono">scp</span>, git and VS Code reach it by name, with this app
+          closed.
+        </span>
+      </p>
     </div>
   );
 }

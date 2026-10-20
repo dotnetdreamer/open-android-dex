@@ -1,4 +1,6 @@
 import type { DesktopReceived, PutProgress, PutReport } from "../../lib/types";
+import { Icon } from "../../ui/Icon";
+import { Stage } from "../../ui/Stage";
 import type { ClipboardShare, ToGuest } from "./clipboardShare";
 
 /**
@@ -72,38 +74,94 @@ export type Copy =
   | { kind: "failed"; message: string };
 
 /**
+ * What the window shows instead of the desktop: reaching the phone, starting
+ * the desktop on it, or why it cannot. The same picture as the main window —
+ * phone, computer, the link between them — so a person who has seen one knows
+ * how to read the other.
+ */
+export function DesktopCover({
+  name,
+  state,
+  message,
+  via = "wifi",
+  onAgain,
+  onClose,
+}: {
+  name: string;
+  state: "connecting" | "starting" | "stopped" | "failed";
+  message?: string;
+  /** Over adb on a cable, or over the network. */
+  via?: "usb" | "wifi";
+  onAgain?: () => void;
+  onClose?: () => void;
+}) {
+  const busy = state === "connecting" || state === "starting";
+  const copy: Record<typeof state, [string, string]> = {
+    connecting: [`Reaching ${name}…`, ""],
+    starting: [`Starting the desktop on ${name}…`, "The first start can take a minute."],
+    stopped: [`The desktop isn't running on ${name}`, "It was shut down, or logged out of, on the phone."],
+    failed: [`Couldn't open the desktop on ${name}`, message ?? ""],
+  };
+  const [title, detail] = copy[state];
+  return (
+    <div className="app-backdrop fade-in absolute inset-0 flex overflow-y-auto p-6">
+      <div className="m-auto flex w-[460px] max-w-full flex-col items-center text-center">
+        <div className="w-[min(300px,62vw)]">
+          <Stage
+            scene={state === "failed" ? "error" : state === "stopped" ? "ended" : "launching"}
+            via={via}
+            progress={state === "starting" ? 1 : 0}
+          />
+        </div>
+        <h1 className="display mt-5 !text-[21px] !leading-[27px]">{title}</h1>
+        {detail && <p className="lede mt-2 select-text">{detail}</p>}
+        {busy ? (
+          <span className="spinner spinner-lg mt-6" aria-hidden="true" />
+        ) : (
+          (onAgain || onClose) && (
+            <div className="mt-6 flex gap-2.5">
+              {onAgain && (
+                <button className="btn btn-primary btn-lg" onClick={onAgain}>
+                  <Icon name={state === "stopped" ? "play" : "refresh"} size={state === "stopped" ? 14 : 16} />
+                  {state === "stopped" ? "Start it" : "Try again"}
+                </button>
+              )}
+              {onClose && (
+                <button className="btn btn-secondary btn-lg" onClick={onClose}>
+                  Close
+                </button>
+              )}
+            </div>
+          )
+        )}
+      </div>
+    </div>
+  );
+}
+
+/**
  * Over everything while files are dragged across the window. No blur: it lies
  * over a picture that repaints all the time.
  */
 export function DropCover({ name, open, busy }: { name: string; open: boolean; busy: boolean }) {
   return (
-    <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-black/60 p-6">
+    <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-black/65 p-6">
       <div
-        className={`flex max-w-full flex-col items-center gap-2 rounded-[var(--item-radius)] border-2 border-dashed bg-[#0d1117]/95 px-10 py-8 text-center ${
-          open ? "border-[var(--accent)]" : "border-white/20"
+        className={`flex w-[440px] max-w-full flex-col items-center gap-2 rounded-[var(--r-xl)] border-[1.5px] border-dashed bg-[var(--bg-overlay)]/95 px-10 py-9 text-center ${
+          open ? "border-[var(--accent)] shadow-[0_0_0_6px_var(--accent-soft)]" : "border-white/20"
         }`}
       >
-        <svg
-          viewBox="0 0 24 24"
-          className={`h-9 w-9 ${open ? "text-[var(--accent)]" : "text-slate-500"}`}
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="1.7"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-          aria-hidden="true"
-        >
-          <path d="M12 3.5v11m0 0-4.2-4.2M12 14.5l4.2-4.2" />
-          <path d="M4 14.5v3.3A2.2 2.2 0 0 0 6.2 20h11.6a2.2 2.2 0 0 0 2.2-2.2v-3.3" />
-        </svg>
-        <p className="text-[15px] font-semibold text-slate-100">
-          {open ? `Drop to copy to the Desktop on ${name}` : `The desktop on ${name} is not open yet`}
+        <span className={`tile tile-lg mb-1 ${open ? "tile-accent" : ""}`}>
+          <Icon name="upload" size={22} />
+        </span>
+        <p className="heading text-[15px]">
+          {open ? `Drop to copy to the Desktop on ${name}` : `The desktop on ${name} isn't open yet`}
         </p>
-        <p className="text-[12.5px] text-slate-400">
+        <p className="body">
           {!open
             ? "Wait for it to open, then drop again."
             : busy
-              ? "It is copied as soon as the copy in progress has finished."
+              ? "It's copied as soon as the copy in progress has finished."
               : "Folders come with everything in them. Nothing already there is replaced."}
         </p>
       </div>
@@ -138,30 +196,33 @@ export function CopyCard({ copy, name, onCancel, onClose }: { copy: Copy; name: 
     title = "The copy did not finish";
     detail = copy.message;
   }
+  const tone = copy.kind === "failed" ? "tile-warn" : copy.kind === "done" ? "tile-ok" : "tile-accent";
   return (
-    <div className="fade-in pointer-events-auto w-[360px] max-w-full rounded-xl border border-white/10 bg-[#0d1117]/95 px-4 py-3 text-[12.5px] text-slate-200 shadow-lg">
-      <div className="flex items-start gap-3">
-        <div className="min-w-0 flex-1">
-          <p className="truncate font-semibold text-slate-100">{title}</p>
-          <p className={copy.kind === "failed" ? "mt-0.5 leading-relaxed text-amber-300/90" : "mt-0.5 truncate text-slate-400"}>
-            {detail}
-          </p>
-          {note && <p className="mt-0.5 truncate text-slate-500">{note}</p>}
-        </div>
-        {copy.kind === "copying" ? (
-          <button className="link-btn shrink-0" onClick={onCancel}>
-            Cancel
-          </button>
-        ) : (
-          <button className="link-btn muted shrink-0" onClick={onClose} aria-label="Close">
-            ✕
-          </button>
+    <div className="toast card-raised pointer-events-auto !w-[380px] max-w-full !items-start !py-3 !pl-3 !pr-2.5">
+      <span className={`tile ${tone}`}>
+        <Icon name={copy.kind === "done" ? "check" : copy.kind === "failed" ? "alert" : "upload"} size={16} />
+      </span>
+      <div className="min-w-0 flex-1 pt-px">
+        <p className="heading truncate">{title}</p>
+        <p className={copy.kind === "failed" ? "caption mt-0.5 !text-[#f3dcb2]" : "caption mt-0.5 truncate"}>{detail}</p>
+        {note && <p className="caption mt-0.5 truncate !text-[var(--ink-4)]">{note}</p>}
+        {done !== null && (
+          <div className="mt-2.5 h-1 overflow-hidden rounded-full bg-white/10">
+            <div
+              className="h-full rounded-full bg-[var(--accent)] transition-[width] duration-200"
+              style={{ width: `${Math.round(done * 100)}%` }}
+            />
+          </div>
         )}
       </div>
-      {done !== null && (
-        <div className="mt-2.5 h-1 overflow-hidden rounded-full bg-white/10">
-          <div className="h-full rounded-full bg-[var(--accent)] transition-[width] duration-200" style={{ width: `${Math.round(done * 100)}%` }} />
-        </div>
+      {copy.kind === "copying" ? (
+        <button className="btn btn-quiet btn-sm shrink-0" onClick={onCancel}>
+          Cancel
+        </button>
+      ) : (
+        <button className="btn btn-quiet btn-sm btn-icon shrink-0" onClick={onClose} aria-label="Close">
+          <Icon name="x" size={14} />
+        </button>
       )}
     </div>
   );
@@ -171,14 +232,13 @@ export function CopyCard({ copy, name, onCancel, onClose }: { copy: Copy; name: 
 export function InboxCard({ inbox, onShow, onClose }: { inbox: Inbox; onShow: (path: string) => void; onClose: () => void }) {
   if (inbox.kind === "receiving") {
     return (
-      <div className="fade-in pointer-events-auto flex w-[360px] max-w-full items-center gap-3 rounded-xl border border-white/10 bg-[#0d1117]/95 px-4 py-3 text-[12.5px] text-slate-200 shadow-lg">
-        <span
-          className="h-3.5 w-3.5 shrink-0 animate-spin rounded-full border-2 border-white/15 border-t-[var(--accent)]"
-          aria-hidden="true"
-        />
+      <div className="toast card-raised pointer-events-auto !w-[380px] max-w-full !items-center !py-3 !pl-3">
+        <span className="tile tile-accent">
+          <span className="spinner !h-3.5 !w-3.5 !border-[1.5px]" aria-hidden="true" />
+        </span>
         <div className="min-w-0 flex-1">
-          <p className="truncate font-semibold text-slate-100">Receiving from Linux…</p>
-          <p className="mt-0.5 truncate text-slate-400">{inbox.name}</p>
+          <p className="heading truncate">Receiving from Linux…</p>
+          <p className="caption mt-0.5 truncate">{inbox.name}</p>
         </div>
       </div>
     );
@@ -190,24 +250,25 @@ export function InboxCard({ inbox, onShow, onClose }: { inbox: Inbox; onShow: (p
   if (got.missing) notes.push(got.missing === 1 ? "1 item was gone from Linux" : `${got.missing} items were gone from Linux`);
   if (got.failed.length) notes.push(got.failed.length === 1 ? `Not saved: ${got.failed[0]}` : `${got.failed.length} could not be saved here`);
   return (
-    <div className="fade-in pointer-events-auto w-[360px] max-w-full rounded-xl border border-white/10 bg-[#0d1117]/95 px-4 py-3 text-[12.5px] text-slate-200 shadow-lg">
-      <div className="flex items-start gap-3">
-        <div className="min-w-0 flex-1">
-          <p className="truncate font-semibold text-slate-100">{saved ? "Saved to Downloads" : "Nothing was saved"}</p>
-          <p className="mt-0.5 truncate text-slate-400">
-            {saved ? `${names(got.landed)} · ${size(got.bytes)}` : "What was sent had gone from Linux, or could not be read there."}
-          </p>
-          {notes.length > 0 && <p className="mt-0.5 truncate text-slate-500">{notes.join(" · ")}</p>}
-        </div>
-        {saved && got.first && (
-          <button className="link-btn shrink-0" onClick={() => onShow(got.first!)}>
-            Show
-          </button>
-        )}
-        <button className="link-btn muted shrink-0" onClick={onClose} aria-label="Close">
-          ✕
-        </button>
+    <div className="toast card-raised pointer-events-auto !w-[380px] max-w-full !items-start !py-3 !pl-3 !pr-2.5">
+      <span className={`tile ${saved ? "tile-ok" : "tile-warn"}`}>
+        <Icon name={saved ? "download" : "alert"} size={16} />
+      </span>
+      <div className="min-w-0 flex-1 pt-px">
+        <p className="heading truncate">{saved ? "Saved to Downloads" : "Nothing was saved"}</p>
+        <p className="caption mt-0.5 truncate">
+          {saved ? `${names(got.landed)} · ${size(got.bytes)}` : "What was sent had gone from Linux, or couldn't be read there."}
+        </p>
+        {notes.length > 0 && <p className="caption mt-0.5 truncate !text-[var(--ink-4)]">{notes.join(" · ")}</p>}
       </div>
+      {saved && got.first && (
+        <button className="btn btn-secondary btn-sm shrink-0" onClick={() => onShow(got.first!)}>
+          Show
+        </button>
+      )}
+      <button className="btn btn-quiet btn-sm btn-icon shrink-0" onClick={onClose} aria-label="Close">
+        <Icon name="x" size={14} />
+      </button>
     </div>
   );
 }
@@ -215,9 +276,10 @@ export function InboxCard({ inbox, onShow, onClose }: { inbox: Inbox; onShow: (p
 /** A sentence over the picture, in the window's own words — never the guest's. */
 export function Notice({ text }: { text: string }) {
   return (
-    <div className="fade-in pointer-events-none absolute inset-x-0 top-14 flex justify-center px-4">
-      <div className="max-w-[560px] rounded-xl border border-white/10 bg-black/85 px-4 py-2 text-center text-[12.5px] text-slate-200 shadow-lg">
-        {text}
+    <div className="pointer-events-none absolute inset-x-0 top-14 flex justify-center px-4">
+      <div className="toast card-raised !w-auto max-w-[560px] !items-center !px-4 !py-2.5 text-center">
+        <Icon name="info" size={15} className="text-[var(--accent-ink)]" />
+        <span>{text}</span>
       </div>
     </div>
   );

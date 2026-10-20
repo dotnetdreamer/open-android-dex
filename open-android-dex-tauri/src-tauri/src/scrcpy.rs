@@ -3818,7 +3818,7 @@ fn warn_if_display_untrusted(app: &AppHandle, serial: &str, session_key: &str, i
         // trusted displays. And "some": a Galaxy A13 gave Clock a window, YouTube none.
         concat!(
             "This phone doesn't fully support app windows. Some apps open full screen, ",
-            "and typing won't work. To leave an app, use Back to launcher below.",
+            "and typing won't work. To leave an app, use Home screen below.",
         ),
     );
 }

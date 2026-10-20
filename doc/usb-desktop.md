@@ -1,6 +1,6 @@
 # The desktop over adb — the phone's Linux at a local desktop's speed
 
-*Phone Linux → Desktop* opens the phone's XFCE in a window on the computer
+*Linux → Open desktop* opens the phone's XFCE in a window on the computer
 ([remote-access.md](remote-access.md), "The desktop, in a window"). Through the
 tunnel that is the phone's own viewer page — noVNC — and it is as fast as VNC
 gets: Xvnc squeezes every change into JPEG and zlib on the phone's CPU, and the

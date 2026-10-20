@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { error as logError, info as logInfo } from "@tauri-apps/plugin-log";
@@ -12,45 +12,41 @@ import type {
   WirelessResult,
   WirelessSupport,
 } from "../../lib/types";
+import { Icon, type IconName } from "../../ui/Icon";
+import { Disclosure, Menu, MenuItem, phoneLabel } from "../../ui/kit";
+import { deviceName } from "../desktop/model";
 
 /**
- * Three ways onto Wi-Fi, and the whole point of the ordering is that the first
- * one needs no typing at all. Reading an IP address off a Settings screen is
- * the thing this panel exists to avoid, so manual entry is a disclosure at the
- * bottom rather than the main event.
+ * Wi-Fi: the phones that have been on it before, one click each, and the ways
+ * to put a new one on it.
  *
- * "Use a cable once" is the default and stays the default even when no cable
- * is plugged in, because it is the only route that does not depend on mDNS —
- * and mDNS is the part that quietly fails on routers that filter multicast,
- * on guest networks with client isolation, and on corporate machines where the
- * firewall rule was never created. The other two tabs are one click away and
- * say what they do.
+ * "With a cable, once" is the first way and stays the default even when no
+ * cable is plugged in, because it is the only route that does not depend on
+ * mDNS — and mDNS is the part that quietly fails on routers that filter
+ * multicast, on guest networks with client isolation, and on corporate
+ * machines where the firewall rule was never created. It is also the only one
+ * that works on every Android version. The two pairing routes (Android 11+)
+ * are one click away and say what they need. Reading an IP address off a
+ * Settings screen is the thing this panel exists to avoid, so manual entry is
+ * a disclosure at the bottom rather than the main event.
  *
  * "project" is the odd one out: it hands the phone to Windows' own Miracast
  * receiver instead of connecting it here, so it ends in Samsung's DeX rather
  * than ours. It earns its place as the fallback for a PC where ADB cannot be
  * made to work at all — see projection.rs for why we cannot host that stream
- * ourselves.
- *
- * That tab is Windows-only, and hidden rather than disabled on macOS: there is
- * no Miracast receiver for a Mac and there cannot be one, so a greyed-out
- * "Project to PC" would only send someone looking for a setting that does not
- * exist. The three ADB routes are unaffected.
+ * ourselves. That way is Windows-only, and hidden rather than disabled
+ * elsewhere: there is no Miracast receiver for a Mac and there cannot be one,
+ * so a greyed-out "Samsung DeX" would only send someone looking for a setting
+ * that does not exist. The three ADB routes are unaffected.
  */
-type Tab = "usb" | "qr" | "code" | "project";
+type Way = "usb" | "qr" | "code" | "project";
 
 /** How often the QR is checked for a scan. Android Studio polls at the same rate. */
 const QR_POLL_MS = 1200;
 /** Refresh rate for "a phone is waiting to be paired" while the code tab is open. */
 const DISCOVER_POLL_MS = 2000;
 
-function Mono({ children }: { children: string }) {
-  return (
-    <code className="rounded bg-white/10 px-1.5 py-0.5 font-mono text-[11px] text-slate-200">
-      {children}
-    </code>
-  );
-}
+const P = ({ children }: { children: ReactNode }) => <span className="ui-path">{children}</span>;
 
 /**
  * The QR, drawn from the module matrix Rust sent.
@@ -77,7 +73,7 @@ function QrImage({ challenge }: { challenge: QrChallenge }) {
     <svg
       viewBox={`-4 -4 ${span} ${span}`}
       shapeRendering="crispEdges"
-      className="h-[188px] w-[188px] rounded-lg"
+      className="fade-in h-full w-full"
       role="img"
       aria-label="Pairing QR code"
     >
@@ -87,13 +83,39 @@ function QrImage({ challenge }: { challenge: QrChallenge }) {
   );
 }
 
-function Steps({ items }: { items: React.ReactNode[] }) {
+function WayCard({
+  way,
+  current,
+  icon,
+  title,
+  hint,
+  onPick,
+}: {
+  way: Way;
+  current: Way;
+  icon: IconName;
+  title: string;
+  hint: string;
+  onPick: (w: Way) => void;
+}) {
   return (
-    <ol className="flex list-decimal flex-col gap-1.5 pl-4 text-[12px] leading-relaxed text-slate-400 marker:text-slate-600">
-      {items.map((item, i) => (
-        <li key={i}>{item}</li>
-      ))}
-    </ol>
+    <button type="button" role="radio" aria-checked={current === way} className="choice" onClick={() => onPick(way)}>
+      <Icon name={icon} size={18} />
+      <span>
+        <span className="choice-title block">{title}</span>
+        <span className="choice-hint block">{hint}</span>
+      </span>
+    </button>
+  );
+}
+
+/** A line under a step list that says what the app is waiting for. */
+function Waiting({ children, tone = "accent" }: { children: ReactNode; tone?: "accent" | "ok" | "warn" }) {
+  return (
+    <p className="caption flex items-center gap-2">
+      <span className={`dot dot-${tone} ${tone === "accent" ? "dot-live" : ""}`} aria-hidden="true" />
+      {children}
+    </p>
   );
 }
 
@@ -105,8 +127,10 @@ export function WirelessPanel({
   /** A phone is reachable over Wi-Fi — launch the desktop on this serial. */
   onConnected: (result: WirelessResult) => void;
 }) {
-  const [tab, setTab] = useState<Tab>("usb");
+  const [way, setWay] = useState<Way>("usb");
   const [busy, setBusy] = useState("");
+  /** Which saved phone the busy state belongs to, so only its button spins. */
+  const [busyAddress, setBusyAddress] = useState<string | null>(null);
   const [error, setError] = useState("");
   const [support, setSupport] = useState<WirelessSupport | null>(null);
   const [known, setKnown] = useState<KnownDevice[]>([]);
@@ -114,7 +138,6 @@ export function WirelessPanel({
   const [waiting, setWaiting] = useState<MdnsService[]>([]);
   const [code, setCode] = useState("");
   const [manual, setManual] = useState("");
-  const [showManual, setShowManual] = useState(false);
   const [projection, setProjection] = useState<ProjectionSupport | null>(null);
   const [installing, setInstalling] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -143,6 +166,7 @@ export function WirelessPanel({
     (result: WirelessResult) => {
       logInfo(`wireless: ${result.label} is on Wi-Fi at ${result.address}`);
       setBusy("");
+      setBusyAddress(null);
       setError("");
       refreshKnown();
       onConnected(result);
@@ -153,6 +177,7 @@ export function WirelessPanel({
   const fail = useCallback((e: unknown) => {
     logError(`wireless: ${String(e)}`);
     setBusy("");
+    setBusyAddress(null);
     setError(String(e));
   }, []);
 
@@ -160,18 +185,18 @@ export function WirelessPanel({
   const goWireless = useCallback(() => {
     if (!usbDevice) return;
     setError("");
-    setBusy("Switching the phone to Wi-Fi…");
+    setBusy("Setting up Wi‑Fi…");
     invoke<WirelessResult>("wireless_go_wireless", { serial: usbDevice.serial })
       .then(succeed)
       .catch(fail);
   }, [usbDevice, succeed, fail]);
 
   // ── QR pairing ──
-  // The code is armed when the tab opens and cancelled when it closes, because
-  // a live challenge is a password sitting in memory waiting for whoever scans
-  // it — it should not outlive the screen showing it.
+  // The code is armed when the way is picked and cancelled when it is left,
+  // because a live challenge is a password sitting in memory waiting for
+  // whoever scans it — it should not outlive the screen showing it.
   useEffect(() => {
-    if (tab !== "qr" || !support?.mdns) return;
+    if (way !== "qr" || !support?.mdns) return;
     let live = true;
     setError("");
     invoke<QrChallenge>("wireless_qr_begin")
@@ -182,10 +207,10 @@ export function WirelessPanel({
       setQr(null);
       invoke("wireless_qr_cancel").catch(() => {});
     };
-  }, [tab, support?.mdns, fail]);
+  }, [way, support?.mdns, fail]);
 
   useEffect(() => {
-    if (tab !== "qr" || !qr) return;
+    if (way !== "qr" || !qr) return;
     let live = true;
     const timer = setInterval(() => {
       invoke<WirelessResult | null>("wireless_qr_poll")
@@ -205,13 +230,13 @@ export function WirelessPanel({
       live = false;
       clearInterval(timer);
     };
-  }, [tab, qr, succeed, fail]);
+  }, [way, qr, succeed, fail]);
 
   // ── Pairing code ──
   // Poll for phones sitting on the pairing screen, purely so the user can see
   // that theirs has been found before they type anything.
   useEffect(() => {
-    if (tab !== "code" || !support?.mdns) return;
+    if (way !== "code" || !support?.mdns) return;
     let live = true;
     const poll = () =>
       invoke<MdnsService[]>("wireless_discover")
@@ -223,15 +248,15 @@ export function WirelessPanel({
       live = false;
       clearInterval(timer);
     };
-  }, [tab, support?.mdns]);
+  }, [way, support?.mdns]);
 
   // ── Windows projection ──
-  // Only probed when the tab is opened: it spawns netsh, and nobody who is
+  // Only probed when the way is picked: it spawns netsh, and nobody who is
   // going to use a cable should pay for that.
   useEffect(() => {
-    if (tab !== "project" || projection) return;
+    if (way !== "project" || projection) return;
     invoke<ProjectionSupport>("projection_support").then(setProjection).catch(() => {});
-  }, [tab, projection]);
+  }, [way, projection]);
 
   const openSettings = useCallback((page: "project" | "features") => {
     invoke("projection_open_settings", { page }).catch((e) => setError(String(e)));
@@ -277,7 +302,8 @@ export function WirelessPanel({
   const reconnect = useCallback(
     (device: KnownDevice) => {
       setError("");
-      setBusy(`Reconnecting to ${device.label}…`);
+      setBusy(`Connecting to ${phoneLabel(device.label)}…`);
+      setBusyAddress(device.address);
       // Scoped to this row: without it, a reply from a different saved phone
       // would be reported as this one.
       invoke<string[]>("wireless_reconnect_known", { only: device.address })
@@ -285,13 +311,13 @@ export function WirelessPanel({
           const address = addresses[0];
           if (!address) {
             throw new Error(
-              `${device.label} did not answer. Check it is awake and on the same Wi-Fi — ` +
-                `and if it has been restarted since, plug the cable in once to set it up again.`,
+              `${phoneLabel(device.label)} didn't answer. Check that it's awake and on the same Wi‑Fi — ` +
+                `and if it has restarted since, connect it with the cable once to set it up again.`,
             );
           }
           succeed({ serial: address, address, label: device.label });
         })
-        .catch(fail);
+        .catch((e) => fail(e instanceof Error ? e.message : e));
     },
     [succeed, fail],
   );
@@ -316,336 +342,320 @@ export function WirelessPanel({
   }, [manual, succeed, fail]);
 
   const mdnsDown = support != null && !support.mdns;
+  const noDiscovery = (
+    <div className="callout callout-warn">
+      <Icon name="alert" size={16} />
+      <p>
+        {THIS_COMPUTER_CAP} can't find phones on the network ({support?.detail}), so pairing isn't available. {MDNS_HINT}{" "}
+        Connecting with a cable once doesn't need it.
+      </p>
+    </div>
+  );
 
   return (
-    <div className="mt-5">
-      <p className="mb-2 text-[11.5px] font-semibold uppercase tracking-wide text-slate-500">
-        Connect over Wi-Fi
-      </p>
-
-      <div className="tabs" role="tablist">
-        <button
-          role="tab"
-          aria-selected={tab === "usb"}
-          className={`tab ${tab === "usb" ? "active" : ""}`}
-          onClick={() => setTab("usb")}
-        >
-          <span aria-hidden="true">🔌</span> Use a cable once
-        </button>
-        <button
-          role="tab"
-          aria-selected={tab === "qr"}
-          className={`tab ${tab === "qr" ? "active" : ""}`}
-          onClick={() => setTab("qr")}
-        >
-          <span aria-hidden="true">▩</span> Scan a code
-        </button>
-        <button
-          role="tab"
-          aria-selected={tab === "code"}
-          className={`tab ${tab === "code" ? "active" : ""}`}
-          onClick={() => setTab("code")}
-        >
-          <span aria-hidden="true">🔢</span> Type a code
-        </button>
-        {/* Windows only, and asked as such. Miracast is a Windows receiver:
-            this tab used to be drawn for anything that was not a Mac, which
-            made it appear on Linux, where every step behind it leads to a
-            Settings page that does not exist. */}
-        {IS_WINDOWS && (
-          <button
-            role="tab"
-            aria-selected={tab === "project"}
-            className={`tab ${tab === "project" ? "active" : ""}`}
-            onClick={() => setTab("project")}
-          >
-            <span aria-hidden="true">🖥️</span> Project to PC
-          </button>
-        )}
-      </div>
-
-      <div className="rounded-b-xl border border-t-0 border-white/10 bg-white/[0.03] px-4 py-4">
-        {tab === "usb" && (
-          <div className="flex flex-col gap-3">
-            <p className="text-[12.5px] leading-relaxed text-slate-300">
-              Plug the phone in once and this sets up Wi-Fi for you — no address to find,
-              no code to type. It works on every Android version.
-            </p>
-            {alreadyWireless ? (
-              <p className="text-[12px] text-teal-300">
-                ✓ This phone is already reachable over Wi-Fi — you can unplug the cable.
-              </p>
-            ) : usbDevice ? (
-              <>
-                <button className="btn-accent self-start" onClick={goWireless} disabled={!!busy}>
-                  <span aria-hidden="true">📶</span>
-                  {busy ? busy : `Set up Wi-Fi for ${usbDevice.model || usbDevice.serial}`}
-                </button>
-                <p className="text-[11.5px] text-slate-500">
-                  You can unplug the cable as soon as this finishes. It stays set up until
-                  the phone restarts.
-                </p>
-              </>
-            ) : (
-              <Steps
-                items={[
-                  <>Connect the phone to {THIS_COMPUTER} with a USB cable.</>,
-                  <>
-                    Turn on USB debugging: Settings → About phone → Software information →
-                    tap <em>Build number</em> seven times, then Settings → Developer options →{" "}
-                    <em>USB debugging</em>.
-                  </>,
-                  <>Tap <em>Allow</em> on the phone, and this button will appear here.</>,
-                ]}
-              />
-            )}
+    <div className="flex flex-col gap-6">
+      {known.length > 0 && (
+        <section>
+          <p className="section-label mb-2 px-1">Your phones</p>
+          <div className="card rows">
+            {known.map((d) => {
+              const named = phoneLabel(d.label);
+              const mine = busyAddress === d.address;
+              return (
+                <div key={d.address} className="flex items-center gap-3 px-3.5 py-3">
+                  <span className="tile">
+                    <Icon name="phone" size={17} />
+                  </span>
+                  <div className="min-w-0 flex-1">
+                    <p className="heading truncate">{named}</p>
+                    <p className="caption truncate">{d.address === d.label ? "Paired over Wi‑Fi" : d.address}</p>
+                  </div>
+                  <button className="btn btn-secondary btn-sm" onClick={() => reconnect(d)} disabled={!!busy}>
+                    {mine ? <span className="spinner !h-3 !w-3 !border-[1.5px]" aria-hidden="true" /> : <Icon name="wifi" size={14} />}
+                    {mine ? "Connecting…" : "Connect"}
+                  </button>
+                  <Menu
+                    label={`${named} options`}
+                    trigger={({ open, toggle, ref }) => (
+                      <button
+                        ref={ref}
+                        className={`btn btn-quiet btn-sm btn-icon ${open ? "!bg-[var(--surface-2)]" : ""}`}
+                        onClick={toggle}
+                        aria-haspopup="menu"
+                        aria-expanded={open}
+                        aria-label={`More for ${named}`}
+                      >
+                        <Icon name="more" size={16} />
+                      </button>
+                    )}
+                  >
+                    {(close) => (
+                      <MenuItem
+                        icon="trash"
+                        danger
+                        onSelect={() => {
+                          close();
+                          forget(d);
+                        }}
+                      >
+                        Forget this phone
+                      </MenuItem>
+                    )}
+                  </Menu>
+                </div>
+              );
+            })}
           </div>
-        )}
+        </section>
+      )}
 
-        {tab === "qr" && (
-          <div className="flex gap-4">
-            {mdnsDown ? (
-              <p className="text-[12.5px] leading-relaxed text-amber-300/90">
-                {THIS_COMPUTER_CAP} cannot discover phones on the network, so code pairing
-                is unavailable ({support?.detail}). {MDNS_HINT} Use a cable once instead —
-                that path does not need network discovery.
-              </p>
+      <section>
+        <p className="section-label mb-2 px-1">{known.length > 0 ? "Add another phone" : "Choose a way to connect"}</p>
+        <div role="radiogroup" aria-label="Ways to connect over Wi-Fi" className={`grid gap-2 ${IS_WINDOWS ? "grid-cols-4" : "grid-cols-3"}`}>
+          <WayCard way="usb" current={way} onPick={setWay} icon="cable" title="Cable, once" hint="Any phone · easiest" />
+          <WayCard way="qr" current={way} onPick={setWay} icon="qr" title="Scan a code" hint="Android 11 or newer" />
+          <WayCard way="code" current={way} onPick={setWay} icon="keypad" title="Type a code" hint="Android 11 or newer" />
+          {/* Windows only, and asked as such. Miracast is a Windows receiver:
+              this way used to be drawn for anything that was not a Mac, which
+              made it appear on Linux, where every step behind it leads to a
+              Settings page that does not exist. */}
+          {IS_WINDOWS && (
+            <WayCard way="project" current={way} onPick={setWay} icon="cast" title="Samsung DeX" hint="Samsung · no USB debugging" />
+          )}
+        </div>
+
+        <div key={way} className="card fade-in mt-2.5 px-4 py-4">
+          {way === "usb" &&
+            (alreadyWireless ? (
+              <div className="callout callout-ok">
+                <Icon name="check" size={16} />
+                <p>This phone is already set up for Wi‑Fi — you can unplug the cable.</p>
+              </div>
+            ) : usbDevice ? (
+              <div className="flex flex-col items-start gap-3">
+                <p className="body">
+                  <span className="font-semibold text-[var(--ink-1)]">{deviceName(usbDevice)}</span> is plugged in. One
+                  click and it's on Wi‑Fi — no address to find, no code to type.
+                </p>
+                <button className="btn btn-primary" onClick={goWireless} disabled={!!busy}>
+                  {busy ? <span className="spinner !h-3.5 !w-3.5 !border-[1.5px] !border-white/30 !border-t-white" aria-hidden="true" /> : <Icon name="wifi" size={15} />}
+                  {busy || "Set up Wi‑Fi"}
+                </button>
+                <p className="caption">You can unplug as soon as it's done. It stays set up until the phone restarts.</p>
+              </div>
             ) : (
-              <>
-                <div className="shrink-0">
+              <div className="flex flex-col gap-3">
+                <p className="body">The simplest way, and it works on every Android phone:</p>
+                <ol className="howto">
+                  <li>Connect your phone with a USB cable. Its desktop opens.</li>
+                  <li>
+                    Choose <P>Go wireless</P> on the screen that appears here.
+                  </li>
+                  <li>Unplug the cable. From then on it connects over Wi‑Fi, until the phone restarts.</li>
+                </ol>
+              </div>
+            ))}
+
+          {way === "qr" &&
+            (mdnsDown ? (
+              noDiscovery
+            ) : (
+              <div className="flex items-center gap-5">
+                <div className="h-[164px] w-[164px] shrink-0 overflow-hidden rounded-[var(--r-md)] bg-white p-1.5 shadow-[0_8px_24px_-8px_rgba(0,0,0,0.6)]">
                   {qr ? (
                     <QrImage challenge={qr} />
                   ) : (
-                    <div className="flex h-[188px] w-[188px] items-center justify-center rounded-lg bg-white/5 text-[12px] text-slate-500">
-                      Preparing…
+                    <div className="flex h-full w-full items-center justify-center">
+                      <span className="spinner !border-black/10 !border-t-black/50" aria-hidden="true" />
                     </div>
                   )}
                 </div>
-                <div className="flex min-w-0 flex-col gap-2">
-                  <p className="text-[12.5px] text-slate-300">On the phone:</p>
-                  <Steps
-                    items={[
-                      <>Settings → Developer options → <em>Wireless debugging</em>, turn it on.</>,
-                      <>Tap <em>Pair device with QR code</em>.</>,
-                      <>Point the camera at this code.</>,
-                    ]}
-                  />
-                  <p className="mt-auto text-[11.5px] text-slate-500">Waiting for a scan…</p>
+                <div className="flex min-w-0 flex-col gap-3.5">
+                  <ol className="howto">
+                    <li>
+                      On your phone, open <P>Settings</P> → <P>Developer options</P> → <P>Wireless debugging</P> and turn it on.
+                    </li>
+                    <li>
+                      Tap <P>Pair device with QR code</P>.
+                    </li>
+                    <li>Point the camera at this code.</li>
+                  </ol>
+                  <Waiting>{busy || "Waiting for your phone to scan…"}</Waiting>
                 </div>
-              </>
-            )}
-          </div>
-        )}
-
-        {tab === "code" && (
-          <div className="flex flex-col gap-3">
-            {mdnsDown ? (
-              <p className="text-[12.5px] leading-relaxed text-amber-300/90">
-                {THIS_COMPUTER_CAP} cannot discover phones on the network
-                ({support?.detail}), so the address has to be entered by hand below — or use
-                a cable once, which does not need discovery at all. {MDNS_HINT}
-              </p>
-            ) : (
-              <Steps
-                items={[
-                  <>Settings → Developer options → <em>Wireless debugging</em>, turn it on.</>,
-                  <>Tap <em>Pair device with pairing code</em>.</>,
-                  <>Type the six digits it shows — the address is found for you.</>,
-                ]}
-              />
-            )}
-            <div className="flex items-center gap-2">
-              <input
-                value={code}
-                inputMode="numeric"
-                maxLength={6}
-                onChange={(e) => setCode(e.target.value.replace(/\D/g, "").slice(0, 6))}
-                onKeyDown={(e) => e.key === "Enter" && code.length === 6 && pair()}
-                placeholder="000000"
-                aria-label="Pairing code"
-                className="field code-input w-[150px]"
-              />
-              <button
-                className="btn-accent shrink-0"
-                onClick={pair}
-                disabled={!!busy || code.length !== 6}
-              >
-                {busy ? busy : "Pair"}
-              </button>
-            </div>
-            {!mdnsDown && (
-              <p className="text-[11.5px] text-slate-500">
-                {waiting.length === 0
-                  ? "No phone is waiting to be paired yet — leave the pairing screen open."
-                  : waiting.length === 1
-                    ? `Found a phone waiting at ${waiting[0].address}.`
-                    : `${waiting.length} phones are waiting — add the address below so the right one is picked.`}
-              </p>
-            )}
-          </div>
-        )}
-
-        {tab === "project" && (
-          <div className="flex flex-col gap-3">
-            {/* Said plainly and first. Someone who follows these steps gets a
-                desktop that looks like this app's but is not — no taskbar from
-                us, no widgets, no file drop — and finding that out afterwards
-                would be worse than being told now. */}
-            <p className="text-[12.5px] leading-relaxed text-slate-300">
-              Samsung phones can cast DeX straight to Windows over Miracast, with no cable
-              and no ADB. This hands the phone to Windows —{" "}
-              <span className="text-amber-300/90">
-                you get Samsung's own DeX, not this app's desktop
-              </span>
-              , so the taskbar, widgets and file drop here won't apply. Use it when ADB
-              can't be made to work.
-            </p>
-
-            {projection?.miracast === false && (
-              <p className="text-[12px] text-amber-300/90">
-                This PC reports no Miracast support, so the phone won't find it. A Wi-Fi
-                adapter with Wi-Fi Direct support is required — a USB Wi-Fi dongle is
-                enough. ({projection.detail})
-              </p>
-            )}
-            {projection?.miracast === true && (
-              <p className="text-[12px] text-teal-300">✓ This PC's Wi-Fi supports Miracast.</p>
-            )}
-
-            <div>
-              <p className="mb-1 text-[11.5px] font-semibold uppercase tracking-wide text-slate-500">
-                On this PC
-              </p>
-              <Steps
-                items={[
-                  <>
-                    Install the <em>Wireless Display</em> component. On Windows 11 24H2 and
-                    25H2 it is usually <strong>missing from the Optional features list</strong>,
-                    so searching for it there finds nothing — the button below installs it by
-                    name instead. Needs administrator approval and a restart.
-                  </>,
-                  <>
-                    Open <em>Projecting to this PC</em> and change the top dropdown from{" "}
-                    <em>Never</em> to <em>Available everywhere</em> — it is off by default,
-                    and this is the step people miss.
-                  </>,
-                  <>
-                    Open the <em>Wireless Display</em> app from Start and leave it on screen,
-                    ready to accept the connection.
-                  </>,
-                ]}
-              />
-              <div className="mt-2 flex flex-wrap gap-2">
-                <button className="btn-ghost" onClick={installReceiver} disabled={!!busy}>
-                  <span aria-hidden="true">➕</span>
-                  Install Wireless Display
-                </button>
-                <button className="btn-ghost" onClick={copyInstallCommand}>
-                  <span aria-hidden="true">📋</span>
-                  {copied ? "Copied" : "Copy command"}
-                </button>
-                <button className="btn-accent" onClick={() => openSettings("project")}>
-                  <span aria-hidden="true">🖥️</span>
-                  Projecting to this PC
-                </button>
               </div>
-              {installing && (
-                <p className="mt-2 text-[12px] text-teal-300">
-                  DISM is installing it in a separate window. When it finishes, restart
-                  Windows — the receiver only appears after a reboot.
-                </p>
+            ))}
+
+          {way === "code" && (
+            <div className="flex flex-col gap-4">
+              {mdnsDown ? (
+                noDiscovery
+              ) : (
+                <ol className="howto">
+                  <li>
+                    On your phone, open <P>Settings</P> → <P>Developer options</P> → <P>Wireless debugging</P> and turn it on.
+                  </li>
+                  <li>
+                    Tap <P>Pair device with pairing code</P>.
+                  </li>
+                  <li>Type the six digits it shows — the address is found for you.</li>
+                </ol>
               )}
-              <button
-                className="link-btn muted mt-1"
-                onClick={() => openSettings("features")}
-                title="Only useful on builds where it is actually listed"
-              >
-                Optional features list
-              </button>
-            </div>
-
-            <div>
-              <p className="mb-1 text-[11.5px] font-semibold uppercase tracking-wide text-slate-500">
-                On the phone
-              </p>
-              <Steps
-                items={[
-                  <>
-                    Swipe down the Quick Settings panel and tap <em>DeX</em> (or Settings →
-                    Connected devices → <em>Samsung DeX</em>).
-                  </>,
-                  <>Pick this PC from the list of nearby devices by its name.</>,
-                  <>Accept the connection prompt when it appears on this PC.</>,
-                ]}
-              />
-            </div>
-
-            <p className="text-[11px] text-slate-500">
-              Both devices need Wi-Fi on. Miracast uses a direct phone-to-PC link, so it
-              works without a router — but a VPN or a second active network adapter on this
-              PC often stops the phone finding it.
-            </p>
-          </div>
-        )}
-      </div>
-
-      {known.length > 0 && (
-        <div className="mt-3 flex flex-col gap-1.5">
-          <p className="text-[11.5px] font-semibold uppercase tracking-wide text-slate-500">
-            Saved phones
-          </p>
-          {known.map((d) => (
-            <div
-              key={d.address}
-              className="flex items-center gap-3 rounded-xl bg-white/[0.04] px-3 py-2"
-            >
-              <span aria-hidden="true">📶</span>
-              <div className="min-w-0 flex-1">
-                <p className="truncate text-[12.5px] text-slate-200">{d.label}</p>
-                <p className="truncate text-[11px] text-slate-500">{d.address}</p>
+              <div className="flex items-center gap-2.5">
+                <input
+                  value={code}
+                  inputMode="numeric"
+                  maxLength={6}
+                  onChange={(e) => setCode(e.target.value.replace(/\D/g, "").slice(0, 6))}
+                  onKeyDown={(e) => e.key === "Enter" && code.length === 6 && !busy && pair()}
+                  placeholder="000000"
+                  aria-label="Pairing code"
+                  className="field code-input w-[176px]"
+                />
+                <button className="btn btn-primary btn-lg" onClick={pair} disabled={!!busy || code.length !== 6}>
+                  {busy === "Pairing…" && <span className="spinner !h-3.5 !w-3.5 !border-[1.5px] !border-white/30 !border-t-white" aria-hidden="true" />}
+                  {busy === "Pairing…" ? "Pairing…" : "Pair"}
+                </button>
               </div>
-              <button className="link-btn" onClick={() => reconnect(d)} disabled={!!busy}>
-                Connect
-              </button>
-              <button className="link-btn muted" onClick={() => forget(d)}>
-                Forget
-              </button>
+              {!mdnsDown &&
+                (waiting.length === 0 ? (
+                  <Waiting>No phone is waiting to pair yet — keep the pairing screen open on it.</Waiting>
+                ) : waiting.length === 1 ? (
+                  <Waiting tone="ok">Found a phone waiting at {waiting[0].address}.</Waiting>
+                ) : (
+                  <Waiting tone="warn">
+                    {waiting.length} phones are waiting — enter the address below so the right one is used.
+                  </Waiting>
+                ))}
             </div>
-          ))}
+          )}
+
+          {way === "project" && (
+            <div className="flex flex-col gap-4">
+              {/* Said plainly and first. Someone who follows these steps gets a
+                  desktop that looks like this app's but is not — no taskbar from
+                  us, no widgets, no file drop — and finding that out afterwards
+                  would be worse than being told now. */}
+              <p className="body">
+                Samsung phones can cast DeX straight to Windows, with no cable and no USB debugging. It hands the phone to
+                Windows, so{" "}
+                <span className="text-[var(--warn)]">you get Samsung's own DeX, not this app's desktop</span> — the taskbar,
+                widgets and file drop here won't apply. Use it when nothing else works.
+              </p>
+
+              {projection?.miracast === false && (
+                <div className="callout callout-warn">
+                  <Icon name="alert" size={16} />
+                  <p>
+                    This PC reports no Miracast support, so the phone won't find it. It needs a Wi‑Fi adapter with Wi‑Fi
+                    Direct — a USB Wi‑Fi dongle is enough. ({projection.detail})
+                  </p>
+                </div>
+              )}
+              {projection?.miracast === true && (
+                <div className="callout callout-ok">
+                  <Icon name="check" size={16} />
+                  <p>This PC's Wi‑Fi supports Miracast.</p>
+                </div>
+              )}
+
+              <div>
+                <p className="section-label mb-2.5">On this PC</p>
+                <ol className="howto">
+                  <li>
+                    Install <P>Wireless Display</P>. On Windows 11 24H2 and 25H2 it is usually missing from the Optional
+                    features list, so the button below installs it by name. It needs administrator approval and a restart.
+                  </li>
+                  <li>
+                    Open <P>Projecting to this PC</P> and change the top setting from <P>Never</P> to{" "}
+                    <P>Available everywhere</P> — it's off by default, and this is the step people miss.
+                  </li>
+                  <li>
+                    Open the <P>Wireless Display</P> app from Start and leave it on screen, ready to accept.
+                  </li>
+                </ol>
+                <div className="mt-3.5 flex flex-wrap gap-2">
+                  <button className="btn btn-secondary btn-sm" onClick={installReceiver} disabled={!!busy}>
+                    <Icon name="download" size={14} />
+                    Install Wireless Display
+                  </button>
+                  <button className="btn btn-secondary btn-sm" onClick={copyInstallCommand}>
+                    <Icon name={copied ? "check" : "copy"} size={14} />
+                    {copied ? "Copied" : "Copy command"}
+                  </button>
+                  <button className="btn btn-primary btn-sm" onClick={() => openSettings("project")}>
+                    <Icon name="cast" size={14} />
+                    Projecting to this PC
+                  </button>
+                </div>
+                {installing && (
+                  <p className="caption mt-2.5 text-[#9ff0c9]">
+                    It's installing in a separate window. When it finishes, restart Windows — the receiver only appears
+                    after a restart.
+                  </p>
+                )}
+                <button
+                  className="link muted mt-2 text-[12px]"
+                  onClick={() => openSettings("features")}
+                  title="Only useful on builds where it is actually listed"
+                >
+                  Open the Optional features list
+                </button>
+              </div>
+
+              <div>
+                <p className="section-label mb-2.5">On your phone</p>
+                <ol className="howto">
+                  <li>
+                    Swipe down Quick Settings and tap <P>DeX</P> (or <P>Settings</P> → <P>Connected devices</P> →{" "}
+                    <P>Samsung DeX</P>).
+                  </li>
+                  <li>Pick this PC from the list by its name.</li>
+                  <li>Accept the connection when this PC asks.</li>
+                </ol>
+              </div>
+
+              <p className="caption">
+                Both need Wi‑Fi on. Miracast links the phone to the PC directly, so it works without a router — but a VPN or
+                a second network adapter on this PC often stops the phone finding it.
+              </p>
+            </div>
+          )}
+        </div>
+      </section>
+
+      {error && (
+        <div className="callout callout-warn fade-in">
+          <Icon name="alert" size={16} />
+          <p className="whitespace-pre-wrap select-text">{error}</p>
         </div>
       )}
 
-      {error && (
-        <pre className="console mt-3 rounded-lg bg-amber-950/40 p-3 text-amber-300">{error}</pre>
-      )}
-
-      <div className="mt-3">
-        <button className="link-btn muted" onClick={() => setShowManual((v) => !v)}>
-          {showManual ? "▾" : "▸"} Enter an address by hand
-        </button>
-        {showManual && (
-          <div className="mt-2 flex gap-2">
-            <input
-              value={manual}
-              onChange={(e) => setManual(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && connectManual()}
-              placeholder="192.168.1.100  or  192.168.1.100:5555"
-              aria-label="Phone address"
-              className="field min-w-0 flex-1"
-            />
-            <button className="btn-ghost shrink-0" onClick={connectManual} disabled={!!busy || !manual.trim()}>
-              Connect
-            </button>
-          </div>
-        )}
-        {showManual && tab === "code" && (
-          <p className="mt-1.5 text-[11px] text-slate-500">
-            On the pairing screen the phone shows its own address — note that it is a{" "}
-            <Mono>different port</Mono> from the one on the Wireless debugging screen behind it.
-            While the code tab is open, the address above is used for pairing.
-          </p>
-        )}
-      </div>
+      <Disclosure title="Enter an address instead" defaultOpen={false} className="-mt-1 px-1">
+        <div className="flex gap-2">
+          <input
+            value={manual}
+            onChange={(e) => setManual(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && connectManual()}
+            placeholder="192.168.1.100  or  192.168.1.100:5555"
+            aria-label="Phone address"
+            spellCheck={false}
+            className="field min-w-0 flex-1"
+          />
+          <button className="btn btn-secondary btn-lg" onClick={connectManual} disabled={!!busy || !manual.trim()}>
+            Connect
+          </button>
+        </div>
+        <p className="caption mt-2">
+          {way === "code" ? (
+            <>
+              While you're pairing with a code, this address is used for the pairing. The pairing screen on the phone shows
+              its own address — a different port from the one on the Wireless debugging screen behind it.
+            </>
+          ) : (
+            <>For a phone that is already set up for wireless debugging, on the same network as {THIS_COMPUTER}.</>
+          )}
+        </p>
+      </Disclosure>
     </div>
   );
 }
