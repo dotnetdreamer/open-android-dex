@@ -59,6 +59,13 @@ function tierOf(route: string | null | undefined): Tier {
 
 /** How often the window on the tunnel looks for its phone on adb. Cheap: no process, a few ms per phone. */
 const WATCH_MS = 3000;
+/**
+ * Watches in a row the phone must be on adb before the window moves to it. A
+ * phone plugged back in is not settled at once: measured on the S25 Ultra,
+ * adb saw it, lost it a second or two later as its USB came up again, and saw
+ * it again — and the window followed it there, back, and there again.
+ */
+const ADB_SETTLE_WATCHES = 2;
 /** How often, in watches, a window on the viewer page because the tunnel's video failed asks for it again. */
 const VIDEO_RETRY_WATCHES = 4;
 /**
@@ -116,6 +123,8 @@ export function DesktopRouter({ phoneId }: { phoneId: string }) {
     let tunnelVideo: "maybe" | "no" | "failed" = "maybe";
     let busy = false;
     let watches = 0;
+    /** Watches in a row that found the phone on adb. */
+    let adbSeen = 0;
     let videoSince = 0;
     let quickLosses = 0;
     let restUntil = 0;
@@ -216,11 +225,15 @@ export function DesktopRouter({ phoneId }: { phoneId: string }) {
       watches += 1;
       try {
         const adb = await overAdb(false);
+        adbSeen = adb ? adbSeen + 1 : 0;
         const now = routeRef.current;
         if (!live || now.kind === "probing" || (now.kind === "video" && now.via === "adb")) return;
-        if (adb) {
+        if (adb && adbSeen >= ADB_SETTLE_WATCHES) {
           logInfo("remote: the phone is on adb; moving the desktop to it");
+          adbSeen = 0;
           toAdb(adb, false);
+        } else if (adb) {
+          // Seen once: looked at again on the next watch before moving.
         } else if (now.kind === "tunnel" && tunnelVideo !== "no" && watches % VIDEO_RETRY_WATCHES === 0) {
           // On the viewer page though the phone has video: it was out of
           // reach when asked, or the video kept dropping. Either may be over.
