@@ -52,9 +52,10 @@ use tauri::{AppHandle, Manager, Url, WebviewUrl, WebviewWindow, WebviewWindowBui
 pub enum DesktopEvent {
     /// The phone is starting the desktop, which can take a minute.
     Starting,
-    /// The path to the phone: straight there or through a relay, and its
-    /// round trip. The window sets the picture's quality from it.
-    Path { direct: bool, rtt_ms: u64 },
+    /// The path to the phone: straight there or through a relay, its round
+    /// trip, and where it runs in the title's words (Wi-Fi, Remote, Remote
+    /// (relay)). The window sets the picture's quality from it.
+    Path { direct: bool, rtt_ms: u64, route: Option<&'static str> },
 }
 
 /// What a desktop window hears of what Linux sends this computer.
@@ -307,13 +308,14 @@ async fn watch_path(
     window: WebviewWindow,
     name: String,
 ) {
-    let mut last: Option<(bool, u64)> = None;
+    let mut last: Option<(bool, u64, Option<&'static str>)> = None;
     let mut titled: Option<&'static str> = None;
     loop {
         tokio::time::sleep(Duration::from_secs(2)).await;
+        let route = desktop.path_kind().map(route_for);
         if crate::remote_usb::streaming(window.label()) {
             titled = None;
-        } else if let Some(route) = desktop.path_kind().map(route_for) {
+        } else if let Some(route) = route {
             if titled != Some(route) {
                 let _ = window.set_title(&title_for(&name, Some(route)));
                 titled = Some(route);
@@ -321,15 +323,15 @@ async fn watch_path(
         }
         let Some((direct, rtt)) = desktop.path() else { continue };
         let moved = match last {
-            Some((was_direct, was_rtt)) => was_direct != direct || was_rtt.abs_diff(rtt) >= 10,
+            Some((was_direct, was_rtt, was_route)) => was_direct != direct || was_rtt.abs_diff(rtt) >= 10 || was_route != route,
             None => true,
         };
         if !moved {
             continue;
         }
-        last = Some((direct, rtt));
+        last = Some((direct, rtt, route));
         if let Some(channel) = events.lock().unwrap().as_ref() {
-            let _ = channel.send(DesktopEvent::Path { direct, rtt_ms: rtt });
+            let _ = channel.send(DesktopEvent::Path { direct, rtt_ms: rtt, route });
         }
     }
 }
@@ -493,6 +495,59 @@ pub async fn remote_desktop_connect(
     })
 }
 
+/// The desktop app's own page, as a browser names it in `Origin`: bundled
+/// (tauri://localhost on macOS and Linux, http://tauri.localhost on Windows)
+/// or, in development, the dev server.
+pub(crate) fn app_origins(app: &AppHandle) -> Vec<String> {
+    let mut origins: Vec<String> =
+        ["tauri://localhost", "http://tauri.localhost", "https://tauri.localhost"].map(String::from).to_vec();
+    if tauri::is_dev() {
+        if let Some(dev) = app.config().build.dev_url.as_ref() {
+            origins.push(dev.origin().ascii_serialization());
+        }
+    }
+    origins
+}
+
+/// How a window reaches its phone's desktop as video through the tunnel.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TunnelVideo {
+    /// The WebSocket to open: this window's port, and its token.
+    pub url: String,
+    /// Where the path runs, in the title's words; the window's bitrate goes by it.
+    pub route: Option<&'static str>,
+}
+
+/// From a desktop window off adb: does its phone carry the desktop as video
+/// through the tunnel (LinuxStream, by the daemon's `stream` op)? `Some` with
+/// the WebSocket to open if it does — this window's own port, which then
+/// takes `/stream/<token>` from this window's page alone — and `None` for a
+/// phone whose app is older, which leaves the viewer page. `events` hears the
+/// path as it changes, as `remote_desktop_connect`'s does.
+#[tauri::command]
+pub async fn remote_desktop_stream(
+    window: WebviewWindow,
+    id: String,
+    events: Channel<DesktopEvent>,
+) -> Result<Option<TunnelVideo>, String> {
+    if window.label() != label_for(&id) {
+        return Err("this window belongs to another phone".into());
+    }
+    let paired = crate::remote::find(&id)?;
+    let phone: EndpointId = id.parse().map_err(|_| "not a phone id".to_string())?;
+    let (desktop, port, channel) = link(&window, &paired, phone).await?;
+    *channel.lock().unwrap() = Some(events);
+    if !desktop.can_stream().await.map_err(|e| e.to_string())? {
+        log::info!("remote: {}'s app has no desktop video; the viewer page it is", paired.name);
+        return Ok(None);
+    }
+    let token = desktop.allow_stream(app_origins(window.app_handle()));
+    let route = desktop.path_kind().map(route_for);
+    log::info!("remote: the desktop goes as video through the tunnel ({})", route.unwrap_or("path unknown"));
+    Ok(Some(TunnelVideo { url: format!("ws://127.0.0.1:{port}/stream/{token}"), route }))
+}
+
 /// Files dropped on a desktop window, onto the Desktop of that phone's Linux:
 /// over SFTP in the tunnel, logged in with the pairing's key, never over
 /// anything already there (see dexremote::sftp). `events` hears the progress
@@ -634,8 +689,10 @@ mod tests {
 
     #[test]
     fn events_read_as_the_window_expects_them() {
-        let path = serde_json::to_string(&DesktopEvent::Path { direct: true, rtt_ms: 23 }).unwrap();
-        assert_eq!(path, r#"{"kind":"path","direct":true,"rttMs":23}"#);
+        let path = serde_json::to_string(&DesktopEvent::Path { direct: true, rtt_ms: 23, route: Some("Wi-Fi") }).unwrap();
+        assert_eq!(path, r#"{"kind":"path","direct":true,"rttMs":23,"route":"Wi-Fi"}"#);
+        let video = serde_json::to_string(&TunnelVideo { url: "ws://127.0.0.1:1/stream/t".into(), route: Some("Remote (relay)") }).unwrap();
+        assert_eq!(video, r#"{"url":"ws://127.0.0.1:1/stream/t","route":"Remote (relay)"}"#);
         let failed = serde_json::to_string(&Opened::Failed { message: "x".into(), again: false }).unwrap();
         assert_eq!(failed, r#"{"kind":"failed","message":"x","again":false}"#);
         let progress = serde_json::to_value(Progress { current: "a.jpg".into(), files_done: 1, ..Default::default() }).unwrap();

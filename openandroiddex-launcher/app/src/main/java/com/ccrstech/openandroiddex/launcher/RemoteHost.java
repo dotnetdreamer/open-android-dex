@@ -363,6 +363,10 @@ final class RemoteHost {
             cmd.add(String.valueOf(sshPort));
             cmd.add("--name");
             cmd.add(LinuxRemote.phoneName(ctx));
+            // The desktop as video, for a computer that is not on adb: the
+            // daemon is this app's uid, which LinuxStream lets in.
+            cmd.add("--stream-socket");
+            cmd.add("@" + LinuxStream.socketName(ctx));
             String dns = dnsServers();
             if (!dns.isEmpty()) {
                 cmd.add("--dns");

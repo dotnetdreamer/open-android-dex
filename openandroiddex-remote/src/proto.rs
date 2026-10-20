@@ -7,7 +7,7 @@
 //! |---|---|---|---|
 //! | [`ALPN_SSH`] | the phone's permanent endpoint | paired computers only | one bi-stream per SSH connection, spliced onto the guest's sshd |
 //! | [`ALPN_CTL`] | the phone's permanent endpoint | paired computers only | one request, one answer: is the phone's Linux there, and how is it |
-//! | [`ALPN_DESKTOP`] | the phone's permanent endpoint | paired computers only | the XFCE desktop: an `open` stream to start it (or ask after it), one bi-stream per connection to its web viewer, and a `ping` every few seconds |
+//! | [`ALPN_DESKTOP`] | the phone's permanent endpoint | paired computers only | the XFCE desktop: an `open` stream to start it (or ask after it), one bi-stream per connection to its web viewer or to its video, and a `ping` every few seconds |
 //! | [`ALPN_PAIR`] | the short-lived pairing endpoint | whoever knows the code | the exchange in [`crate::pairing`] |
 //!
 //! Every handshake is a few JSON frames (u32 big-endian length, then UTF-8),
@@ -26,6 +26,8 @@ pub const ALPN_PAIR: &[u8] = b"/openandroiddex/pair/1";
 
 /// In [`CtlStatus::features`]: the phone answers [`ALPN_DESKTOP`].
 pub const FEATURE_DESKTOP: &str = "desktop";
+/// In [`CtlStatus::features`]: its desktop also comes as video ([`DesktopOp::Stream`]).
+pub const FEATURE_DESKTOP_STREAM: &str = "desktop-stream";
 
 /// Close codes, so the side that was turned away can say why.
 pub const CLOSE_NOT_PAIRED: u32 = 403;
@@ -121,6 +123,8 @@ pub enum Refusal {
     DesktopStopped,
     /// The phone asked for its desktop and it did not come up.
     DesktopFailed,
+    /// The desktop's video did not answer on the phone.
+    StreamUnavailable,
 }
 
 /// The phone's answer to [`SshHello`]. After `ok: true`, raw bytes.
@@ -175,6 +179,10 @@ pub enum DesktopOp {
     /// again is back at the same address, and nothing tells a computer that
     /// its connection to the old one has died.
     Ping,
+    /// After the answer, raw bytes to the desktop as video from the phone's
+    /// encoder — the launcher's LinuxStream, the same the desktop app reaches
+    /// over adb: a WebSocket upgrade on `/stream`, then its frames.
+    Stream,
 }
 
 /// A desktop's size in pixels, which for a computer's window is its screen's
@@ -217,6 +225,10 @@ pub struct DesktopReply {
     /// An `open`'s answer: the size the desktop is running at.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub size: Option<DesktopSize>,
+    /// A `ping`'s answer: the desktop also comes as video
+    /// ([`DesktopOp::Stream`]). A phone from before it leaves it out: no.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub stream: bool,
 }
 
 impl DesktopReply {
@@ -333,6 +345,16 @@ mod tests {
         assert_eq!(serde_json::to_string(&starting).unwrap(), r#"{"ok":false,"starting":true}"#);
         let stopped = serde_json::to_string(&DesktopReply::refused(Refusal::DesktopStopped)).unwrap();
         assert_eq!(stopped, r#"{"ok":false,"refusal":"desktop-stopped"}"#);
+
+        let video: DesktopHello = serde_json::from_str(r#"{"v":1,"op":"stream"}"#).unwrap();
+        assert_eq!(video.op, DesktopOp::Stream);
+        let pong = DesktopReply { ok: true, stream: true, ..Default::default() };
+        assert_eq!(serde_json::to_string(&pong).unwrap(), r#"{"ok":true,"stream":true}"#);
+        // From a phone before the video: a pong without it, which is a no.
+        let old: DesktopReply = serde_json::from_str(r#"{"ok":true}"#).unwrap();
+        assert!(old.ok && !old.stream);
+        let none = serde_json::to_string(&DesktopReply::refused(Refusal::StreamUnavailable)).unwrap();
+        assert_eq!(none, r#"{"ok":false,"refusal":"stream-unavailable"}"#);
     }
 
     #[test]

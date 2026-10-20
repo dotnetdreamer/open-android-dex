@@ -11,8 +11,10 @@ With the phone on **adb** — the cable, or wireless debugging — the same wind
 gets the desktop another way: Xvnc's pixels raw over the phone's loopback, into
 the phone's **hardware video encoder**, out as H.264 that the computer's GPU
 decodes. The pointer is the computer's own, wearing the shape Xvnc sends, so it
-moves at the screen's rate whatever the video does. The window chooses by
-itself, and moves between the two as the cable comes and goes.
+moves at the screen's rate whatever the video does. Off adb the same video
+comes **through the tunnel**, at a bitrate the route can carry, and the viewer
+page is left for a phone whose app has no video. The window chooses by itself,
+and moves between them as the cable comes and goes.
 
 This record exists for the same reason the others do: several numbers below
 look arbitrary until you know what was measured.
@@ -27,7 +29,8 @@ look arbitrary until you know what was measured.
 | The socket | `LinuxStreamSocket.java` | the server end of a WebSocket, and `GET /probe` |
 | Waking it | `RemoteProvider.java`, method `stream` | one `content call` that starts the service the socket lives in |
 | The computer's end | `src-tauri/src/remote_usb.rs` | adb's own protocol, which phone is which, the window's port and its checks |
-| Which way | `src/features/remote/DesktopRouter.tsx` | adb or the tunnel, and moving between them; and what is the window's either way — the clipboard, drops, what Linux sends |
+| Through the tunnel | `openandroiddex-remote` (`stream` op in `phone.rs`, `/stream/<token>` in `pc.rs`), `remote_desktop_stream` | the daemon put through to the same socket; the window's port, the same checks |
+| Which way | `src/features/remote/DesktopRouter.tsx` | adb, the tunnel's video or its viewer page, and moving between them; and what is the window's either way — the clipboard, drops, what Linux sends |
 | The window | `src/features/remote/usb/UsbDesktop.tsx` | decoding, the cursor, input, the size, the clipboard's guest end, the status pill |
 | Pure parts | `usb/h264.ts`, `usb/keysym.ts` | Annex B → WebCodecs; keys → keysyms |
 | Check | `test/usb-desktop-test.mjs`, `test/usb-desktop/` | everything off the phone, and the stream classes on one |
@@ -80,9 +83,10 @@ no cursor.
 
 **On the phone,** the socket is abstract — reachable by `adb` and by every app
 on the phone alike — so each connection's peer is checked with SO_PEERCRED: the
-shell (2000, which is adbd), root, or this app's own uid (which the remote-access
-daemon is, for the day this rides the tunnel). It is RemoteProvider's rule:
-anyone with adb already owns the phone, and nobody else gets a byte.
+shell (2000, which is adbd), root, or this app's own uid, which the
+remote-access daemon is: it carries the stream through the tunnel. It is
+RemoteProvider's rule: anyone with adb already owns the phone, and nobody else
+gets a byte.
 
 **On the computer,** adb's own protocol, not `adb forward`. A forward is a
 listening port, and loopback is not private to the app — any page in any browser
@@ -140,10 +144,28 @@ says so. The coded size is the desktop's, padded to the encoder's alignment
 (the window crops the padding off); a desktop larger than the encoder takes at
 60 fps is drawn smaller and the window scales it back.
 
-The bitrate is set by the window from the desktop's pixels: 0.18 bits a pixel at
-60 Hz on a cable (10–100 Mb/s; 40 at 2560×1440), 0.07 on wireless debugging
-(4–30). They are ceilings for motion; a desktop is mostly still, and still costs
-nothing — Xvnc sends no update when nothing changed.
+The bitrate is set by the window from the desktop's pixels and the route, at
+60 Hz:
+
+| Route | Bits a pixel | Floor–ceiling | At 2560×1440 |
+| --- | --- | --- | --- |
+| the cable | 0.18 | 10–100 Mb/s | 40 Mb/s |
+| Wi-Fi: wireless debugging, or the tunnel on the same network | 0.07 | 4–30 | 15.5 |
+| the internet, straight (mobile data, someone else's Wi-Fi) | 0.03 | 2–12 | 6.6 |
+| a relay | 0.012 | 1–4 | 2.7 |
+
+They are ceilings for motion; a desktop is mostly still, and still costs
+nothing — Xvnc sends no update when nothing changed. When the route changes
+under a live stream — hole punching gets past the relay a few seconds after a
+connect — the window sends the new ceiling (`{"t":"bitrate"}`), and the encoder
+takes it from its next frame (`PARAMETER_KEY_VIDEO_BITRATE`).
+
+**Below the ceiling, the link decides.** Once a second the phone looks at how
+much of that second the pump spent waiting for acknowledgements. Over a fifth
+is a link taking frames slower than they come: the bitrate drops by 30 %. Three
+seconds of motion with almost no waiting climb back by 25 %, up to the
+ceiling, never below 0.5 Mb/s. Fewer bits per frame is how a slow link keeps
+its frame rate; the pacing above already keeps it from piling up latency.
 
 ## The window
 
@@ -213,14 +235,48 @@ remote_usb.rs owns the title and the tunnel's watch stands aside; when the last
 one ends the title goes back to plain, and the tunnel's watch, if the window has
 gone there, fills it in within two seconds.
 
+## Through the tunnel
+
+Off adb, the remote-access daemon carries the same stream: `desktop/1` has a
+`stream` op beside `web`, and the daemon — this app's uid, which LinuxStream
+lets in — puts it through to `@<package>.linux-stream` (`--stream-socket`,
+which RemoteHost passes; a test gives a path, since a Mac has no abstract
+sockets). On the computer it arrives on the window's own tunnel port, the one
+the viewer page is served on, at `/stream/<token>`, under the rules the port
+over adb holds: `Host` naming the port, `Origin` the app's own page — not the
+viewer's frame, which has this port's origin and is the guest's to rewrite —
+and the window's token, which goes no further than this computer. The phone
+is handed `/stream`, the same request as over adb, so LinuxStream cannot tell
+the two apart and does not need to.
+
+Whether a phone has it is asked with the ping the window sends anyway: a
+phone with the video answers `{"ok":true,"stream":true}`, an older one plain
+`ok`, and gets the viewer page. A webview without WebCodecs gets the viewer
+page too.
+
+```
+LinuxStream ──@<package>.linux-stream──▶ dexremote serve (app uid) ──QUIC, desktop/1 `stream`──▶
+pc::Desktop (127.0.0.1:<tunnel port>/stream/<token>, checked) ──▶ the window's WebSocket
+```
+
+**The title and the pill say the route**: `· USB` and *USB* on the cable;
+`· Wi-Fi` and *Wireless debugging* on adb over Wi-Fi; through the tunnel
+`· Wi-Fi`, `· Remote` or `· Remote (relay)`, and the pill the same words —
+following the path as it changes, as the bitrate does.
+
 ## Coming and going
 
-The window opens over adb when the phone is on it, the tunnel otherwise. A
-stream that ends without the phone saying why — the cable pulled — is looked for
-on adb once more (a restarted service comes straight back the same way) and
-otherwise goes through the tunnel. The desktop lives on the phone, so nothing in
-it is lost either way. While on the tunnel the window probes adb every three
-seconds, and moves back when the phone is there.
+The window opens over adb when the phone is on it; otherwise as video through
+the tunnel; otherwise with the viewer page. A stream that ends without the
+phone saying why — the cable pulled — is looked for on adb once more (a
+restarted service comes straight back the same way), then as video through the
+tunnel, then the viewer page. The desktop lives on the phone, so nothing in it
+is lost either way. While off adb the window probes adb every three seconds,
+and moves back when the phone is there; on the viewer page because the phone
+was out of reach when its video was asked for, it asks again every twelve. A
+phone that says it has no video is not asked again while the window is open.
+Three streams in a row that end within ten seconds of starting are something
+the window cannot fix: it stays on the viewer page for half a minute.
 
 What the window owns rather than the route goes along unchanged: a copy in
 progress, the cards in the corner, the clipboard's switch. Only the guest's
@@ -238,12 +294,24 @@ app.
 
 ## Verified, and not yet
 
-The window in headless Chrome, off the phone, Tauri's IPC mocked and the adb
-end a stand-in LinuxStream (41 checks, the same run as remote-access.md's):
+The window in headless Chrome, off the phone, Tauri's IPC mocked and the far
+end a stand-in LinuxStream (51 checks, the same run as remote-access.md's):
 the route chosen and the stream asked for at the cable's rate, the clipboard
-and its switch over the stream, a drop on the video, the cable pulled in the
-middle of a copy and the copy finishing on the tunnel, the clipboard given
-again on the new connection, and the move back to adb within three seconds.
+and its switch over the stream, a drop on the video; the cable pulled in the
+middle of a copy and the window on the tunnel's video at a relay's rate, its
+pill saying so, the copy finishing there, the clipboard given again on the new
+connection, the path going direct and the phone told Wi-Fi's ceiling; a phone
+out of reach when its video is asked for, the viewer page meanwhile and the
+video again once it answers; a phone without video on the viewer page; and
+the move back to adb within three seconds.
+
+Through the tunnel (`node test/remote-test.js`, 9 more checks, over the real
+relays): a phone with video says so in its ping and `dexremote desktop
+--video-origin` prints the address; another token, the viewer's own frame,
+another site and another host refused, none of them reaching the phone; the
+app's page through to LinuxStream's socket, handed `/stream` with the page's
+`Origin`, 1 MB both ways intact; and a phone without it refusing the op in a
+sentence, and a computer asking first told the app is too old.
 
 Off the phone (`node test/usb-desktop-test.mjs`, 63 checks): the window's H.264
 handling and key mapping; the launcher's own `LinuxStreamRfb` against a stand-in
@@ -301,5 +369,7 @@ Not yet:
   would use the tunnel;
 - the extended clipboard against the real Xvnc (1.13.1 on the phone): the
   stand-ins are written from TigerVNC's behaviour, not run against it;
-- the same video through the tunnel when the phone is not on adb — the daemon
-  would splice it to the same socket, as it splices websockify.
+- the video through the tunnel on a phone: the daemon's abstract socket on
+  Android, a real relay's bandwidth and the bitrate adapting to it, a path
+  going direct mid-stream — the protocol is checked end to end off the phone,
+  over the real relays, with a stand-in LinuxStream on a Unix socket.

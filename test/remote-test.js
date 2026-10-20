@@ -24,9 +24,11 @@
 // outbox fetched into a scratch Downloads.
 //
 // Phase C opens the phone's desktop with `dexremote desktop`, against a
-// stand-in websockify: the refusals, a start the app asks for and one it
-// fails, the password handed over, the page and the VNC socket through the
-// tunnel, and the requests from anywhere else that the forward turns away.
+// stand-in websockify and a stand-in LinuxStream (the desktop as video, on a
+// Unix socket): the refusals, a start the app asks for and one it
+// fails, the password handed over, the page, the VNC socket and the video
+// through the tunnel, and the requests from anywhere else that the forward
+// turns away.
 //
 //   node test/remote-test.js          (builds the crate first)
 //   KEEP=1 node test/remote-test.js   (leaves the scratch directory for a look)
@@ -683,8 +685,29 @@ async function desktopPhase(peers) {
     socket.write('HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n');
     socket.pipe(socket);
   });
+  // LinuxStream, standing in on a path (macOS has no abstract sockets): it
+  // notes the request it was handed, upgrades it, and echoes.
+  const streamSock = path.join(SCRATCH, 'linux-stream.sock');
+  const streamSeen = [];
+  const linuxStream = net.createServer((c) => {
+    let head = Buffer.alloc(0);
+    const onData = (d) => {
+      head = Buffer.concat([head, d]);
+      const end = head.indexOf('\r\n\r\n');
+      if (end < 0) return;
+      c.off('data', onData);
+      const [line, ...headers] = head.slice(0, end).toString().split('\r\n');
+      streamSeen.push({ line, headers });
+      c.write('HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n');
+      if (head.length > end + 4) c.write(head.slice(end + 4));
+      c.pipe(c);
+    };
+    c.on('data', onData);
+    c.on('error', () => {});
+  });
+  await new Promise((r) => linuxStream.listen(streamSock, r));
 
-  const phone = new Daemon(await freePort(), ['--desktop-port', String(webPort)]);
+  const phone = new Daemon(await freePort(), ['--desktop-port', String(webPort), '--stream-socket', streamSock]);
   phone.peers = peers;
   phone.start();
   check('a daemon with a desktop starts', !!(await phone.next('ready')), phone.events);
@@ -717,7 +740,8 @@ async function desktopPhase(peers) {
   // The real thing: asked at a size no phone should be made to draw.
   phone.send(`desktop stopped ${PASS} -`);
   mark = phone.events.length;
-  const cli = startDesktopCli(['--size', '99999x900', ALIAS, `127.0.0.1:${fwdPort}`]);
+  const APP = 'tauri://localhost';
+  const cli = startDesktopCli(['--size', '99999x900', '--video-origin', APP, ALIAS, `127.0.0.1:${fwdPort}`]);
   const start = await phone.next('desktop-start', mark);
   check('the size asked for is kept to what a phone can carry', start === 'desktop-start 3840 900', start);
   phone.send(`desktop starting ${PASS} -`);
@@ -764,6 +788,60 @@ async function desktopPhase(peers) {
   });
   check('1 MB through the VNC socket comes back intact', sha(echoed.slice(0, frames.length)) === sha(frames), { got: echoed.length });
 
+  // The desktop as video: the same port, the stream op, LinuxStream's socket.
+  const video = await (async () => {
+    for (let i = 0; i < 50; i++) {
+      const line = cli.stdout.split('\n').find((l) => l.startsWith('ws://'));
+      if (line) return line.trim();
+      await sleep(100);
+    }
+    return null;
+  })();
+  check('a phone with video says so, and the computer prints its address', /^ws:\/\/127\.0\.0\.1:\d+\/stream\/[0-9a-f]{32}$/.test(video || ''), { video, stdout: cli.stdout });
+  const videoPath = video ? new URL(video).pathname : '/stream/none';
+  const videoUpgrade = (p, origin, host = `127.0.0.1:${fwdPort}`) =>
+    `GET ${p} HTTP/1.1\r\nHost: ${host}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nOrigin: ${origin}\r\n\r\n`;
+  const seenBefore = streamSeen.length;
+  const refusedVideo = [
+    await rawRequest(fwdPort, videoUpgrade('/stream/' + '0'.repeat(32), APP)),
+    await rawRequest(fwdPort, videoUpgrade(videoPath, `http://127.0.0.1:${fwdPort}`)),
+    await rawRequest(fwdPort, videoUpgrade(videoPath, 'https://example.com')),
+    await rawRequest(fwdPort, videoUpgrade(videoPath, APP, `example.com:${fwdPort}`)),
+  ].map((b) => b.toString().split('\r\n')[0]);
+  check('the video refuses another token, the viewer\'s own frame, another site and another host', refusedVideo.every((l) => l.startsWith('HTTP/1.1 403')), refusedVideo);
+  check('…and none of them reached the phone', streamSeen.length === seenBefore, streamSeen.slice(seenBefore));
+  const vsocket = await new Promise((resolve) => {
+    const s = net.connect({ port: fwdPort, host: '127.0.0.1' }, () => s.write(videoUpgrade(videoPath, APP)));
+    let buf = Buffer.alloc(0);
+    const onData = (d) => {
+      buf = Buffer.concat([buf, d]);
+      const end = buf.indexOf('\r\n\r\n');
+      if (end < 0) return;
+      s.off('data', onData);
+      resolve({ s, head: buf.slice(0, end).toString(), rest: buf.slice(end + 4) });
+    };
+    s.on('data', onData);
+    s.on('error', () => resolve({ s, head: '', rest: Buffer.alloc(0) }));
+  });
+  check("the app's own page opens the video, through the tunnel to LinuxStream's socket", vsocket.head.startsWith('HTTP/1.1 101'), vsocket.head);
+  const handed = streamSeen[streamSeen.length - 1] || { line: '', headers: [] };
+  check('…which is handed /stream: the token stays on the computer', handed.line === 'GET /stream HTTP/1.1', handed.line);
+  check('…with the page\'s own Origin, for LinuxStream\'s check', handed.headers.includes(`Origin: ${APP}`), handed.headers);
+  const vframes = crypto.randomBytes(1024 * 1024);
+  const vechoed = await new Promise((resolve) => {
+    const got = [vsocket.rest];
+    let n = vsocket.rest.length;
+    vsocket.s.on('data', (d) => {
+      got.push(d);
+      n += d.length;
+      if (n >= vframes.length) resolve(Buffer.concat(got));
+    });
+    vsocket.s.on('close', () => resolve(Buffer.concat(got)));
+    vsocket.s.write(vframes);
+  });
+  check('1 MB through the video stream comes back intact', sha(vechoed.slice(0, vframes.length)) === sha(vframes), { got: vechoed.length });
+  vsocket.s.destroy();
+
   const counts = phone.events.slice(mark).filter((e) => e.startsWith('sessions ')).map((e) => Number(e.split(' ')[1]));
   check('the desktop is one session, however many streams it opened', counts.length > 0 && Math.max(...counts) === 1, counts);
   const status = await run(BIN, ['probe', ALIAS], computerEnv(HOME));
@@ -794,6 +872,24 @@ async function desktopPhase(peers) {
   const after = await rawRequest(fwdPort, `GET /dex.html HTTP/1.1\r\nHost: 127.0.0.1:${fwdPort}\r\nConnection: close\r\n\r\n`);
   check('…and the next request reaches the daemon that took its place', after.toString().startsWith('HTTP/1.1 200'), after.toString().slice(0, 200));
 
+  // That daemon has no video (an older app): the stream op is refused with a
+  // sentence, and a computer asking first is told so.
+  const novideo = await rawRequest(fwdPort, videoUpgrade(videoPath, APP));
+  check('a phone without video refuses the stream, in words', novideo.toString().startsWith('HTTP/1.1 502') && /video did not answer/.test(novideo.toString()), novideo.toString().slice(0, 200));
+  // A new process has to find the phone afresh, moments after its daemon
+  // started again; once more if that first dial is not answered in time.
+  let older;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    older = startDesktopCli(['--video-origin', APP, ALIAS, `127.0.0.1:${await freePort()}`]);
+    await older.url();
+    for (let i = 0; i < 50 && !/too old for the desktop's video/.test(older.stderr); i++) await sleep(100);
+    if (!/did not answer/.test(older.stderr)) break;
+    await Promise.race([older.exited, sleep(5000)]);
+  }
+  check('…and the computer asking first is told the app is too old for it', /too old for the desktop's video/.test(older.stderr) && !older.stdout.includes('ws://'), { stdout: older.stdout, stderr: older.stderr });
+  older.proc.kill('SIGINT');
+  await Promise.race([older.exited, sleep(10000)]);
+
   mark = again.events.length;
   cli.proc.kill('SIGINT');
   const cliCode = await Promise.race([cli.exited, sleep(10000).then(() => 'hung')]);
@@ -803,6 +899,7 @@ async function desktopPhase(peers) {
   again.send('quit');
   await Promise.race([again.exited, sleep(10000)]);
   web.close();
+  linuxStream.close();
 }
 
 main()

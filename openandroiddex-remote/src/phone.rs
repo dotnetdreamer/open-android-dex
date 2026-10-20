@@ -26,7 +26,9 @@
 //! computer's streams go to websockify — the noVNC page and the VNC WebSocket
 //! on one port — instead of sshd, and Xvnc's password is the lock on top.
 //! Starting the desktop is the app's business, asked for with a line; see
-//! [`open_desktop`].
+//! [`open_desktop`]. Or they go to the desktop as video: the launcher's
+//! LinuxStream, on an abstract socket that lets in this app's own uid — which
+//! this daemon runs as — besides adb ([`StreamSocket`]).
 
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
@@ -79,6 +81,60 @@ pub struct Config {
     pub dns: Vec<IpAddr>,
     /// A relay of the user's own instead of the public ones.
     pub relay: Option<RelayUrl>,
+    /// Where the desktop's video is served (LinuxStream); none, and the
+    /// phone offers no video.
+    pub stream_socket: Option<StreamSocket>,
+}
+
+/// Where the launcher's LinuxStream listens: an abstract socket on Android,
+/// `@<package>.linux-stream`, or a path — a test's, on a system without
+/// abstract sockets.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StreamSocket {
+    Abstract(String),
+    Path(PathBuf),
+}
+
+impl StreamSocket {
+    /// `@name` is abstract, anything else a path.
+    pub fn parse(s: &str) -> StreamSocket {
+        match s.strip_prefix('@') {
+            Some(name) => StreamSocket::Abstract(name.to_string()),
+            None => StreamSocket::Path(PathBuf::from(s)),
+        }
+    }
+
+    #[cfg(unix)]
+    async fn connect(&self) -> std::io::Result<tokio::net::UnixStream> {
+        match self {
+            StreamSocket::Path(path) => tokio::net::UnixStream::connect(path).await,
+            StreamSocket::Abstract(name) => connect_abstract(name),
+        }
+    }
+
+    #[cfg(not(unix))]
+    async fn connect(&self) -> std::io::Result<tokio::net::TcpStream> {
+        Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "the desktop's video is a phone's"))
+    }
+}
+
+/// A connect to an abstract socket finishes at once or fails: there is no
+/// network in between, only a listener's backlog.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn connect_abstract(name: &str) -> std::io::Result<tokio::net::UnixStream> {
+    #[cfg(target_os = "android")]
+    use std::os::android::net::SocketAddrExt;
+    #[cfg(target_os = "linux")]
+    use std::os::linux::net::SocketAddrExt;
+    let addr = std::os::unix::net::SocketAddr::from_abstract_name(name.as_bytes())?;
+    let socket = std::os::unix::net::UnixStream::connect_addr(&addr)?;
+    socket.set_nonblocking(true)?;
+    tokio::net::UnixStream::from_std(socket)
+}
+
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "android"))))]
+fn connect_abstract(_name: &str) -> std::io::Result<tokio::net::UnixStream> {
+    Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "abstract sockets are Linux's"))
 }
 
 // ── identity ──────────────────────────────────────────────────────────────
@@ -474,6 +530,7 @@ struct Shared {
     ssh_port: AtomicU16,
     desktop_port: u16,
     desktop: watch::Sender<Desktop>,
+    stream_socket: Option<StreamSocket>,
     name: String,
     host_key_line: String,
     dns: DnsServers,
@@ -725,6 +782,7 @@ pub async fn serve(cfg: Config) -> Result<()> {
         ssh_port: AtomicU16::new(cfg.ssh_port),
         desktop_port: cfg.desktop_port,
         desktop,
+        stream_socket: cfg.stream_socket,
         name: cfg.name,
         host_key_line,
         dns,
@@ -1099,12 +1157,16 @@ async fn ctl_stream(shared: Arc<Shared>, conn: Connection, mut send: SendStream,
     if admit(&shared, &conn, request.auth.as_ref(), &authorised).is_none() {
         return;
     }
+    let mut features = vec![proto::FEATURE_DESKTOP.to_string()];
+    if shared.stream_socket.is_some() {
+        features.push(proto::FEATURE_DESKTOP_STREAM.to_string());
+    }
     let status = CtlStatus {
         name: shared.name.clone(),
         ssh: shared.ssh.borrow().as_str().to_string(),
         sessions: shared.sessions.lock().unwrap().len() as u32,
         version: env!("CARGO_PKG_VERSION").to_string(),
-        features: vec![proto::FEATURE_DESKTOP.to_string()],
+        features,
         desktop: shared.desktop.borrow().state.as_str().to_string(),
     };
     let _ = proto::write_frame(&mut send, &status).await;
@@ -1122,9 +1184,10 @@ const DESKTOP_START_WAIT: Duration = Duration::from_secs(120);
 /// already on its way up — someone else's start.
 const DESKTOP_JOIN_WAIT: Duration = Duration::from_secs(30);
 
-/// One desktop stream: an `open`, answered with how to log in, or a `web`
-/// stream put through to websockify. Admitted on its first frame like every
-/// other stream; the first one admitted makes the connection a session.
+/// One desktop stream: an `open`, answered with how to log in; a `web` stream
+/// put through to websockify, or a `stream` to LinuxStream; or a `ping`.
+/// Admitted on its first frame like every other stream; the first one
+/// admitted makes the connection a session.
 async fn desktop_stream(
     shared: Arc<Shared>,
     conn: Connection,
@@ -1158,8 +1221,30 @@ async fn desktop_stream(
             let _ = tokio::time::timeout(Duration::from_secs(5), send.stopped()).await;
         }
         DesktopOp::Ping => {
-            let _ = proto::write_frame(&mut send, &DesktopReply { ok: true, ..Default::default() }).await;
+            let pong = DesktopReply { ok: true, stream: shared.stream_socket.is_some(), ..Default::default() };
+            let _ = proto::write_frame(&mut send, &pong).await;
             let _ = send.finish();
+        }
+        DesktopOp::Stream => {
+            let socket = match shared.stream_socket.as_ref() {
+                Some(socket) => socket.connect().await.map_err(|e| info!("{}: no video: {e}", peer.fmt_short())).ok(),
+                None => None,
+            };
+            let Some(socket) = socket else {
+                let _ = proto::write_frame(&mut send, &DesktopReply::refused(Refusal::StreamUnavailable)).await;
+                let _ = send.finish();
+                let _ = tokio::time::timeout(Duration::from_secs(5), send.stopped()).await;
+                return;
+            };
+            if proto::write_frame(&mut send, &DesktopReply { ok: true, ..Default::default() }).await.is_err() {
+                return;
+            }
+            info!("{}: the desktop's video", peer.fmt_short());
+            let (r, w) = socket.into_split();
+            // LinuxStream ends a session by closing its socket.
+            if let Err(e) = splice(r, w, send, recv, &link.traffic, Some(Duration::from_secs(2))).await {
+                debug!("{}: the video ended with {e}", peer.fmt_short());
+            }
         }
         DesktopOp::Web => {
             let tcp = match connect_desktop(&shared).await {

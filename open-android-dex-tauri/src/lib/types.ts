@@ -200,8 +200,19 @@ export interface RemoteProbe {
 export type DesktopEvent =
   /** The phone is starting the desktop, which can take a minute. */
   | { kind: "starting" }
-  /** The path to the phone, which sets the picture's quality. */
-  | { kind: "path"; direct: boolean; rttMs: number };
+  /**
+   * The path to the phone, which sets the picture's quality; `route` is where
+   * it runs, in the title's words: Wi-Fi, Remote or Remote (relay).
+   */
+  | { kind: "path"; direct: boolean; rttMs: number; route?: string | null };
+
+/** The desktop as video through the tunnel (remote_desktop_stream). */
+export interface TunnelVideo {
+  /** The WebSocket to open. */
+  url: string;
+  /** Wi-Fi, Remote or Remote (relay); null while the path is not known yet. */
+  route: string | null;
+}
 
 /** What a desktop window hears of what Linux sends this computer (remote_desktop_inbox). */
 export type InboxEvent =

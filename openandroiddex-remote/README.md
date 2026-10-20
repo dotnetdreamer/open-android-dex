@@ -13,7 +13,8 @@ One crate, both ends:
   an [iroh](https://iroh.computer) endpoint that paired computers dial by key,
   and it splices each SSH stream onto the guest's sshd on loopback — and each
   desktop stream onto websockify, which serves the viewer page and the VNC
-  WebSocket.
+  WebSocket, or onto the launcher's LinuxStream (`--stream-socket`), which
+  serves the desktop as hardware-encoded video.
 - **On a computer**, the desktop app links this crate as a library: pairing,
   probing, and the `ssh-proxy` ProxyCommand. A computer without the app can use
   the same binary as a client — see below.
@@ -74,7 +75,10 @@ not running, prints `http://127.0.0.1:6080/dex.html?password=…` — the page t
 phone's own Linux window loads, password included — and serves it until
 Ctrl+C. Only that page's own requests get through the port: anything with
 another site's `Origin` or another `Host` is refused, so a web page open in
-some other tab cannot reach the desktop through it.
+some other tab cannot reach the desktop through it. With `--video-origin
+ORIGIN` it also prints `ws://127.0.0.1:6080/stream/<token>`: the desktop as
+H.264, for a page from ORIGIN that knows LinuxStream's wire (the desktop app's
+window is one; `doc/usb-desktop.md`).
 
 `put` is what dropping files on the desktop app's window does: SFTP inside
 the same tunnel, logged in with the pairing's key against the host key the

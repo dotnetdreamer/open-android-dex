@@ -99,6 +99,7 @@ impl std::fmt::Display for DialError {
             DialError::Refused(Refusal::DesktopFailed) => {
                 "The phone could not start its desktop. Open Linux on the phone to see what went wrong."
             }
+            DialError::Refused(Refusal::StreamUnavailable) => "The phone's desktop video did not answer.",
             DialError::Other(detail) => return write!(f, "The connection to the phone failed: {detail}"),
         })
     }
@@ -547,6 +548,10 @@ const PING_WAIT: Duration = Duration::from_secs(12);
 /// handshakes and no file waits behind the picture. When the connection goes —
 /// a network change neither end could follow, a phone asleep too long — the
 /// next stream dials a new one.
+///
+/// The same port can carry the desktop as video, once [`Desktop::allow_stream`]
+/// has said for whom: `/stream/<token>` goes to the phone's LinuxStream
+/// instead of its viewer.
 pub struct Desktop {
     client: Arc<Client>,
     phone: EndpointId,
@@ -554,6 +559,14 @@ pub struct Desktop {
     /// One dial at a time: a page load opens dozens of streams at once, and
     /// they should share one new connection, not race to make their own.
     dialing: tokio::sync::Mutex<()>,
+    stream: std::sync::Mutex<Option<StreamAccess>>,
+}
+
+/// Who may open the desktop's video: a request with this token in its path,
+/// from a page of one of these origins.
+struct StreamAccess {
+    token: String,
+    origins: Vec<String>,
 }
 
 impl Desktop {
@@ -563,7 +576,41 @@ impl Desktop {
             phone,
             conn: std::sync::Mutex::new(None),
             dialing: tokio::sync::Mutex::new(()),
+            stream: std::sync::Mutex::new(None),
         })
+    }
+
+    /// Serve the desktop's video on this port too, at `/stream/<token>`, to
+    /// pages from `origins` — the desktop app's own. Returns the token, the
+    /// same one each time.
+    pub fn allow_stream(&self, origins: Vec<String>) -> String {
+        let mut slot = self.stream.lock().unwrap();
+        if let Some(access) = slot.as_mut() {
+            access.origins = origins;
+            return access.token.clone();
+        }
+        let mut raw = [0u8; 16];
+        getrandom::fill(&mut raw).expect("the system random source is unavailable");
+        let token: String = raw.iter().map(|b| format!("{b:02x}")).collect();
+        *slot = Some(StreamAccess { token: token.clone(), origins });
+        token
+    }
+
+    /// Does the phone carry its desktop as video? A ping says, on the
+    /// desktop's own connection — dialled if there is none.
+    pub async fn can_stream(&self) -> Result<bool, DialError> {
+        let conn = self.connection().await?;
+        let asked = async {
+            let (mut send, mut recv) = conn.open_bi().await.map_err(|e| failed(&conn, e))?;
+            let hello = DesktopHello { v: 1, auth: Some(self.client.auth()), op: DesktopOp::Ping, start: None };
+            proto::write_frame(&mut send, &hello).await.map_err(|e| failed(&conn, e))?;
+            let _ = send.finish();
+            proto::read_frame::<_, DesktopReply>(&mut recv).await.map_err(|e| failed(&conn, e))
+        };
+        match tokio::time::timeout(PING_WAIT, asked).await {
+            Ok(reply) => Ok(reply?.stream),
+            Err(_) => Err(DialError::Unreachable),
+        }
     }
 
     fn live(&self) -> Option<Connection> {
@@ -675,7 +722,9 @@ impl Desktop {
 
     /// Put every connection made to `listener` through to the phone's web
     /// viewer, each on a stream of its own — after its request has shown it
-    /// comes from the viewer itself (see [`check_request`]).
+    /// comes from the viewer itself (see [`check_request`]) — or to its
+    /// video, for the page [`Self::allow_stream`] named (see
+    /// [`check_stream_request`]).
     pub async fn serve(self: Arc<Self>, listener: TcpListener) -> std::io::Result<()> {
         let port = listener.local_addr()?.port();
         loop {
@@ -690,14 +739,25 @@ impl Desktop {
         let Some(received) = read_request_head(&mut tcp).await else {
             return;
         };
-        if let Err(why) = check_request(&received, port) {
+        let video = request_path(&received).is_some_and(|p| p.starts_with("/stream/"));
+        let checked = if video {
+            let access = self.stream.lock().unwrap().as_ref().map(|a| (a.token.clone(), a.origins.clone()));
+            match access {
+                Some((token, origins)) => check_stream_request(&received, port, &token, &origins),
+                None => Err("no video here"),
+            }
+        } else {
+            check_request(&received, port)
+        };
+        if let Err(why) = checked {
             info!("desktop: refused a request to the viewer's port ({why})");
             let _ = tcp
                 .write_all(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
                 .await;
             return;
         }
-        let (send, recv) = match self.open_web().await {
+        let op = if video { DesktopOp::Stream } else { DesktopOp::Web };
+        let (send, recv) = match self.open_stream(op).await {
             Ok(stream) => stream,
             Err(e) => {
                 debug!("desktop: {e}");
@@ -715,7 +775,9 @@ impl Desktop {
         };
         let mut send = send;
         // Everything read so far goes first: the request head, and whatever
-        // the browser had already sent behind it.
+        // the browser had already sent behind it. The token stays here: the
+        // phone serves its video at /stream.
+        let received = if video { with_path(&received, "/stream") } else { received };
         if send.write_all(&received).await.is_err() {
             return;
         }
@@ -726,11 +788,11 @@ impl Desktop {
         }
     }
 
-    /// One `web` stream, past its answer.
-    async fn open_web(&self) -> Result<(SendStream, RecvStream), DialError> {
+    /// One `web` or `stream` stream, past its answer.
+    async fn open_stream(&self, op: DesktopOp) -> Result<(SendStream, RecvStream), DialError> {
         let conn = self.connection().await?;
         let (mut send, mut recv) = conn.open_bi().await.map_err(|e| failed(&conn, e))?;
-        let hello = DesktopHello { v: 1, auth: Some(self.client.auth()), op: DesktopOp::Web, start: None };
+        let hello = DesktopHello { v: 1, auth: Some(self.client.auth()), op, start: None };
         proto::write_frame(&mut send, &hello).await.map_err(|e| failed(&conn, e))?;
         let reply: DesktopReply = match tokio::time::timeout(Duration::from_secs(30), proto::read_frame(&mut recv)).await
         {
@@ -775,6 +837,76 @@ async fn read_request_head(tcp: &mut TcpStream) -> Option<Vec<u8>> {
 
 fn head_end(received: &[u8]) -> Option<usize> {
     received.windows(4).position(|w| w == b"\r\n\r\n").map(|i| i + 4)
+}
+
+/// The path in a request line.
+fn request_path(received: &[u8]) -> Option<&str> {
+    let line = received.split(|b| *b == b'\r').next()?;
+    std::str::from_utf8(line).ok()?.split(' ').nth(1)
+}
+
+/// `received` with its request line's path replaced.
+fn with_path(received: &[u8], path: &str) -> Vec<u8> {
+    let Some(line_end) = received.windows(2).position(|w| w == b"\r\n") else {
+        return received.to_vec();
+    };
+    let line = String::from_utf8_lossy(&received[..line_end]);
+    let mut parts: Vec<&str> = line.split(' ').collect();
+    if parts.len() >= 2 {
+        parts[1] = path;
+    }
+    let mut out = parts.join(" ").into_bytes();
+    out.extend_from_slice(&received[line_end..]);
+    out
+}
+
+/// Is this the desktop app's own video socket? `GET /stream/<token>`,
+/// addressed to this port by name, from one of `origins`, asking to upgrade —
+/// the rule the app's port over adb holds too (remote_usb.rs). A page from
+/// another site names itself in `Origin`, a DNS-rebinding one carries its own
+/// name in `Host`, the viewer's frame has this port's origin, and none of
+/// them has the token, which only the app's page is given.
+fn check_stream_request(received: &[u8], port: u16, token: &str, origins: &[String]) -> Result<(), &'static str> {
+    let end = head_end(received).ok_or("no request")?;
+    let head = std::str::from_utf8(&received[..end]).map_err(|_| "not text")?;
+    let mut lines = head.split("\r\n");
+    let mut first = lines.next().unwrap_or("").split(' ');
+    let (method, path, version) = (first.next(), first.next(), first.next());
+    if method != Some("GET") || !version.is_some_and(|v| v.starts_with("HTTP/1.")) {
+        return Err("not a GET");
+    }
+    if path != Some(&format!("/stream/{token}")) {
+        return Err("not the window's path");
+    }
+    let ours = [format!("127.0.0.1:{port}"), format!("localhost:{port}")];
+    let (mut host, mut origin, mut upgrade) = (None, None, None);
+    for line in lines {
+        let Some((name, value)) = line.split_once(':') else { continue };
+        let slot = if name.eq_ignore_ascii_case("host") {
+            &mut host
+        } else if name.eq_ignore_ascii_case("origin") {
+            &mut origin
+        } else if name.eq_ignore_ascii_case("upgrade") {
+            &mut upgrade
+        } else {
+            continue;
+        };
+        if slot.replace(value.trim()).is_some() {
+            return Err("a header twice");
+        }
+    }
+    let host = host.ok_or("no Host")?;
+    if !ours.iter().any(|o| o.eq_ignore_ascii_case(host)) {
+        return Err("another host");
+    }
+    // A browser always says where a WebSocket comes from.
+    if !origin.is_some_and(|o| origins.iter().any(|ok| ok.eq_ignore_ascii_case(o))) {
+        return Err("another origin");
+    }
+    if !upgrade.is_some_and(|u| u.eq_ignore_ascii_case("websocket")) {
+        return Err("not a WebSocket");
+    }
+    Ok(())
 }
 
 /// Is this request the viewer's own? Addressed to this port by name — and,
@@ -875,6 +1007,30 @@ mod tests {
         let doubled = request(&["GET / HTTP/1.1", "Host: 127.0.0.1:6080", "Host: example.com"]);
         assert!(check_request(&doubled, 6080).is_err());
         assert!(check_request(b"GET / HTTP/1.1\r\nHost: 127.0.0.1:6080\r\n", 6080).is_err(), "unfinished head");
+    }
+
+    #[test]
+    fn only_the_apps_own_page_opens_the_video() {
+        let app = vec!["tauri://localhost".to_string(), "http://tauri.localhost".to_string()];
+        let go = |lines: &[&str]| check_stream_request(&request(lines), 7000, "abc", &app);
+        let ok = ["GET /stream/abc HTTP/1.1", "Host: 127.0.0.1:7000", "Upgrade: websocket", "Origin: tauri://localhost"];
+        assert_eq!(go(&ok), Ok(()));
+        assert_eq!(go(&["GET /stream/abc HTTP/1.1", "Host: localhost:7000", "Upgrade: websocket", "Origin: http://tauri.localhost"]), Ok(()));
+        assert!(go(&["GET /stream/xyz HTTP/1.1", "Host: 127.0.0.1:7000", "Upgrade: websocket", "Origin: tauri://localhost"]).is_err(), "another token");
+        assert!(go(&["GET /stream/abc HTTP/1.1", "Host: 127.0.0.1:7000", "Upgrade: websocket", "Origin: http://127.0.0.1:7000"]).is_err(), "the viewer's frame");
+        assert!(go(&["GET /stream/abc HTTP/1.1", "Host: 127.0.0.1:7000", "Upgrade: websocket", "Origin: https://example.com"]).is_err(), "another site");
+        assert!(go(&["GET /stream/abc HTTP/1.1", "Host: 127.0.0.1:7000", "Upgrade: websocket"]).is_err(), "no origin");
+        assert!(go(&["GET /stream/abc HTTP/1.1", "Host: example.com:7000", "Upgrade: websocket", "Origin: tauri://localhost"]).is_err(), "DNS rebinding");
+        assert!(go(&["GET /stream/abc HTTP/1.1", "Host: 127.0.0.1:7000", "Origin: tauri://localhost"]).is_err(), "not an upgrade");
+        assert!(go(&["POST /stream/abc HTTP/1.1", "Host: 127.0.0.1:7000", "Upgrade: websocket", "Origin: tauri://localhost"]).is_err());
+        assert!(
+            go(&["GET /stream/abc HTTP/1.1", "Host: 127.0.0.1:7000", "Origin: tauri://localhost", "Upgrade: websocket", "Origin: https://example.com"]).is_err(),
+            "a header twice"
+        );
+        let head = request(&ok);
+        assert_eq!(request_path(&head), Some("/stream/abc"));
+        let out = String::from_utf8(with_path(&head, "/stream")).unwrap();
+        assert!(out.starts_with("GET /stream HTTP/1.1\r\nHost: 127.0.0.1:7000\r\n") && !out.contains("abc"), "the token stays here");
     }
 
     #[test]

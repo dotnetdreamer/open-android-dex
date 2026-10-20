@@ -49,7 +49,7 @@ import java.nio.ByteBuffer;
  * <pre>
  * computer → phone   text   {"t":"hello","v":1,"start":bool,"w":..,"h":..,"bitrate":..,"fps":..}
  *                    text   {"t":"resize","w":..,"h":..} | {"t":"clip","text":..}
- *                           | {"t":"keyframe"} | {"t":"ping","n":..}
+ *                           | {"t":"keyframe"} | {"t":"ping","n":..} | {"t":"bitrate","bitrate":..}
  *                    binary 0x10 buttons u8, x u16, y u16       — the pointer, in desktop pixels
  *                    binary 0x11 down u8, keysym u32            — a key
  *                    binary 0x12                                — one video frame arrived
@@ -61,6 +61,13 @@ import java.nio.ByteBuffer;
  *                    binary 0x02 hotX u16, hotY u16, w u16, h u16, RGBA — the pointer's shape
  * </pre>
  * All numbers big-endian.
+ *
+ * <p><b>Over the tunnel too.</b> The remote-access daemon puts a computer's
+ * stream through to this socket when the phone is not on adb ({@code desktop/1}'s
+ * {@code stream} op), so the link may be a relay on the other side of the
+ * world. The bitrate the computer asks for is a ceiling for its route; the
+ * session takes it down when the link cannot carry it and back up when it can
+ * ({@link Session#adapt}).
  *
  * <p>Design record: doc/usb-desktop.md.
  */
@@ -132,6 +139,18 @@ final class LinuxStream {
     private static final int RTT_SAMPLES = 32;
     /** Only a computer that stopped acknowledging altogether is waited out, and logged. */
     private static final long ACK_GIVE_UP_MS = 3000;
+    /**
+     * Adaptive bitrate: a second in which the pump waited this share of its
+     * time on acknowledgements is a link taking frames slower than they come;
+     * the bitrate drops by {@link #BITRATE_DOWN}. Three seconds of motion that
+     * kept within {@link #BEHIND_FINE} of it climb by {@link #BITRATE_UP}, up
+     * to what the computer asked for. Never below {@link #MIN_BITRATE}.
+     */
+    private static final double BEHIND_SLOW = 0.2;
+    private static final double BEHIND_FINE = 0.02;
+    private static final double BITRATE_DOWN = 0.7;
+    private static final double BITRATE_UP = 1.25;
+    private static final int MIN_BITRATE = 500_000;
 
     static String socketName(Context ctx) {
         return ctx.getPackageName() + ".linux-stream";
@@ -284,7 +303,10 @@ final class LinuxStream {
         // the hello
         private boolean start;
         private int wantW = 1280, wantH = 800;
-        private int bitrate = 24_000_000;
+        /** What the encoder is asked for now: {@link #ceiling} or less, as the link allows. */
+        private volatile int bitrate = 24_000_000;
+        /** What the computer asked for, for its route: the most {@link #adapt} gives back. */
+        private volatile int ceiling = 24_000_000;
         private int fps = 60;
 
         // pump-thread state
@@ -319,6 +341,10 @@ final class LinuxStream {
         /** The computer acknowledges frames (every one of ours does; an older one may not). */
         private boolean acks;
         private boolean ackStallLogged;
+        /** Time the pump spent waiting on acknowledgements this stats second. Under {@link #pace}. */
+        private long linkWaitNs;
+        /** Seconds of motion in a row that the link kept up with; drain thread. */
+        private int keptUp;
 
         // stats, drain thread
         private long statsSince = SystemClock.elapsedRealtime();
@@ -364,7 +390,8 @@ final class LinuxStream {
                 start = hello.optBoolean("start");
                 wantW = even(clamp(hello.optInt("w", 1280), MIN_W, MAX_W));
                 wantH = even(clamp(hello.optInt("h", 800), MIN_H, MAX_H));
-                bitrate = clamp(hello.optInt("bitrate", 24_000_000), 1_000_000, 150_000_000);
+                bitrate = clamp(hello.optInt("bitrate", 24_000_000), MIN_BITRATE, 150_000_000);
+                ceiling = bitrate;
                 fps = clamp(hello.optInt("fps", 60), 10, 60);
                 acks = hello.optBoolean("acks");
                 sock.setSoTimeout(0);
@@ -581,10 +608,12 @@ final class LinuxStream {
                 while (!closing) {
                     now = SystemClock.elapsedRealtime();
                     long left;
+                    boolean link = false;
                     if (inFlight > MAX_IN_FLIGHT - 1) {
                         left = encoderUntil - now;
                     } else if (acks && sent - acked >= window()) {
                         left = linkUntil - now;
+                        link = true;
                         if (left <= 0 && !ackStallLogged) {
                             ackStallLogged = true;
                             DexLog.warn("stream", "no acknowledgement for " + ACK_GIVE_UP_MS + " ms; going on without");
@@ -593,12 +622,14 @@ final class LinuxStream {
                         break;
                     }
                     if (left <= 0) break;
+                    long waitFrom = System.nanoTime();
                     try {
                         pace.wait(left);
                     } catch (InterruptedException ie) {
                         Thread.currentThread().interrupt();
                         return;
                     }
+                    if (link) linkWaitNs += System.nanoTime() - waitFrom;
                 }
             }
             LinuxStreamRfb r = rfb;
@@ -656,6 +687,7 @@ final class LinuxStream {
             statsEncodeUs += Math.max(0, outUs - ptsUs);
             statsSendUs += doneUs - outUs;
             if (now - statsSince >= 1000) {
+                adapt(now - statsSince, statsFrames);
                 JSONObject j = new JSONObject();
                 try {
                     double secs = (now - statsSince) / 1000.0;
@@ -678,6 +710,7 @@ final class LinuxStream {
                             .put("rttMs", rtt < 0 ? -1 : Math.round(rtt / 100.0) / 10.0)
                             .put("bestRttMs", best < 0 ? -1 : Math.round(best / 100.0) / 10.0)
                             .put("window", win)
+                            .put("targetKbps", bitrate / 1000)
                             .put("swapMs", enc == null ? 0 : enc.swapMs());
                     int u = sumUpdates;
                     if (u > 0) {
@@ -702,6 +735,38 @@ final class LinuxStream {
                 statsEncodeUs = 0;
                 statsSendUs = 0;
             }
+        }
+
+        /**
+         * The bitrate, held to what the link carries — the drain thread's, once
+         * a second. A cable never comes near; Wi-Fi in power save, mobile data
+         * and a relay can, and there a frame that waits is a frame that is late.
+         */
+        private void adapt(long periodMs, int frames) {
+            long waited;
+            synchronized (pace) {
+                waited = linkWaitNs;
+                linkWaitNs = 0;
+            }
+            double behind = waited / 1e6 / Math.max(1, periodMs);
+            int now = bitrate;
+            if (behind > BEHIND_SLOW) {
+                keptUp = 0;
+                int next = Math.max(MIN_BITRATE, (int) (now * BITRATE_DOWN));
+                if (next < now) setBitrate(next, "the link is behind (" + Math.round(behind * 100) + "% waiting)");
+            } else if (behind < BEHIND_FINE && frames >= fps / 4 && now < ceiling) {
+                if (++keptUp >= 3) {
+                    keptUp = 0;
+                    setBitrate(Math.min(ceiling, (int) (now * BITRATE_UP)), "the link keeps up");
+                }
+            }
+        }
+
+        private void setBitrate(int bps, String why) {
+            bitrate = bps;
+            LinuxStreamEncoder e = enc;
+            if (e != null) e.setBitrate(bps);
+            DexLog.step("stream", why + ": " + Math.round(bps / 1e5) / 10.0 + " Mb/s");
         }
 
         @Override
@@ -766,6 +831,16 @@ final class LinuxStream {
                     case "keyframe": {
                         LinuxStreamEncoder e = enc;
                         if (e != null) e.requestKeyFrame();
+                        break;
+                    }
+                    case "bitrate": {
+                        // The route changed — a relay that became a direct
+                        // path, say: what it can carry is the new ceiling, and
+                        // the link has its say from there.
+                        int asked = clamp(j.optInt("bitrate", ceiling), MIN_BITRATE, 150_000_000);
+                        ceiling = asked;
+                        keptUp = 0;
+                        setBitrate(asked, "the computer's route changed");
                         break;
                     }
                     case "ping": {

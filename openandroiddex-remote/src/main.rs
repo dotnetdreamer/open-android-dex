@@ -33,7 +33,9 @@ On a computer:
   dexremote desktop <NAME> [ADDR]    its Linux desktop, in a browser tab: prints the address
                                      to open (default 127.0.0.1:6080). Starts the desktop at
                                      --size WxH (default 1920x1080) unless it is running;
-                                     --no-start only joins one that is
+                                     --no-start only joins one that is; --video-origin ORIGIN
+                                     also prints the address of its video (a WebSocket) for
+                                     pages from ORIGIN, when the phone has it
   dexremote put <NAME> <PATH>…       copy files and folders onto its Linux desktop (--to DIR
                                      for another folder of its home); nothing there is ever
                                      replaced: a name in use gets Thunar's \"(copy 1)\"
@@ -46,7 +48,7 @@ On a computer:
 
 On the phone (run by the app):
   dexremote serve --dir DIR --ssh-port PORT --name NAME [--dns IP,…] [--relay URL]
-                  [--desktop-port PORT]
+                  [--desktop-port PORT] [--stream-socket @NAME|PATH]
   dexremote init --dir DIR
 
   --state DIR overrides where a computer keeps its identity and phone list.
@@ -132,7 +134,9 @@ fn serve(args: &[String]) -> anyhow::Result<()> {
         .unwrap_or_default();
     let relay = flag(args, "--relay").map(|u| u.parse()).transpose()?;
     let desktop_port = flag(args, "--desktop-port").map(str::parse).transpose()?.unwrap_or(phone::DESKTOP_WEB_PORT);
-    runtime()?.block_on(phone::serve(phone::Config { dir, ssh_port, desktop_port, name, dns, relay }))
+    // LinuxStream's socket: `@` and its abstract name on the phone.
+    let stream_socket = flag(args, "--stream-socket").map(phone::StreamSocket::parse);
+    runtime()?.block_on(phone::serve(phone::Config { dir, ssh_port, desktop_port, name, dns, relay, stream_socket }))
 }
 
 /// Make the identity if it is not there, and print `<endpoint id> <host key>`.
@@ -314,6 +318,7 @@ fn desktop(args: &[String]) -> anyhow::Result<()> {
         .and_then(|(w, h)| Some(dexremote::proto::DesktopSize { w: w.parse().ok()?, h: h.parse().ok()? }))
         .ok_or_else(|| anyhow::anyhow!("--size is width x height, like 1920x1080"))?;
     let listen: Option<SocketAddr> = pos.get(1).map(|a| a.parse()).transpose()?;
+    let video_origin = flag(&args, "--video-origin").map(str::to_string);
     // The page checks nothing and the VNC password is in its address: it is
     // served to this computer alone, which is also all the viewer's own
     // checks let through (see pc::Desktop::serve).
@@ -341,6 +346,14 @@ fn desktop(args: &[String]) -> anyhow::Result<()> {
                 .open(start, || eprintln!("Starting it on the phone. The first start can take a minute."))
                 .await?;
             println!("{}", pc::desktop_url(port, &login));
+            if let Some(origin) = video_origin {
+                if desktop.can_stream().await? {
+                    let token = desktop.allow_stream(vec![origin]);
+                    println!("ws://127.0.0.1:{port}/stream/{token}");
+                } else {
+                    eprintln!("The app on the phone is too old for the desktop's video; the page above is all there is.");
+                }
+            }
             eprintln!("Open that in a browser on this computer. Ctrl+C here closes it.");
             tokio::spawn(desktop.clone().keep_alive());
             tokio::select! {

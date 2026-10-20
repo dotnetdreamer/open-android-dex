@@ -330,6 +330,12 @@ need — noVNC imports from `/core/`, and websockify sends no CORS headers — a
 the computer needs no copy of noVNC. Xvnc's 5901 straight through would have
 needed one, and a WebSocket server of the app's own to feed it.
 
+A phone whose app has it also carries the desktop as **video** on the same
+ALPN: a `stream` op that the daemon splices onto the launcher's LinuxStream
+socket instead of websockify, served on the window's same port at
+`/stream/<token>` for the app's own page alone. The window prefers it to the
+viewer page; see [usb-desktop.md](usb-desktop.md), "Through the tunnel".
+
 **One connection per window.** The `open`, every file the page loads and the
 WebSocket are streams on one QUIC connection: a page load costs no handshakes,
 and no file waits behind the picture. The phone counts the connection as one

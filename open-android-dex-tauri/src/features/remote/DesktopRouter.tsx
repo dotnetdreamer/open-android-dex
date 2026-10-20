@@ -5,20 +5,25 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { readText, writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { error as logError, info as logInfo } from "@tauri-apps/plugin-log";
 import { load, type Store } from "@tauri-apps/plugin-store";
-import type { InboxEvent, PutProgress, PutReport, RemotePhone } from "../../lib/types";
+import type { DesktopEvent, InboxEvent, PutProgress, PutReport, RemotePhone, TunnelVideo } from "../../lib/types";
 import { ClipboardShare, type ToGuest } from "./clipboardShare";
 import { CopyCard, DropCover, InboxCard, merge, Notice, type Copy, type DesktopHost, type Inbox } from "./DesktopCards";
 import { DesktopWindow } from "./DesktopWindow";
-import { UsbDesktop } from "./usb/UsbDesktop";
+import { UsbDesktop, type Tier } from "./usb/UsbDesktop";
 
 /**
- * A phone's desktop window, which reaches its phone one of two ways.
+ * A phone's desktop window, which reaches its phone one of three ways, in
+ * this order:
  *
  * - **Over adb** — the cable, or wireless debugging — as video from the
  *   phone's encoder (UsbDesktop, remote_usb.rs): a local desktop's frame
  *   rate and a pointer that never lags.
- * - **Through the tunnel**, anywhere else, with the phone's own viewer page
- *   (DesktopWindow, remote_desktop.rs).
+ * - **Through the tunnel, as the same video** (remote_desktop_stream), at a
+ *   bitrate for the route — Wi-Fi, the internet, a relay — that the phone
+ *   lowers further while the link falls behind.
+ * - **Through the tunnel, with the phone's own viewer page** (DesktopWindow,
+ *   remote_desktop.rs): for a phone whose app has no video, and a webview
+ *   that cannot decode it.
  *
  * Adb wins whenever the phone is on it. A cable pulled mid-session drops the
  * window onto the tunnel — the desktop itself lives on the phone, so nothing
@@ -42,19 +47,28 @@ interface UsbLink {
 
 type Route =
   | { kind: "probing" }
-  | { kind: "usb"; url: string; wireless: boolean; start: boolean; key: number }
+  /** The video, over adb or through the tunnel; `route` is the pill's word for the way. */
+  | { kind: "video"; via: "adb" | "tunnel"; url: string; route: string; tier: Tier; start: boolean; key: number }
+  /** The viewer page, through the tunnel. */
   | { kind: "tunnel"; key: number };
+
+/** A tunnel route, as remote_desktop.rs names it, as a bitrate tier. Not known yet: as little as a relay carries. */
+function tierOf(route: string | null | undefined): Tier {
+  return route === "Wi-Fi" ? "wifi" : route === "Remote" ? "remote" : "relay";
+}
 
 /** How often the window on the tunnel looks for its phone on adb. Cheap: no process, a few ms per phone. */
 const WATCH_MS = 3000;
+/** How often, in watches, a window on the viewer page because the tunnel's video failed asks for it again. */
+const VIDEO_RETRY_WATCHES = 4;
 /**
- * A stream over adb that keeps ending moments after it began is not a cable
+ * A video stream that keeps ending moments after it began is not a cable
  * pulled; it is something the window cannot fix. After this many in a row it
- * stays on the tunnel, and does not look at adb again for a while.
+ * stays on the viewer page, and does not try the video again for a while.
  */
 const QUICK_LOSS_MS = 10_000;
 const QUICK_LOSSES = 3;
-const ADB_REST_MS = 30_000;
+const VIDEO_REST_MS = 30_000;
 
 /** This webview decodes H.264 with WebCodecs. */
 async function canDecode(): Promise<boolean> {
@@ -92,19 +106,36 @@ export function DesktopRouter({ phoneId }: { phoneId: string }) {
   /** Where the inbox's channel delivers: the effect that is live now, whichever channel the app kept. */
   const onInbox = useRef<(e: InboxEvent) => void>(() => {});
 
-  // Which way: adb or the tunnel, and moving between them.
+  // Which way: adb, the tunnel's video or its viewer page, and moving between them.
   useEffect(() => {
     let live = true;
     let n = 0;
+    /** This webview decodes H.264. */
     let video = false;
+    /** The phone has video through the tunnel; has none (an older app); or asking failed (out of reach, say). */
+    let tunnelVideo: "maybe" | "no" | "failed" = "maybe";
     let busy = false;
-    let usbSince = 0;
+    let watches = 0;
+    let videoSince = 0;
     let quickLosses = 0;
-    let adbRestUntil = 0;
-    const toUsb = (link: UsbLink, start: boolean) => {
-      usbSince = Date.now();
-      setRoute({ kind: "usb", ...link, start, key: ++n });
+    let restUntil = 0;
+    const toAdb = (link: UsbLink, start: boolean) => {
+      videoSince = Date.now();
+      setRoute({
+        kind: "video",
+        via: "adb",
+        url: link.url,
+        route: link.wireless ? "Wireless debugging" : "USB",
+        tier: link.wireless ? "wifi" : "cable",
+        start,
+        key: ++n,
+      });
     };
+    const toTunnelVideo = (v: TunnelVideo, start: boolean) => {
+      videoSince = Date.now();
+      setRoute({ kind: "video", via: "tunnel", url: v.url, route: v.route ?? "Remote", tier: tierOf(v.route), start, key: ++n });
+    };
+    const toViewer = () => setRoute((r) => (r.kind === "tunnel" ? r : { kind: "tunnel", key: ++n }));
 
     invoke<RemotePhone[]>("remote_phones")
       .then((list) => {
@@ -122,45 +153,82 @@ export function DesktopRouter({ phoneId }: { phoneId: string }) {
         return null;
       }
     };
-    const viaTunnel = () => setRoute((r) => (r.kind === "tunnel" ? r : { kind: "tunnel", key: ++n }));
+
+    // The tunnel's path as it changes, for the video's pill and bitrate.
+    const tunnelEvents = new Channel<DesktopEvent>((e) => {
+      if (!live || e.kind !== "path" || !e.route) return;
+      const now = e.route;
+      setRoute((r) =>
+        r.kind === "video" && r.via === "tunnel" && r.route !== now ? { ...r, route: now, tier: tierOf(now) } : r,
+      );
+    });
+    const overTunnel = async (): Promise<TunnelVideo | null> => {
+      if (!video || tunnelVideo === "no") return null;
+      try {
+        const v = await invoke<TunnelVideo | null>("remote_desktop_stream", { id: phoneId, events: tunnelEvents });
+        tunnelVideo = v ? "maybe" : "no";
+        return v;
+      } catch (e) {
+        tunnelVideo = "failed";
+        logError(`remote: desktop video through the tunnel: ${String(e)}`);
+        return null;
+      }
+    };
+
+    /** The best way there is now: adb, the tunnel's video, or the viewer page. */
+    const choose = async (start: boolean, wake: boolean) => {
+      const adb = await overAdb(wake);
+      if (!live) return;
+      if (adb) return toAdb(adb, start);
+      const tunnel = Date.now() < restUntil ? null : await overTunnel();
+      if (!live) return;
+      if (tunnel) return toTunnelVideo(tunnel, start);
+      toViewer();
+    };
 
     const first = async () => {
       video = await canDecode();
-      if (!video) logInfo("remote: this webview has no H.264 decoder for the desktop's video; using the tunnel");
-      const link = await overAdb(true);
-      if (!live) return;
-      if (link) toUsb(link, true);
-      else viaTunnel();
+      if (!video) logInfo("remote: this webview has no H.264 decoder for the desktop's video; using the viewer page");
+      await choose(true, true);
     };
 
     // The stream went without the phone saying why. Still on adb — its
     // service restarted, say — it comes straight back the same way; gone from
-    // it, the cable pulled, it goes through the tunnel.
+    // it, the cable pulled, it goes through the tunnel, as video if it can.
     lost.current = async () => {
-      quickLosses = Date.now() - usbSince < QUICK_LOSS_MS ? quickLosses + 1 : 0;
+      quickLosses = Date.now() - videoSince < QUICK_LOSS_MS ? quickLosses + 1 : 0;
       if (quickLosses >= QUICK_LOSSES) {
-        logError("remote: the desktop over adb keeps dropping; staying on the tunnel for now");
+        logError("remote: the desktop's video keeps dropping; the viewer page for now");
         quickLosses = 0;
-        adbRestUntil = Date.now() + ADB_REST_MS;
-        viaTunnel();
+        restUntil = Date.now() + VIDEO_REST_MS;
+        toViewer();
         return;
       }
       // Quick losses wait a little longer each time before looking again.
       if (quickLosses) await new Promise((r) => window.setTimeout(r, 500 * 2 ** (quickLosses - 1)));
-      const link = await overAdb(false);
-      if (!live) return;
-      if (link) toUsb(link, false);
-      else viaTunnel();
+      await choose(false, false);
     };
 
     const watch = window.setInterval(async () => {
-      if (!video || busy || routeRef.current.kind !== "tunnel" || Date.now() < adbRestUntil) return;
+      const r = routeRef.current;
+      if (!video || busy || Date.now() < restUntil || r.kind === "probing" || (r.kind === "video" && r.via === "adb")) return;
       busy = true;
+      watches += 1;
       try {
-        const link = await overAdb(false);
-        if (live && link && routeRef.current.kind === "tunnel") {
+        const adb = await overAdb(false);
+        const now = routeRef.current;
+        if (!live || now.kind === "probing" || (now.kind === "video" && now.via === "adb")) return;
+        if (adb) {
           logInfo("remote: the phone is on adb; moving the desktop to it");
-          toUsb(link, false);
+          toAdb(adb, false);
+        } else if (now.kind === "tunnel" && tunnelVideo !== "no" && watches % VIDEO_RETRY_WATCHES === 0) {
+          // On the viewer page though the phone has video: it was out of
+          // reach when asked, or the video kept dropping. Either may be over.
+          const tunnel = await overTunnel();
+          if (live && tunnel && routeRef.current.kind === "tunnel") {
+            logInfo("remote: the phone's video is there now; moving the desktop to it");
+            toTunnelVideo(tunnel, false);
+          }
         }
       } finally {
         busy = false;
@@ -366,12 +434,13 @@ export function DesktopRouter({ phoneId }: { phoneId: string }) {
   }, [phoneId]);
 
   let view;
-  if (host && route.kind === "usb") {
+  if (host && route.kind === "video") {
     view = (
       <UsbDesktop
         key={route.key}
         url={route.url}
-        wireless={route.wireless}
+        route={route.route}
+        tier={route.tier}
         name={name}
         start={route.start}
         host={host}

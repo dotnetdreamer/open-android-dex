@@ -8,7 +8,10 @@ import { avcC, codecString, sameBytes, splitAccessUnit } from "./h264";
 import { ALTS, isModifier, keyDown, XK_ISO_LEVEL3_SHIFT } from "./keysym";
 
 /**
- * The phone's Linux desktop over adb, as video (remote_usb.rs, LinuxStream.java).
+ * The phone's Linux desktop as video (LinuxStream.java): over adb
+ * (remote_usb.rs), or through the tunnel when the phone is not on it
+ * (remote_desktop_stream) — the same stream either way, at a bitrate for the
+ * route.
  *
  * The phone reads Xvnc's pixels raw and encodes them on its video encoder;
  * this decodes them on this computer's GPU (WebCodecs) and draws them 1:1 into
@@ -62,26 +65,43 @@ function sizeFor(w: number, h: number): [number, number] {
 }
 
 /**
- * The stream's bitrate: by pixels, for the cable, or the Wi-Fi of wireless
- * debugging. A desktop is mostly still, so these are ceilings for motion
- * rather than what flows.
+ * What the way to the phone can carry: the cable; Wi-Fi — wireless
+ * debugging, or the tunnel on the same network; the internet, straight; or
+ * a relay, shared and rate-limited.
  */
-function bitrateFor(w: number, h: number, wireless: boolean) {
-  const bpp = wireless ? 0.07 : 0.18;
-  const bits = w * h * 60 * bpp;
-  return Math.round(wireless ? Math.min(30e6, Math.max(4e6, bits)) : Math.min(100e6, Math.max(10e6, bits)));
+export type Tier = "cable" | "wifi" | "remote" | "relay";
+
+/** Bits a pixel at 60 Hz, and the floor and ceiling, by tier. */
+const BITRATES: Record<Tier, [number, number, number]> = {
+  cable: [0.18, 10e6, 100e6],
+  wifi: [0.07, 4e6, 30e6],
+  remote: [0.03, 2e6, 12e6],
+  relay: [0.012, 1e6, 4e6],
+};
+
+/**
+ * The stream's bitrate, by pixels and route. A desktop is mostly still, so
+ * these are ceilings for motion rather than what flows; the phone goes below
+ * one while the link falls behind (LinuxStream.adapt).
+ */
+export function bitrateFor(w: number, h: number, tier: Tier) {
+  const [bpp, lo, hi] = BITRATES[tier];
+  return Math.round(Math.min(hi, Math.max(lo, w * h * 60 * bpp)));
 }
 
 export function UsbDesktop({
   url,
-  wireless,
+  route,
+  tier,
   name,
   start,
   host,
   onLost,
 }: {
   url: string;
-  wireless: boolean;
+  /** How the window gets there, as its pill says it: USB, Wireless debugging, Wi-Fi, Remote, Remote (relay). */
+  route: string;
+  tier: Tier;
   name: string;
   /** Start the desktop if it is not running: a window's first open, never its comebacks. */
   start: boolean;
@@ -96,9 +116,11 @@ export function UsbDesktop({
   const [pill, setPill] = useState(true);
   /** The clipboard's switch, as the window last said it; null until it has. */
   const [share, setShare] = useState<boolean | null>(null);
-  const actions = useRef({ again: () => {}, fullscreen: () => {}, clipboard: () => {} });
+  const actions = useRef({ again: () => {}, fullscreen: () => {}, clipboard: () => {}, tier: (_t: Tier) => {} });
   const lostRef = useRef(onLost);
   lostRef.current = onLost;
+  const tierRef = useRef(tier);
+  tierRef.current = tier;
 
   useEffect(() => {
     const canvas = canvasRef.current!;
@@ -429,7 +451,7 @@ export function UsbDesktop({
       socket.onopen = () => {
         const [w, h] = sizeFor(window.innerWidth, window.innerHeight);
         socket.send(
-          JSON.stringify({ t: "hello", v: 1, start: asStart, w, h, bitrate: bitrateFor(w, h, wireless), fps: 60, acks: true }),
+          JSON.stringify({ t: "hello", v: 1, start: asStart, w, h, bitrate: bitrateFor(w, h, tierRef.current), fps: 60, acks: true }),
         );
       };
       socket.onmessage = (ev) => {
@@ -559,6 +581,11 @@ export function UsbDesktop({
       fullscreen: () => void toggleFullscreen(),
       // The window keeps the switch, and says it moved.
       clipboard: () => void host.clipboard.then((c) => c.toggle()),
+      // The route changed under a live stream — a relay that became a direct
+      // path: what it carries is the phone's new ceiling.
+      tier: (t) => {
+        if (configured && dw > 0) send(JSON.stringify({ t: "bitrate", bitrate: bitrateFor(dw, dh, t) }));
+      },
     };
     connect(start);
 
@@ -583,7 +610,9 @@ export function UsbDesktop({
       s?.close();
       if (decoder && decoder.state !== "closed") decoder.close();
     };
-  }, [url, wireless, start, host]);
+  }, [url, start, host]);
+
+  useEffect(() => actions.current.tier(tier), [tier]);
 
   const covered = phase.kind !== "up";
   return (
@@ -602,7 +631,7 @@ export function UsbDesktop({
         >
           <div className="glass pointer-events-auto flex items-center gap-3 px-3.5 py-1.5 text-[12px] text-slate-200 shadow-lg">
             <span className="h-2 w-2 rounded-full bg-emerald-400" aria-hidden="true" />
-            <span className="font-semibold">{wireless ? "Wireless debugging" : "USB"}</span>
+            <span className="font-semibold">{route}</span>
             {stats && (
               <span className="tabular-nums text-slate-400">
                 {stats.size} · {stats.fps} fps · {stats.mbps} Mb/s · {stats.rttMs} ms
@@ -631,7 +660,7 @@ export function UsbDesktop({
 function UsbCover({ phase, name, onAgain }: { phase: Exclude<Phase, { kind: "up" }>; name: string; onAgain: () => void }) {
   const busy = phase.kind === "connecting" || phase.kind === "starting";
   const copy: Record<typeof phase.kind, [string, string]> = {
-    connecting: [`Reaching ${name} over USB…`, ""],
+    connecting: [`Reaching ${name}…`, ""],
     starting: [`Starting the desktop on ${name}…`, "The first start can take a minute."],
     stopped: [`The desktop is not running on ${name}`, "It was shut down, or logged out of, on the phone."],
     failed: [`No desktop from ${name}`, phase.kind === "failed" ? phase.message : ""],

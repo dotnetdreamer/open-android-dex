@@ -417,6 +417,17 @@ final class LinuxStreamEncoder {
         return Math.round(swapMsAvg * 10) / 10.0;
     }
 
+    /** Encode at {@code bps} from the next frames on — the link's bitrate, adapted. Any thread. */
+    void setBitrate(int bps) {
+        try {
+            Bundle b = new Bundle();
+            b.putInt(MediaCodec.PARAMETER_KEY_VIDEO_BITRATE, bps);
+            codec.setParameters(b);
+        } catch (Exception ignored) {
+            // stopping
+        }
+    }
+
     /** A key frame next, for a decoder that has to start over. Any thread. */
     void requestKeyFrame() {
         try {

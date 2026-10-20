@@ -50,7 +50,11 @@ a stand-in websockify: refused with a sentence when there is no Linux, never
 started unless asked, a start the app reports failed, the size held to what a
 phone can carry, the password handed over, the page and 1 MB of WebSocket
 through the tunnel as one session, requests from other sites and other host
-names turned away, and Ctrl+C letting the phone go at once.
+names turned away, and Ctrl+C letting the phone go at once. And the desktop as
+video, against a stand-in LinuxStream on a Unix socket: the phone saying it
+has it, the address printed, the app's page through with the token kept here,
+1 MB both ways, other tokens, origins and hosts refused, and a phone without
+it refusing in a sentence.
 
 The desktop over adb (`doc/usb-desktop.md`) has its own, with Node 24 and a JDK:
 
