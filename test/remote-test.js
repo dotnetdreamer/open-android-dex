@@ -19,7 +19,9 @@
 // a command, its exit status, scp, and all of it again over the relay alone.
 // Then `dexremote put`, the desktop window's file drop, against the same sshd:
 // SFTP in the tunnel, Thunar's names for copies, Ctrl+C's take-back, and a
-// host key other than the paired one refused.
+// host key other than the paired one refused. And `dexremote get`, the other
+// way: the guest's Send To set up, its script run as Thunar runs it, and the
+// outbox fetched into a scratch Downloads.
 //
 // Phase C opens the phone's desktop with `dexremote desktop`, against a
 // stand-in websockify: the refusals, a start the app asks for and one it

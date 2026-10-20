@@ -29,6 +29,7 @@ One crate, both ends:
 | `src/proto.rs` | ALPNs, frames, messages, the delegation |
 | `src/pipe.rs` | joining a QUIC stream to a socket or to stdio, half-close included |
 | `src/sftp.rs` | files onto the phone's Linux: SFTP in the tunnel, never over anything (feature `sftp`) |
+| `src/outbox.rs` | and back: Send To in the guest, its outbox, fetched into Downloads (feature `sftp`) |
 | `src/sshkey.rs` | OpenSSH key files, without `ssh-keygen` |
 | `src/crypto.rs` | HMAC-SHA256 and PBKDF2 over the tree's own SHA-256 |
 | `src/main.rs` | the `dexremote` command line |
@@ -65,6 +66,7 @@ dexremote forward galaxy-s25-ultra 127.0.0.1:2222    # for PuTTY, WinSCP, …
 dexremote probe galaxy-s25-ultra                     # reachable? direct or relayed?
 dexremote desktop galaxy-s25-ultra                   # its desktop: prints the address to open
 dexremote put galaxy-s25-ultra report.pdf photos/    # onto its Linux desktop
+dexremote get galaxy-s25-ultra                       # what its Linux sent this computer
 ```
 
 `desktop` starts the phone's desktop at `--size` (default 1920x1080) if it is
@@ -80,6 +82,13 @@ pairing pinned, into the guest's `~/Desktop` (or `--to <dir>` in its home).
 Nothing there is ever replaced — a name in use gets Thunar's "(copy 1)" — and
 Ctrl+C takes back the item it was in the middle of. Links inside a folder are
 left out, and said so.
+
+`get` is the other way: it sets up this computer's entry in the guest's
+Thunar *Send To* menu (and a *Send to computer* icon for the dock, there from
+the desktop's next start), then fetches whatever Linux has sent this computer
+since into `~/Downloads` (or `--to <dir>`), never over anything already
+there. The desktop app does the same every two seconds while its desktop
+window is open.
 
 `pair` writes the same `~/.ssh` setup the app does, with `dexremote proxy` as
 the ProxyCommand. `DEXREMOTE_RELAY_ONLY=1` forces every packet through the

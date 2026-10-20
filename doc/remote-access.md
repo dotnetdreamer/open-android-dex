@@ -18,7 +18,8 @@ What a person does:
 4. And the desktop: *Phone Linux* → *Desktop* opens the phone's XFCE in a
    window on the computer — see [The desktop, in a window](#the-desktop-in-a-window).
    Copy on one side and paste on the other; drop files on the window and
-   they land on the guest's Desktop.
+   they land on the guest's Desktop; Send To this computer in Linux and they
+   land in its Downloads.
 
 This record exists for the same reason `custom-titlebar-v2.md` and
 `web-viewer.md` do: several decisions below look arbitrary until you know what
@@ -44,6 +45,7 @@ was measured, or what the platform refuses.
 | The desktop's page | `assets/linux/novnc/dex.js` (`ctx=pc`) | the phone's own viewer, in that window |
 | The clipboard | `src/features/remote/clipboardShare.ts` | when it crosses, which way, and the switch |
 | Files onto the phone | `openandroiddex-remote/src/sftp.rs` | SFTP in the tunnel, never over anything; `dexremote put` |
+| Files back from it | `openandroiddex-remote/src/outbox.rs` | Send To and the dock icon in the guest, the outbox, fetching into Downloads; `dexremote get` |
 | Check | `test/remote-test.js` | both ends against each other, real relays, real OpenSSH |
 
 ## Why iroh
@@ -620,17 +622,65 @@ sftp-server takes (255 KB), as many in flight as SSH's 2 MB window holds.
 
 ### Files the other way
 
-Not built. A real drag out of the window cannot work: the drag happens inside
-X, and VNC carries no drag and no files. The nearest native equivalent —
-Thunar's *Send To → ‹this computer›*, and a drop target in the XFCE panel,
-copying into an outbox in the guest that the computer pulls over the same
-SFTP into `~/Downloads` and announces as "Saved to Downloads — Show" — is
-proposed and waiting on a decision.
+A real drag out of the window cannot work: the drag happens inside X, and VNC
+carries neither drags nor files. So the guest gets the nearest things it has
+of its own: **Thunar's *Send To → ‹this computer›***, and a ***Send to
+computer* icon on the dock** to drop files on — the way for a file on the
+Desktop, since xfdesktop's own icon menu has no Send To (that is Thunar's).
+
+Both run `oadx-send`, a few lines of sh in the guest, which queues what was
+picked in this computer's outbox there
+(`~/.local/share/openandroiddex/outbox/‹computer›/‹batch›/`, one small file per
+item naming its path, the batch renamed into place whole). While the desktop
+window is open the app looks at that outbox every two seconds over SFTP,
+fetches each item into Downloads, takes it off the queue, and the window says
+"Saved to Downloads — Show"; Show reveals it in Finder or Explorer, and only
+ever something that window saved. `dexremote get <phone>` does the same once,
+from a terminal.
+
+**The computer writes the guest's half**, over SFTP, each time its window
+connects: the script, its Send To entry (with the name the phone's list gives
+it), and the dock's launcher. So nothing new is needed on the phone, every
+write lands inside the container, and an update of the app reaches the guest
+by itself. The launcher goes into the folder linux-setup.sh keeps the dock's
+launchers in, and dock.py puts it on the dock at the next start of the
+desktop — not before: xfce4-panel with two panels asks the user which one
+before adding anything (`panel_application_add_new_item`), and a running
+panel writes its own layout over any edit as it exits.
+
+**Paths, not copies.** A copy into the outbox would cost the phone twice the
+space and twice the time of a large video, for a snapshot nobody asked for;
+Bluetooth's Send To and every file manager read a file from where it is. The
+cost: a file deleted before the computer comes back is gone, and is counted
+as gone, not failed.
+
+**Which computer.** Each computer rewrites a `.seen` file in its outbox every
+five seconds — stamped by the guest's own clock, so no two clocks are ever
+compared — and the dock's icon sends to the newest: the computer showing the
+desktop now, or else the one that showed it last.
+
+**What arrives** never replaces anything ("report (2).pdf", the app's own
+convention on this side, the same as its File transfer window's), is never
+opened, and is named for this computer's filesystem — Windows' reserved
+characters and device names included. A picked link is followed; links inside
+a folder are left out, as on the way in. A fetch that is cut off — the window
+closed, the connection gone — takes back what it had written of the item in
+progress and leaves the item queued, to come again whole. Large files are
+read in four ranges at once, each through a handle of its own: russh-sftp 2.4
+asks for one chunk per round trip, which held a 32 MB file to ~1 MB/s on the
+phone, against ~6 MB/s in ranges (debug builds, both).
+
+**What it trusts.** While the window is open, anything in Linux can queue
+files for this computer, and they land in Downloads. That is the feature; they
+are never opened, never replace anything, and every arrival is announced.
+There is no telling the guest's user that a file went: the guest has no
+notify-send, no gdbus and no notification daemon, so the window on the
+computer is what says so.
 
 ## Verified, and not yet
 
 Verified, on a Mac, over the real public relays and address lookup
-(`node test/remote-test.js`, 73 checks): an unpaired computer is turned away
+(`node test/remote-test.js`, 86 checks): an unpaired computer is turned away
 with a sentence; pairing by code (typed lower-case, with a dash); the generated
 SSH setup; direct and relay-only paths; 4 MB through intact, half-close passed
 on; removal closing a live session within ~2 s; a restarted daemon keeping its
@@ -645,6 +695,12 @@ the folder left out, and said so; a second and a third drop named "(copy 1)"
 and "(copy 2)" with the first untouched; the relay alone; Ctrl+C half way
 through taking back the whole folder it was in; a host key other than the
 paired one refused before a byte was sent; and every copy's session let go.
+And back with `dexremote get`: the guest's script and Send To entry written;
+the script, run as Thunar runs it, queueing one batch whole; a 2 MB file (in
+ranges, with its time) and a folder fetched byte for byte, the link inside it
+left out; a missing and an unreadable item counted, not fatal; the outbox
+empty after; the same again landing as "(2)"; and the dock's `--open` going to
+the computer that looked, and refusing when none ever had.
 And the desktop, with `dexremote desktop` against a stand-in websockify: no
 Linux refused in a sentence; a stopped desktop not started unless asked; a
 start the app reports failed, reported as one; an oversized request held to
@@ -719,6 +775,13 @@ not the client, are the limit. Files land as the guest's umask has them —
 077, Android's, so `0700` for a script — which is how Linux's own programs
 make theirs there.
 
+Files the other way, on the same phone: `dexremote get` set up "IK's M1" in the
+guest — the script, the Send To entry, and the dock's launcher beside
+linux-setup.sh's own — and Thunar's real context menu showed *Send To → IK's
+M1*; clicking it queued the file, and the next `get` saved it byte for byte. A
+folder with a link inside came back without the link, and 32 MB came back in
+7.3 s, setting up included.
+
 The phone found five things no computer test could:
 
 - **SFTP fails under proot.** OpenSSH's SFTP server makes itself undumpable
@@ -767,4 +830,9 @@ Not yet verified on a device:
 - the clipboard on Windows (CRLF written, and read back as the same text) and
   on Linux;
 - macOS asking before a programmatic clipboard read, if Apple turns that on;
-- files the other way, from the guest to this computer: not built (below).
+- the desktop app's own fetching, in its real window ("Saved to Downloads —
+  Show", and Show revealing it): the same `outbox::fetch`, run by
+  `dexremote get` on the phone, and the window's card under mocked IPC, but not
+  the two together;
+- the dock's *Send to computer* icon on the dock itself, which dock.py adds at
+  the next start of the desktop; and Downloads on Windows and Linux.

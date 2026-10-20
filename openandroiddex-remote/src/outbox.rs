@@ -37,7 +37,7 @@ use iroh::EndpointId;
 use russh_sftp::client::error::Error as SftpError;
 use russh_sftp::protocol::{FileAttributes, OpenFlags, StatusCode};
 use serde::Serialize;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tracing::{debug, info};
 
 use crate::sftp::{CancellationToken, Guest, PutError};
@@ -528,11 +528,51 @@ async fn fetch_tree(guest: &Guest, remote: &str, local: &Path, tally: &mut Recei
 }
 
 /// One file's bytes into `file`, and its time. Returns the byte count.
+///
+/// russh-sftp 2.4 asks for one read at a time, which holds a file to one
+/// chunk (255 KB) per round trip. A large file is read as [`READERS`] ranges
+/// at once instead, each through a handle of its own, and written where it
+/// belongs.
 async fn fetch_file(
     guest: &Guest,
     remote: &str,
-    mut file: std::fs::File,
+    file: std::fs::File,
     attrs: &FileAttributes,
+    cancel: &CancellationToken,
+) -> Result<u64, Missed> {
+    let size = attrs.size.unwrap_or(0);
+    let total = if size >= RANGES_FROM {
+        let chunk = size.div_ceil(READERS as u64);
+        let ranges: Vec<(u64, Option<u64>)> = (0..READERS as u64)
+            .map(|i| (i * chunk, if i + 1 == READERS as u64 { None } else { Some(((i + 1) * chunk).min(size)) }))
+            .collect();
+        let file = &file;
+        let parts = futures_util::future::try_join_all(
+            ranges.into_iter().map(|(start, end)| fetch_range(guest, remote, file, start, end, cancel)),
+        )
+        .await?;
+        parts.iter().sum()
+    } else {
+        fetch_range(guest, remote, &file, 0, None, cancel).await?
+    };
+    if let Some(t) = attrs.mtime {
+        let _ = file.set_modified(UNIX_EPOCH + Duration::from_secs(u64::from(t)));
+    }
+    Ok(total)
+}
+
+/// Files at least this large are read in [`READERS`] ranges at once.
+const RANGES_FROM: u64 = 2 * 1024 * 1024;
+const READERS: usize = 4;
+
+/// `remote` from `start` to `end` (or to its end), written into `file` at the
+/// same offsets.
+async fn fetch_range(
+    guest: &Guest,
+    remote: &str,
+    file: &std::fs::File,
+    start: u64,
+    end: Option<u64>,
     cancel: &CancellationToken,
 ) -> Result<u64, Missed> {
     let mut source = match guest.sftp().open(remote).await {
@@ -540,26 +580,49 @@ async fn fetch_file(
         Err(e) if is_status(&e, &[StatusCode::NoSuchFile, StatusCode::PermissionDenied]) => return Err(Missed::Gone),
         Err(e) => return Err(Missed::Link(link_error(e))),
     };
+    if start > 0 {
+        source.seek(std::io::SeekFrom::Start(start)).await.map_err(|e| Missed::Link(link_error(e)))?;
+    }
     let mut buf = vec![0u8; 256 * 1024];
-    let mut total = 0u64;
+    let mut at = start;
     loop {
         // Between chunks, so that what was written of it is taken back by
         // whoever started it.
         if cancel.is_cancelled() {
             return Err(Missed::Link(link_error("cancelled")));
         }
-        let n = source.read(&mut buf).await.map_err(|e| Missed::Link(link_error(e)))?;
+        let want = match end {
+            Some(end) if at >= end => break,
+            Some(end) => ((end - at) as usize).min(buf.len()),
+            None => buf.len(),
+        };
+        let n = source.read(&mut buf[..want]).await.map_err(|e| Missed::Link(link_error(e)))?;
         if n == 0 {
             break;
         }
-        std::io::Write::write_all(&mut file, &buf[..n]).map_err(|e| Missed::Here(format!("{remote}: {e}")))?;
-        total += n as u64;
-    }
-    if let Some(t) = attrs.mtime {
-        let _ = file.set_modified(UNIX_EPOCH + Duration::from_secs(u64::from(t)));
+        write_at(file, &buf[..n], at).map_err(|e| Missed::Here(format!("{remote}: {e}")))?;
+        at += n as u64;
     }
     let _ = source.shutdown().await;
-    Ok(total)
+    Ok(at - start)
+}
+
+#[cfg(unix)]
+fn write_at(file: &std::fs::File, buf: &[u8], offset: u64) -> std::io::Result<()> {
+    std::os::unix::fs::FileExt::write_all_at(file, buf, offset)
+}
+
+#[cfg(windows)]
+fn write_at(file: &std::fs::File, mut buf: &[u8], mut offset: u64) -> std::io::Result<()> {
+    while !buf.is_empty() {
+        let n = std::os::windows::fs::FileExt::seek_write(file, buf, offset)?;
+        if n == 0 {
+            return Err(std::io::ErrorKind::WriteZero.into());
+        }
+        buf = &buf[n..];
+        offset += n as u64;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

@@ -40,7 +40,12 @@ for byte, with their times and executable bit, a link inside the folder left
 out and said so, a second and third drop named the way Thunar names copies
 and the first one untouched, the relay alone, Ctrl+C taking back the folder it
 was in the middle of, a host key other than the paired one refused before a
-byte is sent, and every copy's session let go. Then the desktop, with `dexremote desktop` against
+byte is sent, and every copy's session let go. And back with `dexremote
+get`: the guest's script and Send To entry written, the script run as Thunar
+runs it, a file and a folder fetched into a scratch Downloads byte for byte
+(a large one in ranges), what had gone or was unreadable in Linux counted and
+not fatal, "(2)" for a second copy, and the dock's icon sending to the
+computer that is looking. Then the desktop, with `dexremote desktop` against
 a stand-in websockify: refused with a sentence when there is no Linux, never
 started unless asked, a start the app reports failed, the size held to what a
 phone can carry, the password handed over, the page and 1 MB of WebSocket
