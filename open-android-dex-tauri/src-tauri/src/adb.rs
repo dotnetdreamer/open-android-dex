@@ -662,7 +662,7 @@ fn restore_store_path(app: &tauri::AppHandle) -> Option<PathBuf> {
         .map(|d| d.join("desktop-restore.json"))
 }
 
-/// serial → the values [`DESKTOP_GLOBALS`] held before we touched them.
+/// phone ([`restore_key`]) → the values [`DESKTOP_GLOBALS`] held before we touched them.
 fn load_restore_map(app: &tauri::AppHandle) -> HashMap<String, HashMap<String, String>> {
     restore_store_path(app)
         .and_then(|p| std::fs::read_to_string(p).ok())
@@ -682,6 +682,89 @@ fn save_restore_map(app: &tauri::AppHandle, map: &HashMap<String, HashMap<String
     }
 }
 
+/// Where each adb serial's phone identity is remembered: see [`restore_key`].
+fn identities_path(app: &tauri::AppHandle) -> Option<PathBuf> {
+    app.path().app_config_dir().ok().map(|d| d.join("device-identities.json"))
+}
+
+fn load_identities(app: &tauri::AppHandle) -> HashMap<String, String> {
+    identities_path(app)
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+fn save_identities(app: &tauri::AppHandle, map: &HashMap<String, String>) {
+    let Some(path) = identities_path(app) else {
+        return;
+    };
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    if let Ok(json) = serde_json::to_string(map) {
+        let _ = std::fs::write(path, json);
+    }
+}
+
+/// The phone behind `serial`, as the restore map knows it: its `ro.serialno`,
+/// whichever way adb reaches it.
+///
+/// One phone has a serial per route — `RFCY10FRKBK` on the cable,
+/// `adb-RFCY10FRKBK-….​_adb-tls-connect._tcp` or `192.168.2.12:38959` on
+/// wireless debugging — and a map keyed by the route has no record for a
+/// route it has not seen. A session on the cable that followed one on
+/// wireless debugging which ended badly therefore found no snapshot, took
+/// one, and recorded the first session's values as the originals: on the
+/// Galaxy S25 Ultra (2026-10-20) the animations stayed at 0, freeform and the
+/// relaxed hidden-API policy stayed on, and every later exit "restored" them.
+///
+/// Read once per serial per run and remembered on disk, so an exit with the
+/// phone already gone — the cable pulled, the app killed and started again —
+/// still finds the right record. A phone that will not say falls back to the
+/// serial itself, which is the old behaviour.
+fn restore_key(app: &tauri::AppHandle, serial: &str) -> String {
+    static KNOWN: std::sync::OnceLock<std::sync::Mutex<HashMap<String, String>>> = std::sync::OnceLock::new();
+    let known = KNOWN.get_or_init(Default::default);
+    if let Some(id) = known.lock().unwrap().get(serial) {
+        return id.clone();
+    }
+    let read = run_adb_timeout(app, &["-s", serial, "shell", "getprop ro.serialno"], Duration::from_secs(3))
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| {
+            !s.is_empty()
+                && s != "unknown"
+                && s.len() <= 64
+                && s.chars().all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c))
+        });
+    let mut identities = load_identities(app);
+    let id = match read {
+        Some(id) => {
+            if identities.get(serial) != Some(&id) {
+                identities.insert(serial.to_string(), id.clone());
+                save_identities(app, &identities);
+            }
+            id
+        }
+        // Not cached: the next ask, with the phone back, should read it.
+        None => return identities.get(serial).cloned().unwrap_or_else(|| serial.to_string()),
+    };
+    // A record kept under the route's serial, from before records were kept
+    // by phone: it becomes the phone's, unless the phone already has one.
+    if id != serial {
+        let mut map = load_restore_map(app);
+        if !map.contains_key(&id) {
+            if let Some(entry) = map.remove(serial) {
+                log::info!("the restore record for {serial} is now {id}'s, whichever way adb reaches it");
+                map.insert(id.clone(), entry);
+                save_restore_map(app, &map);
+            }
+        }
+    }
+    known.lock().unwrap().insert(serial.to_string(), id.clone());
+    id
+}
+
 /// Record what the phone looked like before the desktop profile went on.
 ///
 /// On disk, not in memory: the desktop app can be killed (or crash) with a
@@ -695,13 +778,14 @@ fn save_restore_map(app: &tauri::AppHandle, map: &HashMap<String, HashMap<String
 /// has not run a desktop before, and it is the safe way to be wrong: the
 /// alternative — waiting for a reading — is what records our own values later.
 fn snapshot_desktop_globals(app: &tauri::AppHandle, serial: &str, before: &HashMap<String, String>) {
+    let key = restore_key(app, serial);
     let mut map = load_restore_map(app);
     // Asked of the KEYS, not of the serial: `arm_perf_globals` can put an entry
     // on file holding nothing but the animation scales, and that entry says
     // nothing about the four below — treating it as "already snapshotted"
     // would leave the display profile with no recorded original values.
     if map
-        .get(serial)
+        .get(&key)
         .is_some_and(|saved| DESKTOP_GLOBALS.iter().all(|k| saved.contains_key(*k)))
     {
         log::info!("desktop profile snapshot for {serial} already on file — keeping it");
@@ -719,9 +803,9 @@ fn snapshot_desktop_globals(app: &tauri::AppHandle, serial: &str, before: &HashM
     // `arm_perf_globals` already recorded holds a value from BEFORE the mode
     // was switched on, and `before` here is a reading taken after it — writing
     // over it would record our own zero as the value to restore.
-    let entry = map.entry(serial.to_string()).or_default();
-    for (key, value) in before {
-        entry.entry(key.clone()).or_insert_with(|| value.clone());
+    let entry = map.entry(key).or_default();
+    for (name, value) in before {
+        entry.entry(name.clone()).or_insert_with(|| value.clone());
     }
     save_restore_map(app, &map);
 }
@@ -939,9 +1023,10 @@ fn undo_pointer_speed_script(saved: &HashMap<String, String>) -> String {
 /// write either: changing a setting with nothing on file that knows how to put
 /// it back is worse than the setting not taking.
 fn arm_pointer_speed(app: &tauri::AppHandle, serial: &str) -> bool {
+    let key = restore_key(app, serial);
     let mut map = load_restore_map(app);
     if map
-        .get(serial)
+        .get(&key)
         .is_some_and(|e| e.contains_key(&pointer_speed_slot()))
     {
         return true;
@@ -954,9 +1039,7 @@ fn arm_pointer_speed(app: &tauri::AppHandle, serial: &str) -> bool {
         return false;
     };
     log::info!("remembering system/{POINTER_SPEED}={before} on {serial} before the pointer speed");
-    map.entry(serial.to_string())
-        .or_default()
-        .insert(pointer_speed_slot(), before);
+    map.entry(key).or_default().insert(pointer_speed_slot(), before);
     save_restore_map(app, &map);
     true
 }
@@ -1010,7 +1093,7 @@ pub fn pointer_speed_script(app: &tauri::AppHandle, serial: &str, arg: &str) -> 
 /// this exact line (see `wm::WmClient::arm`), which is why the output stays one
 /// line with no quotes and no newlines in it.
 pub fn undo_globals_script(app: &tauri::AppHandle, serial: &str) -> String {
-    let saved = load_restore_map(app).remove(serial).unwrap_or_default();
+    let saved = load_restore_map(app).remove(&restore_key(app, serial)).unwrap_or_default();
     let mut out = String::new();
     for key in DESKTOP_GLOBALS {
         match saved.get(key).and_then(|v| restorable(v)) {
@@ -1061,7 +1144,7 @@ fn undo_perf_globals_script(saved: &HashMap<String, String>) -> String {
 /// The same undo for a caller that only has the serial — the request pump,
 /// when "Reduce quality" is switched back off mid-session.
 pub fn undo_perf_globals(app: &tauri::AppHandle, serial: &str) -> String {
-    undo_perf_globals_script(&load_restore_map(app).remove(serial).unwrap_or_default())
+    undo_perf_globals_script(&load_restore_map(app).remove(&restore_key(app, serial)).unwrap_or_default())
 }
 
 /// Make sure this phone's snapshot has a row for each of [`PERF_GLOBALS`]
@@ -1079,8 +1162,9 @@ pub fn undo_perf_globals(app: &tauri::AppHandle, serial: &str) -> String {
 /// write as the values to restore, which is the one way to make an undo a
 /// permanent change.
 pub fn arm_perf_globals(app: &tauri::AppHandle, serial: &str) -> String {
+    let key = restore_key(app, serial);
     let mut map = load_restore_map(app);
-    let entry = map.entry(serial.to_string()).or_default();
+    let entry = map.entry(key).or_default();
     if PERF_GLOBALS.iter().any(|k| !entry.contains_key(*k)) {
         let now = read_desktop_globals(app, serial);
         for key in PERF_GLOBALS {
@@ -1271,8 +1355,15 @@ pub fn restore_phone(app: &tauri::AppHandle, serial: &str) {
     // lose the original values for good, and the profile would stay on the
     // phone with nothing left that knows how to take it off.
     if undone {
+        let key = restore_key(app, serial);
         let mut map = load_restore_map(app);
-        if map.remove(serial).is_some() {
+        // The phone's record, and any left under another of its serials from
+        // before records were kept by phone: it is back to how it was, and
+        // none of them describes it any more.
+        let identities = load_identities(app);
+        let before = map.len();
+        map.retain(|k, _| k != &key && k != serial && identities.get(k) != Some(&key));
+        if map.len() != before {
             save_restore_map(app, &map);
         }
     }
@@ -2068,8 +2159,9 @@ fn enable_notification_listener(app: &tauri::AppHandle, serial: &str) {
 const NOTIFICATION_GRANT_KEY: &str = "notification_listener_granted_by_us";
 
 fn remember_notification_grant(app: &tauri::AppHandle, serial: &str, ours: bool) {
+    let key = restore_key(app, serial);
     let mut map = load_restore_map(app);
-    map.entry(serial.to_string()).or_default().insert(
+    map.entry(key).or_default().insert(
         NOTIFICATION_GRANT_KEY.to_string(),
         if ours { "1" } else { "0" }.to_string(),
     );
@@ -2078,7 +2170,7 @@ fn remember_notification_grant(app: &tauri::AppHandle, serial: &str, ours: bool)
 
 fn notification_grant_is_ours(app: &tauri::AppHandle, serial: &str) -> bool {
     load_restore_map(app)
-        .get(serial)
+        .get(&restore_key(app, serial))
         .and_then(|saved| saved.get(NOTIFICATION_GRANT_KEY))
         .is_some_and(|v| v == "1")
 }
@@ -2088,8 +2180,9 @@ fn notification_grant_is_ours(app: &tauri::AppHandle, serial: &str) -> bool {
 const POWER_EXEMPTION_KEY: &str = "power_exemption_granted_by_us";
 
 fn remember_power_exemption(app: &tauri::AppHandle, serial: &str, ours: bool) {
+    let key = restore_key(app, serial);
     let mut map = load_restore_map(app);
-    map.entry(serial.to_string()).or_default().insert(
+    map.entry(key).or_default().insert(
         POWER_EXEMPTION_KEY.to_string(),
         if ours { "1" } else { "0" }.to_string(),
     );
@@ -2100,7 +2193,7 @@ fn remember_power_exemption(app: &tauri::AppHandle, serial: &str, ours: bool) {
 /// always put on the whitelist by us, which is what the exit path assumed.
 fn power_exemption_is_ours(app: &tauri::AppHandle, serial: &str) -> bool {
     load_restore_map(app)
-        .get(serial)
+        .get(&restore_key(app, serial))
         .and_then(|saved| saved.get(POWER_EXEMPTION_KEY))
         .is_none_or(|v| v == "1")
 }
