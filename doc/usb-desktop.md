@@ -377,19 +377,37 @@ adb (RFCY10FRKBK, the cable)"), Xvnc read at 2176×1086 in its own B,G,R,X,
 `c2.qti.avc.encoder` with the low-latency configuration at 25 Mb/s, WKWebView
 decoding it, the desktop one pixel per pixel and sharp (the user's own
 screenshot), a resize to 1352×1086 on a new encoder five seconds later, and the
-title naming the route.
+title naming the route. Typing from the Mac's keyboard, F11 and the cursor's
+shape: checked by the user in the same window.
+
+Pulling the cable, S25 Ultra, 2026-10-20 (over Wi-Fi, and over mobile data
+with the phone's Wi-Fi off): the window was on the tunnel's video within a
+second of the cable going — at a relay's rate while the path was unknown and
+Wi-Fi's 4 Mb/s two seconds later, or "Remote" at 2 Mb/s over mobile data — and
+back on adb about ten seconds after the cable was back, once the phone had
+settled. adbd restarted three seconds after every unplug and took the window
+daemon with it; the launcher undid the session ten seconds after the desktop
+went ("8 settings put back, 0 left for the computer"), and a cable back within
+ten seconds undid nothing. Plugged in, Samsung's MTP service switches the port
+to file transfer about five seconds later, which restarts adbd again — right
+through a deploy, or just after one: DeX came back on the display scrcpy made
+next ("the desktop came back on display N") in 1.2–1.4 s each time, and a
+deploy cut off part way waited for the phone instead of failing. The
+launcher's Linux kept its processes through all of it, and a launch onto a
+phone already running this build's Linux (the app restarting, say) now resumes
+around it rather than reinstalling the launcher, which used to end that Linux.
 
 Not yet:
 
-- keys from a real keyboard (the mapping is tested; the window was looked at,
-  not typed into), F11, and the cursor's shape in WKWebView;
-- pulling the cable mid-session and putting it back — the router's move to the
-  tunnel and back, and the title following it;
+- frames per second and latency on the real desktop, the cable against Wi-Fi:
+  the window's bar shows both (pointer at the top edge), not yet read off it;
 - Windows (WebView2) and Linux (WebKitGTK) — the latter may have no WebCodecs and
   would use the tunnel;
 - the extended clipboard against the real Xvnc (1.13.1 on the phone): the
   stand-ins are written from TigerVNC's behaviour, not run against it;
-- the video through the tunnel on a phone: the daemon's abstract socket on
-  Android, a real relay's bandwidth and the bitrate adapting to it, a path
-  going direct mid-stream — the protocol is checked end to end off the phone,
-  over the real relays, with a stand-in LinuxStream on a Unix socket.
+- the video through a relay, and a path going direct mid-stream: Wi-Fi and
+  mobile data are checked on the phone (above); a relay's bandwidth and the
+  bitrate adapting to it only off the phone, over the real relays, with a
+  stand-in LinuxStream on a Unix socket;
+- the window daemon's own undo on a phone whose adbd outlives the cable (the
+  S25's never did), and the A13 with this launcher.

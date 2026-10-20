@@ -1618,6 +1618,49 @@ fn install_launcher(app: &tauri::AppHandle, serial: &str, apk: &str) -> Result<(
     })
 }
 
+/// The bundled launcher's SHA-256, hex, worked out once per build of it.
+fn bundled_apk_sha256(apk: &std::path::Path) -> Option<String> {
+    use sha2::{Digest, Sha256};
+    static CACHE: std::sync::Mutex<Option<(u64, std::time::SystemTime, String)>> = std::sync::Mutex::new(None);
+    let meta = std::fs::metadata(apk).ok()?;
+    let (len, modified) = (meta.len(), meta.modified().ok()?);
+    let mut cache = CACHE.lock().unwrap();
+    if let Some((l, m, hex)) = cache.as_ref() {
+        if *l == len && *m == modified {
+            return Some(hex.clone());
+        }
+    }
+    let mut hasher = Sha256::new();
+    std::io::copy(&mut std::fs::File::open(apk).ok()?, &mut hasher).ok()?;
+    let hex = format!("{:x}", hasher.finalize());
+    *cache = Some((len, modified, hex.clone()));
+    Some(hex)
+}
+
+/// The phone runs the launcher's Linux, and its launcher is this very build.
+///
+/// Installing the same APK again would stop the package — `install -r` does —
+/// and that Linux with it, for nothing: a dev app restarting, or a launch after
+/// one that failed, would end a session someone is in. Asked in one round
+/// trip; any doubt answers no, which is the plain install.
+fn linux_on_this_build(app: &tauri::AppHandle, serial: &str, apk: &std::path::Path) -> bool {
+    let out = run_adb(
+        app,
+        &[
+            "-s",
+            serial,
+            "shell",
+            &format!(
+                "pidof {LAUNCHER_PACKAGE}:linux >/dev/null && \
+                 p=$(pm path {LAUNCHER_PACKAGE} | head -n 1) && sha256sum \"${{p#package:}}\""
+            ),
+        ],
+    )
+    .unwrap_or_default();
+    let installed = out.split_whitespace().next().unwrap_or("");
+    !installed.is_empty() && bundled_apk_sha256(apk).as_deref() == Some(installed)
+}
+
 /// Install (or update) the bundled Open Android DeX launcher APK and start
 /// it on the given display.
 ///
@@ -1634,7 +1677,7 @@ pub fn adb_start_launcher(
     display_id: i32,
     resume: Option<bool>,
 ) -> Result<String, String> {
-    let resume = resume.unwrap_or(false);
+    let mut resume = resume.unwrap_or(false);
     log::info!(
         "── deploy launcher on {serial}, display {display_id}{} ──",
         if resume { " (resuming around the running launcher)" } else { "" }
@@ -1644,6 +1687,10 @@ pub fn adb_start_launcher(
     if !apk.exists() {
         log::error!("launcher APK missing from the bundle: {}", apk.display());
         return Err("bundled openandroiddex-launcher.apk not found".into());
+    }
+    if !resume && linux_on_this_build(&app, &serial, &apk) {
+        log::info!("{LAUNCHER_PACKAGE} is already this build and its Linux is running — resuming around it");
+        resume = true;
     }
     if !resume {
         // always reinstall: it is tiny and this guarantees updates land

@@ -16,6 +16,8 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = [] }
+# The bundled launcher's hash, to tell a phone already running that build (adb.rs).
+sha2 = "0.10"
 tauri-plugin-opener = "2"
 tauri-plugin-store = "2"
 tauri-plugin-log = "2"

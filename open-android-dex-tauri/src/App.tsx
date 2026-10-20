@@ -373,12 +373,23 @@ export default function App() {
 
   // ── Once the virtual display exists, deploy the DeX launcher ──
   useEffect(() => {
-    if (phase.kind !== "launching") return;
+    if (phase.kind !== "launching" && phase.kind !== "ready") return;
     const device = phase.device;
     const key = `${device.serial}|desktop`;
     const displayId = sessions[key]?.displayId;
     if (displayId == null || deployedFor.current === displayId) return;
     deployedFor.current = displayId;
+    if (phase.kind === "ready") {
+      // A desktop already up got a new display: scrcpy's reconnect after the
+      // phone came back (Samsung's adbd restarts on every USB mode switch)
+      // makes one, and a new display is an empty one — the old one's windows
+      // went with it. Put the launcher back on it, around the running one.
+      logInfo(`launch: the desktop came back on display ${displayId} — putting the launcher back on it`);
+      invoke("adb_start_launcher", { serial: device.serial, displayId, resume: true })
+        .then(() => logInfo("launch: desktop ready again"))
+        .catch((e) => logError(`launch: could not put the launcher back — ${String(e)}`));
+      return;
+    }
     sawDesktop.current = true;
     logInfo(`launch: display ${displayId} is up — deploying the launcher`);
     setDexStep({ state: "busy", text: "Deploying DeX launcher…" });
@@ -395,6 +406,18 @@ export default function App() {
         setTimeout(() => appWindow.minimize().catch(() => {}), 1400);
       })
       .catch((e) => {
+        // The phone dropping off adb part way through is not a failed launch.
+        // Samsung's MTP service switches the port to file transfer about five
+        // seconds after it is plugged in, which restarts adbd and every adb
+        // connection with it — right through a deploy that started on replug.
+        // scrcpy reconnects by itself and makes a new display, and this effect
+        // deploys onto that one (or the reconnect asks for a relaunch, which
+        // the session-ended effect below takes up).
+        if (/device '[^']*' not found|device offline|no devices\/emulators found/.test(String(e))) {
+          logInfo("launch: the phone dropped off adb part way through — deploying again once it is back");
+          setDexStep({ state: "busy", text: "Waiting for the phone to come back…" });
+          return;
+        }
         logError(`launch: launcher deployment failed — ${String(e)}`);
         invoke("stop_mirror", { sessionKey: key }).catch(() => {});
         // The stage row is one line in a fixed-width span; the guidance errors
@@ -457,7 +480,9 @@ export default function App() {
 
   // ── Detect the desktop session ending (exited, or the window closed) ──
   useEffect(() => {
-    if (phase.kind !== "ready") return;
+    // A relaunch can also be asked for while the launch is still going: the
+    // phone dropped off adb part way through it, before the desktop was set up.
+    if (phase.kind !== "ready" && !(phase.kind === "launching" && relaunching.current)) return;
     const key = `${phase.device.serial}|desktop`;
     if (sawDesktop.current && !sessions[key]) {
       if (restarting.current || relaunching.current) {
