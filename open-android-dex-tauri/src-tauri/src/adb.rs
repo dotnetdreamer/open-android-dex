@@ -2293,13 +2293,17 @@ pub(crate) fn start_wmd(app: &tauri::AppHandle, serial: &str) {
     }
     // One daemon at a time: a second bind on 7191 would just throw.
     let _ = run_adb(app, &["-s", serial, "shell", "pkill -f WmDaemon"]);
+    // The last one's log kept beside the new one: it is what says whether its
+    // watchdog undid the session while the cable was out, and the start of a
+    // reconnect is exactly when someone wants to read that.
     let _ = run_adb(
         app,
         &[
             "-s",
             serial,
             "shell",
-            "setsid sh -c 'CLASSPATH=/data/local/tmp/wmd.dex exec app_process /system/bin \
+            "mv -f /data/local/tmp/wmd.log /data/local/tmp/wmd.log.1 2>/dev/null; \
+             setsid sh -c 'CLASSPATH=/data/local/tmp/wmd.dex exec app_process /system/bin \
              com.ccrstech.openandroiddex.wmd.WmDaemon > /data/local/tmp/wmd.log 2>&1' &",
         ],
     );

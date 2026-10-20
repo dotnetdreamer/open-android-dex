@@ -795,6 +795,15 @@ public final class WmDaemon {
     private static volatile long ttlMs = 0L;
     /** The one part of the undo only the PC can know. Null until armed. */
     private static volatile String undoGlobals = null;
+    /** Why the watchdog is holding back, said once per stretch of it; null when it is not. */
+    private static String holding = null;
+
+    /** A line in wmd.log, with the time: the log is read after the fact, against the PC's. */
+    private static void log(String line) {
+        System.out.println(new java.text.SimpleDateFormat("HH:mm:ss.SSS", java.util.Locale.ROOT)
+                .format(new java.util.Date()) + " " + line);
+        System.out.flush();
+    }
 
     private static void watchdog() {
         while (true) {
@@ -819,7 +828,7 @@ public final class WmDaemon {
                     // A framework hiccup is not evidence that anything went away.
                 }
                 if (desktopGone) {
-                    System.out.println("watchdog: desktop gone with the panel dark — restoring it");
+                    log("watchdog: desktop gone with the panel dark — restoring it");
                     Screen.restore();
                 }
             }
@@ -827,7 +836,10 @@ public final class WmDaemon {
             String globals = undoGlobals;
             if (globals == null) continue;                                  // never armed
             long silent = System.currentTimeMillis() - lastArmMs;
-            if (silent < ttlMs) continue;                                   // PC still there
+            if (silent < ttlMs) {                                           // PC still there
+                holding = null;
+                continue;
+            }
 
             // Silence alone is not enough. The PC also goes quiet for a few seconds
             // whenever it cycles the session itself — the Settings window's "restart
@@ -839,15 +851,32 @@ public final class WmDaemon {
                 display = Wm.displayHosting(LAUNCHER);
             } catch (Throwable t) {
                 // A framework hiccup is not evidence of anything. Wait for a clean read.
-                System.out.println("watchdog: cannot read the task tree (" + t + ") — holding");
+                log("watchdog: cannot read the task tree (" + t + ") — holding");
                 continue;
             }
-            if (display > 0) continue;
+            if (display > 0) {
+                holding = null;
+                continue;
+            }
 
-            System.out.println("watchdog: no PC for " + (silent / 1000)
+            // Still on a computer's USB port: the cable never came out — the PC
+            // app restarting — or it is already back in, and the PC re-arms in a
+            // moment and sets the desktop up again around whatever is here.
+            // Undoing the session under that would race it: measured on the S25
+            // Ultra, a cable put back nine seconds after it was pulled met this
+            // undo half way through the PC's reconnect. Wall chargers say AC.
+            if (sh("dumpsys battery").contains("USB powered: true")) {
+                if (holding == null) {
+                    holding = "usb";
+                    log("watchdog: no PC for " + (silent / 1000) + "s, but on a computer's USB port — holding");
+                }
+                continue;
+            }
+
+            log("watchdog: no PC for " + (silent / 1000)
                     + "s and no desktop display — undoing the session");
             cleanup(globals);
-            System.out.println("watchdog: done, exiting");
+            log("watchdog: done, exiting");
             System.out.flush();
             System.exit(0);
         }
@@ -871,7 +900,7 @@ public final class WmDaemon {
         try {
             Audio.clear();
         } catch (Throwable t) {
-            System.out.println("watchdog: no media-output pin to clear (" + t.getMessage() + ")");
+            log("watchdog: no media-output pin to clear (" + t.getMessage() + ")");
         }
 
         sh(globals);
@@ -902,7 +931,7 @@ public final class WmDaemon {
         // end that session as well. The PC, plugged back in, sets DeX up again
         // around the running launcher (adb_start_launcher's `resume`).
         if (!sh("pidof " + LAUNCHER + ":linux").trim().isEmpty()) {
-            System.out.println("watchdog: the launcher's Linux is running — leaving the launcher be");
+            log("watchdog: the launcher's Linux is running — leaving the launcher be");
             return;
         }
 

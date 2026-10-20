@@ -3252,7 +3252,10 @@ fn spawn_freeform_enforcer(
                 phone_aspect: 1080.0 / 2340.0,
                 default_freeform: false,
                 undo_globals,
-                wmd_restarted_at: None,
+                // As if just started: the deploy starts the daemon itself a
+                // moment after the display comes up, and a second start racing
+                // it would only kill the first.
+                wmd_restarted_at: Some(Instant::now()),
                 last_pkgs: None,
                 last_transfer: None,
                 tseq: 0,
