@@ -313,6 +313,54 @@ pub struct DeviceInfo {
     pub android_version: Option<String>,
     /// `ro.serialno` — stable across USB and Wi-Fi, unlike [`Self::serial`].
     pub hardware_serial: Option<String>,
+    /// What the phone's owner calls it: "Galaxy S25 Ultra" where the model is
+    /// "SM-S938B". See [`device_name`].
+    pub name: Option<String>,
+}
+
+/// The phone's Device name, from its About screen: "Galaxy S25 Ultra", or
+/// whatever its owner renamed it to. The model string adb reports is a part
+/// number on most phones ("SM-S938B"), and the app's first words to someone
+/// who has just plugged in should be the name they know the phone by.
+///
+/// It lives in `settings`, not in a property, and `settings` starts a process
+/// on the phone — so it is read once per phone per run, not on every 2.5s
+/// poll. `key` is the phone's `ro.serialno` and model, so the phone keeps its
+/// name moving between the cable and Wi-Fi, and two cheap phones that share a
+/// placeholder serial ("0123456789ABCDEF") do not share a name unless they are
+/// also the same model. A phone with no name says "null", which is remembered;
+/// a read that fails is tried again, but not before a minute has passed — a
+/// phone whose `settings` keeps failing would otherwise cost every poll up to
+/// three seconds and a line in the log.
+fn device_name(app: &tauri::AppHandle, serial: &str, key: &str) -> Option<String> {
+    static KNOWN: std::sync::OnceLock<std::sync::Mutex<HashMap<String, Option<String>>>> = std::sync::OnceLock::new();
+    static FAILED: std::sync::OnceLock<std::sync::Mutex<HashMap<String, Instant>>> = std::sync::OnceLock::new();
+    let known = KNOWN.get_or_init(Default::default);
+    let failed = FAILED.get_or_init(Default::default);
+    if let Some(name) = known.lock().unwrap().get(key) {
+        return name.clone();
+    }
+    if failed.lock().unwrap().get(key).is_some_and(|at| at.elapsed() < Duration::from_secs(60)) {
+        return None;
+    }
+    let Ok(out) = run_adb_full(
+        app,
+        &["-s", serial, "shell", "settings get global device_name"],
+        Duration::from_secs(3),
+        false,
+    ) else {
+        failed.lock().unwrap().insert(key.to_string(), Instant::now());
+        return None;
+    };
+    let name = clean_device_name(&out);
+    known.lock().unwrap().insert(key.to_string(), name.clone());
+    name
+}
+
+/// `settings get` prints "null" for a name that was never set.
+pub(crate) fn clean_device_name(out: &str) -> Option<String> {
+    let name = out.trim();
+    (!name.is_empty() && name != "null" && name.chars().count() <= 64 && !name.contains('\n')).then(|| name.to_string())
 }
 
 /// What the last poll saw, so the log records phones appearing, going
@@ -428,6 +476,12 @@ pub fn adb_list_devices(app: tauri::AppHandle) -> Result<Vec<DeviceInfo>, String
         } else {
             (None, None, None)
         };
+        let name = if state == "device" {
+            let key = format!("{}|{model}", hardware_serial.as_deref().unwrap_or(serial));
+            device_name(&app, serial, &key)
+        } else {
+            None
+        };
 
         devices.push(DeviceInfo {
             serial: serial.to_string(),
@@ -438,6 +492,7 @@ pub fn adb_list_devices(app: tauri::AppHandle) -> Result<Vec<DeviceInfo>, String
             brand,
             android_version,
             hardware_serial,
+            name,
         });
     }
 
@@ -2441,6 +2496,17 @@ mod tests {
         assert!(rest.starts_with("no permissions"));
         // A line that reads as nothing known keeps the old first-token split.
         assert_eq!(split_device_line("weird-serial whatever"), ("weird-serial", "whatever"));
+    }
+
+    #[test]
+    fn a_device_name_is_the_one_its_owner_set_or_nothing() {
+        assert_eq!(clean_device_name("Galaxy S25 Ultra\r\n").as_deref(), Some("Galaxy S25 Ultra"));
+        assert_eq!(clean_device_name("Idrees's Pixel\n").as_deref(), Some("Idrees's Pixel"));
+        // Never set: `settings get` prints the word.
+        assert_eq!(clean_device_name("null\n"), None);
+        assert_eq!(clean_device_name("  \n"), None);
+        // Not a name: something else answered on the shell.
+        assert_eq!(clean_device_name("line one\nline two\n"), None);
     }
 
     /// Verbatim from a user report on the 0.3.0 portable build — the string

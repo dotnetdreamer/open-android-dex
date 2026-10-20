@@ -12,6 +12,8 @@ export interface DeviceInfo {
    * as one device.
    */
   hardwareSerial?: string | null;
+  /** The phone's Device name, as its owner knows it: "Galaxy S25 Ultra". */
+  name?: string | null;
 }
 
 // ── Wireless ────────────────────────────────────────────────────────────

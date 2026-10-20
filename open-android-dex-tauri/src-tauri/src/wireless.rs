@@ -465,7 +465,16 @@ fn getprop(app: &tauri::AppHandle, serial: &str, prop: &str) -> String {
         .to_string()
 }
 
+/// What a saved phone is called in the list: its own Device name when it has
+/// one ("Galaxy S25 Ultra" — what the device list shows too), else its brand
+/// and model, else the serial.
 fn device_label(app: &tauri::AppHandle, serial: &str) -> String {
+    if let Some(name) = run_adb_quiet(app, &["-s", serial, "shell", "settings get global device_name"])
+        .ok()
+        .and_then(|out| crate::adb::clean_device_name(&out))
+    {
+        return name;
+    }
     let out = run_adb_quiet(
         app,
         &[
