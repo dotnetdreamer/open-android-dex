@@ -1,5 +1,6 @@
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, ChildStdout, Stdio};
+use std::time::{Duration, Instant};
 
 use tauri::AppHandle;
 
@@ -13,17 +14,36 @@ use crate::adb;
 /// taskbar/titlebar button presses, so it keeps ONE device shell open and
 /// streams commands through it; a per-call sentinel delimits each command's
 /// output. The session respawns itself once per call if the pipe died
-/// (device unplugged, adb restarted).
+/// (device unplugged, adb restarted) — and no more than once a
+/// [`RESPAWN_AFTER`] while a fresh shell dies at once: a phone that is gone
+/// answers every spawn with an exit, and its callers keep asking several
+/// times a second until it is back.
 pub struct ShellSession {
     serial: String,
     conn: Option<Conn>,
     seq: u64,
+    /// No new shell before this, after one that died straight away.
+    retry_at: Option<Instant>,
 }
+
+/// How long a session waits after a fresh shell died before it spawns another.
+const RESPAWN_AFTER: Duration = Duration::from_secs(1);
 
 struct Conn {
     child: Child,
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
+}
+
+impl Conn {
+    /// Kill it and reap it. A child that is never waited for stays a zombie
+    /// holding a process slot: one per failed call, with the phone unplugged,
+    /// filled the computer's process table in under three minutes
+    /// (2026-10-20) — nothing on it could start a process after that.
+    fn close(mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
 }
 
 impl ShellSession {
@@ -32,6 +52,7 @@ impl ShellSession {
             serial,
             conn: None,
             seq: 0,
+            retry_at: None,
         }
     }
 
@@ -60,19 +81,33 @@ impl ShellSession {
         let mut last_err = String::new();
         for _ in 0..2 {
             if self.conn.is_none() {
-                self.conn = Some(self.spawn(app)?);
+                if self.retry_at.is_some_and(|at| Instant::now() < at) {
+                    return Err(if last_err.is_empty() { "adb shell unavailable".into() } else { last_err });
+                }
+                match self.spawn(app) {
+                    Ok(conn) => self.conn = Some(conn),
+                    Err(e) => {
+                        self.retry_at = Some(Instant::now() + RESPAWN_AFTER);
+                        return Err(e);
+                    }
+                }
             }
             match self.exec(cmd) {
-                Ok(out) => return Ok(out),
+                Ok(out) => {
+                    self.retry_at = None;
+                    return Ok(out);
+                }
                 Err(e) => {
                     // dead pipe — drop the connection and retry once fresh
-                    if let Some(mut conn) = self.conn.take() {
-                        let _ = conn.child.kill();
+                    if let Some(conn) = self.conn.take() {
+                        conn.close();
                     }
                     last_err = e;
                 }
             }
         }
+        // A fresh shell died as well: the device, or adb, is gone for now.
+        self.retry_at = Some(Instant::now() + RESPAWN_AFTER);
         Err(last_err)
     }
 
@@ -107,8 +142,8 @@ impl ShellSession {
 
 impl Drop for ShellSession {
     fn drop(&mut self) {
-        if let Some(mut conn) = self.conn.take() {
-            let _ = conn.child.kill();
+        if let Some(conn) = self.conn.take() {
+            conn.close();
         }
     }
 }
