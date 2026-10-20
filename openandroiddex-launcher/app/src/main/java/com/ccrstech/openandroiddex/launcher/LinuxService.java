@@ -56,9 +56,18 @@ public class LinuxService extends Service {
     static final String ACTION_REMOTE_PAIR_CANCEL = "com.ccrstech.openandroiddex.launcher.linux.REMOTE_PAIR_CANCEL";
     /** A computer on the cable is about to open the desktop as video: be up to answer. See {@link LinuxStream}. */
     static final String ACTION_STREAM = "com.ccrstech.openandroiddex.launcher.linux.STREAM";
+    /**
+     * Start a Linux app as a window of its own (doc/linux-windows.md): the
+     * window session first, if it is not running, then the app in it.
+     */
+    static final String ACTION_WIN_RUN = "com.ccrstech.openandroiddex.launcher.linux.WIN_RUN";
+    /** End the window session, and every app in it. */
+    static final String ACTION_WIN_STOP = "com.ccrstech.openandroiddex.launcher.linux.WIN_STOP";
     static final String EXTRA_W = "w";
     static final String EXTRA_H = "h";
     static final String EXTRA_CODE = "code";
+    static final String EXTRA_CMD = "cmd";
+    static final String EXTRA_DPI = "dpi";
     /** On REMOTE_OFF: it came from the notification's Turn off. */
     private static final String EXTRA_FROM_NOTIFICATION = "from_notification";
 
@@ -218,6 +227,21 @@ public class LinuxService extends Service {
      */
     static boolean wakeForStream(Context ctx) {
         return send(ctx, ACTION_STREAM, 0, 0);
+    }
+
+    /**
+     * Run {@code command} on the window display, starting the window session
+     * at w×h and {@code dpi} first if it is not up. See {@link LinuxWindows}.
+     */
+    static boolean winRun(Context ctx, String command, int w, int h, int dpi) {
+        Intent i = new Intent(ctx, LinuxService.class).setAction(ACTION_WIN_RUN)
+                .putExtra(EXTRA_CMD, command).putExtra(EXTRA_W, w).putExtra(EXTRA_H, h)
+                .putExtra(EXTRA_DPI, dpi);
+        return start(ctx, i);
+    }
+
+    static void winStop(Context ctx) {
+        send(ctx, ACTION_WIN_STOP, 0, 0);
     }
 
     private static boolean send(Context ctx, String action, int w, int h) {
@@ -391,6 +415,20 @@ public class LinuxService extends Service {
             mainHandler.postDelayed(this::idleStopQueued, 30_000);
             return stickiness();
         }
+        if (ACTION_WIN_RUN.equals(action)) {
+            final String cmd = intent.getStringExtra(EXTRA_CMD);
+            final int w = intent.getIntExtra(EXTRA_W, 1920);
+            final int h = intent.getIntExtra(EXTRA_H, 1080);
+            final int dpi = intent.getIntExtra(EXTRA_DPI, 96);
+            io.execute(() -> winRun(cmd, w, h, dpi));
+            return stickiness();
+        } else if (ACTION_WIN_STOP.equals(action)) {
+            io.execute(() -> {
+                stopWin();
+                idleStop();
+            });
+            return stickiness();
+        }
         if (ACTION_START.equals(action)) {
             final int w = intent.getIntExtra(EXTRA_W, 1280);
             final int h = intent.getIntExtra(EXTRA_H, 800);
@@ -441,6 +479,9 @@ public class LinuxService extends Service {
     @Override
     public void onDestroy() {
         super.onDestroy();
+        // Its stdin is this process's: closed, the session ends, and proot takes
+        // the apps with it.
+        closeWinInput();
         LinuxStream.stop();
         io.shutdownNow();
         // The host is the process's, not this instance's: stopped (in order,
@@ -573,6 +614,8 @@ public class LinuxService extends Service {
      */
     private void wipe() {
         stopRuntime();
+        // The window session's apps run in this same rootfs.
+        stopWin();
         // sshd runs in a proot of its own over the same rootfs, and a wipe
         // under a live one is the half-deleted tree this method exists to
         // avoid. Held stopped for the whole wipe, not just stopped: deleting a
@@ -806,6 +849,11 @@ public class LinuxService extends Service {
         // /system/bin/kill, not the builtin: toybox sh's own kill rejects a
         // negative pid outright ("arguments must be jobs or process IDs"), so
         // the group kill has to go to the real binary. Measured on device.
+        // The window session (linux-win.sh) runs Linux apps beside this
+        // desktop, xfce4-terminal and Thunar among them, and may own the one
+        // PulseAudio: while it is up, the belts that match by name stay
+        // narrow enough to miss it. The group kill above them is exact either way.
+        boolean win = winAlive();
         String script =
                 "P=$(cat " + q(dir) + "/rt.pid 2>/dev/null); "
                         + "if [ -n \"$P\" ]; then "
@@ -814,9 +862,14 @@ public class LinuxService extends Service {
                         + "rm -f " + q(dir) + "/rt.pid " + q(dir) + "/rt.exit; "
                         + "pkill -l KILL -f '[X]vnc :1' 2>/dev/null; "
                         + "pkill -l KILL -f '[w]ebsockify --web' 2>/dev/null; "
-                        + "pkill -l KILL -f '[p]ulseaudio -n' 2>/dev/null; "
+                        + (win ? "" : "pkill -l KILL -f '[p]ulseaudio -n' 2>/dev/null; ")
                         + "pkill -l KILL -f '[d]ex-session-bus' 2>/dev/null; "
-                        + "pkill -l KILL -f '[x]fce' 2>/dev/null; true";
+                        + (win ? "pkill -l KILL -f '[x]fce4-session' 2>/dev/null; "
+                                + "pkill -l KILL -f '[x]fce4-panel' 2>/dev/null; "
+                                + "pkill -l KILL -f '[x]fwm4' 2>/dev/null; "
+                                + "pkill -l KILL -f '[x]fdesktop' 2>/dev/null; "
+                        : "pkill -l KILL -f '[x]fce' 2>/dev/null; ")
+                        + "true";
         try {
             new ProcessBuilder("/system/bin/sh", "-c", script)
                     .redirectErrorStream(true).start().waitFor();
@@ -834,6 +887,132 @@ public class LinuxService extends Service {
         liveRuntime = null;
         runtimeUp = false;
         DexLog.step("linux", "runtime stopped");
+    }
+
+    // ── the window session: Linux apps as windows of their own ──
+
+    /** linux-win.sh, while it runs; static for the same reason {@link #liveRuntime} is. */
+    private static volatile Process liveWin;
+    /** Its stdin, where each app to start is one line. io thread. */
+    private java.io.OutputStream winInput;
+    /** It started the guest's sound itself, because the desktop on :1 was not running. */
+    private boolean winSound;
+
+    static boolean winAlive() {
+        Process p = liveWin;
+        return p != null && p.isAlive();
+    }
+
+    /** io thread. */
+    private void winRun(String command, int w, int h, int dpi) {
+        if (command == null || command.trim().isEmpty()) return;
+        // A session this instance holds no stdin of cannot be handed anything:
+        // start one that it does.
+        if ((!winAlive() || winInput == null) && !startWin(w, h, dpi)) return;
+        try {
+            String b64 = android.util.Base64.encodeToString(
+                    command.getBytes(java.nio.charset.StandardCharsets.UTF_8), android.util.Base64.NO_WRAP);
+            winInput.write(("run " + b64 + "\n").getBytes(java.nio.charset.StandardCharsets.US_ASCII));
+            winInput.flush();
+        } catch (Exception e) {
+            DexLog.warn("linux", "could not hand the window session an app: " + e);
+        }
+    }
+
+    /**
+     * Start linux-win.sh: the second X display, at the desktop display's size,
+     * with a cookie of its own (the launcher reads it from the same file to
+     * connect), and sound when nothing else is giving the guest any. io thread.
+     */
+    private boolean startWin(int w, int h, int dpi) {
+        try {
+            Linux.Status st = Linux.readStatus(this);
+            if (!"ready".equals(st.phase)) {
+                DexLog.step("linux", "window session: Linux is not ready (" + st.phase + ")");
+                return false;
+            }
+            stopWin();
+            File dir = Linux.root(this);
+            copyAsset("linux/linux-win.sh", Linux.winScript(this));
+            writeFile(new File(dir, "win-geometry"),
+                    Math.min(Math.max(w, 640), 7680) + "x" + Math.min(Math.max(h, 400), 4320));
+            writeFile(new File(dir, "win-dpi"), String.valueOf(Math.min(Math.max(dpi, 48), 384)));
+            byte[] cookie = new byte[16];
+            new java.security.SecureRandom().nextBytes(cookie);
+            File tmp = new File(dir, "tmp");
+            tmp.mkdirs();
+            writeBytes(new File(tmp, ".oadx-win.xauth"), X11.xauthority("2", cookie));
+            ProcessBuilder pb = new ProcessBuilder("/system/bin/sh", Linux.winScript(this).getAbsolutePath());
+            pb.directory(dir);
+            pb.environment().putAll(Linux.scriptEnv(this));
+            winSound = !st.running;
+            if (winSound) pb.environment().put("LINUX_WIN_SOUND", "1");
+            pb.redirectErrorStream(true);
+            pb.redirectOutput(new File(dir, "win.log"));
+            Process p = pb.start();
+            winInput = p.getOutputStream();
+            liveWin = p;
+            if (winSound) LinuxAudio.start();
+            goForeground(getString(R.string.ln_label));
+            DexLog.step("linux", "window session started " + w + "x" + h + " at " + dpi + " dpi");
+            return true;
+        } catch (Exception e) {
+            DexLog.step("linux", "window session start error: " + e);
+            return false;
+        }
+    }
+
+    /** End the window session: asked first, then the group kill — linux-rt.sh's rule. io thread. */
+    private void stopWin() {
+        Process p = liveWin;
+        File dir = Linux.root(this);
+        if (p == null && !new File(dir, "win.pid").exists()) return;
+        try {
+            if (winInput != null) {
+                winInput.write("quit\n".getBytes(java.nio.charset.StandardCharsets.US_ASCII));
+                winInput.flush();
+            }
+        } catch (Exception ignored) {
+        }
+        closeWinInput();
+        try {
+            if (p != null) p.waitFor(1, java.util.concurrent.TimeUnit.SECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+        String script =
+                "P=$(cat " + q(dir) + "/win.pid 2>/dev/null); "
+                        + "if [ -n \"$P\" ]; then "
+                        + "/system/bin/kill -9 -\"$P\" 2>/dev/null; "
+                        + "/system/bin/kill -9 \"$P\" 2>/dev/null; fi; "
+                        + "rm -f " + q(dir) + "/win.pid; "
+                        + "pkill -l KILL -f '[X]vnc :2' 2>/dev/null; "
+                        + "pkill -l KILL -f '[d]ex-win-bus' 2>/dev/null; true";
+        try {
+            new ProcessBuilder("/system/bin/sh", "-c", script).redirectErrorStream(true).start().waitFor();
+        } catch (Exception e) {
+            DexLog.step("linux", "window session stop error: " + e);
+        }
+        if (p != null) {
+            try {
+                p.destroyForcibly();
+            } catch (Throwable ignored) {
+            }
+        }
+        liveWin = null;
+        if (winSound && !Linux.readStatus(this).running) LinuxAudio.stop();
+        winSound = false;
+        DexLog.step("linux", "window session stopped");
+    }
+
+    private void closeWinInput() {
+        java.io.OutputStream in = winInput;
+        winInput = null;
+        if (in == null) return;
+        try {
+            in.close();
+        } catch (Exception ignored) {
+        }
     }
 
     /**
@@ -969,6 +1148,8 @@ public class LinuxService extends Service {
             return;
         }
         if (Linux.readStatus(this).running) return;
+        // Linux apps open as windows of their own: their session is a runtime too.
+        if (winAlive()) return;
         // Remote access is a reason to be running all by itself: no window, no
         // desktop session, just a phone that can be reached. The marker, not
         // only running(): it is written before the intent that starts the host
@@ -1009,6 +1190,15 @@ public class LinuxService extends Service {
 
     private void writeError(String msg) {
         writeState("error", 0, msg);
+    }
+
+    /** Atomic write of bytes, as {@link #writeFile}: the cookie is read by another process. */
+    private static void writeBytes(File f, byte[] content) throws java.io.IOException {
+        File tmp = new File(f.getAbsolutePath() + ".tmp");
+        try (FileOutputStream out = new FileOutputStream(tmp)) {
+            out.write(content);
+        }
+        if (!tmp.renameTo(f)) throw new java.io.IOException("cannot write " + f);
     }
 
     /** Atomic file write (tmp + rename) so a reader never sees half of it. */

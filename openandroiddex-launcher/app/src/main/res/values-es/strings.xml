@@ -633,4 +633,8 @@ Si lo desactivas más adelante, Android cerrará Linux a la fuerza y el escritor
     <string name="rm_note_turn_off">Desactivar</string>
     <string name="rm_note_resume">El acceso remoto está en pausa: toca para reanudar</string>
     <string name="ln_remote_menu">Acceso remoto…</string>
+
+    <!-- ── Linux app windows ── -->
+    <string name="lw_opening">Abriendo %1$s…</string>
+    <string name="lw_close_window">Cerrar ventana</string>
 </resources>

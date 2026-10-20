@@ -645,4 +645,8 @@
     <string name="rm_note_turn_off">إيقاف</string>
     <string name="rm_note_resume">الوصول عن بُعد متوقف مؤقتًا — انقر للاستئناف</string>
     <string name="ln_remote_menu">الوصول عن بُعد…</string>
+
+    <!-- ── Linux app windows ── -->
+    <string name="lw_opening">جارٍ فتح %1$s…</string>
+    <string name="lw_close_window">إغلاق النافذة</string>
 </resources>

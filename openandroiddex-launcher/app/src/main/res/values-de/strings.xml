@@ -637,4 +637,8 @@ Wenn du sie später wieder abschaltest, erzwingt Android das Beenden von Linux u
     <string name="rm_note_turn_off">Ausschalten</string>
     <string name="rm_note_resume">Fernzugriff ist pausiert — zum Fortsetzen tippen</string>
     <string name="ln_remote_menu">Fernzugriff…</string>
+
+    <!-- ── Linux app windows ── -->
+    <string name="lw_opening">%1$s wird geöffnet…</string>
+    <string name="lw_close_window">Fenster schließen</string>
 </resources>

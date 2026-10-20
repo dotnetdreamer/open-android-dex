@@ -633,4 +633,8 @@
     <string name="rm_note_turn_off">बंद करें</string>
     <string name="rm_note_resume">रिमोट एक्सेस रुका हुआ है — फिर से शुरू करने के लिए टैप करें</string>
     <string name="ln_remote_menu">रिमोट एक्सेस…</string>
+
+    <!-- ── Linux app windows ── -->
+    <string name="lw_opening">%1$s खुल रहा है…</string>
+    <string name="lw_close_window">विंडो बंद करें</string>
 </resources>

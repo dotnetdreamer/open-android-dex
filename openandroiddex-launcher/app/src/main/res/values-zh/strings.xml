@@ -633,4 +633,8 @@
     <string name="rm_note_turn_off">关闭</string>
     <string name="rm_note_resume">远程访问已暂停 —— 点按即可恢复</string>
     <string name="ln_remote_menu">远程访问…</string>
+
+    <!-- ── Linux app windows ── -->
+    <string name="lw_opening">正在打开 %1$s…</string>
+    <string name="lw_close_window">关闭窗口</string>
 </resources>

@@ -7,8 +7,10 @@ storage — no shell uid, no daemon, no PC. Display is XFCE4 through TigerVNC's
 Xvnc, rendered by noVNC in a WebView window on the desktop display, with
 Firefox and Chromium installed.
 
-This directory holds the three on-device scripts — setup, the desktop runtime,
-and `linux-ssh.sh`, remote access's sshd (see `doc/remote-access.md`) — which
+This directory holds the four on-device scripts — setup, the desktop runtime,
+`linux-ssh.sh`, remote access's sshd (see `doc/remote-access.md`), and
+`linux-win.sh`, the second X display Linux apps open on as windows of their
+own (see `doc/linux-windows.md`) — which
 `open-android-dex-tauri/scripts/build-launcher-apk.mjs` copies into the
 launcher's assets on every build. proot itself is **committed** to the
 launcher's jniLibs for the two ABIs we stage — **arm64-v8a** (real phones) and
@@ -331,6 +333,7 @@ every other phase sends a plain dash-separated token and reads unchanged.
 | 6081 | the PulseAudio tap — raw s16le/48k/stereo, read by `LinuxAudio` in the app (`doc/linux-audio.md`) |
 | 4713 | the PulseAudio control protocol, for `pavucontrol`, the panel plugin and anything linking libpulse |
 | 7022 | sshd, while remote access is on — from `linux-ssh.sh`, in a proot of its own. Keys only; reached from outside the phone only through the dexremote tunnel. Another free port when 7022 is taken |
+| 5902 | Xvnc `:2`, the window display (`linux-win.sh`), for a VNC viewer if anyone wants to see it bare — VncAuth, the desktop's password. Its X socket is the abstract `@/tmp/.X11-unix/X2`, where the launcher is the window manager; every X client needs the session's cookie (`/tmp/.oadx-win.xauth`) |
 
 ## Sound
 

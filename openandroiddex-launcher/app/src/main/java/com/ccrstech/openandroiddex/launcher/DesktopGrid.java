@@ -270,8 +270,13 @@ class DesktopGrid extends ViewGroup {
     }
 
     private Item itemFor(ComponentName component) {
+        // Linux apps all carry one package; only the whole component tells them apart.
+        boolean linux = LauncherActivity.LINUX_PKG.equals(component.getPackageName());
         for (Item it : items) {
-            if (it.app.component.getPackageName().equals(component.getPackageName())) return it;
+            if (linux ? it.app.component.equals(component)
+                    : it.app.component.getPackageName().equals(component.getPackageName())) {
+                return it;
+            }
         }
         return null;
     }

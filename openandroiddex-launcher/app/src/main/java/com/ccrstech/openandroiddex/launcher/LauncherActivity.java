@@ -159,13 +159,28 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
         final CharSequence label;
         final Drawable icon;
         final ComponentName component;
+        /**
+         * A Linux app, opened as a window of its own on this desktop
+         * (LinuxWindows) rather than as an activity; null for an Android app.
+         * Its component is {@link #LINUX_PKG}/its .desktop id, which keeps it
+         * in recents and on the desktop grid like any other.
+         */
+        final LinuxApps.App linux;
 
         AppEntry(CharSequence label, Drawable icon, ComponentName component) {
+            this(label, icon, component, null);
+        }
+
+        AppEntry(CharSequence label, Drawable icon, ComponentName component, LinuxApps.App linux) {
             this.label = label;
             this.icon = icon;
             this.component = component;
+            this.linux = linux;
         }
     }
+
+    /** The package a Linux app's entry carries: no Android package is called that. */
+    static final String LINUX_PKG = "linux";
 
     /** PC-side enforcer pushes the display's open apps via this broadcast. */
     public static final String ACTION_RUNNING = "com.ccrstech.openandroiddex.launcher.RUNNING";
@@ -244,6 +259,14 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
     private static LauncherActivity liveDesktop() {
         LauncherActivity a = live == null ? null : live.get();
         return a != null && !a.isDestroyed() && !a.isFinishing() ? a : null;
+    }
+
+    /**
+     * The live desktop, for {@link LinuxWindows}: the window a Linux app's
+     * task is started from, on this display, with this display's shape.
+     */
+    static LauncherActivity desktopShell() {
+        return liveDesktop();
     }
 
     /**
@@ -548,6 +571,8 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
 
     /** Our own windows opened or closed — rebuild their taskbar tiles. */
     private final OwnWindows.Listener ownWindowsListener = this::refreshOpenApps;
+    /** Linux apps' windows come and go, and change their titles and icons. */
+    private final LinuxWindows.Listener linuxWindowsListener = this::refreshOpenApps;
 
     /** Packages CaptionService has minimised — open, but deliberately not visible. */
     private final LinkedHashSet<String> minimisedPkgs = new LinkedHashSet<>();
@@ -785,6 +810,7 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
         // in this very process. Registering REPLACES any earlier listener, so a
         // density-driven relaunch of the desktop cannot leave a dead one behind.
         OwnWindows.setListener(ownWindowsListener);
+        LinuxWindows.get(this).addListener(linuxWindowsListener);
         // Same again for the notification listener: it is a service in this
         // very process, so it reports directly rather than over a broadcast.
         // Registered whether or not the grant is in place — the service binds
@@ -1013,6 +1039,7 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
         } catch (Exception ignored) {
         }
         OwnWindows.clearListener(ownWindowsListener);
+        LinuxWindows.get(this).removeListener(linuxWindowsListener);
         DexNotifications.clearListener(notificationListener);
         // The call banner is an overlay window, so — like the taskbar and the
         // transfer card — it outlives this activity unless it is taken down
@@ -1804,6 +1831,13 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
             // and every SSH session with it; this is the moment it comes back.
             // Same delay as the provision, for the same reason.
             root.postDelayed(() -> LinuxService.remoteResume(this), 3000);
+            // The guest's apps, for the app list: read once the desktop has
+            // settled, then again whenever the drawer opens a while later.
+            root.postDelayed(() -> loadLinuxApps(true), 3500);
+            // Linux apps' windows still open from before this process started.
+            root.postDelayed(() -> {
+                if (!onPhone()) LinuxWindows.get(this).resume();
+            }, 3500);
         }
     }
 
@@ -4096,6 +4130,8 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
      */
     private void showDrawer() {
         if (drawerShown) return;
+        // Something may have been installed in Linux since the list was read.
+        loadLinuxApps(false);
         // Pinned is a view of the desktop, which the user can have rearranged
         // since the last open. ~16 views; cheaper than watching the grid.
         fillStartPinned();
@@ -5888,6 +5924,9 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
         for (AppEntry a : allApps) {
             if (a.component.equals(component)) return a;
         }
+        // Every Linux app shares one package: a removed one is gone, not
+        // another app under the same name.
+        if (LINUX_PKG.equals(component.getPackageName())) return null;
         return findByPackage(component.getPackageName());
     }
 
@@ -6036,6 +6075,97 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
             openAppsRow.addView(item, new LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         }
+        addLinuxWindowTiles();
+    }
+
+    /**
+     * One tile per Linux app window (LinuxWindows), with the window's own icon
+     * and title: they are separate tasks of our own package, so the PC's
+     * running list cannot name them any more than it can our other windows.
+     * A dialog over another window gets no tile of its own, as on any desktop.
+     */
+    private void addLinuxWindowTiles() {
+        LinuxWindows lw = LinuxWindows.get(this);
+        for (LinuxWindows.Entry e : lw.taskbar()) {
+            ImageView icon = new ImageView(this);
+            if (e.icon != null) {
+                icon.setImageBitmap(e.icon);
+            } else {
+                icon.setImageResource(R.mipmap.ic_linux);
+            }
+            icon.setContentDescription(e.title());
+            LinearLayout item = taskbarTile(icon);
+            item.setTooltipText(e.title());
+            final int task = e.taskId;
+            item.setOnClickListener(v -> lw.raiseTask(task));
+            item.setOnContextClickListener(v -> {
+                showLinuxWindowMenu(v, task);
+                return true;
+            });
+            item.setOnLongClickListener(v -> {
+                showLinuxWindowMenu(v, task);
+                return true;
+            });
+            openAppsRow.addView(item, new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        }
+    }
+
+    private void showLinuxWindowMenu(View anchor, int task) {
+        android.widget.PopupMenu menu = new android.widget.PopupMenu(this, anchor);
+        menu.getMenu().add(0, 1, 0, getString(R.string.lx_maximize_restore));
+        menu.getMenu().add(0, 2, 1, getString(R.string.lw_close_window));
+        menu.setOnMenuItemClickListener(item -> {
+            if (item.getItemId() == 1) {
+                CaptionService.maximiseTask(task, !CaptionService.maximisedTask(task));
+            } else {
+                LinuxWindows.closeTask(task);
+            }
+            return true;
+        });
+        menu.show();
+    }
+
+    /**
+     * Linux apps join the app list where their windows can open: a desktop
+     * display, a container that is installed and ready, an ABI that runs it.
+     */
+    private boolean linuxAppsWanted() {
+        return Linux.abiSupported() && !onPhone() && Linux.isInstalled(this)
+                && "ready".equals(Linux.readStatus(this).phase);
+    }
+
+    /** When the guest's apps were last read; they change only when something is installed in there. */
+    private long linuxAppsReadAt;
+
+    /** Read the guest's apps again, off the main thread, and join them to the list when done. */
+    private void loadLinuxApps(boolean force) {
+        if (!linuxAppsWanted()) return;
+        long now = SystemClock.uptimeMillis();
+        if (!force && linuxAppsReadAt != 0 && now - linuxAppsReadAt < 120_000) return;
+        linuxAppsReadAt = now;
+        LinuxWindows.get(this).loadApps(() -> {
+            if (!isDestroyed()) loadApps();
+        });
+    }
+
+    /**
+     * A Linux app's icon, with the desktop's Linux mark in its corner — the
+     * same app is often on the phone too, and the two open very different
+     * windows. One without an icon of its own gets the mark alone.
+     */
+    private Drawable linuxIcon(android.graphics.Bitmap bitmap) {
+        Drawable mark = getDrawable(R.mipmap.ic_linux);
+        if (bitmap == null) return mark;
+        Drawable base = new android.graphics.drawable.BitmapDrawable(getResources(), bitmap);
+        android.graphics.drawable.LayerDrawable layers =
+                new android.graphics.drawable.LayerDrawable(new Drawable[]{base, mark});
+        int side = dp(iconDp());
+        int badge = Math.round(side * 0.42f);
+        layers.setLayerSize(0, side, side);
+        layers.setLayerSize(1, badge, badge);
+        layers.setLayerGravity(1, Gravity.END | Gravity.BOTTOM);
+        return layers;
     }
 
     private void showTaskbarAppMenu(View anchor, AppEntry app) {
@@ -6591,6 +6721,16 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
                     ri.loadIcon(pm),
                     new ComponentName(ri.activityInfo.packageName, ri.activityInfo.name)));
         }
+        // Linux apps beside the Android ones, each opening as a window of its
+        // own on this desktop. The list is read off the main thread
+        // (loadLinuxApps) and simply joins whenever this runs next.
+        if (linuxAppsWanted()) {
+            LinuxWindows lw = LinuxWindows.get(this);
+            for (LinuxApps.App a : lw.apps()) {
+                allApps.add(new AppEntry(a.name, linuxIcon(lw.appIcon(a)),
+                        new ComponentName(LINUX_PKG, a.id), a));
+            }
+        }
         allApps.sort((a, b) -> a.label.toString().compareToIgnoreCase(b.label.toString()));
         filter("");
         refreshOpenApps();
@@ -6654,6 +6794,14 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
     void launch(AppEntry app) {
         hideDrawer();
         dismissPopups();
+        if (app.linux != null) {
+            // Every launch is a new window, as running the program again would
+            // be on any desktop; the app decides whether it is a second one.
+            noteRecent(app.component);
+            LinuxWindows.get(this).launch(app.linux);
+            Toast.makeText(this, getString(R.string.lw_opening, app.label), Toast.LENGTH_SHORT).show();
+            return;
+        }
         // A minimised app is already running; it just needs un-hiding. `am start` does
         // NOT clear the hidden flag — measured: the task stays visible=false and the
         // click appears to do nothing — so ask CaptionService, which owns the window

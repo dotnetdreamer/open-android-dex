@@ -112,7 +112,9 @@ if (process.env.SKIP_LAUNCHER_APK === '1') {
   mkdirSync(assetsLinux, { recursive: true })
   // linux-ssh.sh is remote access's runtime: the guest's sshd, in a proot of
   // its own so it outlives the desktop session (see the script's header).
-  const scripts = ['linux-setup.sh', 'linux-rt.sh', 'linux-ssh.sh']
+  // linux-win.sh is the window session: the second X display that Linux apps
+  // open on as windows of their own (doc/linux-windows.md).
+  const scripts = ['linux-setup.sh', 'linux-rt.sh', 'linux-ssh.sh', 'linux-win.sh']
   for (const name of scripts) {
     const src = join(linuxDir, name)
     if (!existsSync(src)) {

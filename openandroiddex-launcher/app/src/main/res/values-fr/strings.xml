@@ -633,4 +633,8 @@ Si vous la désactivez plus tard, Android forcera la fermeture de Linux et le bu
     <string name="rm_note_turn_off">Désactiver</string>
     <string name="rm_note_resume">L’accès à distance est en pause — appuyez pour reprendre</string>
     <string name="ln_remote_menu">Accès à distance…</string>
+
+    <!-- ── Linux app windows ── -->
+    <string name="lw_opening">Ouverture de %1$s…</string>
+    <string name="lw_close_window">Fermer la fenêtre</string>
 </resources>

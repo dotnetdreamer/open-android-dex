@@ -77,5 +77,24 @@ resize, and prints the frame rate and where the time goes. It cleans up after
 itself; the frame rate is checked only on a cable, since wireless debugging's
 is the link's.
 
+Linux apps as windows of their own (`doc/linux-windows.md`) have their pure
+parts checked the same way, with a JDK:
+
+```sh
+node test/linux-windows-test.mjs
+```
+
+It compiles the launcher's own `X11`, `X11Keys`, `LinuxWm` and `LinuxApps` for
+this JVM and runs them: keysyms found in a us layout's columns, Shift and Level
+3 where they are needed, a keycode lent to a keysym the layout lacks and never
+taken back while held; the session's Xauthority cookie; the guest's xfconf
+`xsettings` channel read as XSETTINGS names, the user's file winning, and the
+XSETTINGS wire format read back byte for byte; damage rectangles clipped and
+merged; and the `.desktop` scanner on a scratch rootfs — what the menu hides
+left out, field codes dropped, a terminal app wrapped, `~/.local` overriding,
+and icons found through links that name guest paths, and through links proot
+wrote with this side's. The window manager against a real Xvnc needs a guest
+and is recorded in the design record.
+
 Everything else needs a device. `doc/web-viewer.md`, `doc/remote-access.md`
 and `doc/usb-desktop.md` list what is still unverified there.

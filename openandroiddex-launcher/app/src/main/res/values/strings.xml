@@ -973,4 +973,10 @@ If you switch this off again later, Android force-closes Linux and the desktop r
 
     <!-- The Linux tile's menu -->
     <string name="ln_remote_menu">Remote access…</string>
+
+    <!-- ── Linux app windows ── -->
+    <!-- A Linux app opens as a window of its own; the toast while it starts. -->
+    <string name="lw_opening">Opening %1$s…</string>
+    <!-- The taskbar menu of a Linux app's window: asks the app to close it. -->
+    <string name="lw_close_window">Close window</string>
 </resources>

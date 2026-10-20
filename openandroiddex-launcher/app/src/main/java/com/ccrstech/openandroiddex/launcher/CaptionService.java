@@ -108,6 +108,89 @@ public final class CaptionService extends AccessibilityService {
         return s == null ? -1 : s.desktopDisplayId;
     }
 
+    // ── what a Linux app asks of its window (LinuxWindows), main thread ──
+
+    /** Minimise one task, as its caption's minimise does. */
+    static void minimiseTask(int taskId) {
+        CaptionService s = live;
+        if (s == null) return;
+        WmClient.Task t = s.tasks.get(taskId);
+        if (t != null && !s.minimised.containsKey(taskId)) s.onMinimise(t);
+    }
+
+    /** Is this task minimised — hidden by us, still open? */
+    static boolean minimisedTask(int taskId) {
+        CaptionService s = live;
+        return s != null && s.minimised.containsKey(taskId);
+    }
+
+    /** Bring a minimised task back. The reconcile drops it from the set once it is visible. */
+    static void restoreTask(int taskId) {
+        CaptionService s = live;
+        if (s == null || s.wm == null) return;
+        final int display = s.desktopDisplayId;
+        s.wm.post(() -> s.wm.show(display, taskId));
+    }
+
+    /** Is this task on the maximised rect now? */
+    static boolean maximisedTask(int taskId) {
+        CaptionService s = live;
+        if (s == null) return false;
+        WmClient.Task t = s.tasks.get(taskId);
+        return t != null && near(t, s.maxRect(t.displayId));
+    }
+
+    /** Maximise ({@code on}) or restore, as the caption's ⤢ does; nothing if it is already so. */
+    static void maximiseTask(int taskId, boolean on) {
+        CaptionService s = live;
+        if (s == null) return;
+        WmClient.Task t = s.tasks.get(taskId);
+        if (t == null) return;
+        if (on != near(t, s.maxRect(t.displayId))) s.onMaximise(t);
+    }
+
+    /**
+     * Make a task's content {@code w} × {@code h}, from where its top-left is,
+     * inside the maximised rect: an app sizing its own window (a dialog that
+     * grows to fit what it shows).
+     */
+    static void resizeTask(int taskId, int w, int h) {
+        CaptionService s = live;
+        if (s == null || s.wm == null) return;
+        WmClient.Task t = s.tasks.get(taskId);
+        if (t == null || w <= 0 || h <= 0) return;
+        final int display = t.displayId;
+        final int px = s.captionHeight(taskId);
+        final int[] max = s.maxRect(display);
+        final int left = t.left;
+        final int top = t.top;
+        final int right = Math.min(left + w, max[2]);
+        final int bottom = Math.min(top + px + h, max[3]);
+        if (right - left < 64 || bottom - top < px + 32) return;
+        s.wm.post(() -> s.wm.resize(display, taskId, left, top, right, bottom, px));
+    }
+
+    /**
+     * A context for {@code TYPE_ACCESSIBILITY_OVERLAY} windows on a display:
+     * above every app window and the taskbar, needing no permission — where a
+     * Linux app's menus are shown. Null while the service is not running.
+     */
+    static android.content.Context overlayContext(int displayId) {
+        CaptionService s = live;
+        if (s == null) return null;
+        try {
+            Display d = s.getSystemService(android.hardware.display.DisplayManager.class).getDisplay(displayId);
+            if (d == null) return null;
+            android.content.Context ctx = s.createDisplayContext(d);
+            if (android.os.Build.VERSION.SDK_INT >= 30) {
+                ctx = ctx.createWindowContext(WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY, null);
+            }
+            return ctx;
+        } catch (RuntimeException e) {
+            return null;
+        }
+    }
+
     /**
      * Fallback caption height in px on the desktop display (density 1.0, so px == dp).
      *
@@ -491,7 +574,8 @@ public final class CaptionService extends AccessibilityService {
                 && !DockerActivity.class.getName().equals(t.activity)
                 && !TaskManagerActivity.class.getName().equals(t.activity)
                 && !FileTransferActivity.class.getName().equals(t.activity)
-                && !LinuxRemoteActivity.class.getName().equals(t.activity);
+                && !LinuxRemoteActivity.class.getName().equals(t.activity)
+                && !LinuxWindowActivity.class.getName().equals(t.activity);
     }
 
     /** @return true if any caption geometry changed, i.e. windows are on the move. */
@@ -710,9 +794,17 @@ public final class CaptionService extends AccessibilityService {
             Long since = geometrySince.get(t.taskId);
             if (since == null || now - since < GEOMETRY_SETTLE_MS) continue;
             geometrySaved.add(t.taskId);
-            WindowMemory.remember(this, WindowMemory.keyFor(this, t.pkg, t.activity),
-                    new android.graphics.Rect(t.left, t.top, t.right, t.bottom),
-                    displaySize(display));
+            // A Linux window is remembered by its app (its window class):
+            // all of them are one activity, and Firefox should open where
+            // Firefox was, not where the last Linux window was left.
+            String key = LinuxWindowActivity.class.getName().equals(t.activity)
+                    ? LinuxWindows.memoryKeyForTask(t.taskId)
+                    : WindowMemory.keyFor(this, t.pkg, t.activity);
+            if (key != null) {
+                WindowMemory.remember(this, key,
+                        new android.graphics.Rect(t.left, t.top, t.right, t.bottom),
+                        displaySize(display));
+            }
         }
         // A closed window's entries would otherwise be held for the life of the
         // service, and its task id can be handed to a different app later.
@@ -1357,6 +1449,12 @@ public final class CaptionService extends AccessibilityService {
      * (our own Settings window is titled "Settings", not "Open Android DeX").
      */
     private String labelFor(WmClient.Task task) {
+        // A Linux app's window: its own title, which changes as the app goes
+        // (a document's name, a page's) — every one of them is the same activity.
+        if (LinuxWindowActivity.class.getName().equals(task.activity)) {
+            String title = LinuxWindows.titleForTask(task.taskId);
+            if (title != null) return title;
+        }
         PackageManager pm = getPackageManager();
         if (task.activity != null && !task.activity.isEmpty() && !"?".equals(task.activity)) {
             try {
@@ -1400,6 +1498,14 @@ public final class CaptionService extends AccessibilityService {
             sendBroadcast(new android.content.Intent(LauncherActivity.ACTION_CLOSE_WINDOW)
                     .setPackage(getPackageName())
                     .putExtra("activity", task.activity));
+            return;
+        }
+        // A Linux app's window closes the way any window manager closes one:
+        // the app is asked (WM_DELETE_WINDOW), and may ask about unsaved work
+        // first. The window, and its task with it, goes when the app lets it.
+        if (getPackageName().equals(task.pkg)
+                && LinuxWindowActivity.class.getName().equals(task.activity)
+                && LinuxWindows.closeTask(task.taskId)) {
             return;
         }
         wm.post(() -> {

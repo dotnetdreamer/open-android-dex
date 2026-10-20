@@ -246,6 +246,32 @@
             android:windowSoftInputMode="adjustResize"
             android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|navigation|uiMode" />
 
+        <!-- One Linux app's window (doc/linux-windows.md): each X window on the
+             guest's window display gets a task of its own, so it wears the
+             desktop's title bar and has a taskbar button like any app.
+
+             standard + launched with NEW_TASK | MULTIPLE_TASK: a new task per
+             window, under an affinity of its own so none of them ever joins —
+             or drags — the launcher's task (the trap SettingsActivity's
+             comment describes). excludeFromRecents: the window belongs to a
+             process in the guest, and a task restored without it shows
+             nothing; LinuxWindowActivity finishes such a task at once anyway.
+
+             Every configuration change is handled in place: rebuilding the
+             activity would take the surface from under a window mid-resize. -->
+        <activity
+            android:name=".LinuxWindowActivity"
+            android:exported="false"
+            android:icon="@mipmap/ic_linux"
+            android:label="@string/ln_label"
+            android:launchMode="standard"
+            android:taskAffinity="com.ccrstech.openandroiddex.launcher.linuxwindow"
+            android:excludeFromRecents="true"
+            android:autoRemoveFromRecents="true"
+            android:resizeableActivity="true"
+            android:windowSoftInputMode="stateAlwaysHidden|adjustNothing"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|density|keyboard|keyboardHidden|navigation|uiMode|locale|layoutDirection|fontScale" />
+
         <!-- Linux in the PHONE's app list. A second launcher entry of our own,
              so the container can be opened with no desktop, no PC and no cable
              — the feature never depended on any of them (see LinuxAppActivity

@@ -140,6 +140,14 @@ guide to follow.
 
 ![Ubuntu 24.04 with XFCE running in a resizable window on the desktop](doc/img/linux.png)
 
+**Linux apps as windows of their own.** Every app in Linux's menu is also in
+the desktop's app drawer, next to your Android apps, with a small Linux mark on
+its icon. Open one — the terminal, the file manager, VS Code, GIMP — and it
+comes up in a window of its own, with the same title bar, taskbar button and
+window controls as an Android app, instead of inside the Linux desktop. Menus,
+dialogs, copy and paste, and typing in any language work as they do in Linux.
+How it works: [doc/linux-windows.md](doc/linux-windows.md).
+
 **You can also get just the Linux part on its own.** On the
 [releases page](https://github.com/dotnetdreamer/open-android-dex/releases/latest)
 there is a separate download called **LinuxOnDroid**. It is about 1 MB, you

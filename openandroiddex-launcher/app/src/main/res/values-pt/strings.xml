@@ -637,4 +637,8 @@ Se desativar isto mais tarde, o Android força o encerramento do Linux e o ambie
     <string name="rm_note_turn_off">Desligar</string>
     <string name="rm_note_resume">O acesso remoto está em pausa — toque para retomar</string>
     <string name="ln_remote_menu">Acesso remoto…</string>
+
+    <!-- ── Linux app windows ── -->
+    <string name="lw_opening">A abrir %1$s…</string>
+    <string name="lw_close_window">Fechar janela</string>
 </resources>

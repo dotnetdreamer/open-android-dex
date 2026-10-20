@@ -531,6 +531,11 @@ final class Linux {
         return new File(root(ctx), "linux-rt.sh");
     }
 
+    /** The window session's runtime: Linux apps as windows of their own (doc/linux-windows.md). */
+    static File winScript(Context ctx) {
+        return new File(root(ctx), "linux-win.sh");
+    }
+
     static File rootfsTarball(Context ctx) {
         return new File(root(ctx), "linux-rootfs.tar.gz");
     }

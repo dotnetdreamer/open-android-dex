@@ -633,4 +633,8 @@
     <string name="rm_note_turn_off">બંધ કરો</string>
     <string name="rm_note_resume">રિમોટ ઍક્સેસ થોભાવેલું છે — ફરી શરૂ કરવા ટૅપ કરો</string>
     <string name="ln_remote_menu">રિમોટ ઍક્સેસ…</string>
+
+    <!-- ── Linux app windows ── -->
+    <string name="lw_opening">%1$s ખુલી રહ્યું છે…</string>
+    <string name="lw_close_window">વિન્ડો બંધ કરો</string>
 </resources>
