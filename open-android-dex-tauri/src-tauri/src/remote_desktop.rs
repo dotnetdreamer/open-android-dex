@@ -18,21 +18,26 @@
 //! the window checks.
 //!
 //! Files dropped on the window go onto the guest's Desktop over SFTP, in the
-//! same tunnel ([`dexremote::sftp`]); the clipboard is the window page's own
-//! business (clipboardShare.ts), through the clipboard plugin.
+//! same tunnel ([`dexremote::sftp`]); and while the window is open, what Linux
+//! sends this computer — Thunar's Send To, the dock's "Send to computer" — is
+//! fetched from its outbox into Downloads ([`dexremote::outbox`], [`inbox`]).
+//! The clipboard is the window page's own business (clipboardShare.ts),
+//! through the clipboard plugin.
 //!
 //! Design record: doc/remote-access.md, "The desktop, in a window".
 
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
+use dexremote::computer::Phone;
 use dexremote::iroh::EndpointId;
+use dexremote::outbox::{self, Received};
 use dexremote::pc::{self, Desktop, DialError};
 use dexremote::proto::{DesktopSize, Refusal};
-use dexremote::sftp::{self, CancellationToken, Progress, Report};
+use dexremote::sftp::{self, CancellationToken, Guest, Progress, Report};
 use serde::Serialize;
 use tauri::async_runtime::JoinHandle;
 use tauri::ipc::Channel;
@@ -48,6 +53,10 @@ pub enum DesktopEvent {
     /// The path to the phone: straight there or through a relay, and its
     /// round trip. The window sets the picture's quality from it.
     Path { direct: bool, rtt_ms: u64 },
+    /// Linux sent this computer something, and it is on its way: its name.
+    Receiving { name: String },
+    /// …and here it is, in Downloads.
+    Received(Received),
 }
 
 /// How opening the desktop went.
@@ -72,6 +81,11 @@ struct Link {
     port: u16,
     events: Arc<Mutex<Option<Channel<DesktopEvent>>>>,
     tasks: [JoinHandle<()>; 3],
+    /// The outbox fetch: cancelled, never aborted, so that a file half
+    /// fetched is taken back rather than left in Downloads.
+    inbox: CancellationToken,
+    /// What this window has saved, the only paths its "Show" may reveal.
+    received: Arc<Mutex<Vec<PathBuf>>>,
 }
 
 fn links() -> &'static Mutex<HashMap<String, Link>> {
@@ -85,7 +99,12 @@ fn label_for(id: &str) -> String {
 }
 
 /// The window's link, made on its first connect.
-async fn link(label: &str, phone: EndpointId) -> Result<(Arc<Desktop>, u16, Arc<Mutex<Option<Channel<DesktopEvent>>>>), String> {
+async fn link(
+    app: &AppHandle,
+    label: &str,
+    paired: &Phone,
+    phone: EndpointId,
+) -> Result<(Arc<Desktop>, u16, Arc<Mutex<Option<Channel<DesktopEvent>>>>), String> {
     let existing = |map: &HashMap<String, Link>| map.get(label).map(|l| (l.desktop.clone(), l.port, l.events.clone()));
     if let Some(found) = existing(&links().lock().unwrap()) {
         return Ok(found);
@@ -116,8 +135,133 @@ async fn link(label: &str, phone: EndpointId) -> Result<(Arc<Desktop>, u16, Arc<
     // A phone whose daemon was started again — the app updated, the end of a
     // DeX session — never says the old connection died; this notices.
     let alive = tauri::async_runtime::spawn(desktop.clone().keep_alive());
-    map.insert(label.to_string(), Link { desktop: desktop.clone(), port, events: events.clone(), tasks: [serve, watch, alive] });
+    let inbox = CancellationToken::new();
+    let received: Arc<Mutex<Vec<PathBuf>>> = Arc::default();
+    tauri::async_runtime::spawn(self::inbox(app.clone(), paired.clone(), events.clone(), received.clone(), inbox.clone()));
+    map.insert(
+        label.to_string(),
+        Link { desktop: desktop.clone(), port, events: events.clone(), tasks: [serve, watch, alive], inbox, received },
+    );
     Ok((desktop, port, events))
+}
+
+/// How often the outbox is looked at while the window is open, how often
+/// this computer says it is the one looking, and how long a phone that could
+/// not be reached is left before the next try.
+const INBOX_EVERY: Duration = Duration::from_secs(2);
+const SEEN_EVERY: Duration = Duration::from_secs(5);
+const INBOX_RETRY: Duration = Duration::from_secs(15);
+
+/// While the window is open: this computer's Send To entry kept in the guest,
+/// its outbox there looked at every two seconds, and whatever Linux sent
+/// fetched into Downloads, the window told as it goes (see dexremote::outbox).
+/// One SFTP session for all of it, opened again when the phone drops it.
+async fn inbox(
+    app: AppHandle,
+    phone: Phone,
+    events: Arc<Mutex<Option<Channel<DesktopEvent>>>>,
+    received: Arc<Mutex<Vec<PathBuf>>>,
+    cancel: CancellationToken,
+) {
+    let downloads = match app.path().download_dir() {
+        Ok(dir) => dir,
+        Err(e) => return log::warn!("remote: no Downloads folder to fetch into: {e}"),
+    };
+    let me = (|| -> Result<_, String> {
+        let c = crate::remote::computer()?;
+        let seed = c.ssh_key_seed().map_err(|e| e.to_string())?;
+        let id = c.endpoint_key().map_err(|e| e.to_string())?.public();
+        Ok((seed, outbox::Me::new(&id, &dexremote::computer::computer_name())))
+    })();
+    let (seed, me) = match me {
+        Ok(me) => me,
+        Err(e) => return log::warn!("remote: cannot fetch what Linux sends: {e}"),
+    };
+    let tell = |event: DesktopEvent| {
+        if let Some(channel) = events.lock().unwrap().as_ref() {
+            let _ = channel.send(event);
+        }
+    };
+    let mut session: Option<(Guest, String)> = None;
+    let mut seen_at: Option<Instant> = None;
+    let mut wait = Duration::from_secs(1);
+    let mut said = false;
+    loop {
+        tokio::select! {
+            _ = tokio::time::sleep(wait) => {}
+            _ = cancel.cancelled() => break,
+        }
+        wait = INBOX_EVERY;
+        if session.is_none() {
+            let opened = async {
+                let client = crate::remote::client().await.map_err(sftp::PutError::Link)?;
+                let guest = Guest::open(&client, &phone, &seed).await?;
+                let set_up = async {
+                    let home = guest.home().await?;
+                    outbox::install(&guest, &home, &me, true).await?;
+                    Ok::<_, sftp::PutError>(home)
+                }
+                .await;
+                match set_up {
+                    Ok(home) => Ok((guest, home)),
+                    Err(e) => {
+                        guest.close().await;
+                        Err(e)
+                    }
+                }
+            }
+            .await;
+            match opened {
+                Ok(opened) => {
+                    log::info!("remote: Send To → {} is set up in {}'s Linux", me.name, phone.name);
+                    session = Some(opened);
+                    seen_at = Some(Instant::now());
+                    said = false;
+                }
+                Err(e) => {
+                    if !said {
+                        log::info!("remote: what Linux sends cannot be fetched yet: {e}");
+                        said = true;
+                    }
+                    wait = INBOX_RETRY;
+                    continue;
+                }
+            }
+        }
+        let (guest, home) = session.as_ref().expect("opened above");
+        let beat = if seen_at.is_none_or(|at| at.elapsed() >= SEEN_EVERY) {
+            outbox::heartbeat(guest, home, &me).await.map(|()| seen_at = Some(Instant::now()))
+        } else {
+            Ok(())
+        };
+        let fetched = match beat {
+            Ok(()) => {
+                outbox::fetch(guest, home, &me, &downloads, |name| tell(DesktopEvent::Receiving { name: name.to_string() }), &cancel)
+                    .await
+            }
+            Err(e) => Err(e),
+        };
+        match fetched {
+            Ok(batches) => {
+                for batch in batches {
+                    let dir = Path::new(&batch.dir);
+                    received.lock().unwrap().extend(batch.landed.iter().map(|name| dir.join(name)));
+                    log::info!("remote: saved {} item(s) from {} to {}", batch.landed.len(), phone.name, batch.dir);
+                    tell(DesktopEvent::Received(batch));
+                }
+            }
+            Err(e) => {
+                log::info!("remote: the outbox went away ({e}); opening it again");
+                if let Some((guest, _)) = session.take() {
+                    guest.close().await;
+                }
+                wait = INBOX_RETRY;
+            }
+        }
+    }
+    if let Some((guest, _)) = session {
+        guest.close().await;
+    }
 }
 
 /// The path, to the window, when it changes enough to matter: from relayed to
@@ -159,6 +303,7 @@ pub fn window_closed(label: &str) {
         copy.cancel();
     }
     let Some(link) = links().lock().unwrap().remove(label) else { return };
+    link.inbox.cancel();
     for task in &link.tasks {
         task.abort();
     }
@@ -262,9 +407,9 @@ pub async fn remote_desktop_connect(
     if window.label() != label_for(&id) {
         return Err("this window belongs to another phone".into());
     }
-    crate::remote::find(&id)?;
+    let paired = crate::remote::find(&id)?;
     let phone: EndpointId = id.parse().map_err(|_| "not a phone id".to_string())?;
-    let (desktop, port, channel) = link(window.label(), phone).await?;
+    let (desktop, port, channel) = link(window.app_handle(), window.label(), &paired, phone).await?;
     *channel.lock().unwrap() = Some(events.clone());
     let size = start.then_some(DesktopSize { w: width, h: height });
     let result = desktop
@@ -366,6 +511,22 @@ pub fn remote_desktop_put_cancel(window: WebviewWindow) {
     }
 }
 
+/// "Show": what Linux sent, in Finder or Explorer — only ever something this
+/// window itself saved.
+#[tauri::command]
+pub fn remote_desktop_reveal(window: WebviewWindow, path: String) -> Result<(), String> {
+    let wanted = PathBuf::from(&path);
+    let ours = links()
+        .lock()
+        .unwrap()
+        .get(window.label())
+        .is_some_and(|link| link.received.lock().unwrap().iter().any(|p| *p == wanted));
+    if !ours {
+        return Err("that is not something this window saved".into());
+    }
+    tauri_plugin_opener::reveal_item_in_dir(&wanted).map_err(|e| e.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -399,6 +560,14 @@ mod tests {
         let report = serde_json::to_value(Report { landed: vec!["a (copy 1).jpg".into()], ..Default::default() }).unwrap();
         for key in ["dir", "landed", "files", "bytes", "links", "unreadable", "cancelled"] {
             assert!(report.get(key).is_some(), "the window reads {key}");
+        }
+        let receiving = serde_json::to_string(&DesktopEvent::Receiving { name: "a.pdf".into() }).unwrap();
+        assert_eq!(receiving, r#"{"kind":"receiving","name":"a.pdf"}"#);
+        let got = Received { dir: "/Users/me/Downloads".into(), landed: vec!["a.pdf".into()], first: Some("/Users/me/Downloads/a.pdf".into()), ..Default::default() };
+        let got = serde_json::to_value(DesktopEvent::Received(got)).unwrap();
+        assert_eq!(got["kind"], "received");
+        for key in ["dir", "landed", "first", "files", "bytes", "links", "missing", "failed"] {
+            assert!(got.get(key).is_some(), "the window reads {key}");
         }
     }
 }
