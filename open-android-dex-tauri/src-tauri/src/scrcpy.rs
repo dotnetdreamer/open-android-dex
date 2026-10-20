@@ -858,12 +858,16 @@ fn spawn_display_watchdog(
     });
 }
 
-/// The phone's window daemon is still running: whatever the session switched on
-/// over there has not been undone by its watchdog.
-fn wmd_alive(app: &AppHandle, serial: &str) -> bool {
-    // `[W]` so the pattern does not find this very shell's command line.
-    crate::adb::run_adb(app, &["-s", serial, "shell", "pgrep -f '[W]mDaemon' >/dev/null && echo up"])
-        .is_ok_and(|out| out.trim() == "up")
+/// The session is still set up on the phone: its watchdog has not undone it.
+///
+/// Asked of the caption service, which every set-up turns on and every undo —
+/// the watchdog's, and the PC's own — turns off. Not of the window daemon: an
+/// adbd restart kills that without undoing anything (it is how Samsung switches
+/// USB mode, which it does by itself right after a plug-in), and the session's
+/// enforcer starts it again by itself.
+fn desktop_still_set_up(app: &AppHandle, serial: &str) -> bool {
+    crate::adb::run_adb(app, &["-s", serial, "shell", "settings get secure enabled_accessibility_services"])
+        .is_ok_and(|out| out.contains("CaptionService"))
 }
 
 /// Block until the device is back in "device" state, or timeout / user stop.
@@ -1772,6 +1776,9 @@ struct Enforcer {
     /// per session and re-sent to the daemon on a timer. Empty when there is
     /// nothing to put back.
     undo_globals: String,
+    /// When the daemon was last started again because it had gone (see the
+    /// re-arm in `tick`), so a phone that keeps losing it is not hammered.
+    wmd_restarted_at: Option<Instant>,
     /// last broadcast payload, to skip redundant broadcasts
     last_pkgs: Option<String>,
     /// Same, for the file-transfer HUD: its state is broadcast only when it
@@ -3106,6 +3113,25 @@ impl Enforcer {
                 if let Some(host_port) = crate::files::host_port(&self.key) {
                     crate::adb::reverse_files_port(&self.app, &serial, host_port);
                 }
+                // Still unanswered with the forward back: the daemon is not
+                // running. An adbd restart takes everything adb started with
+                // it — `setsid` or not, it is all in adbd's process group — and
+                // Samsung restarts adbd whenever the USB mode changes, which it
+                // does by itself a few seconds after a phone is plugged in and
+                // unlocked (charging → file transfer). Measured on the S25
+                // Ultra, 2026-10-20: the daemon gone within seconds of every
+                // such plug-in, and with it the window chrome and the dead-man
+                // switch for the rest of the session. Started again, and armed.
+                if !self.wm.arm(WATCHDOG_TTL_SECS, &self.undo_globals)
+                    && self.wmd_restarted_at.is_none_or(|at| at.elapsed() >= Duration::from_secs(10))
+                {
+                    self.wmd_restarted_at = Some(Instant::now());
+                    log::info!("freeform-enforcer [{}] the window daemon is gone — starting it again", self.key);
+                    crate::adb::start_wmd(&self.app, &serial);
+                    if self.wm.arm(WATCHDOG_TTL_SECS, &self.undo_globals) {
+                        log::info!("freeform-enforcer [{}] the window daemon is back and armed", self.key);
+                    }
+                }
             }
         }
         // grep on the device: the full dump is hundreds of KB and shipping
@@ -3226,6 +3252,7 @@ fn spawn_freeform_enforcer(
                 phone_aspect: 1080.0 / 2340.0,
                 default_freeform: false,
                 undo_globals,
+                wmd_restarted_at: None,
                 last_pkgs: None,
                 last_transfer: None,
                 tseq: 0,
@@ -3558,7 +3585,7 @@ fn monitor(app: AppHandle, mut opts: MirrorOptions, attempt: Attempt, stop: Arc<
             // set up, with nothing on the phone left to take it off again; the
             // window starts it over instead, as a fresh connect does.
             let back = wait_for_device(&app, &opts.serial, &stop) && !stop.load(Ordering::SeqCst);
-            if back && opts.new_display.is_some() && opts.app_package.is_none() && !wmd_alive(&app, &opts.serial) {
+            if back && opts.new_display.is_some() && opts.app_package.is_none() && !desktop_still_set_up(&app, &opts.serial) {
                 log::info!("mirror [{key}] the phone undid the session while it was away — setting it up again");
                 let _ = app.emit("desktop:relaunch", serde_json::json!({ "sessionKey": key }));
             } else if back {

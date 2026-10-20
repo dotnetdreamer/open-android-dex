@@ -894,6 +894,18 @@ public final class WmDaemon {
                 + "appops set " + LAUNCHER + " ACCESS_RESTRICTED_SETTINGS default; "
                 + "cmd appwidget revokebind --package " + LAUNCHER + " --user 0");
 
+        // The launcher's own Linux, when it is running, is somebody's session: a
+        // computer's desktop window carries on over Wi-Fi once the cable is out,
+        // and Remote access serves SSH from it. DeX's own windows went with its
+        // display — scrcpy destroys a display's content along with it — so there
+        // is nothing of DeX left in the launcher to stop, and a force-stop would
+        // end that session as well. The PC, plugged back in, sets DeX up again
+        // around the running launcher (adb_start_launcher's `resume`).
+        if (!sh("pidof " + LAUNCHER + ":linux").trim().isEmpty()) {
+            System.out.println("watchdog: the launcher's Linux is running — leaving the launcher be");
+            return;
+        }
+
         sh("am force-stop " + LAUNCHER);
 
         // The force-stop took Linux's remote access down with everything else,

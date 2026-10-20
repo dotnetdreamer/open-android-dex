@@ -1618,29 +1618,42 @@ fn install_launcher(app: &tauri::AppHandle, serial: &str, apk: &str) -> Result<(
 }
 
 /// Install (or update) the bundled Open Android DeX launcher APK and start
-/// it on the given display. Skips the install when the same version is
-/// already on the device.
+/// it on the given display.
+///
+/// `resume`: the desktop is being set up again around a launcher that is
+/// still running — the phone undid the session while the cable was out and
+/// left the launcher alone because its Linux was running (WmDaemon.cleanup).
+/// Nothing is installed and nothing is force-stopped, either of which would
+/// end that Linux; everything else the deploy grants and starts, it grants
+/// and starts again.
 #[tauri::command(async)]
 pub fn adb_start_launcher(
     app: tauri::AppHandle,
     serial: String,
     display_id: i32,
+    resume: Option<bool>,
 ) -> Result<String, String> {
-    log::info!("── deploy launcher on {serial}, display {display_id} ──");
+    let resume = resume.unwrap_or(false);
+    log::info!(
+        "── deploy launcher on {serial}, display {display_id}{} ──",
+        if resume { " (resuming around the running launcher)" } else { "" }
+    );
     let deploy_started = Instant::now();
     let apk = bin_dir(&app)?.join("openandroiddex-launcher.apk");
     if !apk.exists() {
         log::error!("launcher APK missing from the bundle: {}", apk.display());
         return Err("bundled openandroiddex-launcher.apk not found".into());
     }
-    // always reinstall: it is tiny and this guarantees updates land
-    let apk_str = apk.to_string_lossy().to_string();
-    log::info!("installing {}", apk.display());
-    install_launcher(&app, &serial, &apk_str)?;
-    log::info!(
-        "launcher installed in {}ms",
-        deploy_started.elapsed().as_millis()
-    );
+    if !resume {
+        // always reinstall: it is tiny and this guarantees updates land
+        let apk_str = apk.to_string_lossy().to_string();
+        log::info!("installing {}", apk.display());
+        install_launcher(&app, &serial, &apk_str)?;
+        log::info!(
+            "launcher installed in {}ms",
+            deploy_started.elapsed().as_millis()
+        );
+    }
 
     // Overlay-taskbar permission: the taskbar is a TYPE_APPLICATION_OVERLAY
     // window so it floats above app windows (base layer ~111000 vs 21000 for
@@ -1789,16 +1802,18 @@ pub fn adb_start_launcher(
 
     // fresh task, pinned fullscreen (windowingMode 1): the launcher IS the
     // desktop surface even though the display defaults to freeform. A
-    // running instance keeps its old windowing mode, hence the force-stop.
+    // running instance keeps its old windowing mode, hence the force-stop —
+    // except on a resume, where the instance's task went with the old display
+    // (scrcpy destroys a display's content with it) and the start below makes
+    // a new one.
+    let stop = if resume { String::new() } else { format!("am force-stop {LAUNCHER_PACKAGE}; ") };
     let started_out = run_adb(
         &app,
         &[
             "-s",
             &serial,
             "shell",
-            &format!(
-                "am force-stop {LAUNCHER_PACKAGE}; am start --display {display_id} --windowingMode 1 -n {LAUNCHER_COMPONENT}"
-            ),
+            &format!("{stop}am start --display {display_id} --windowingMode 1 -n {LAUNCHER_COMPONENT}"),
         ],
     )?;
 
@@ -2259,7 +2274,7 @@ pub fn reverse_files_port(app: &tauri::AppHandle, serial: &str, host_port: u16) 
 ///
 /// Best-effort: the desktop is fully usable without it, minus window chrome and
 /// the fast command path.
-fn start_wmd(app: &tauri::AppHandle, serial: &str) {
+pub(crate) fn start_wmd(app: &tauri::AppHandle, serial: &str) {
     let dex = match bin_dir(app) {
         Ok(d) => d.join("openandroiddex-wmd.dex"),
         Err(_) => return,

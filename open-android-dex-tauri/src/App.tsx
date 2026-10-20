@@ -202,6 +202,8 @@ export default function App() {
   const restarting = useRef(false);
   /** The session ended because the phone undid it while unplugged: launch it again. */
   const relaunching = useRef(false);
+  /** This launch sets the desktop up around a launcher that is still running (adb_start_launcher's `resume`). */
+  const resumeLauncher = useRef(false);
   /**
    * Set when the phone asked to leave DeX ("Exit DeX" in the taskbar or in the
    * in-desktop Settings window). Only changes the wording of the screen this
@@ -272,7 +274,8 @@ export default function App() {
   }, []);
 
   // ── Desktop launch pipeline ──
-  const launch = useCallback(async (device: DeviceInfo) => {
+  const launch = useCallback(async (device: DeviceInfo, resume = false) => {
+    resumeLauncher.current = resume;
     armedRef.current = false;
     deployedFor.current = null;
     sawDesktop.current = false;
@@ -383,7 +386,7 @@ export default function App() {
     // By here it is almost always already done, and this await costs nothing —
     // but it is what makes "fired, not awaited" above safe rather than a race.
     Promise.resolve(prepareProfile.current)
-      .then(() => invoke("adb_start_launcher", { serial: device.serial, displayId }))
+      .then(() => invoke("adb_start_launcher", { serial: device.serial, displayId, resume: resumeLauncher.current }))
       .then(() => {
         logInfo("launch: desktop ready");
         setDexStep({ state: "done", text: "Desktop ready" });
@@ -462,7 +465,9 @@ export default function App() {
         restarting.current = false;
         relaunching.current = false;
         setDexStep({ state: "busy", text: again ? "Setting the desktop up again…" : "Applying stream settings…" });
-        launch(phase.device);
+        // After the phone's own clean-up the launcher may still be running its
+        // Linux; resuming sets DeX up around it instead of reinstalling it.
+        launch(phase.device, again);
         return;
       }
       // Moving a running desktop onto Wi-Fi. The session had to end first —
