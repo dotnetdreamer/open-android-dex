@@ -2618,8 +2618,8 @@ impl RequestPump {
                 // its own half — blur, grain, surface alpha, the taskbar's
                 // shadow — off the pref alone; this is the half it has no
                 // privilege for. The animation scales are Settings.Global,
-                // which needs WRITE_SECURE_SETTINGS: the launcher does not
-                // hold it, this adb shell does.
+                // which needs WRITE_SECURE_SETTINGS: this adb shell holds it,
+                // and the launcher only for the cable-pulled undo.
                 //
                 // Remembered as well as applied, so the next spawn can cap the
                 // stream's bitrate (see apply_stored_config) — that is the part

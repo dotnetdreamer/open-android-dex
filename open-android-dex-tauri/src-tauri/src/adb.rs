@@ -593,9 +593,9 @@ const TOUCH_GLOBAL: &str = "block_untrusted_touches";
 ///
 /// This is the single biggest thing the mode does. An app launch spends most of
 /// its visible time in the open transition, and at scale 0 the window is simply
-/// there. Only adb can write them: the launcher does not hold
-/// WRITE_SECURE_SETTINGS and nothing grants it, but the shell uid these run as
-/// does.
+/// there. Written from here, by the shell uid: the launcher holds
+/// WRITE_SECURE_SETTINGS during a session, but only for the cable-pulled undo
+/// (UnplugWatch).
 pub const PERF_GLOBALS: [&str; 3] = [
     "window_animation_scale",
     "transition_animation_scale",
@@ -1259,14 +1259,15 @@ pub fn restore_phone(app: &tauri::AppHandle, serial: &str) {
         ));
     }
 
-    // 3. the app-ops and the widget-bind whitelist we granted over adb
-    //    without ever asking the user. Widgets already bound stay bound —
-    //    revokebind only closes the door on silent NEW binds, and the next
-    //    session's deploy opens it again.
+    // 3. the app-ops, the widget-bind whitelist and the cable-pulled undo's
+    //    WRITE_SECURE_SETTINGS we granted over adb without ever asking the
+    //    user. Widgets already bound stay bound — revokebind only closes the
+    //    door on silent NEW binds, and the next session's deploy opens it again.
     script.push_str(&format!(
         "appops set {LAUNCHER_PACKAGE} SYSTEM_ALERT_WINDOW default; \
          appops set {LAUNCHER_PACKAGE} ACCESS_RESTRICTED_SETTINGS default; \
-         cmd appwidget revokebind --package {LAUNCHER_PACKAGE} --user 0; "
+         cmd appwidget revokebind --package {LAUNCHER_PACKAGE} --user 0; \
+         pm revoke {LAUNCHER_PACKAGE} android.permission.WRITE_SECURE_SETTINGS; "
     ));
 
     // 3b. the battery-optimisation exemption, for the same reason: the user
@@ -1713,6 +1714,25 @@ pub fn adb_start_launcher(
              {OVERLAY_GRANT_TRIES} attempts — the taskbar will fall back to an in-activity \
              bar that app windows can cover, and the desktop's escape bar will not appear"
         );
+    }
+    // The cable-pulled undo's permission. A restarting adbd kills the window
+    // daemon with everything else adb started — measured on SM-S938B, adbd
+    // restarts three seconds after every unplug, before the daemon's switch
+    // trips — so the launcher keeps a copy of that switch and puts the
+    // settings back itself (UnplugWatch). A development permission, so neither
+    // this grant nor restore_phone's revoke stops the app. A launcher too old
+    // to declare it is refused, and the undo stays the daemon's alone.
+    match run_adb(
+        &app,
+        &[
+            "-s",
+            &serial,
+            "shell",
+            &format!("pm grant {LAUNCHER_PACKAGE} android.permission.WRITE_SECURE_SETTINGS"),
+        ],
+    ) {
+        Ok(_) => log::info!("WRITE_SECURE_SETTINGS granted — the launcher can undo the session if the cable is pulled"),
+        Err(e) => log::warn!("WRITE_SECURE_SETTINGS not granted ({e}) — a pulled cable leaves the undo to the window daemon"),
     }
     // Shared-folder permission, for the Linux feature's /sdcard/LinuxOnDeX.
     //

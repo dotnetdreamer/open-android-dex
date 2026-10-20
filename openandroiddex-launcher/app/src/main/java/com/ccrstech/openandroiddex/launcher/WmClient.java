@@ -91,6 +91,17 @@ final class WmClient {
     }
 
     /**
+     * The dead-man switch as the PC last armed it: {@code {ttlSeconds, settings chain}},
+     * or null — not armed, or the daemon could not be reached.
+     */
+    String[] armed() {
+        String reply = request("ARMED");
+        if (reply == null || !reply.startsWith("OK ")) return null;
+        String[] parts = reply.substring(3).split(" ", 2);
+        return parts.length == 2 ? parts : null;
+    }
+
+    /**
      * Display id of the live desktop, or -1.
      *
      * Asked of the daemon rather than derived from accessibility windows: a freshly

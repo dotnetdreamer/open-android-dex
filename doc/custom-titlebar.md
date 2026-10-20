@@ -337,7 +337,12 @@ Design notes:
 **Daemon.** `ServerSocket(7191, 8, InetAddress.getByName("127.0.0.1"))`, thread per
 connection, `TCP_NODELAY` (a drag is many tiny writes; Nagle would batch them into
 latency). Loopback-only bind is a security requirement: this socket speaks with
-shell authority. Per-connection `Grab` state needs no locking. No `Looper` is
+shell authority. It is not enough on its own, and that is a known, open gap:
+any app on the phone can connect, and the watchdog runs `ARM`'s settings chain
+as the shell. The fix is to check each caller's uid — `/proc/net/tcp` maps the
+client's port to it — and take `ARM` only from the shell's 2000 (adb), the
+other verbs from 2000 or the launcher. Per-connection `Grab` state needs no
+locking. No `Looper` is
 prepared — outgoing binder transactions are synchronous on the calling thread, and
 the daemon registers no callbacks.
 
@@ -678,7 +683,11 @@ adb shell CLASSPATH=/data/local/tmp/wmd.dex app_process /system/bin \
 ```
 
 A process started via `adb shell` dies with the adb connection; persisting it
-requires reparenting to init (`setsid`/`nohup`).
+requires reparenting to init (`setsid`/`nohup`). That still does not outlive
+adbd itself: a restarting adbd has init kill its whole cgroup, and the shell
+uid cannot leave it. Some phones restart adbd on every unplug — the S25 Ultra
+three seconds after — which is why the cable-pulled undo has a second home in
+the launcher (`UnplugWatch`, see doc/usb-desktop.md).
 
 Verifying the layer constraint directly:
 

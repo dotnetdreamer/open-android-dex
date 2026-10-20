@@ -137,6 +137,8 @@ public final class CaptionService extends AccessibilityService {
 
     private final Handler main = new Handler(Looper.getMainLooper());
     private WmClient wm;
+    /** Undoes the session when the cable is pulled and the window daemon went with it. */
+    private UnplugWatch unplug;
 
     /** a11y window id -> live caption host. */
     /**
@@ -298,6 +300,11 @@ public final class CaptionService extends AccessibilityService {
         // gesture dispatch has no such floor, so the Web viewer's control
         // still works on a phone this service can draw nothing on.
         live = this;
+        // Ahead of the API floor below, which the cable-pulled undo does not share.
+        if (unplug == null) {
+            unplug = new UnplugWatch(this, () -> main.post(this::disableSelf));
+            unplug.start();
+        }
         if (android.os.Build.VERSION.SDK_INT < 34) {
             // attachAccessibilityOverlayToWindow is API 34. Below that there is no way to
             // get a surface into another app's window, so the service is inert rather
@@ -349,6 +356,7 @@ public final class CaptionService extends AccessibilityService {
     public void onDestroy() {
         running = false;
         live = null;
+        if (unplug != null) unplug.stop();
         try {
             unregisterReceiver(restoreReceiver);
         } catch (Exception ignored) {

@@ -285,16 +285,32 @@ client's clipboard only while that client stays — and the new connection gets
 it.
 
 A DeX session on the same cable is another matter: pulling the cable ends it,
-and ten seconds later the window daemon's dead-man switch undoes the session on
-the phone — its settings, the caption service, the grants — force-stopping the
-launcher, the Linux desktop with it. (It was a minute; ten seconds is the PC
-re-arming it every two, `WATCHDOG_TTL_SECS`, and the daemon looking every
-second.) That switch sends the same "bring remote access back" broadcast the PC
-sends after its own force-stop (`WmDaemon.cleanup`); before, a phone unplugged
-mid-session stayed unreachable over SSH and the desktop window until something
-else restarted the app. A phone plugged back in after the switch went off gets
-its DeX session set up again from the start (`desktop:relaunch`), not just a
-new display over a profile that is no longer there.
+and about ten seconds later the phone undoes the session by itself — its
+settings and the caption service. Two things there can do it:
+
+- **The window daemon's dead-man switch** (`WmDaemon.cleanup`) does all of it,
+  the grants included. The PC re-arms it every two seconds
+  (`WATCHDOG_TTL_SECS`, ten seconds; it was a minute) and it looks every second.
+- **The launcher** (`UnplugWatch`), for when the daemon is dead. A restarting
+  adbd kills the daemon — init kills adbd's whole cgroup, `setsid` or not — and
+  the S25 Ultra restarts adbd three seconds after every unplug, before the
+  switch trips. So the launcher keeps a copy of the switch (the daemon's
+  `ARMED`) and, holding WRITE_SECURE_SETTINGS for the session (granted at
+  deploy, revoked by `restore_phone` and by the daemon's own undo), writes the
+  settings back itself, then turns the caption service off. The app-ops, the
+  widget whitelist and the pointer speed need the shell's uid and wait for the
+  PC.
+
+Neither undoes anything while the phone sits on a computer's USB port: the
+cable is still in or already back, and the PC is about to set the desktop up
+again. The launcher's Linux keeps running through all of it, so a desktop
+window carries on over Wi-Fi, and a phone plugged back in gets DeX set up
+again around it (`desktop:relaunch` with `resume`: no reinstall, no
+force-stop), not just a new display over a profile that is no longer there.
+Only with no Linux running does the daemon force-stop the launcher, and then
+it sends the same "bring remote access back" broadcast the PC sends after its
+own force-stop; before, a phone unplugged mid-session stayed unreachable over
+SSH and the desktop window until something else restarted the app.
 
 ## Verified, and not yet
 

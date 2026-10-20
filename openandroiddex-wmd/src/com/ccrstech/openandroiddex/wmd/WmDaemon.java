@@ -43,6 +43,7 @@ import java.util.List;
  *   AUDIOROUTE SET <type> <address|->         -> OK          pin media to a phone output
  *   AUDIOROUTE CLEAR                          -> OK          back to the phone's own policy
  *   ARM <ttlSeconds> <settings chain…>        -> OK          refresh the dead-man switch
+ *   ARMED                                     -> OK <ttlSeconds> <settings chain…> / NONE
  *   REQPUT <id> <cmd> <arg…>                  -> OK          launcher raises a PC request
  *   REQGET                                    -> REQ <id> <cmd> <arg…> … / END
  *   REQACK <id>                               -> OK          drop rows with id <= N
@@ -377,6 +378,17 @@ public final class WmDaemon {
                 undoGlobals = sb.toString();
                 lastArmMs = System.currentTimeMillis();
                 out.println("OK");
+                return;
+            }
+
+            case "ARMED": {
+                // The launcher's copy of the switch. adbd takes this process down
+                // with it whenever it restarts — on the S25 Ultra, three seconds
+                // after every unplug — and the launcher, an app process, outlives
+                // that and does the settings half of the undo itself (see
+                // CaptionService's unplug watch). Reading it is not proof of life.
+                String g = undoGlobals;
+                out.println(g == null ? "NONE" : "OK " + (ttlMs / 1000L) + " " + g);
                 return;
             }
 
@@ -784,10 +796,13 @@ public final class WmDaemon {
     // desktop vanishes but the phone keeps freeform windowing, a relaxed hidden-API
     // policy, our accessibility service, a granted overlay app-op, and this process.
     //
-    // Nothing else on the phone can clean that up. The launcher is an ordinary app uid:
-    // it cannot write secure settings, cannot reset an app-op and cannot kill this
-    // process. This one runs at uid 2000 — the same authority the PC's `adb shell` had —
-    // and `setsid` means it outlives the cable. So it does the undo itself.
+    // This one runs at uid 2000 — the same authority the PC's `adb shell` had — so it
+    // does the undo itself. `setsid` does NOT make it outlive the cable everywhere:
+    // when adbd restarts, init kills adbd's whole cgroup, and this process is in it.
+    // The S25 Ultra restarts adbd three seconds after every unplug. So the launcher
+    // keeps a copy of the undo (ARMED) and, holding WRITE_SECURE_SETTINGS for the
+    // session, puts the settings back itself once this process is gone; the app-ops,
+    // the widget whitelist and the pointer speed wait for the PC.
 
     /** Last ARM from the PC. Only ARM refreshes it; see the verb for why. */
     private static volatile long lastArmMs = 0L;
@@ -919,9 +934,13 @@ public final class WmDaemon {
         // the user ever seeing a prompt. Widgets already on the desktop stay
         // bound; this only closes the door on silent NEW binds. No-op (an error
         // string, swallowed) before Android 12, which has no `cmd appwidget`.
+        // WRITE_SECURE_SETTINGS goes the same way: the PC grants it for the session
+        // so the launcher can do this undo when this process cannot. A development
+        // permission, so taking it back does not kill the app, Linux included.
         sh("appops set " + LAUNCHER + " SYSTEM_ALERT_WINDOW default; "
                 + "appops set " + LAUNCHER + " ACCESS_RESTRICTED_SETTINGS default; "
-                + "cmd appwidget revokebind --package " + LAUNCHER + " --user 0");
+                + "cmd appwidget revokebind --package " + LAUNCHER + " --user 0; "
+                + "pm revoke " + LAUNCHER + " android.permission.WRITE_SECURE_SETTINGS");
 
         // The launcher's own Linux, when it is running, is somebody's session: a
         // computer's desktop window carries on over Wi-Fi once the cable is out,

@@ -1,10 +1,18 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
 
     <!-- Taskbar floats above app windows as a TYPE_APPLICATION_OVERLAY.
          Must be DECLARED here or `appops set SYSTEM_ALERT_WINDOW allow`
          silently stays "default" and canDrawOverlays() returns false. -->
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+
+    <!-- The cable-pulled undo (UnplugWatch): a restarting adbd kills the window
+         daemon that would otherwise put the phone's settings back. Granted by
+         the PC over adb (`pm grant`) for a desktop session and revoked when it
+         ends; declared here or the grant is refused. -->
+    <uses-permission android:name="android.permission.WRITE_SECURE_SETTINGS"
+        tools:ignore="ProtectedPermissions" />
 
     <!-- Home button: bring the desktop task back over app windows -->
     <uses-permission android:name="android.permission.REORDER_TASKS" />
