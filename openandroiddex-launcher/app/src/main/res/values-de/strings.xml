@@ -338,10 +338,12 @@
     <string name="st_nav_clipboard_sub">Sync · Inhalt · Verlauf</string>
     <string name="st_resolution">Anzeigeauflösung</string>
     <string name="st_res_note">Eine andere Auflösung behält deine Anzeigegröße bei — sie wird dafür neu berechnet.</string>
+    <string name="st_res_auto">Wie der Bildschirm des Computers</string>
+    <string name="st_res_auto_sub">Standard — so scharf wie dieser Bildschirm</string>
     <string name="st_res_720">Am sparsamsten mit Bandbreite</string>
     <string name="st_res_900">Ein Mittelweg</string>
-    <string name="st_res_1080">Standard — auf den meisten Monitoren scharf</string>
-    <string name="st_res_1440">Am schärfsten; braucht eine schnelle Verbindung</string>
+    <string name="st_res_1080">Auf den meisten Monitoren scharf</string>
+    <string name="st_res_1440">Sehr scharf; braucht eine schnelle Verbindung</string>
     <string name="st_codec">Video-Codec</string>
     <string name="st_codec_auto">Automatisch</string>
     <string name="st_codec_auto_sub">scrcpy entscheiden lassen (meist H.264)</string>
@@ -358,6 +360,8 @@
     <string name="st_encoder_none">Dieses Telefon hat keinen Encoder für den gewählten Codec.</string>
     <string name="st_bitrate">Video-Bitrate</string>
     <string name="st_bitrate_value">%1$d Mbit/s</string>
+    <string name="st_bitrate_auto">Automatisch</string>
+    <string name="st_bitrate_auto_sub">Standard — mehr für einen größeren, schärferen Desktop</string>
     <string name="st_default_suffix">Standard</string>
     <string name="st_fps">Bildratenlimit</string>
     <string name="st_fps_value">%1$d fps</string>

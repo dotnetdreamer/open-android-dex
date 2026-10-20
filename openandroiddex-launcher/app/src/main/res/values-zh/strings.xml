@@ -338,10 +338,12 @@
     <string name="st_nav_clipboard_sub">同步 · 当前内容 · 历史</string>
     <string name="st_resolution">显示分辨率</string>
     <string name="st_res_note">更改分辨率会保留你的显示尺寸预设，并按新分辨率重新计算。</string>
+    <string name="st_res_auto">与电脑屏幕一致</string>
+    <string name="st_res_auto_sub">默认 — 与该屏幕一样清晰</string>
     <string name="st_res_720">最省带宽</string>
     <string name="st_res_900">折中选择</string>
-    <string name="st_res_1080">默认 — 在多数显示器上清晰</string>
-    <string name="st_res_1440">最清晰；需要较快的连接</string>
+    <string name="st_res_1080">在多数显示器上清晰</string>
+    <string name="st_res_1440">非常清晰；需要较快的连接</string>
     <string name="st_codec">视频编解码</string>
     <string name="st_codec_auto">自动</string>
     <string name="st_codec_auto_sub">交给 scrcpy 决定（多数手机为 H.264）</string>
@@ -358,6 +360,8 @@
     <string name="st_encoder_none">此手机没有所选编解码的编码器。</string>
     <string name="st_bitrate">视频码率</string>
     <string name="st_bitrate_value">%1$d Mbps</string>
+    <string name="st_bitrate_auto">自动</string>
+    <string name="st_bitrate_auto_sub">默认 — 桌面越大越清晰，码率越高</string>
     <string name="st_default_suffix">默认</string>
     <string name="st_fps">帧率上限</string>
     <string name="st_fps_value">%1$d fps</string>

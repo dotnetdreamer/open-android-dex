@@ -487,13 +487,36 @@ final class LinuxWm {
      * Linux app is the size an Android one is beside it.
      */
     private void publishSettings() throws IOException {
-        Map<String, Object> s = new LinkedHashMap<>(opt.settings);
-        s.put("Xft/DPI", opt.dpi * 1024);
-        byte[] blob = xsettings(s, ++settingsSerial);
+        byte[] blob = xsettings(atDpi(opt.settings, opt.dpi), ++settingsSerial);
         x.changeProperty(self, aXsettingsSettings, aXsettingsSettings, 8, blob, blob.length);
         x.setSelectionOwner(self, aXsettingsS0, X11.CURRENT_TIME);
         x.sendClientMessage(x.root, X11.STRUCTURE_NOTIFY_MASK, x.root, aManager, X11.CURRENT_TIME,
                 aXsettingsS0, self);
+    }
+
+    /**
+     * The guest's settings at the desktop display's DPI.
+     *
+     * Up to about 1.75x of 96 that is the font DPI alone, as before: text grows,
+     * widgets and icons stay drawn at one pixel per pixel. Past it — a desktop
+     * fitted to a Retina or 4K screen is 192 here — that would be big text in
+     * small widgets, so GTK is also told to draw everything at a whole multiple
+     * (Gdk/WindowScalingFactor) with the font DPI left over beside it
+     * (Gdk/UnscaledDPI), the way GNOME publishes a HiDPI screen. Chromium,
+     * Electron and Firefox take their scale from the same values.
+     *
+     * The guest's own xsettings.xml pins WindowScalingFactor at 1 for the XFCE
+     * desktop on :1, which goes out over VNC and is scaled by the viewer; these
+     * windows are composited one X pixel per Android pixel, so the scale is
+     * theirs to have and is set here over it.
+     */
+    static Map<String, Object> atDpi(Map<String, Object> settings, int dpi) {
+        Map<String, Object> s = new LinkedHashMap<>(settings);
+        int scale = Math.max(1, (int) Math.floor(dpi / 96.0 + 0.25));
+        s.put("Gdk/WindowScalingFactor", scale);
+        s.put("Gdk/UnscaledDPI", Math.round(dpi * 1024f / scale));
+        s.put("Xft/DPI", dpi * 1024);
+        return s;
     }
 
     /** The XSETTINGS wire format: little-endian, Integer and String settings, each stamped with the serial. */

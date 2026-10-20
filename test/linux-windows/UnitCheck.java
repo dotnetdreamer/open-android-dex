@@ -252,6 +252,32 @@ public final class UnitCheck {
         check("XSETTINGS: little-endian, the serial, the count", order == 0 && serial == 7 && n == 2, serial + "/" + n);
         check("…and every setting reads back, each carrying the serial", back.equals(s) && serials, back);
         check("…to the last byte", !b.hasRemaining(), b.remaining());
+
+        // The desktop's DPI over the guest's own settings (LinuxWm.atDpi).
+        Map<String, Object> guest = new LinkedHashMap<>();
+        guest.put("Net/ThemeName", "Arc-Dark");
+        guest.put("Gdk/WindowScalingFactor", 1);     // what the guest's xsettings.xml pins
+        Map<String, Object> at96 = LinuxWm.atDpi(guest, 96);
+        check("XSETTINGS: at 96 dpi, scale 1 and the font DPI as it was",
+                Integer.valueOf(1).equals(at96.get("Gdk/WindowScalingFactor"))
+                        && Integer.valueOf(96 * 1024).equals(at96.get("Xft/DPI"))
+                        && Integer.valueOf(96 * 1024).equals(at96.get("Gdk/UnscaledDPI"))
+                        && "Arc-Dark".equals(at96.get("Net/ThemeName")), at96);
+        Map<String, Object> at144 = LinuxWm.atDpi(guest, 144);
+        check("XSETTINGS: 1.5x is still font DPI alone, widgets at one pixel per pixel",
+                Integer.valueOf(1).equals(at144.get("Gdk/WindowScalingFactor"))
+                        && Integer.valueOf(144 * 1024).equals(at144.get("Xft/DPI")), at144);
+        Map<String, Object> at192 = LinuxWm.atDpi(guest, 192);
+        check("XSETTINGS: a desktop fitted to a 2x screen draws GTK at 2x, over the guest's pinned 1",
+                Integer.valueOf(2).equals(at192.get("Gdk/WindowScalingFactor"))
+                        && Integer.valueOf(192 * 1024).equals(at192.get("Xft/DPI"))
+                        && Integer.valueOf(96 * 1024).equals(at192.get("Gdk/UnscaledDPI")), at192);
+        Map<String, Object> at240 = LinuxWm.atDpi(guest, 240);
+        check("XSETTINGS: …and its Large preset keeps 2x with the extra in the font DPI",
+                Integer.valueOf(2).equals(at240.get("Gdk/WindowScalingFactor"))
+                        && Integer.valueOf(120 * 1024).equals(at240.get("Gdk/UnscaledDPI")), at240);
+        check("XSETTINGS: the guest's own map is left as it was",
+                guest.size() == 2 && Integer.valueOf(1).equals(guest.get("Gdk/WindowScalingFactor")), guest);
     }
 
     // ── damage ──

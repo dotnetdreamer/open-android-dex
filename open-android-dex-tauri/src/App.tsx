@@ -25,6 +25,12 @@ import type {
 
 const appWindow = getCurrentWindow();
 
+/**
+ * The desktop's size when there is no screen to fit it to. Normally the Rust
+ * side replaces it with the computer's own screen, in its own pixels, with the
+ * density and bit rate to match (src-tauri/src/display.rs); a resolution picked
+ * in the phone's Settings replaces it as well.
+ */
 const DESKTOP_RES = "1920x1080";
 
 /**
@@ -43,6 +49,8 @@ function desktopOptions(d: DeviceInfo): MirrorOptions {
     newDisplay: DESKTOP_RES,
     vdNoDecorations: true, // our launcher is the only desktop surface
     maxSize: 0,
+    // scrcpy's own 8 Mbps, for that 1080p — scaled with the display's pixels on
+    // the Rust side unless a rate was picked in Settings
     videoBitRateMbps: 8,
     maxFps: 0,
     audio: true,

@@ -226,7 +226,10 @@ Two more that were visual rather than silent:
   very signal used to find the desktop.
 - **`setAppBounds` outlives its owner binder.** Clear it explicitly; a crashed host
   otherwise leaves every app short by the strip height.
-- **Match the platform caption's height, and only ever grow to it.** One UI's is 40 px here.
+- **Match the platform caption's height, and only ever grow to it.** One UI's is 40 dp here
+  — 40 px at the 160 dpi this was measured at, 80 on a desktop fitted to a Retina screen,
+  which is why CaptionService converts every size at the display's density
+  (`doc/sharp-desktop.md`).
   Measuring and assigning (`return h`) is not enough: our own bar is *itself* an
   accessibility window at the same origin and width, so a measurement can land on us and
   latch the height at whatever we last drew. That is how a 34 px bar survived under a 40 px

@@ -69,6 +69,9 @@ windows-sys = { version = "0.60", features = [
     # GetAsyncKeyState and the VK_* codes, so the Escape hook can tell a bare
     # Escape from Ctrl+Escape — which is the Start menu, and not ours to eat.
     "Win32_UI_Input_KeyboardAndMouse",
+    # AdjustWindowRectExForDpi: the frame scrcpy's window will get, so its
+    # content can be placed one pixel for one on the screen (display.rs).
+    "Win32_UI_HiDpi",
 ] }
 
 # Native window control for the spawned scrcpy windows (embed/macos.rs).
@@ -96,6 +99,8 @@ objc2-foundation = { version = "0.3", default-features = false, features = [
     "std",
     "NSSet",
     "NSEnumerator",
+    # NSRect and friends, for the title bar measurement in display.rs.
+    "NSGeometry",
 ] }
 # Quartz Event Services, for the trackpad tap. Already in the tree via
 # objc2-app-kit, so this adds resolution rather than compilation — and unlike
@@ -125,6 +130,9 @@ objc2-app-kit = { version = "0.3", default-features = false, features = [
     "NSResponder",
     "NSView",
     "NSWorkspace",
+    # frameRectForContentRect:styleMask: — how tall the title bar of the
+    # desktop's window will be (display.rs).
+    "NSWindow",
     # …and eventWithCGEvent: is gated behind the CoreGraphics bridge.
     "objc2-core-graphics",
 ] }

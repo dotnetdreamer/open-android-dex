@@ -338,10 +338,12 @@
     <string name="st_nav_clipboard_sub">सिंक · मौजूदा · इतिहास</string>
     <string name="st_resolution">डिस्प्ले रिज़ॉल्यूशन</string>
     <string name="st_res_note">इसे बदलने पर आपका डिस्प्ले-साइज़ प्रीसेट बना रहता है, नए रिज़ॉल्यूशन के लिए दोबारा गणना करके।</string>
+    <string name="st_res_auto">कंप्यूटर की स्क्रीन जितना</string>
+    <string name="st_res_auto_sub">डिफ़ॉल्ट — उस स्क्रीन जितना साफ़</string>
     <string name="st_res_720">बैंडविड्थ पर सबसे हल्का</string>
     <string name="st_res_900">बीच का रास्ता</string>
-    <string name="st_res_1080">डिफ़ॉल्ट — ज़्यादातर मॉनिटर पर साफ़</string>
-    <string name="st_res_1440">सबसे साफ़; तेज़ कनेक्शन चाहिए</string>
+    <string name="st_res_1080">ज़्यादातर मॉनिटर पर साफ़</string>
+    <string name="st_res_1440">बहुत साफ़; तेज़ कनेक्शन चाहिए</string>
     <string name="st_codec">वीडियो कोडेक</string>
     <string name="st_codec_auto">स्वचालित</string>
     <string name="st_codec_auto_sub">scrcpy को चुनने दें (ज़्यादातर फ़ोन पर H.264)</string>
@@ -358,6 +360,8 @@
     <string name="st_encoder_none">इस फ़ोन में चुने गए कोडेक के लिए कोई एन्कोडर नहीं है।</string>
     <string name="st_bitrate">वीडियो बिट रेट</string>
     <string name="st_bitrate_value">%1$d Mbps</string>
+    <string name="st_bitrate_auto">स्वचालित</string>
+    <string name="st_bitrate_auto_sub">डिफ़ॉल्ट — बड़े, ज़्यादा साफ़ डेस्कटॉप के लिए ज़्यादा</string>
     <string name="st_default_suffix">डिफ़ॉल्ट</string>
     <string name="st_fps">फ़्रेम दर सीमा</string>
     <string name="st_fps_value">%1$d fps</string>

@@ -338,10 +338,12 @@
     <string name="st_nav_clipboard_sub">Synchro · Contenu · Historique</string>
     <string name="st_resolution">Résolution d\'affichage</string>
     <string name="st_res_note">Changer de résolution conserve votre préréglage de taille d\'affichage, recalculé pour la nouvelle.</string>
+    <string name="st_res_auto">Comme l’écran de l’ordinateur</string>
+    <string name="st_res_auto_sub">Par défaut — aussi nette que cet écran</string>
     <string name="st_res_720">La plus légère en bande passante</string>
     <string name="st_res_900">Un entre-deux</string>
-    <string name="st_res_1080">Par défaut — nette sur la plupart des écrans</string>
-    <string name="st_res_1440">La plus nette ; demande un lien rapide</string>
+    <string name="st_res_1080">Nette sur la plupart des écrans</string>
+    <string name="st_res_1440">Très nette ; demande un lien rapide</string>
     <string name="st_codec">Codec vidéo</string>
     <string name="st_codec_auto">Automatique</string>
     <string name="st_codec_auto_sub">Laisser scrcpy choisir (H.264 le plus souvent)</string>
@@ -358,6 +360,8 @@
     <string name="st_encoder_none">Ce téléphone n\'a pas d\'encodeur pour le codec choisi.</string>
     <string name="st_bitrate">Débit vidéo</string>
     <string name="st_bitrate_value">%1$d Mb/s</string>
+    <string name="st_bitrate_auto">Automatique</string>
+    <string name="st_bitrate_auto_sub">Par défaut — davantage pour un bureau plus grand et plus net</string>
     <string name="st_default_suffix">Par défaut</string>
     <string name="st_fps">Limite d\'images</string>
     <string name="st_fps_value">%1$d ips</string>

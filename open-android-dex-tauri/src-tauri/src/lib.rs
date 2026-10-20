@@ -1,5 +1,6 @@
 mod adb;
 mod diag;
+mod display;
 mod embed;
 mod files;
 mod gestures;
@@ -113,6 +114,10 @@ pub fn run() {
         })
         .setup(|app| {
             diag::log_startup(&app.handle().clone());
+            // The desktop's window is opened at the exact size of its content,
+            // which on a Mac means knowing the title bar above it — and AppKit
+            // only answers that on this thread.
+            display::measure_window_frame();
             // Each paired phone's ProxyCommand names this binary by path, and
             // an update or a move changes that path. Rewritten on every start
             // so `ssh <phone>` follows the app wherever it is.

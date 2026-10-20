@@ -64,9 +64,6 @@ import java.util.Locale;
  */
 public class SettingsActivity extends Activity {
 
-    /** Kept as the historical name so an upgrade does not lose the choice. */
-    static final String KEY_DENSITY = DexPrefs.KEY_DENSITY;
-
     private static final String SEC_DISPLAY = "display";
     private static final String SEC_PERF = "performance";
     private static final String SEC_LANGUAGE = "language";
@@ -85,9 +82,6 @@ public class SettingsActivity extends Activity {
     private static final String REPO_URL = "https://github.com/dotnetdreamer/open-android-dex";
     private static final String RELEASES_URL = REPO_URL + "/releases/latest";
     private static final String WMD_URL = REPO_URL + "/tree/main/openandroiddex-wmd";
-
-    /** Relative UI scale, over a 160dpi-at-1080p desktop baseline. */
-    private static final float[] SIZE_FACTORS = {0.75f, 0.875f, 1f, 1.25f, 1.5f};
 
     private DexTheme theme;
     private int[] presetDpis;
@@ -174,7 +168,7 @@ public class SettingsActivity extends Activity {
             showingContent = savedInstanceState.getBoolean("showingContent", false);
         }
         presetDpis = computePresets();
-        densityIndex = selectedDensityIndex();
+        densityIndex = DexPrefs.sizeIndex(this);
         buildNavs();
         buildUi();
         IntentFilter filter = new IntentFilter(DexPrefs.ACTION_CHANGED);
@@ -2291,16 +2285,20 @@ public class SettingsActivity extends Activity {
         cardHeader(resCard, s(R.string.st_resolution));
         String res = DexPrefs.getString(this, DexPrefs.KEY_RESOLUTION, DexPrefs.DEF_RESOLUTION);
         String[][] resolutions = {
+                // The desktop app makes the display the size of the computer's
+                // screen, in its own pixels, and shows it one for one.
+                {"auto", s(R.string.st_res_auto), s(R.string.st_res_auto_sub)},
                 {"1280x720", "1280 × 720", s(R.string.st_res_720)},
                 {"1600x900", "1600 × 900", s(R.string.st_res_900)},
                 {"1920x1080", "1920 × 1080", s(R.string.st_res_1080)},
                 {"2560x1440", "2560 × 1440", s(R.string.st_res_1440)},
         };
         for (String[] entry : resolutions) {
+            // The Display size preset needs no carrying over: it is a multiple
+            // of whatever Default the next display is made with.
             choiceRow(resCard, null, entry[1], entry[2], entry[0].equals(res),
                     () -> {
                         pcConfig(DexPrefs.KEY_RESOLUTION, entry[0]);
-                        rescaleDensityFor(entry[0]);
                         showSection(SEC_STREAM, false);
                     });
         }
@@ -2355,6 +2353,13 @@ public class SettingsActivity extends Activity {
         LinearLayout perfCard = card(body);
         cardHeader(perfCard, s(R.string.st_bitrate));
         int bitrate = DexPrefs.getInt(this, DexPrefs.KEY_BITRATE, DexPrefs.DEF_BITRATE);
+        // 0: the desktop app picks, scaling 8 Mbps at 1080p to the display's
+        // pixels — a sharper desktop needs more to look as good moving.
+        choiceRow(perfCard, null, s(R.string.st_bitrate_auto), s(R.string.st_bitrate_auto_sub),
+                bitrate == 0, () -> {
+                    pcConfig(DexPrefs.KEY_BITRATE, 0);
+                    showSection(SEC_STREAM, false);
+                });
         for (int mbps : new int[]{2, 4, 8, 12, 20}) {
             final int value = mbps;
             choiceRow(perfCard, null, getString(R.string.st_bitrate_value, mbps),
@@ -2818,8 +2823,8 @@ public class SettingsActivity extends Activity {
                 DexPrefs.KEY_GESTURES, DexPrefs.KEY_GESTURE_3UP,
                 DexPrefs.KEY_GESTURE_3DOWN, DexPrefs.KEY_GESTURE_3LEFT,
                 DexPrefs.KEY_GESTURE_3RIGHT, DexPrefs.KEY_GESTURE_3TAP));
-        scopes.add(new ResetScope(R.string.st_scope_display, DexPrefs.KEY_DENSITY,
-                DexPrefs.KEY_LANGUAGE));
+        scopes.add(new ResetScope(R.string.st_scope_display, DexPrefs.KEY_SIZE_INDEX,
+                DexPrefs.KEY_DENSITY, DexPrefs.KEY_LANGUAGE));
 
         Dialog dialog = new Dialog(this);
         LinearLayout panel = dialogPanel(dialog, "⚠", theme.danger,
@@ -2911,7 +2916,7 @@ public class SettingsActivity extends Activity {
             if (!scope.checked) continue;
             for (String key : scope.keys) {
                 editor.remove(key);
-                if (DexPrefs.KEY_DENSITY.equals(key)) density = true;
+                if (DexPrefs.KEY_SIZE_INDEX.equals(key)) density = true;
                 if (key.startsWith(DexPrefs.PC_PREFIX)) stream = true;
                 if (DesktopGrid.KEY_WIDGETS.equals(key)) widgets = true;
                 if (DexPrefs.KEY_PERF.equals(key)) clearingPerf = true;
@@ -2941,9 +2946,7 @@ public class SettingsActivity extends Activity {
         if (density) {
             // back to the "Default" preset for this display, the same value a
             // never-configured desktop gets
-            Point size = new Point();
-            getWindowManager().getDefaultDisplay().getRealSize(size);
-            RequestProvider.enqueue("density", String.valueOf(defaultDpi(size.x, size.y)));
+            RequestProvider.enqueue("density", String.valueOf(defaultDensity()));
         }
         DexPrefs.broadcast(this, "*");
         Toast.makeText(this, s(R.string.st_factory_done), Toast.LENGTH_LONG).show();
@@ -3073,69 +3076,41 @@ public class SettingsActivity extends Activity {
     // ── display size ──
 
     /**
-     * The "Default" preset for a display: 160dpi at 1080p, scaled by
-     * resolution. Also the density LauncherActivity auto-applies to a fresh
-     * desktop before the user makes any choice.
+     * The "Default" of a display the desktop app did not say the Default of:
+     * 160dpi at 1080p, scaled by resolution, so it is 1080 dp tall — MUST match
+     * default_density in the desktop app's scrcpy.rs. A desktop app that fits
+     * the display to the computer's screen sends its own (base_dpi), which
+     * wins: see {@link #defaultDensity}.
      */
     static int defaultDpi(int w, int h) {
         return Math.round(160f * Math.min(w, h) / 1080f);
     }
 
     /**
-     * Carry the chosen display size across a resolution change.
-     *
-     * Display size is stored as an absolute dpi, but it MEANS a preset — 160dpi
-     * is "Default" at 1080p and far too small at 1440p. Without this, picking a
-     * new resolution would silently change how big everything looks. The stored
-     * dpi is therefore recomputed for the resolution that is about to be
-     * created, keeping the same preset.
-     *
-     * Written straight to prefs, with no `density` request: the display it
-     * applies to does not exist yet. The launcher enqueues it on the next start
-     * (see reapplyDensity), which is the one moment the new display is there.
+     * This display's "Default" preset: the one the desktop app worked out from
+     * the computer's screen — one dp per point of its UI — or, before one has
+     * said, the 1080-dp-tall one of {@link #defaultDpi}.
      */
-    private void rescaleDensityFor(String resolution) {
-        String[] parts = resolution.split("x");
-        if (parts.length != 2) return;
-        try {
-            int w = Integer.parseInt(parts[0]);
-            int h = Integer.parseInt(parts[1]);
-            int index = Math.max(0, Math.min(densityIndex, SIZE_FACTORS.length - 1));
-            int dpi = Math.round(defaultDpi(w, h) * SIZE_FACTORS[index]);
-            DexPrefs.prefs(this).edit().putInt(DexPrefs.KEY_DENSITY, dpi).apply();
-        } catch (NumberFormatException ignored) {
-            // the list is ours and well-formed; a bad entry just means no rescale
-        }
+    int defaultDensity() {
+        return defaultDensity(this);
     }
 
-    /** Preset dpi values, scaled so 1080p → {120, 140, 160, 200, 240}. */
-    private int[] computePresets() {
+    static int defaultDensity(Activity activity) {
+        int base = DexPrefs.getInt(activity, DexPrefs.KEY_BASE_DPI, -1);
+        if (base > 0) return base;
         Point size = new Point();
-        getWindowManager().getDefaultDisplay().getRealSize(size);
-        int base = defaultDpi(size.x, size.y);
-        int[] out = new int[SIZE_FACTORS.length];
-        for (int i = 0; i < SIZE_FACTORS.length; i++) {
-            out[i] = Math.round(base * SIZE_FACTORS[i]);
+        activity.getWindowManager().getDefaultDisplay().getRealSize(size);
+        return defaultDpi(size.x, size.y);
+    }
+
+    /** Preset dpi values: the Default times {@link DexPrefs#SIZE_FACTORS}. */
+    private int[] computePresets() {
+        int base = defaultDensity();
+        int[] out = new int[DexPrefs.SIZE_FACTORS.length];
+        for (int i = 0; i < DexPrefs.SIZE_FACTORS.length; i++) {
+            out[i] = Math.round(base * DexPrefs.SIZE_FACTORS[i]);
         }
         return out;
-    }
-
-    /**
-     * Preset to highlight: the stored choice, or — before any choice was
-     * made — whichever preset is closest to the display's current density
-     * (a fresh scrcpy display inherits the phone's ~340+ dpi, which reads
-     * as "Very large").
-     */
-    private int selectedDensityIndex() {
-        int stored = DexPrefs.getInt(this, DexPrefs.KEY_DENSITY, -1);
-        int target = stored > 0 ? stored : getResources().getConfiguration().densityDpi;
-        int best = 0;
-        for (int i = 1; i < presetDpis.length; i++) {
-            if (Math.abs(presetDpis[i] - target) < Math.abs(presetDpis[best] - target)) {
-                best = i;
-            }
-        }
-        return best;
     }
 
     /**
@@ -3147,7 +3122,7 @@ public class SettingsActivity extends Activity {
     private void applyDensity(int index) {
         if (index == densityIndex) return;
         densityIndex = index;
-        DexPrefs.prefs(this).edit().putInt(DexPrefs.KEY_DENSITY, presetDpis[index]).apply();
+        DexPrefs.prefs(this).edit().putInt(DexPrefs.KEY_SIZE_INDEX, index).apply();
         RequestProvider.enqueue("density", String.valueOf(presetDpis[index]));
         showSection(SEC_DISPLAY, false);
         Toast.makeText(this, s(R.string.st_display_size_applying), Toast.LENGTH_SHORT).show();

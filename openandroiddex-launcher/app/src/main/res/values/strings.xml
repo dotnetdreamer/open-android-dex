@@ -276,10 +276,12 @@
 
     <string name="st_resolution">Display resolution</string>
     <string name="st_res_note">Changing this keeps your display-size preset, recomputed for the new resolution.</string>
+    <string name="st_res_auto">Match the computer’s screen</string>
+    <string name="st_res_auto_sub">Default — as sharp as that screen</string>
     <string name="st_res_720">Lightest on bandwidth</string>
     <string name="st_res_900">A middle ground</string>
-    <string name="st_res_1080">Default — sharp on most monitors</string>
-    <string name="st_res_1440">Sharpest; needs a fast link</string>
+    <string name="st_res_1080">Sharp on most monitors</string>
+    <string name="st_res_1440">Very sharp; needs a fast link</string>
     <string name="st_codec">Video codec</string>
     <string name="st_codec_auto">Auto</string>
     <string name="st_codec_auto_sub">Let scrcpy choose (H.264 on most phones)</string>
@@ -296,6 +298,8 @@
     <string name="st_encoder_none">This phone has no encoder for the selected codec.</string>
     <string name="st_bitrate">Video bit rate</string>
     <string name="st_bitrate_value">%1$d Mbps</string>
+    <string name="st_bitrate_auto">Auto</string>
+    <string name="st_bitrate_auto_sub">Default — more for a bigger, sharper desktop</string>
     <string name="st_default_suffix">Default</string>
     <string name="st_fps">Frame rate limit</string>
     <string name="st_fps_value">%1$d fps</string>

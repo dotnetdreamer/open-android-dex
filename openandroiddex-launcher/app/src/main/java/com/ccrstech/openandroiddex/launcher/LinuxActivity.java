@@ -499,7 +499,12 @@ public class LinuxActivity extends Activity {
      * The window's own pixels are the right answer on the desktop display: the
      * viewer scales the framebuffer to the stage in CSS px, so a framebuffer
      * sized in device pixels lands 1:1 whatever dpi the display-size preset
-     * picked. They are the wrong answer on the phone's own panel: at density
+     * picked. Up to a point: XFCE draws at 96 dpi whatever happens (its
+     * xsettings pin the scale at 1, for VNC's sake), so on a desktop fitted to
+     * a Retina or 4K screen — 320 dpi, two device pixels per dp — one for one
+     * would make it half the size of everything around it. There it gets whole
+     * device pixels per X pixel ({@link #pixelsPerGuestPixel}), drawn at the
+     * size it always had. They are the wrong answer on the phone's own panel: at density
      * ~2.75 this window is ~972x2062 PIXELS, so Xvnc would be told to make a
      * desktop that shape and the viewer would squeeze it back into ~354 CSS px
      * of width. XFCE's 10 pt menus end up under a millimetre tall, and no
@@ -523,11 +528,23 @@ public class LinuxActivity extends Activity {
             w = 1280;
             h = 800;
         } else {
-            w = Math.max(root.getWidth(), 800);
-            h = Math.max(root.getHeight(), 600);
+            int k = pixelsPerGuestPixel();
+            w = Math.max(root.getWidth() / k, 800);
+            h = Math.max(root.getHeight() / k, 600);
         }
         LinuxService.start(this, w, h);
         DexLog.step("linux", "START " + w + "x" + h);
+    }
+
+    /**
+     * Device pixels per guest pixel on the desktop: 1 around the usual 160 dpi,
+     * 2 from 280 (a desktop fitted to a 2x screen, or 1.75x of one), 3 from 440.
+     * Whole numbers only: the viewer then scales by exactly that, and XFCE's
+     * one-pixel lines stay one pixel wide instead of smearing across two.
+     */
+    private int pixelsPerGuestPixel() {
+        int dpi = getResources().getDisplayMetrics().densityDpi;
+        return Math.max(1, (int) Math.floor(dpi / 160.0 + 0.25));
     }
 
     /**

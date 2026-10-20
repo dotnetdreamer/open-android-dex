@@ -338,10 +338,12 @@
     <string name="st_nav_clipboard_sub">المزامنة · المحتوى · السجل</string>
     <string name="st_resolution">دقة العرض</string>
     <string name="st_res_note">تغييرها يحافظ على إعداد حجم العرض لديك، مع إعادة حسابه للدقة الجديدة.</string>
+    <string name="st_res_auto">مطابقة شاشة الكمبيوتر</string>
+    <string name="st_res_auto_sub">الافتراضية — بأقصى وضوح تتيحه تلك الشاشة</string>
     <string name="st_res_720">الأخف على النطاق الترددي</string>
     <string name="st_res_900">حل وسط</string>
-    <string name="st_res_1080">الافتراضية — واضحة على معظم الشاشات</string>
-    <string name="st_res_1440">الأوضح؛ تحتاج اتصالاً سريعاً</string>
+    <string name="st_res_1080">واضحة على معظم الشاشات</string>
+    <string name="st_res_1440">واضحة جداً؛ تحتاج اتصالاً سريعاً</string>
     <string name="st_codec">ترميز الفيديو</string>
     <string name="st_codec_auto">تلقائي</string>
     <string name="st_codec_auto_sub">دع scrcpy يختار (H.264 على معظم الهواتف)</string>
@@ -358,6 +360,8 @@
     <string name="st_encoder_none">لا يملك هذا الهاتف مُرمِّزاً للترميز المختار.</string>
     <string name="st_bitrate">معدل بت الفيديو</string>
     <string name="st_bitrate_value">%1$d ميجابت/ث</string>
+    <string name="st_bitrate_auto">تلقائي</string>
+    <string name="st_bitrate_auto_sub">الافتراضي — أعلى لسطح مكتب أكبر وأوضح</string>
     <string name="st_default_suffix">الافتراضي</string>
     <string name="st_fps">حد معدل الإطارات</string>
     <string name="st_fps_value">%1$d إطار/ث</string>

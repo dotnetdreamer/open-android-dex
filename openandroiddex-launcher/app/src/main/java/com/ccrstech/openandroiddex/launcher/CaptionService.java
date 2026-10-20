@@ -192,23 +192,23 @@ public final class CaptionService extends AccessibilityService {
     }
 
     /**
-     * Fallback caption height in px on the desktop display (density 1.0, so px == dp).
+     * Fallback caption height in dp on the desktop display.
      *
      * Used only when One UI's own decoration cannot be measured. Our bar must be at least
      * as tall as the platform's caption, otherwise the difference shows as a sliver of the
-     * old title bar peeking out underneath ours — One UI's is 40 px on this device.
+     * old title bar peeking out underneath ours — One UI's is 40 dp on this device.
      */
-    private static final int CAPTION_PX = 40;
+    private static final int CAPTION_DP = 40;
 
     /** A candidate taller than this is the app window, not a caption. */
-    private static final int CAPTION_MAX_PX = 72;
+    private static final int CAPTION_MAX_DP = 72;
 
     /** taskId -> caption height actually in use, measured from the platform decor. */
     private final Map<Integer, Integer> captionHeights = new HashMap<>();
 
     private int captionHeight(int taskId) {
         Integer h = captionHeights.get(taskId);
-        return h == null ? CAPTION_PX : h;
+        return h == null ? px(CAPTION_DP) : h;
     }
 
     /** Poll cadence for reconciling captions against the live task list, when idle. */
@@ -580,6 +580,7 @@ public final class CaptionService extends AccessibilityService {
 
     /** @return true if any caption geometry changed, i.e. windows are on the move. */
     private boolean applyTasks(int display, List<WmClient.Task> live) {
+        trackDensity(display);
         moved = false;
         tasks.clear();
         // Kept in the daemon's order — TOPMOST FIRST — because stacking depends on it.
@@ -824,13 +825,13 @@ public final class CaptionService extends AccessibilityService {
         android.graphics.Rect r = new android.graphics.Rect();
         host.getBoundsInScreen(r);
         int h = r.height();
-        if (h > CAPTION_MAX_PX) return CAPTION_PX;   // that was the app window
+        if (h > px(CAPTION_MAX_DP)) return px(CAPTION_DP);   // that was the app window
         // Only ever grow to cover, never shrink to match. Once our bar exists it is itself
         // an accessibility window at the same origin and width as the platform's caption,
         // so a measurement can land on *us* — and a plain `return h` then latches the
         // height at whatever we last drew. Shrinking is what leaves a sliver of the old
         // title bar visible below ours; being a few px too tall costs nothing.
-        return Math.max(h, CAPTION_PX);
+        return Math.max(h, px(CAPTION_DP));
     }
 
     /**
@@ -866,7 +867,7 @@ public final class CaptionService extends AccessibilityService {
             // window blinks out of the list for the odd pass, the fallback also caused a
             // rebuild every time it did, flipping the host back and forth forever.
             // Returning null instead means "keep what this task already has, try again".
-            if (r.height() <= CAPTION_PX * 3
+            if (r.height() <= px(CAPTION_DP) * 3
                     && !isOurs(w)
                     && (decor == null || w.getId() < decor.getId())) {
                 decor = w;
@@ -901,7 +902,7 @@ public final class CaptionService extends AccessibilityService {
             w.getBoundsInScreen(r);
             if (Math.abs(r.left - task.left) > 2 || Math.abs(r.right - task.right) > 2) continue;
             if (Math.abs(r.top - task.top) > 2) continue;
-            if (r.height() <= CAPTION_MAX_PX) continue;      // a caption, or one of ours
+            if (r.height() <= px(CAPTION_MAX_DP)) continue;  // a caption, or one of ours
             if (app == null || w.getId() < app.getId()) app = w;
         }
         return app;
@@ -1057,8 +1058,8 @@ public final class CaptionService extends AccessibilityService {
                 .getDisplay(task.displayId);
         // Views MUST be inflated against the target display's Context, not the service's.
         // The service's resources describe the phone panel (~450dpi); the desktop runs at
-        // 160dpi. Using the wrong one scales every sp/dp by ~2.8 and the caption comes out
-        // enormous.
+        // its own — 160dpi on a 1x screen, 320 on a Retina one. Using the wrong one scales
+        // every sp/dp by up to ~2.8 and the caption comes out enormous.
         final android.content.Context ui = createDisplayContext(display);
 
         Caption c = new Caption();
@@ -1089,7 +1090,7 @@ public final class CaptionService extends AccessibilityService {
         c.title = new TextView(ui);
         c.title.setText(labelFor(task));
         c.title.setTextColor(theme.textDim);
-        // Absolute px against the desktop display: the strip is a fixed CAPTION_PX tall,
+        // Absolute px against the desktop display: the strip is sized in its pixels (px),
         // so the text has to be sized in the same space rather than in scaled sp.
         c.title.setTextSize(TypedValue.COMPLEX_UNIT_PX, px(13));
         c.title.setSingleLine(true);
@@ -1270,9 +1271,47 @@ public final class CaptionService extends AccessibilityService {
         }
     }
 
-    /** px on the desktop display, which runs at density 1.0 — so dp and px coincide. */
-    private static int px(int dp) {
-        return dp;
+    /**
+     * The desktop display's density, as a multiple of 160 dpi — what every size in here is
+     * drawn at. This was written when the desktop ran at 1.0 and px was dp; a display the
+     * desktop app fits to a Retina screen runs at 2.0, and a bar sized at 1.0 there is half
+     * a title bar with One UI's own showing underneath. Followed every pass, see
+     * {@link #trackDensity}.
+     */
+    private float density = 1f;
+
+    /** dp → px on the desktop display. */
+    private int px(int dp) {
+        return Math.round(dp * density);
+    }
+
+    /**
+     * Follow the desktop display's density. On a change — the Display size setting, a new
+     * session on a different computer screen — the bars and the heights measured for them
+     * are in the old pixels, so they are dropped and the next pass builds them again.
+     *
+     * Read off the Display (getRealMetrics), which is current the moment `wm density`
+     * lands: the service's own Resources describe the phone panel, and a display
+     * context's would be one more Context per pass.
+     */
+    private void trackDensity(int display) {
+        float d;
+        try {
+            Display disp = getSystemService(android.hardware.display.DisplayManager.class)
+                    .getDisplay(display);
+            if (disp == null) return;
+            android.util.DisplayMetrics dm = new android.util.DisplayMetrics();
+            disp.getRealMetrics(dm);
+            d = dm.densityDpi / 160f;
+        } catch (Throwable t) {
+            return;
+        }
+        if (d <= 0f || d == density) return;
+        density = d;
+        for (int i = 0; i < captions.size(); i++) release(captions.valueAt(i));
+        captions.clear();
+        captionHeights.clear();
+        trace("desktop density " + d + " — captions dropped for rebuild");
     }
 
     private LinearLayout.LayoutParams buttonParams(int height) {
@@ -1358,8 +1397,8 @@ public final class CaptionService extends AccessibilityService {
                         // plain TextView, not clickable, so it counts as empty space.
                         if (lastTap != 0
                                 && SystemClock.uptimeMillis() - lastTap <= DOUBLE_TAP_MS
-                                && Math.abs(rawX - lastTapX) <= DOUBLE_TAP_SLOP
-                                && Math.abs(rawY - lastTapY) <= DOUBLE_TAP_SLOP) {
+                                && Math.abs(rawX - lastTapX) <= px(DOUBLE_TAP_SLOP_DP)
+                                && Math.abs(rawY - lastTapY) <= px(DOUBLE_TAP_SLOP_DP)) {
                             lastTap = 0;          // consumed: a third tap starts a new pair
                             dragging = false;
                             onMaximise(task);
@@ -1372,8 +1411,8 @@ public final class CaptionService extends AccessibilityService {
                         return true;
                     case android.view.MotionEvent.ACTION_MOVE:
                         if (!dragging
-                                && Math.abs(rawX - (task.left + grabDx)) < touchSlop
-                                && Math.abs(rawY - (task.top + grabDy)) < touchSlop) {
+                                && Math.abs(rawX - (task.left + grabDx)) < px(TOUCH_SLOP_DP)
+                                && Math.abs(rawY - (task.top + grabDy)) < px(TOUCH_SLOP_DP)) {
                             return true;   // still a tap; let the buttons win
                         }
                         dragging = true;
@@ -1426,18 +1465,19 @@ public final class CaptionService extends AccessibilityService {
         };
     }
 
-    private int touchSlop = 6;
+    /** Movement under this is a click on the bar, not the start of a drag. */
+    private static final int TOUCH_SLOP_DP = 6;
 
     /** Two taps this close together, in time and in space, are a double-click. */
     private static final long DOUBLE_TAP_MS =
             android.view.ViewConfiguration.getDoubleTapTimeout();
     /**
-     * Absolute px on the desktop display, which runs at density 1.0 — the scaled value
-     * from ViewConfiguration describes the phone panel (~450dpi) and would be ~3x too
-     * large here. Deliberately looser than touchSlop: a double-click is aimed once and
-     * clicked twice, and a few px of drift between the two must not lose the gesture.
+     * In the desktop display's dp — the scaled value from ViewConfiguration describes the
+     * phone panel (~450dpi) and would be ~3x too large here. Deliberately looser than
+     * TOUCH_SLOP_DP: a double-click is aimed once and clicked twice, and a few px of drift
+     * between the two must not lose the gesture.
      */
-    private static final int DOUBLE_TAP_SLOP = 24;
+    private static final int DOUBLE_TAP_SLOP_DP = 24;
 
     /**
      * Window title: the top activity's label, falling back to the application
@@ -1683,11 +1723,11 @@ public final class CaptionService extends AccessibilityService {
     /**
      * The taskbar's height in the DESKTOP display's pixels.
      *
-     * Read from a display context rather than through px(int): that helper assumes the
-     * desktop runs at density 1.0, which is only true at the 1080p preset — the others pick
-     * a dpi (SettingsActivity#defaultDpi, pushed by LauncherActivity#reapplyDensity), and the
-     * launcher lays its taskbar out in dp against that same density. This is also why it
-     * cannot come from the service's own Resources, which describe the phone panel.
+     * Read from a display context of its own rather than through px(int), which follows
+     * the display the captions were last laid out on: this one is asked about a display by
+     * id, and the launcher lays its taskbar out in dp against that display's density. This
+     * is also why it cannot come from the service's own Resources, which describe the phone
+     * panel.
      */
     private int taskbarPx(int display) {
         try {

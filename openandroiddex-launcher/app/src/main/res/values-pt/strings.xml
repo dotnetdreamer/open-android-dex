@@ -338,10 +338,12 @@
     <string name="st_nav_clipboard_sub">Sincronização · Atual · Histórico</string>
     <string name="st_resolution">Resolução da tela</string>
     <string name="st_res_note">Mudar isto mantém o seu preset de tamanho da tela, recalculado para a nova resolução.</string>
+    <string name="st_res_auto">Igual ao ecrã do computador</string>
+    <string name="st_res_auto_sub">Padrão — tão nítido como esse ecrã</string>
     <string name="st_res_720">Menor consumo de banda</string>
     <string name="st_res_900">Um meio-termo</string>
-    <string name="st_res_1080">Padrão — nítido na maioria dos monitores</string>
-    <string name="st_res_1440">Mais nítido; exige uma conexão rápida</string>
+    <string name="st_res_1080">Nítido na maioria dos monitores</string>
+    <string name="st_res_1440">Muito nítido; exige uma conexão rápida</string>
     <string name="st_codec">Codec de vídeo</string>
     <string name="st_codec_auto">Automático</string>
     <string name="st_codec_auto_sub">Deixar o scrcpy escolher (H.264 na maioria)</string>
@@ -358,6 +360,8 @@
     <string name="st_encoder_none">Este telefone não tem codificador para o codec escolhido.</string>
     <string name="st_bitrate">Bit rate de vídeo</string>
     <string name="st_bitrate_value">%1$d Mbps</string>
+    <string name="st_bitrate_auto">Automático</string>
+    <string name="st_bitrate_auto_sub">Padrão — mais para um ambiente de trabalho maior e mais nítido</string>
     <string name="st_default_suffix">Padrão</string>
     <string name="st_fps">Limite de quadros</string>
     <string name="st_fps_value">%1$d fps</string>

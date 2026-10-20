@@ -338,10 +338,12 @@
     <string name="st_nav_clipboard_sub">સિંક · હાલનું · ઇતિહાસ</string>
     <string name="st_resolution">ડિસ્પ્લે રિઝોલ્યુશન</string>
     <string name="st_res_note">આ બદલવાથી તમારો ડિસ્પ્લે-માપ પ્રીસેટ જળવાઈ રહે છે, નવા રિઝોલ્યુશન માટે ફરી ગણીને.</string>
+    <string name="st_res_auto">કમ્પ્યુટરની સ્ક્રીન જેટલું</string>
+    <string name="st_res_auto_sub">ડિફોલ્ટ — એ સ્ક્રીન જેટલું સ્પષ્ટ</string>
     <string name="st_res_720">બેન્ડવિડ્થ પર સૌથી હળવું</string>
     <string name="st_res_900">વચ્ચેનો રસ્તો</string>
-    <string name="st_res_1080">ડિફોલ્ટ — મોટા ભાગનાં મોનિટર પર સ્પષ્ટ</string>
-    <string name="st_res_1440">સૌથી સ્પષ્ટ; ઝડપી જોડાણ જોઈએ</string>
+    <string name="st_res_1080">મોટા ભાગનાં મોનિટર પર સ્પષ્ટ</string>
+    <string name="st_res_1440">ખૂબ સ્પષ્ટ; ઝડપી જોડાણ જોઈએ</string>
     <string name="st_codec">વિડિયો કોડેક</string>
     <string name="st_codec_auto">આપોઆપ</string>
     <string name="st_codec_auto_sub">scrcpy ને પસંદ કરવા દો (મોટા ભાગના ફોન પર H.264)</string>
@@ -358,6 +360,8 @@
     <string name="st_encoder_none">આ ફોનમાં પસંદ કરેલા કોડેક માટે કોઈ એન્કોડર નથી.</string>
     <string name="st_bitrate">વિડિયો બિટ રેટ</string>
     <string name="st_bitrate_value">%1$d Mbps</string>
+    <string name="st_bitrate_auto">આપોઆપ</string>
+    <string name="st_bitrate_auto_sub">ડિફોલ્ટ — મોટા, વધુ સ્પષ્ટ ડેસ્કટોપ માટે વધુ</string>
     <string name="st_default_suffix">ડિફોલ્ટ</string>
     <string name="st_fps">ફ્રેમ દર મર્યાદા</string>
     <string name="st_fps_value">%1$d fps</string>

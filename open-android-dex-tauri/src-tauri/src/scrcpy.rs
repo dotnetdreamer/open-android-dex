@@ -11,6 +11,7 @@ use tauri::{AppHandle, Emitter, Manager};
 
 use crate::adb;
 use crate::diag;
+use crate::display;
 use crate::files;
 use crate::shell::ShellSession;
 use crate::transfer;
@@ -109,6 +110,19 @@ pub struct MirrorOptions {
     /// `reconcile_audio_session`. Never set by the frontend.
     #[serde(default)]
     pub audio_only: bool,
+    /// Where scrcpy's window opens and how big, so that a display fitted to
+    /// the screen is shown one pixel for one (display.rs). Worked out on every
+    /// spawn from the screen the app is on, never sent by the frontend.
+    #[serde(skip)]
+    pub window: Option<display::WindowRect>,
+    /// The desktop's Default density, which the Display size presets are
+    /// multiples of: one dp per point of the computer's UI on a fitted
+    /// display, the 1080-dp-tall one on a resolution picked in Settings.
+    #[serde(skip)]
+    pub base_dpi: Option<i32>,
+    /// The display was fitted to the screen rather than picked in Settings.
+    #[serde(skip)]
+    pub fitted: bool,
 }
 
 fn default_true() -> bool {
@@ -187,6 +201,10 @@ pub struct SessionHandle {
     /// `reconcile_audio_session` compares against the stored config to decide
     /// if the audio companion must be cycled. Meaningless for video sessions.
     audio_playback: bool,
+    /// The Default density this attempt was spawned with (-1 = not a desktop):
+    /// what a Display size request is remembered as a multiple of, and what
+    /// the launcher is told to build its presets on.
+    base_dpi: i32,
 }
 
 impl SessionHandle {
@@ -313,6 +331,16 @@ fn build_args(opts: &MirrorOptions) -> Vec<String> {
         if opts.vd_no_decorations {
             args.push("--no-vd-system-decorations".into());
         }
+    }
+    // scrcpy would size the window to fit the screen less a 96-point margin,
+    // which shows a display fitted to the screen at ~0.9x: a little soft, the
+    // one thing the fit is for. These four put its content exactly where the
+    // display shows one for one. The window stays the user's to move after.
+    if let Some(w) = &opts.window {
+        args.push(format!("--window-x={}", w.x));
+        args.push(format!("--window-y={}", w.y));
+        args.push(format!("--window-width={}", w.width));
+        args.push(format!("--window-height={}", w.height));
     }
     if let Some(pkg) = &opts.app_package {
         args.push(format!("--start-app={pkg}"));
@@ -569,6 +597,7 @@ fn spawn_output_reader<R: Read + Send + 'static>(
     app: AppHandle,
     key: String,
     serial: String,
+    codec: Option<String>,
     display_id: Arc<AtomicI32>,
     density: Arc<AtomicI32>,
     display_size: Arc<Mutex<Option<(i32, i32)>>>,
@@ -596,6 +625,20 @@ fn spawn_output_reader<R: Read + Send + 'static>(
             // A file dropped on this window is pushed by scrcpy itself, and
             // these lines are the only account of it there is.
             transfer::observe(&key, &line);
+            // The size of the video, which comes out smaller than the display
+            // only when the phone's encoder could not take the display's size.
+            if let Some((tw, th)) = display::parse_texture_size(&line) {
+                let shown = *display_size.lock().unwrap();
+                if let Some((dw, dh)) = shown {
+                    let (video, asked) = (tw.max(th), dw.max(dh).max(0) as u32);
+                    if video < asked {
+                        // Off this thread, like the dumpsys below: knowing
+                        // which phone this is can take an adb round trip.
+                        let (a2, s2, c2) = (app.clone(), serial.clone(), codec.clone());
+                        thread::spawn(move || display::remember_video_cap(&a2, &s2, c2.as_deref(), video));
+                    }
+                }
+            }
             if display_id.load(Ordering::SeqCst) < 0 {
                 if let Some(id) = parse_display_id(&line) {
                     if let Some(d) = parse_display_density(&line) {
@@ -657,6 +700,7 @@ fn register_session(
             app.clone(),
             key.clone(),
             opts.serial.clone(),
+            opts.video_codec.clone(),
             display_id.clone(),
             density.clone(),
             display_size.clone(),
@@ -669,6 +713,7 @@ fn register_session(
             app.clone(),
             key.clone(),
             opts.serial.clone(),
+            opts.video_codec.clone(),
             display_id.clone(),
             density.clone(),
             display_size.clone(),
@@ -689,6 +734,7 @@ fn register_session(
         hwnd: Arc::new(std::sync::atomic::AtomicIsize::new(0)),
         output: output.clone(),
         audio_playback: opts.audio_playback,
+        base_dpi: opts.base_dpi.unwrap_or(-1),
     };
     let state = app.state::<MirrorState>();
     state.0.lock().unwrap().insert(key.clone(), handle);
@@ -711,6 +757,16 @@ fn register_session(
         display_id,
         output,
     }
+}
+
+/// The Default density of this phone's running desktop, if it has one — the
+/// base the launcher builds its Display size presets on (adb_start_launcher).
+pub(crate) fn desktop_base_dpi(app: &AppHandle, serial: &str) -> Option<i32> {
+    let state = app.state::<MirrorState>();
+    let map = state.0.lock().unwrap();
+    map.get(&format!("{serial}|desktop"))
+        .map(|s| s.base_dpi)
+        .filter(|d| *d > 0)
 }
 
 /// The dpi baked into `--new-display=WxH/DPI`.
@@ -1095,44 +1151,22 @@ fn parse_display_size(s: &str) -> Option<(i32, i32)> {
     Some((w.trim().parse().ok()?, h.trim().parse().ok()?))
 }
 
-// ── Per-device display-density memory ──────────────────────────────────
+// ── Per-device display size ─────────────────────────────────────────────
 // The launcher reconciles the display's density against its stored choice
 // AFTER it starts, which used to mean a couple of seconds of the phone's
 // ~340dpi ("very large") desktop before the override landed — a visible
 // zoom flash on every launch. The PC executes every density request, so it
-// remembers the value per serial and bakes it into `--new-display=WxH/DPI`:
+// remembers the choice per phone and bakes it into `--new-display=WxH/DPI`:
 // the display then renders at the right scale from the very first frame.
+//
+// Remembered as a multiple of the Default density rather than as a dpi
+// (display::size_factor): the Default is the computer's, and the same phone
+// on a Retina laptop and on a 1x monitor wants 320 and 160 for the same size.
 
-fn density_store_path(app: &AppHandle) -> Option<std::path::PathBuf> {
-    app.path()
-        .app_config_dir()
-        .ok()
-        .map(|d| d.join("display-density.json"))
-}
-
-fn load_density_map(app: &AppHandle) -> HashMap<String, i32> {
-    density_store_path(app)
-        .and_then(|p| std::fs::read_to_string(p).ok())
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default()
-}
-
-fn remember_density(app: &AppHandle, serial: &str, dpi: i32) {
-    let Some(path) = density_store_path(app) else {
-        return;
-    };
-    let mut map = load_density_map(app);
-    if map.get(serial) == Some(&dpi) {
-        return;
-    }
-    map.insert(serial.to_string(), dpi);
-    if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
-    }
-    if let Ok(json) = serde_json::to_string(&map) {
-        let _ = std::fs::write(path, json);
-    }
-}
+/// The densities a desktop may be given — scrcpy's, the request pump's and
+/// the launcher's bounds alike. Very large (1.5x) on a 3x screen is 720.
+const DPI_MIN: i32 = 70;
+const DPI_MAX: i32 = 960;
 
 // ── Stream configuration (Settings → Scrcpy Config / Clipboard) ────────
 // The in-desktop Settings window cannot run scrcpy, so it stores its choice
@@ -1227,27 +1261,62 @@ fn apply_stored_config(app: &AppHandle, opts: &mut MirrorOptions) {
         return;
     }
     let map = load_config(app);
-    if let Some(res) = map.get("res") {
-        // trust it only if it parses — a bad value would take the desktop down
-        if parse_display_size(res).is_some() {
-            opts.new_display = Some(res.clone());
-        }
+    // Before the size: how large a display this phone's encoder takes is
+    // remembered per codec.
+    match map.get("codec").map(String::as_str) {
+        Some("h264") => opts.video_codec = Some("h264".into()),
+        Some("h265") => opts.video_codec = Some("h265".into()),
+        Some("av1") => opts.video_codec = Some("av1".into()),
+        _ => opts.video_codec = None, // "auto" or unset
     }
-    if let Some(mbps) = map.get("bitrate").and_then(|v| v.parse::<u32>().ok()) {
-        if (1..=100).contains(&mbps) {
-            opts.video_bit_rate_mbps = mbps;
+    // A resolution picked in Settings — trusted only if it parses, since a bad
+    // value would take the desktop down — or else ("auto", or never picked)
+    // the screen the app is on, at its own pixels (display.rs).
+    match map.get("res").filter(|r| parse_display_size(r).is_some()) {
+        Some(res) => {
+            opts.new_display = Some(res.clone());
+            opts.window = None;
+            opts.base_dpi = None;
+            opts.fitted = false;
+        }
+        None => match display::desktop_geometry(app, &opts.serial, opts.video_codec.as_deref()) {
+            Some(g) => {
+                opts.new_display = Some(format!("{}x{}", g.width, g.height));
+                opts.window = g.window;
+                opts.base_dpi = Some(g.base_dpi);
+                opts.fitted = true;
+            }
+            // No screen to fit (none reported, or too small): the size the
+            // frontend asked for, as before this existed.
+            None => {
+                opts.window = None;
+                opts.base_dpi = None;
+                opts.fitted = false;
+            }
+        },
+    }
+    // A bit rate picked in Settings, or else scrcpy's 8 Mbps for 1080p scaled
+    // to this display's pixels. 0 is how the launcher says "Automatic".
+    match map
+        .get("bitrate")
+        .and_then(|v| v.parse::<u32>().ok())
+        .filter(|m| (1..=100).contains(m))
+    {
+        Some(mbps) => opts.video_bit_rate_mbps = mbps,
+        None => {
+            if let Some((w, h)) = opts.new_display.as_deref().and_then(parse_display_size) {
+                opts.video_bit_rate_mbps = display::auto_bit_rate_mbps(
+                    w.max(0) as u32,
+                    h.max(0) as u32,
+                    display::is_wireless(&opts.serial),
+                );
+            }
         }
     }
     if let Some(fps) = map.get("fps").and_then(|v| v.parse::<u32>().ok()) {
         if fps <= 240 {
             opts.max_fps = fps; // 0 = scrcpy's own default
         }
-    }
-    match map.get("codec").map(String::as_str) {
-        Some("h264") => opts.video_codec = Some("h264".into()),
-        Some("h265") => opts.video_codec = Some("h265".into()),
-        Some("av1") => opts.video_codec = Some("av1".into()),
-        _ => opts.video_codec = None, // "auto" or unset
     }
     // An encoder belongs to exactly one codec, so it is only passed through
     // when the codec was pinned too — otherwise scrcpy rejects the pair and
@@ -1352,6 +1421,9 @@ fn audio_companion_options(serial: &str, dup: bool) -> MirrorOptions {
         video_encoder: None,
         clipboard_autosync: true,
         audio_only: true,
+        window: None,
+        base_dpi: None,
+        fitted: false,
     }
 }
 
@@ -1554,18 +1626,21 @@ fn stop_audio_companion(app: &AppHandle, serial: &str) {
     }
 }
 
-/// The "Default" display-size preset: 160dpi at 1080p, scaled by
-/// resolution — MUST match SettingsActivity.defaultDpi in the launcher.
+/// The "Default" display-size preset of a resolution picked in Settings:
+/// 160dpi at 1080p, scaled by resolution, so the desktop is 1080 dp tall —
+/// MUST match SettingsActivity.defaultDpi in the launcher. A display fitted to
+/// the screen has the computer's own Default instead (display::geometry).
 fn default_density(size: &str) -> i32 {
     parse_display_size(size)
         .map(|(w, h)| (160f32 * w.min(h) as f32 / 1080f32).round() as i32)
         .unwrap_or(160)
 }
 
-/// Bake the remembered (or default) density into a desktop session's
-/// `--new-display`. Re-run before every (re)spawn so a size changed
-/// mid-session survives an auto-reconnect without a zoom flash. Any dpi
-/// we previously appended is replaced.
+/// Bake the remembered (or default) display size into a desktop session's
+/// `--new-display`, as a dpi: the session's Default times the phone's preset.
+/// Re-run before every (re)spawn so a size changed mid-session survives an
+/// auto-reconnect without a zoom flash. Any dpi we previously appended is
+/// replaced.
 fn apply_stored_density(app: &AppHandle, opts: &mut MirrorOptions) {
     if opts.app_package.is_some() {
         return;
@@ -1574,12 +1649,17 @@ fn apply_stored_density(app: &AppHandle, opts: &mut MirrorOptions) {
         return;
     };
     let base = nd.split('/').next().unwrap_or(nd).to_string();
-    let dpi = load_density_map(app)
-        .get(&opts.serial)
-        .copied()
-        .filter(|d| (70..=600).contains(d))
-        .unwrap_or_else(|| default_density(&base));
+    let base_dpi = opts.base_dpi.unwrap_or_else(|| default_density(&base));
+    // A dpi remembered before presets were multiples meant one at the
+    // resolution then in force.
+    let legacy_res = load_config(app)
+        .get("res")
+        .and_then(|r| parse_display_size(r))
+        .unwrap_or((1920, 1080));
+    let factor = display::size_factor(app, &opts.serial, legacy_res);
+    let dpi = ((f64::from(base_dpi) * factor).round() as i32).clamp(DPI_MIN, DPI_MAX);
     opts.new_display = Some(format!("{base}/{dpi}"));
+    opts.base_dpi = Some(base_dpi);
 }
 
 /// Height of the launcher taskbar in px for a given display density (52dp).
@@ -2746,7 +2826,7 @@ impl RequestPump {
                 // display's density. Synchronous so the log captures a
                 // failure; the config change recreates the on-display UIs.
                 match arg.parse::<i32>() {
-                    Ok(dpi) if (70..=600).contains(&dpi) => {
+                    Ok(dpi) if (DPI_MIN..=DPI_MAX).contains(&dpi) => {
                         log::info!("request-pump [{}] density request: {dpi}", self.key);
                         match self.run(&format!("wm density {dpi} -d {display}")) {
                             Some(out) => {
@@ -2757,15 +2837,21 @@ impl RequestPump {
                                 // from the session density — keep in step
                                 let state = self.app.state::<MirrorState>();
                                 let map = state.0.lock().unwrap();
-                                if let Some(s) = map.get(&self.key) {
+                                let base_dpi = map.get(&self.key).map(|s| {
                                     s.density.store(dpi, Ordering::SeqCst);
-                                }
+                                    s.base_dpi
+                                });
                                 drop(map);
-                                // future sessions start straight at this density
+                                // future sessions start straight at this size,
+                                // as a multiple of whatever their Default is
                                 let serial =
                                     self.key.split('|').next().unwrap_or("").to_string();
-                                if !serial.is_empty() {
-                                    remember_density(&self.app, &serial, dpi);
+                                if let (false, Some(base)) = (serial.is_empty(), base_dpi.filter(|b| *b > 0)) {
+                                    let f = display::remember_size_factor(&self.app, &serial, dpi, base);
+                                    log::info!(
+                                        "request-pump [{}] display size {f}x Default ({base} dpi)",
+                                        self.key
+                                    );
                                 }
                                 true
                             }
@@ -3460,11 +3546,28 @@ fn fallback_options(opts: &MirrorOptions) -> Option<MirrorOptions> {
         || opts.mouse_bind.is_some()
         || opts.mouse_mode.is_some()
         || opts.max_fps > 0
-        || opts.video_bit_rate_mbps > 0;
+        || opts.video_bit_rate_mbps > 0
+        || opts.fitted;
     if !strippable {
         return None;
     }
+    // A display fitted to the screen goes back to the fixed 1080p it replaced,
+    // which every phone has run, at the same Display size preset.
+    let (new_display, base_dpi) = if opts.fitted {
+        let factor = requested_density(opts)
+            .zip(opts.base_dpi)
+            .map(|(dpi, base)| f64::from(dpi) / f64::from(base.max(1)))
+            .unwrap_or(1.0);
+        let dpi = ((160.0 * factor).round() as i32).clamp(DPI_MIN, DPI_MAX);
+        (Some(format!("1920x1080/{dpi}")), Some(160))
+    } else {
+        (opts.new_display.clone(), opts.base_dpi)
+    };
     Some(MirrorOptions {
+        new_display,
+        base_dpi,
+        window: None,
+        fitted: false,
         audio: false,
         audio_playback: false,
         video_codec: None,
@@ -3535,7 +3638,8 @@ fn monitor(app: AppHandle, mut opts: MirrorOptions, attempt: Attempt, stop: Arc<
                 tried_fallback = true;
                 log::warn!(
                     "mirror [{key}] retrying without audio, codec/encoder pinning and mouse \
-                     bindings — one of them is the likeliest cause"
+                     bindings{} — one of them is the likeliest cause",
+                    if opts.fitted { ", at 1920x1080" } else { "" }
                 );
                 let _ = app.emit(
                     "mirror:notice",
@@ -3937,9 +4041,12 @@ pub fn start_mirror(app: AppHandle, mut options: MirrorOptions) -> Result<Sessio
     let key = options.session_key();
     log::info!("── start session [{key}] ──");
     log::info!(
-        "options: display={:?} decorations={} audio={} codec={:?} encoder={:?} bitrate={}Mbps \
-         fps={} freeform={} reconnect={}",
+        "options: display={:?} fitted={} default={:?}dpi window={:?} decorations={} audio={} \
+         codec={:?} encoder={:?} bitrate={}Mbps fps={} freeform={} reconnect={}",
         options.new_display,
+        options.fitted,
+        options.base_dpi,
+        options.window,
         !options.vd_no_decorations,
         options.audio,
         options.video_codec,

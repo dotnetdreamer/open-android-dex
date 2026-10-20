@@ -713,7 +713,8 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
         @Override
         public void onReceive(Context ctx, Intent intent) {
             String key = intent.getStringExtra(DexPrefs.EXTRA_KEY);
-            if (DexPrefs.KEY_DENSITY.equals(key)) return;   // the display listener owns that one
+            // the display listener owns the density, whichever key moved it
+            if (DexPrefs.KEY_SIZE_INDEX.equals(key) || DexPrefs.KEY_BASE_DPI.equals(key)) return;
             if (!DexPrefs.affectsShell(key)) return;        // a desktop-app setting
             if (DexPrefs.KEY_LANGUAGE.equals(key) || "*".equals(key)) {
                 // Resources were resolved against the old locale in
@@ -763,6 +764,7 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
                 + (compact ? " — compact chrome" : ""));
         theme = DexTheme.of(this);
         loadRecents();
+        rememberBaseDpi(getIntent());
         reapplyDensity();
         reapplyPerfMode();
         reapplyPointerSpeed();
@@ -1128,22 +1130,45 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
     }
 
     /**
-     * A fresh scrcpy display always comes up at the phone's ~340+ dpi, which
-     * reads as absurdly zoomed on a monitor. Ask the PC to apply the user's
-     * stored display size — or, before any choice was made, the "Default"
-     * preset — so the desktop always starts at a sane scale. Once the
-     * override lands, stored == current and this is a no-op.
+     * Make sure the display is at the user's Display size: the Default density
+     * times their preset. The desktop app bakes exactly that into every display
+     * it makes, so this is normally a no-op — it is here for a display that came
+     * up at anything else (the phone's own ~340+ dpi, which reads as absurdly
+     * zoomed on a monitor), and for a preset this phone chose that the computer
+     * has not heard of.
      */
     private void reapplyDensity() {
-        int stored = DexPrefs.getInt(this, DexPrefs.KEY_DENSITY, -1);
-        if (stored <= 0) {
-            Point size = new Point();
-            getWindowManager().getDefaultDisplay().getRealSize(size);
-            stored = SettingsActivity.defaultDpi(size.x, size.y);
+        int want = Math.round(SettingsActivity.defaultDensity(this)
+                * DexPrefs.SIZE_FACTORS[DexPrefs.sizeIndex(this)]);
+        if (want != currentDisplayDensity()) {
+            RequestProvider.enqueue("density", String.valueOf(want));
         }
-        if (stored != currentDisplayDensity()) {
-            RequestProvider.enqueue("density", String.valueOf(stored));
+    }
+
+    /**
+     * Keep the Default density the desktop app started us with ({@code base_dpi}):
+     * one dp per point of the computer's UI, worked out from its screen, which
+     * nothing on the phone can know. The Display size presets are multiples of it.
+     */
+    private boolean rememberBaseDpi(Intent intent) {
+        int base = intent == null ? -1 : intent.getIntExtra("base_dpi", -1);
+        if (base <= 0) return false;
+        if (DexPrefs.getInt(this, DexPrefs.KEY_BASE_DPI, -1) != base) {
+            DexPrefs.prefs(this).edit().putInt(DexPrefs.KEY_BASE_DPI, base).apply();
+            DexLog.step("launcher", "the desktop's Default density is " + base + " dpi");
         }
+        return true;
+    }
+
+    /**
+     * A start while we are already running (singleTask): the desktop app setting
+     * the desktop up again, which says the Default density of the display it made.
+     */
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        if (rememberBaseDpi(intent)) reapplyDensity();
     }
 
     /**

@@ -66,7 +66,34 @@ final class DexPrefs {
     static final String KEY_TRANSPARENCY = "ui_transparency";
     /** 0–100; corner-radius multiplier, 50 = the design's own radii. */
     static final String KEY_ROUNDING = "ui_rounding";
-    /** Display dpi override — historically "display_density", kept for upgrades. */
+    /**
+     * Display size, as an index into {@link #SIZE_FACTORS}: a multiple of the
+     * desktop's Default density rather than a dpi, because the Default is the
+     * computer's — 160 on a 1x monitor, 320 on a Retina laptop — and the same
+     * choice has to mean the same size on both. See {@link #sizeIndex}.
+     */
+    static final String KEY_SIZE_INDEX = "display_size_index";
+    static final int DEF_SIZE_INDEX = 2;
+
+    /**
+     * Display size presets as multiples of the Default density — MUST match
+     * SIZE_FACTORS in the desktop app's display.rs, which remembers the choice
+     * per phone and bakes it into every new display.
+     */
+    static final float[] SIZE_FACTORS = {0.75f, 0.875f, 1f, 1.25f, 1.5f};
+
+    /**
+     * The Default density of the display the desktop runs on, as the desktop
+     * app worked it out from the computer's screen and passed it on start
+     * (LauncherActivity, extra {@code base_dpi}). Nothing on the phone can know
+     * it; -1 until a desktop app new enough to send it has started us.
+     */
+    static final String KEY_BASE_DPI = "display_base_dpi";
+
+    /**
+     * Display size as an absolute dpi, from before {@link #KEY_SIZE_INDEX}:
+     * read once by {@link #sizeIndex} to carry the choice over, then removed.
+     */
     static final String KEY_DENSITY = "display_density";
 
     // ── Performance ──
@@ -317,9 +344,14 @@ final class DexPrefs {
     /** Stays scrcpy's own default: uhid captures the PC's mouse, so it is opt-in. */
     static final String DEF_MOUSE_MODE = "sdk";
     static final String DEF_FONT = "default";
-    /** These four MUST match desktopOptions() in the desktop app's App.tsx. */
-    static final String DEF_RESOLUTION = "1920x1080";
-    static final int DEF_BITRATE = 8;
+    /**
+     * These four MUST match what the desktop app does when nothing was picked:
+     * "auto" fits the display to the computer's screen and 0 streams it at a
+     * rate for its size (display.rs), falling back to desktopOptions() in
+     * App.tsx — 1920x1080 at 8 Mbps — where there is no screen to fit.
+     */
+    static final String DEF_RESOLUTION = "auto";
+    static final int DEF_BITRATE = 0;
     static final int DEF_FPS = 0;                 // 0 = scrcpy decides
     static final boolean DEF_AUDIO = true;
     /**
@@ -395,6 +427,47 @@ final class DexPrefs {
 
     static SharedPreferences prefs(Context ctx) {
         return ctx.getSharedPreferences(LauncherActivity.PREFS, Context.MODE_PRIVATE);
+    }
+
+    /**
+     * The Display size preset, as an index into {@link #SIZE_FACTORS}.
+     *
+     * A launcher that stored an absolute dpi ({@link #KEY_DENSITY}) has it
+     * turned into the preset it stood for, once: it was a multiple of the
+     * 1080-dp-tall Default of the resolution then picked (1080p unless one was).
+     */
+    static int sizeIndex(Context ctx) {
+        SharedPreferences p = prefs(ctx);
+        int index = p.getInt(KEY_SIZE_INDEX, -1);
+        if (index >= 0) return Math.min(index, SIZE_FACTORS.length - 1);
+        int dpi = p.getInt(KEY_DENSITY, -1);
+        if (dpi <= 0) return DEF_SIZE_INDEX;
+        int[] res = parseResolution(p.getString(KEY_RESOLUTION, ""));
+        if (res == null) res = new int[]{1920, 1080};
+        index = nearestSize(dpi / (float) SettingsActivity.defaultDpi(res[0], res[1]));
+        p.edit().putInt(KEY_SIZE_INDEX, index).remove(KEY_DENSITY).apply();
+        return index;
+    }
+
+    /** The preset whose factor is nearest {@code factor}. */
+    static int nearestSize(float factor) {
+        int best = 0;
+        for (int i = 1; i < SIZE_FACTORS.length; i++) {
+            if (Math.abs(SIZE_FACTORS[i] - factor) < Math.abs(SIZE_FACTORS[best] - factor)) best = i;
+        }
+        return best;
+    }
+
+    /** "1920x1080" → {1920, 1080}; null for "auto", empty or junk. */
+    static int[] parseResolution(String res) {
+        if (res == null) return null;
+        String[] parts = res.split("x");
+        if (parts.length != 2) return null;
+        try {
+            return new int[]{Integer.parseInt(parts[0].trim()), Integer.parseInt(parts[1].trim())};
+        } catch (NumberFormatException e) {
+            return null;
+        }
     }
 
     static boolean getBool(Context ctx, String key, boolean def) {

@@ -283,6 +283,11 @@ On the phone (Galaxy S25 Ultra, Android 16, the desktop app from `tauri dev`,
   the same video was silent: the session had trusted a stale `rt.pid` and
   started no sound at all.
 
+On a desktop fitted to the MacBook's Retina screen (3024x1824 at 320 dpi, from
+`doc/sharp-desktop.md`): the window session at 192 dpi with GTK drawing at 2x
+(`Gdk/WindowScalingFactor`), Thunar in proportion beside the Android windows,
+and its title bar 80 px — at 40 it had left One UI's caption showing below.
+
 Found on the phone, and not this feature's: **Firefox 158's tabs crash under
 proot** — "IPDL protocol error: Shared memory PlatformHandle is not safe to
 map", then signal 11, for every content process — on the XFCE desktop exactly

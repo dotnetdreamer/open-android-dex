@@ -338,10 +338,12 @@
     <string name="st_nav_clipboard_sub">Sincronización · Actual · Historial</string>
     <string name="st_resolution">Resolución de pantalla</string>
     <string name="st_res_note">Cambiarla mantiene tu preajuste de tamaño de pantalla, recalculado para la nueva resolución.</string>
+    <string name="st_res_auto">Igual que la pantalla del ordenador</string>
+    <string name="st_res_auto_sub">Predeterminada — tan nítida como esa pantalla</string>
     <string name="st_res_720">La que menos ancho de banda usa</string>
     <string name="st_res_900">Un término medio</string>
-    <string name="st_res_1080">Predeterminada — nítida en casi cualquier monitor</string>
-    <string name="st_res_1440">La más nítida; necesita una conexión rápida</string>
+    <string name="st_res_1080">Nítida en casi cualquier monitor</string>
+    <string name="st_res_1440">Muy nítida; necesita una conexión rápida</string>
     <string name="st_codec">Códec de vídeo</string>
     <string name="st_codec_auto">Automático</string>
     <string name="st_codec_auto_sub">Que lo elija scrcpy (H.264 en casi todos)</string>
@@ -358,6 +360,8 @@
     <string name="st_encoder_none">Este móvil no tiene codificador para el códec elegido.</string>
     <string name="st_bitrate">Bitrate de vídeo</string>
     <string name="st_bitrate_value">%1$d Mbps</string>
+    <string name="st_bitrate_auto">Automático</string>
+    <string name="st_bitrate_auto_sub">Predeterminado — más para un escritorio más grande y nítido</string>
     <string name="st_default_suffix">Predeterminado</string>
     <string name="st_fps">Límite de fotogramas</string>
     <string name="st_fps_value">%1$d fps</string>

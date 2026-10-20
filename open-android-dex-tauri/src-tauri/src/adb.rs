@@ -777,7 +777,7 @@ fn save_identities(app: &tauri::AppHandle, map: &HashMap<String, String>) {
 /// phone already gone — the cable pulled, the app killed and started again —
 /// still finds the right record. A phone that will not say falls back to the
 /// serial itself, which is the old behaviour.
-fn restore_key(app: &tauri::AppHandle, serial: &str) -> String {
+pub(crate) fn restore_key(app: &tauri::AppHandle, serial: &str) -> String {
     static KNOWN: std::sync::OnceLock<std::sync::Mutex<HashMap<String, String>>> = std::sync::OnceLock::new();
     let known = KNOWN.get_or_init(Default::default);
     if let Some(id) = known.lock().unwrap().get(serial) {
@@ -1929,13 +1929,21 @@ pub fn adb_start_launcher(
     // (scrcpy destroys a display's content with it) and the start below makes
     // a new one.
     let stop = if resume { String::new() } else { format!("am force-stop {LAUNCHER_PACKAGE}; ") };
+    // The Default density this desktop was made at, which the launcher's
+    // Display size presets are multiples of. Only this side knows it: it comes
+    // from the computer's screen (display.rs), not from anything on the phone.
+    let base = crate::scrcpy::desktop_base_dpi(&app, &serial)
+        .map(|dpi| format!(" --ei base_dpi {dpi}"))
+        .unwrap_or_default();
     let started_out = run_adb(
         &app,
         &[
             "-s",
             &serial,
             "shell",
-            &format!("{stop}am start --display {display_id} --windowingMode 1 -n {LAUNCHER_COMPONENT}"),
+            &format!(
+                "{stop}am start --display {display_id} --windowingMode 1{base} -n {LAUNCHER_COMPONENT}"
+            ),
         ],
     )?;
 
