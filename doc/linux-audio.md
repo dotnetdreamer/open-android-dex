@@ -163,10 +163,12 @@ None of this has run on a device. Roughly in order of how quietly it would fail:
   terminal.
 - **Whether the drift cap fires when it should.** `in.available()` does report
   the backlog on the phone — it is how the bursts above were found, when the
-  first cap fired on all of them. The low-point cap has run only off the phone
-  (`node test/linux-windows-test.mjs`). *Test:* "dropped Nms of backlog" should
-  not appear in the log while nothing is wrong; then play a long video and
-  watch A/V sync after an hour.
+  first cap fired on all of them. The low-point cap no longer fires on bursts:
+  on the S25, a quiet window session's tap logged no "dropped" line in over a
+  minute, where the old cap had logged 200 a minute (2026-10-20). That it
+  still fires on real drift is checked only off the phone
+  (`node test/linux-windows-test.mjs`). *Test:* play a long video and watch
+  A/V sync after an hour.
 - **Whether the panel plugin picks the daemon up on the first session.**
   pulseaudio is started a second before `startxfce4`, and the plugin retries its
   connection, but the ordering has not been watched on hardware. *Test:* the
