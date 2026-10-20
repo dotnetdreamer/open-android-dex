@@ -195,14 +195,32 @@ jobs:
         working-directory: openandroiddex-wmd
         run: ./build.sh
 
+      - name: Build scrcpy's server from source, with our patch
+        # The part of scrcpy that runs on the phone, rebuilt from scrcpy's own
+        # source at SCRCPY_VERSION with openandroiddex-scrcpy/display-scale.patch
+        # (a desktop that follows its window comes out at the screen's pixels,
+        # not its points). The client stays the release download below; the
+        # client refuses a server of any other version, hence the check. The
+        # same script `npm run apk` runs locally.
+        run: |
+          grep -qF "SCRCPY_VERSION = '$SCRCPY_VERSION'" openandroiddex-scrcpy/build.mjs || {
+            echo "::error::openandroiddex-scrcpy/build.mjs does not build scrcpy $SCRCPY_VERSION — update it alongside SCRCPY_VERSION"
+            exit 1
+          }
+          node openandroiddex-scrcpy/build.mjs
+
       - name: Stage payloads under their shipped names
-        # cp fails the job loudly if either build silently produced nothing.
+        # cp fails the job loudly if any build silently produced nothing. The
+        # server is staged under the release's own name, so each platform job's
+        # download of these payloads into resources/bin replaces the release's
+        # server with ours.
         run: |
           mkdir -p payloads
           cp openandroiddex-launcher/app/build/outputs/apk/debug/app-debug.apk \
              payloads/openandroiddex-launcher.apk
           cp openandroiddex-wmd/openandroiddex-wmd.dex \
              payloads/openandroiddex-wmd.dex
+          cp openandroiddex-scrcpy/build/scrcpy-server payloads/scrcpy-server
 
       - uses: actions/upload-artifact@v4
         with:

@@ -742,6 +742,9 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
                 public void onDisplayChanged(int displayId) {
                     if (getDisplay() != null && displayId == getDisplay().getDisplayId()) {
                         maybeRebuildForDisplay();
+                        // A desktop that follows its window changes size and, on a
+                        // screen of another scale, density: Linux's windows follow.
+                        LinuxWindows.get(LauncherActivity.this).desktopChanged();
                     }
                 }
             };
@@ -1161,6 +1164,24 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
     }
 
     /**
+     * Keep the Default density in step with a density the desktop app moved.
+     *
+     * Every density this display gets is the Default times the Display size
+     * preset: baked in when it is made, applied when a preset is picked (the
+     * preset is stored first, see SettingsActivity#applyDensity), and applied
+     * again when a desktop that follows its window is dragged onto a screen of
+     * another scale — which only the desktop app can see. Dividing by the
+     * preset recovers the Default, so the presets offered from then on are
+     * multiples of the new one.
+     */
+    private void followBaseDpi(int density) {
+        int base = Math.round(density / DexPrefs.SIZE_FACTORS[DexPrefs.sizeIndex(this)]);
+        if (base > 0 && base != DexPrefs.getInt(this, DexPrefs.KEY_BASE_DPI, -1)) {
+            DexPrefs.prefs(this).edit().putInt(DexPrefs.KEY_BASE_DPI, base).apply();
+        }
+    }
+
+    /**
      * A start while we are already running (singleTask): the desktop app setting
      * the desktop up again, which says the Default density of the display it made.
      */
@@ -1228,6 +1249,7 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
         getWindowManager().getDefaultDisplay().getRealSize(size);
         int density = currentDisplayDensity();
         boolean changed = density != uiDensity || size.x != uiWidthPx;
+        if (density != uiDensity) followBaseDpi(density);
         uiDensity = density;
         uiWidthPx = size.x;
         compact = Math.round(size.x * 160f / Math.max(1, density)) < COMPACT_WIDTH_DP;

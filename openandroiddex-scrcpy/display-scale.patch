@@ -1,0 +1,182 @@
+diff --git a/server/src/main/java/com/genymobile/scrcpy/video/DisplayScale.java b/server/src/main/java/com/genymobile/scrcpy/video/DisplayScale.java
+new file mode 100644
+index 0000000..d888092
+--- /dev/null
++++ b/server/src/main/java/com/genymobile/scrcpy/video/DisplayScale.java
+@@ -0,0 +1,62 @@
++package com.genymobile.scrcpy.video;
++
++import java.io.BufferedReader;
++import java.io.FileReader;
++import java.io.IOException;
++
++/**
++ * The scale of the computer screen a flex display's window is on (Open Android DeX).
++ *
++ * <p>The client asks for its window's size in window coordinates, which are points on macOS and
++ * Wayland: on a 2x screen, half the pixels the window covers, so the display comes out at half
++ * resolution and is drawn twice as big. The computer writes the scale of the window's screen into
++ * {@link #FILE} before it starts the client, and again whenever the window moves to a screen of
++ * another scale. Each requested size is multiplied by it, so the display is the window's size in
++ * pixels; the client, started with {@code --render-fit=letterbox}, then shows it one for one.
++ *
++ * <p>No file means scale 1: stock behaviour.
++ */
++public final class DisplayScale {
++
++    public static final String FILE = "/data/local/tmp/oadx-display-scale";
++
++    private DisplayScale() {
++        // not instantiable
++    }
++
++    /** The scale in {@code text}'s first token: 1 for anything missing, unreadable or absurd. */
++    public static float parse(String text) {
++        if (text == null) {
++            return 1f;
++        }
++        String t = text.trim();
++        if (t.isEmpty()) {
++            return 1f;
++        }
++        try {
++            float scale = Float.parseFloat(t.split("\\s+")[0]);
++            return scale >= 0.5f && scale <= 8f ? scale : 1f;
++        } catch (NumberFormatException e) {
++            return 1f;
++        }
++    }
++
++    /** The scale the computer last wrote, or 1. */
++    public static float read() {
++        try (BufferedReader reader = new BufferedReader(new FileReader(FILE))) {
++            return parse(reader.readLine());
++        } catch (IOException | SecurityException e) {
++            return 1f;
++        }
++    }
++
++    /** One side of a requested size, in pixels. */
++    public static int toPixels(int side, float scale) {
++        return Math.max(1, Math.round(side * scale));
++    }
++
++    /** One side of the display, back in the window's coordinates. */
++    public static int toWindow(int side, float scale) {
++        return Math.max(1, Math.round(side / scale));
++    }
++}
+diff --git a/server/src/main/java/com/genymobile/scrcpy/video/NewDisplayCapture.java b/server/src/main/java/com/genymobile/scrcpy/video/NewDisplayCapture.java
+index 5ed4c73..0a4be64 100644
+--- a/server/src/main/java/com/genymobile/scrcpy/video/NewDisplayCapture.java
++++ b/server/src/main/java/com/genymobile/scrcpy/video/NewDisplayCapture.java
+@@ -74,6 +74,11 @@ public class NewDisplayCapture extends SurfaceCapture {
+ 
+     private int dpi;
+ 
++    // Open Android DeX: flex sizes in the computer screen's pixels, see DisplayScale
++    private float scale = 1f;
++    private Size windowSize; // the last size the client asked for, in its window coordinates
++    private Thread scaleWatcher;
++
+     public NewDisplayCapture(VirtualDisplayListener vdListener, Options options) {
+         this.vdListener = vdListener;
+         this.newDisplay = options.getNewDisplay();
+@@ -112,6 +117,14 @@ public class NewDisplayCapture extends SurfaceCapture {
+             if (dpi == 0) {
+                 dpi = 160;
+             }
++
++            // The initial size is already in pixels; the client's requests are not.
++            scale = DisplayScale.read();
++            windowSize = new Size(DisplayScale.toWindow(displaySize.getWidth(), scale),
++                    DisplayScale.toWindow(displaySize.getHeight(), scale));
++            // Said whatever the scale: the computer reads it as "this server follows the scale file"
++            Ln.i("Flex display: " + scale + "x the window's size");
++            startScaleWatcher();
+         } else if (displaySize == null || dpi == 0) {
+             DisplayInfo displayInfo = ServiceManager.getDisplayManager().getDisplayInfo(0);
+             if (displayInfo != null) {
+@@ -300,6 +313,10 @@ public class NewDisplayCapture extends SurfaceCapture {
+             debouncer.stop();
+         }
+ 
++        if (scaleWatcher != null) {
++            scaleWatcher.interrupt();
++        }
++
+         if (virtualDisplay != null) {
+             // synchronized with triggerResize()
+             synchronized (this) {
+@@ -331,16 +348,61 @@ public class NewDisplayCapture extends SurfaceCapture {
+             throw new IllegalStateException("Cannot resize a non-flex display");
+         }
+ 
++        synchronized (this) {
++            windowSize = new Size(width, height);
++        }
++        requestScaledResize();
++    }
++
++    private void requestScaledResize() {
++        Size window;
++        float s;
++        synchronized (this) {
++            window = windowSize;
++            s = scale;
++        }
++        int width = DisplayScale.toPixels(window.getWidth(), s);
++        int height = DisplayScale.toPixels(window.getHeight(), s);
++
+         VideoConstraints constraints = getVideoConstraints(); // synchronized
+         Size newSize = new Size(width, height).constrain(constraints, false);
+         if (Ln.isEnabled(Ln.Level.VERBOSE)) {
+-            Ln.v(getClass().getSimpleName() + ": requestResize(" + width + ", " + height + ")");
++            Ln.v(getClass().getSimpleName() + ": requestResize(" + window.getWidth() + ", " + window.getHeight() + ") at " + s + "x");
+             Ln.v(getClass().getSimpleName() + ": constrained size = " + newSize);
+         }
+ 
+         debouncer.requestResize(newSize);
+     }
+ 
++    /**
++     * Follow the computer's {@link DisplayScale#FILE}: a window dragged to a screen of another
++     * scale asks for no new size (its size in points is unchanged), so the new scale is applied to
++     * the last size it did ask for.
++     */
++    private void startScaleWatcher() {
++        scaleWatcher = new Thread(() -> {
++            try {
++                while (true) {
++                    Thread.sleep(500);
++                    float s = DisplayScale.read();
++                    boolean changed;
++                    synchronized (this) {
++                        changed = s != scale;
++                        scale = s;
++                    }
++                    if (changed) {
++                        Ln.i("Display scale: " + s + "x");
++                        requestScaledResize();
++                    }
++                }
++            } catch (InterruptedException e) {
++                // released
++            }
++        }, "display-scale");
++        scaleWatcher.setDaemon(true);
++        scaleWatcher.start();
++    }
++
+     private synchronized void setCurrentVirtualDisplay(VirtualDisplay virtualDisplay) {
+         this.virtualDisplay = virtualDisplay;
+     }
+@@ -369,6 +431,8 @@ public class NewDisplayCapture extends SurfaceCapture {
+             // Although the display size (as detected by the DisplayMonitor) is rotated, the virtual display itself is not
+             Size vdSize = (displayRotation % 2) == 0 ? size : size.rotate();
+             virtualDisplay.resize(vdSize.getWidth(), vdSize.getHeight(), dpi);
++            // The computer follows the display's size from this line, as it does "New display"
++            Ln.i("Display resized: " + size.getWidth() + "x" + size.getHeight() + "/" + dpi + " (id=" + displayId + ")");
+         }
+     }
+ }

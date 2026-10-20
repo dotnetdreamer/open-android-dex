@@ -123,6 +123,11 @@ pub struct MirrorOptions {
     /// The display was fitted to the screen rather than picked in Settings.
     #[serde(skip)]
     pub fitted: bool,
+    /// The display follows its window (`--flex-display`), and the phone is
+    /// told to multiply every size the window asks for by this — pixels per
+    /// window coordinate (display::flex_geometry). None: fitted once.
+    #[serde(skip)]
+    pub flex: Option<f64>,
 }
 
 fn default_true() -> bool {
@@ -201,10 +206,11 @@ pub struct SessionHandle {
     /// `reconcile_audio_session` compares against the stored config to decide
     /// if the audio companion must be cycled. Meaningless for video sessions.
     audio_playback: bool,
-    /// The Default density this attempt was spawned with (-1 = not a desktop):
-    /// what a Display size request is remembered as a multiple of, and what
-    /// the launcher is told to build its presets on.
-    base_dpi: i32,
+    /// The Default density of this attempt's display (-1 = not a desktop): what
+    /// a Display size request is remembered as a multiple of, and what the
+    /// launcher is told to build its presets on. Changes with the screen a
+    /// display that follows its window is dragged onto (`watch_window_scale`).
+    base_dpi: Arc<AtomicI32>,
 }
 
 impl SessionHandle {
@@ -342,6 +348,15 @@ fn build_args(opts: &MirrorOptions) -> Vec<String> {
         args.push(format!("--window-width={}", w.width));
         args.push(format!("--window-height={}", w.height));
     }
+    // A display that follows its window. Letterbox, not flex's own default of
+    // "unscaled": the phone makes the display the window's size in PIXELS
+    // (display-scale.patch), while the client draws content in window
+    // coordinates — points on a Mac — so unscaled would draw it twice as big.
+    // Letterboxed, it fills the window one pixel for one.
+    if opts.flex.is_some() {
+        args.push("--flex-display".into());
+        args.push("--render-fit=letterbox".into());
+    }
     if let Some(pkg) = &opts.app_package {
         args.push(format!("--start-app={pkg}"));
     }
@@ -428,6 +443,9 @@ fn branded_exe(_app: &AppHandle, exe: &std::path::Path) -> std::path::PathBuf {
 /// The fallback must be scrcpy 4.0 or newer: the command line carries options
 /// older releases reject outright (`--keep-active`, `--background-color`).
 fn spawn_scrcpy(app: &AppHandle, opts: &MirrorOptions) -> Result<Child, String> {
+    if let Some(scale) = opts.flex {
+        write_display_scale(app, &opts.serial, scale);
+    }
     let bin = adb::bin_dir(app)?;
     let exe = bin.join(adb::exe_name("scrcpy"));
     adb::warn_if_not_executable(&exe);
@@ -585,6 +603,18 @@ fn parse_display_size_announced(line: &str) -> Option<(i32, i32)> {
     parse_display_size(rest.split_whitespace().next()?)
 }
 
+/// "[server] INFO: Display resized: 2832x1706/320 (id=63)" → (2832, 1706, 320)
+///
+/// What the patched server (openandroiddex-scrcpy) says each time a display
+/// that follows its window takes a new size — the only way this side learns
+/// it without asking the phone.
+fn parse_display_resized(line: &str) -> Option<(i32, i32, i32)> {
+    let rest = &line[line.find("Display resized:")? + "Display resized:".len()..];
+    let (size, dpi) = rest.split_whitespace().next()?.split_once('/')?;
+    let (w, h) = parse_display_size(size)?;
+    Some((w, h, dpi.trim().parse().ok()?))
+}
+
 /// Drain one of scrcpy's output pipes: record every line, watch for the
 /// virtual display id and announce it to the webview once seen.
 ///
@@ -598,6 +628,7 @@ fn spawn_output_reader<R: Read + Send + 'static>(
     key: String,
     serial: String,
     codec: Option<String>,
+    flex: bool,
     display_id: Arc<AtomicI32>,
     density: Arc<AtomicI32>,
     display_size: Arc<Mutex<Option<(i32, i32)>>>,
@@ -605,6 +636,8 @@ fn spawn_output_reader<R: Read + Send + 'static>(
     stream: R,
 ) {
     thread::spawn(move || {
+        // The patched server says it is one before it makes the display.
+        let mut follows_scale = false;
         for line in BufReader::new(stream).lines().map_while(Result::ok) {
             let line = line.trim_end().to_string();
             if line.is_empty() {
@@ -639,8 +672,23 @@ fn spawn_output_reader<R: Read + Send + 'static>(
                     }
                 }
             }
+            if line.contains("Flex display:") {
+                follows_scale = true;
+            }
+            if let Some((w, h, dpi)) = parse_display_resized(&line) {
+                *display_size.lock().unwrap() = Some((w, h));
+                density.store(dpi, Ordering::SeqCst);
+                log::info!("scrcpy [{key}] the display follows its window: {w}x{h} at {dpi} dpi");
+            }
             if display_id.load(Ordering::SeqCst) < 0 {
                 if let Some(id) = parse_display_id(&line) {
+                    if flex && !follows_scale {
+                        log::warn!(
+                            "scrcpy [{key}] this scrcpy server does not follow the screen's scale \
+                             (the release's own, not openandroiddex-scrcpy's?) — the desktop will \
+                             follow its window in points, half resolution on a Retina screen"
+                        );
+                    }
                     if let Some(d) = parse_display_density(&line) {
                         density.store(d, Ordering::SeqCst);
                     }
@@ -701,6 +749,7 @@ fn register_session(
             key.clone(),
             opts.serial.clone(),
             opts.video_codec.clone(),
+            opts.flex.is_some(),
             display_id.clone(),
             density.clone(),
             display_size.clone(),
@@ -714,6 +763,7 @@ fn register_session(
             key.clone(),
             opts.serial.clone(),
             opts.video_codec.clone(),
+            opts.flex.is_some(),
             display_id.clone(),
             density.clone(),
             display_size.clone(),
@@ -734,11 +784,26 @@ fn register_session(
         hwnd: Arc::new(std::sync::atomic::AtomicIsize::new(0)),
         output: output.clone(),
         audio_playback: opts.audio_playback,
-        base_dpi: opts.base_dpi.unwrap_or(-1),
+        base_dpi: Arc::new(AtomicI32::new(opts.base_dpi.unwrap_or(-1))),
     };
+    let base_dpi = handle.base_dpi.clone();
     let state = app.state::<MirrorState>();
     state.0.lock().unwrap().insert(key.clone(), handle);
     log::info!("scrcpy [{key}] started, pid {pid}");
+
+    if opts.flex.is_some() {
+        watch_window_scale(
+            app.clone(),
+            opts.serial.clone(),
+            key.clone(),
+            pid,
+            child.clone(),
+            stop.clone(),
+            display_id.clone(),
+            density.clone(),
+            base_dpi,
+        );
+    }
 
     spawn_display_watchdog(
         app.clone(),
@@ -759,13 +824,86 @@ fn register_session(
     }
 }
 
+/// Where the patched scrcpy server reads the scale it multiplies a flex
+/// display's sizes by (DisplayScale.FILE in openandroiddex-scrcpy).
+const DISPLAY_SCALE_FILE: &str = "/data/local/tmp/oadx-display-scale";
+
+/// Tell the phone what a window coordinate is in pixels. Before the server
+/// starts, which reads it once as it makes the display, and again whenever the
+/// window lands on a screen of another scale, which its watcher picks up.
+fn write_display_scale(app: &AppHandle, serial: &str, scale: f64) {
+    let cmd = format!("echo {scale} > {DISPLAY_SCALE_FILE}");
+    if let Err(e) = adb::run_adb(app, &["-s", serial, "shell", &cmd]) {
+        log::warn!("{serial}: could not write the display scale: {e}");
+    }
+}
+
+/// Keep a display that follows its window sharp, and the same size to look
+/// at, when the window is dragged onto a screen of another scale — a Retina
+/// laptop beside a 1x monitor is the everyday case.
+///
+/// The window asks for no new size when it moves: its size in points is the
+/// same. On macOS the phone is told the new pixels-per-point and applies it to
+/// the last size the window asked for; on Windows the window's pixel size
+/// changes by itself as Windows rescales it. Either way the density goes with
+/// the scale — one dp stays one point — at the phone's Display size preset.
+///
+/// Asked once a second, of the window server (embed::window_scale): there is
+/// no event for it that this process could hear.
+#[allow(clippy::too_many_arguments)]
+fn watch_window_scale(
+    app: AppHandle,
+    serial: String,
+    key: String,
+    pid: u32,
+    child: Arc<Mutex<Child>>,
+    stop: Arc<AtomicBool>,
+    display_id: Arc<AtomicI32>,
+    density: Arc<AtomicI32>,
+    base_dpi: Arc<AtomicI32>,
+) {
+    thread::spawn(move || {
+        let mut scale = f64::from(base_dpi.load(Ordering::SeqCst).max(80)) / 160.0;
+        loop {
+            thread::sleep(Duration::from_secs(1));
+            if stop.load(Ordering::SeqCst)
+                || child.lock().unwrap().try_wait().map(|s| s.is_some()).unwrap_or(true)
+            {
+                return;
+            }
+            let display = display_id.load(Ordering::SeqCst);
+            let Some(now) = crate::embed::window_scale(&app, pid) else {
+                continue;
+            };
+            if display < 0 || (now - scale).abs() < 0.01 {
+                continue;
+            }
+            log::info!("scrcpy [{key}] the window is on a {now}x screen now (was {scale}x)");
+            if cfg!(target_os = "macos") {
+                write_display_scale(&app, &serial, now);
+            }
+            let base = ((160.0 * now).round() as i32).clamp(80, 960);
+            let factor = display::size_factor(&app, &serial, (1920, 1080));
+            let dpi = ((f64::from(base) * factor).round() as i32).clamp(DPI_MIN, DPI_MAX);
+            match adb::run_adb(&app, &["-s", &serial, "shell", &format!("wm density {dpi} -d {display}")]) {
+                Ok(_) => {
+                    base_dpi.store(base, Ordering::SeqCst);
+                    density.store(dpi, Ordering::SeqCst);
+                    scale = now;
+                }
+                Err(e) => log::warn!("scrcpy [{key}] could not move the density to {dpi}: {e}"),
+            }
+        }
+    });
+}
+
 /// The Default density of this phone's running desktop, if it has one — the
 /// base the launcher builds its Display size presets on (adb_start_launcher).
 pub(crate) fn desktop_base_dpi(app: &AppHandle, serial: &str) -> Option<i32> {
     let state = app.state::<MirrorState>();
     let map = state.0.lock().unwrap();
     map.get(&format!("{serial}|desktop"))
-        .map(|s| s.base_dpi)
+        .map(|s| s.base_dpi.load(Ordering::SeqCst))
         .filter(|d| *d > 0)
 }
 
@@ -1272,31 +1410,48 @@ fn apply_stored_config(app: &AppHandle, opts: &mut MirrorOptions) {
     // A resolution picked in Settings — trusted only if it parses, since a bad
     // value would take the desktop down — or else ("auto", or never picked)
     // the screen the app is on, at its own pixels (display.rs).
-    match map.get("res").filter(|r| parse_display_size(r).is_some()) {
-        Some(res) => {
+    // The display that follows its window where the host can (macOS, Windows),
+    // else one fitted to the screen once.
+    let picked = map.get("res").filter(|r| parse_display_size(r).is_some());
+    let fit = match picked {
+        Some(_) => None,
+        None => display::desktop_flex_geometry(app).or_else(|| {
+            display::desktop_geometry(app, &opts.serial, opts.video_codec.as_deref())
+        }),
+    };
+    match (picked, fit) {
+        (Some(res), _) => {
             opts.new_display = Some(res.clone());
             opts.window = None;
             opts.base_dpi = None;
             opts.fitted = false;
+            opts.flex = None;
         }
-        None => match display::desktop_geometry(app, &opts.serial, opts.video_codec.as_deref()) {
-            Some(g) => {
-                opts.new_display = Some(format!("{}x{}", g.width, g.height));
-                opts.window = g.window;
-                opts.base_dpi = Some(g.base_dpi);
-                opts.fitted = true;
-            }
-            // No screen to fit (none reported, or too small): the size the
-            // frontend asked for, as before this existed.
-            None => {
-                opts.window = None;
-                opts.base_dpi = None;
-                opts.fitted = false;
-            }
-        },
+        (None, Some(g)) => {
+            opts.new_display = Some(format!("{}x{}", g.width, g.height));
+            opts.window = g.window;
+            opts.base_dpi = Some(g.base_dpi);
+            opts.fitted = true;
+            opts.flex = g.flex;
+        }
+        // No screen to fit (none reported, or too small): the size the
+        // frontend asked for, as before this existed.
+        (None, None) => {
+            opts.window = None;
+            opts.base_dpi = None;
+            opts.fitted = false;
+            opts.flex = None;
+        }
     }
     // A bit rate picked in Settings, or else scrcpy's 8 Mbps for 1080p scaled
-    // to this display's pixels. 0 is how the launcher says "Automatic".
+    // to the most pixels this display will have. 0 is how the launcher says
+    // "Automatic".
+    let largest = fit
+        .map(|g| g.largest)
+        .or_else(|| {
+            let (w, h) = opts.new_display.as_deref().and_then(parse_display_size)?;
+            Some((w.max(0) as u32, h.max(0) as u32))
+        });
     match map
         .get("bitrate")
         .and_then(|v| v.parse::<u32>().ok())
@@ -1304,12 +1459,9 @@ fn apply_stored_config(app: &AppHandle, opts: &mut MirrorOptions) {
     {
         Some(mbps) => opts.video_bit_rate_mbps = mbps,
         None => {
-            if let Some((w, h)) = opts.new_display.as_deref().and_then(parse_display_size) {
-                opts.video_bit_rate_mbps = display::auto_bit_rate_mbps(
-                    w.max(0) as u32,
-                    h.max(0) as u32,
-                    display::is_wireless(&opts.serial),
-                );
+            if let Some((w, h)) = largest {
+                opts.video_bit_rate_mbps =
+                    display::auto_bit_rate_mbps(w, h, display::is_wireless(&opts.serial));
             }
         }
     }
@@ -1424,6 +1576,7 @@ fn audio_companion_options(serial: &str, dup: bool) -> MirrorOptions {
         window: None,
         base_dpi: None,
         fitted: false,
+        flex: None,
     }
 }
 
@@ -1824,6 +1977,12 @@ struct Enforcer {
     app: AppHandle,
     key: String,
     display_size: Option<(i32, i32)>,
+    /// The display follows its window, so its size changes under the session.
+    flex: bool,
+    /// The display just changed size: maximised windows are fitted to the new one.
+    refit: bool,
+    /// When a display that follows its window was last measured on the phone.
+    next_size_check: Instant,
     shell: ShellSession,
     /// maximize/restore state per task on this display
     wins: HashMap<u32, WinState>,
@@ -2258,6 +2417,16 @@ impl Enforcer {
         let Some(max_rect) = self.maxed_rect(density) else {
             return;
         };
+        // The display changed size under maximised windows. Left alone they
+        // would read as "resized by hand" below and drop to windowed; they are
+        // maximised, so they are fitted to the display as it is now.
+        if std::mem::take(&mut self.refit) {
+            let maxed: Vec<u32> = self.wins.iter().filter(|(_, w)| w.maxed).map(|(id, _)| *id).collect();
+            for rec in tasks.iter().filter(|t| maxed.contains(&t.id)) {
+                log::info!("freeform-enforcer [{}] task {} re-fitted to the display", self.key, rec.id);
+                self.apply(rec, true, display, density);
+            }
+        }
         let dflt = self.default_windowed();
         let live: Vec<&TaskRec> = tasks
             .iter()
@@ -2839,7 +3008,7 @@ impl RequestPump {
                                 let map = state.0.lock().unwrap();
                                 let base_dpi = map.get(&self.key).map(|s| {
                                     s.density.store(dpi, Ordering::SeqCst);
-                                    s.base_dpi
+                                    s.base_dpi.load(Ordering::SeqCst)
                                 });
                                 drop(map);
                                 // future sessions start straight at this size,
@@ -3166,6 +3335,34 @@ impl Enforcer {
             );
             self.restart_caption_service(display);
         }
+        // A display that follows its window changes size under the session. The
+        // patched server says so as it happens ("Display resized", read in
+        // spawn_output_reader); the phone is asked as well every few seconds, for
+        // a server that does not.
+        if self.flex && Instant::now() >= self.next_size_check {
+            self.next_size_check = Instant::now() + FLEX_SIZE_CHECK;
+            if let Some(size) = self
+                .run(&format!("wm size -d {display}"))
+                .and_then(|o| physical_size(&o))
+            {
+                if session_display_size(&self.app, &self.key) != Some(size) {
+                    set_session_display_size(&self.app, &self.key, size);
+                }
+            }
+        }
+        if let Some(size) = session_display_size(&self.app, &self.key) {
+            if self.display_size.is_some_and(|old| old != size) {
+                log::info!(
+                    "freeform-enforcer [{}] display {display} is {}x{} now (was {:?})",
+                    self.key,
+                    size.0,
+                    size.1,
+                    self.display_size
+                );
+                self.refit = true;
+            }
+            self.display_size = Some(size);
+        }
         // Keep the daemon's dead-man switch fed. If the cable is pulled, this
         // side never gets to run the undo — nothing here can reach the phone
         // any more — so the daemon does it once this goes quiet and the desktop
@@ -3270,6 +3467,26 @@ fn session_display_size(app: &AppHandle, key: &str) -> Option<(i32, i32)> {
     map.get(key).and_then(|s| *s.display_size.lock().unwrap())
 }
 
+fn set_session_display_size(app: &AppHandle, key: &str, size: (i32, i32)) {
+    let state = app.state::<MirrorState>();
+    let map = state.0.lock().unwrap();
+    if let Some(s) = map.get(key) {
+        *s.display_size.lock().unwrap() = Some(size);
+    }
+}
+
+/// How often a display that follows its window is measured on the phone, on
+/// top of what the server reports as it resizes.
+const FLEX_SIZE_CHECK: Duration = Duration::from_millis(2500);
+
+/// `wm size -d N` → the display's own size: "Physical size: 2832x1706".
+fn physical_size(out: &str) -> Option<(i32, i32)> {
+    out.lines()
+        .find_map(|l| l.trim().strip_prefix("Physical size:"))
+        .and_then(|v| parse_display_size(v.trim()))
+        .filter(|(w, h)| *w > 0 && *h > 0)
+}
+
 /// The Android display a session is showing, for callers outside this module.
 ///
 /// The gesture engine needs it per gesture rather than once: an auto-reconnect
@@ -3308,6 +3525,7 @@ fn spawn_freeform_enforcer(
     serial: String,
     key: String,
     display_size: Option<(i32, i32)>,
+    flex: bool,
     stop: Arc<AtomicBool>,
 ) {
     let shared = Arc::new(Shared::default());
@@ -3328,6 +3546,9 @@ fn spawn_freeform_enforcer(
                 app,
                 key,
                 display_size,
+                flex,
+                refit: false,
+                next_size_check: Instant::now(),
                 wins: Default::default(),
                 owned: Default::default(),
                 reclaims: Default::default(),
@@ -3568,6 +3789,7 @@ fn fallback_options(opts: &MirrorOptions) -> Option<MirrorOptions> {
         base_dpi,
         window: None,
         fitted: false,
+        flex: None,
         audio: false,
         audio_playback: false,
         video_codec: None,
@@ -4115,6 +4337,7 @@ pub fn start_mirror(app: AppHandle, mut options: MirrorOptions) -> Result<Sessio
             options.serial.clone(),
             key.clone(),
             size,
+            options.flex.is_some(),
             stop.clone(),
         );
     }
@@ -4689,6 +4912,24 @@ mod tests {
         let line = "INFO: Renderer: direct3d11";
         assert_eq!(parse_display_id(line), None);
         assert_eq!(parse_display_size_announced(line), None);
+    }
+
+    #[test]
+    fn reads_the_patched_servers_resize_lines() {
+        let line = "[server] INFO: Display resized: 2832x1706/320 (id=63)";
+        assert_eq!(parse_display_resized(line), Some((2832, 1706, 320)));
+        assert_eq!(parse_display_resized("[server] INFO: Display resized: 2464x1220/160 (id=7)"), Some((2464, 1220, 160)));
+        assert_eq!(parse_display_resized("[server] INFO: New display: 2832x1706/320 (id=63)"), None);
+        assert_eq!(parse_display_resized("[server] INFO: Display resized: wide/tall"), None);
+    }
+
+    #[test]
+    fn reads_a_displays_own_size_from_wm() {
+        assert_eq!(physical_size("Physical size: 2560x1280"), Some((2560, 1280)));
+        assert_eq!(physical_size("Physical size: 2832x1706\nOverride size: 1920x1080"), Some((2832, 1706)));
+        // what a display that is gone answers
+        assert_eq!(physical_size("Physical size: 0x0"), None);
+        assert_eq!(physical_size(""), None);
     }
 
     /// The frontend sends camelCase, and a misspelt key would drop the option

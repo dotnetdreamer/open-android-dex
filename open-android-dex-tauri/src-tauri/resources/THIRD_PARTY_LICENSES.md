@@ -18,6 +18,11 @@ Files, Windows: `scrcpy.exe`, `scrcpy-server`, `LICENSE.txt`
 Files, macOS: `scrcpy`, `scrcpy-server`, `LICENSE`
 Files, Linux: `scrcpy`, `scrcpy-server`, `LICENSE`
 
+`scrcpy-server` is not the release's own file: it is built from scrcpy's
+source at that release with one change by this project,
+`openandroiddex-scrcpy/display-scale.patch` (a resizable display follows its
+window in the computer screen's pixels). The files it changes say so.
+
 The scrcpy release archive also carries the libraries listed under
 "Libraries bundled by scrcpy" below, which are **not** Apache-2.0. On macOS and
 Linux the build is statically linked, so those libraries are inside the `scrcpy`

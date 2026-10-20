@@ -87,6 +87,11 @@ objc2-core-foundation = { version = "0.3", features = [
     "CFBase",
     "CFString",
     "CFDictionary",
+    # The window list a desktop that follows its window is watched through
+    # (embed/macos.rs window_scale): an array of dictionaries of numbers.
+    "CFArray",
+    "CFNumber",
+    "CFCGTypes",
     # The trackpad tap is a Mach port pumped on a run loop of its own
     # (gestures/macos.rs), which is the only way to receive one off the main
     # thread.
@@ -112,6 +117,9 @@ objc2-core-graphics = { version = "0.3", default-features = false, features = [
     "objc2",
     "CGEvent",
     "CGEventTypes",
+    # Which screen the desktop's window is on (embed/macos.rs window_scale).
+    "CGWindow",
+    "CGGeometry",
 ] }
 objc2-app-kit = { version = "0.3", default-features = false, features = [
     "std",

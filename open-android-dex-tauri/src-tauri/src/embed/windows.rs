@@ -243,3 +243,14 @@ pub fn activate(pid: u32) -> Result<(), String> {
     cmd.output().map_err(|e| format!("focus failed: {e}"))?;
     Ok(())
 }
+
+/// The window's own dpi, as Windows scales it on the monitor it is on, over
+/// 96. Per window rather than per monitor so a window straddling two is
+/// answered the way Windows itself decided.
+pub fn window_scale(_app: &AppHandle, pid: u32) -> Option<f64> {
+    use windows_sys::Win32::UI::HiDpi::GetDpiForWindow;
+    let hwnd = find_window_for_pid(pid)?;
+    // SAFETY: a handle EnumWindows just returned; a window gone since answers 0.
+    let dpi = unsafe { GetDpiForWindow(hwnd) };
+    (dpi > 0).then(|| f64::from(dpi) / 96.0)
+}

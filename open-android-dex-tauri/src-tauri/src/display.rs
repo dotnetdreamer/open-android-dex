@@ -108,6 +108,14 @@ pub struct Geometry {
     /// The Default density: one dp is one point of the computer's own UI.
     pub base_dpi: i32,
     pub window: Option<WindowRect>,
+    /// For a display that follows its window (see [`flex_geometry`]): what a
+    /// window coordinate is in pixels — the scale the phone is told to multiply
+    /// every size scrcpy asks for by. None for a display fitted once.
+    pub flex: Option<f64>,
+    /// The largest the display gets, in pixels, which is what the bit rate is
+    /// chosen for: its own size when fitted once, the screen's usable area
+    /// when it follows a window that can be made that big.
+    pub largest: (u32, u32),
 }
 
 /// Fit a desktop to `screen`, rendering at most `cap` pixels on its long side.
@@ -156,11 +164,54 @@ pub fn geometry(screen: &Screen, cap: u32) -> Option<Geometry> {
         height,
         base_dpi,
         window,
+        flex: None,
+        largest: (width, height),
     })
 }
 
 fn align_down(v: u32) -> u32 {
     v / ALIGN * ALIGN
+}
+
+/// scrcpy keeps a new window this far inside the screen's usable area, in
+/// window coordinates on every side combined (DISPLAY_MARGINS, screen.c).
+const SCRCPY_MARGINS: f64 = 96.0;
+
+/// A desktop that follows its window (`--flex-display`), started at the size
+/// scrcpy will open its window at on `screen` — the main screen, where SDL
+/// centres it — so the first frame already fills it one pixel for one.
+///
+/// scrcpy sizes that window to the display (taken in window coordinates)
+/// shrunk to fit the screen's usable area less 96 on each axis. A display of
+/// exactly that area times the screen's scale fits on both axes at once, so
+/// the window is that area and no resize is needed to match it. From then on
+/// every size the window takes is asked of the phone in pixels — see the
+/// scale file in openandroiddex-scrcpy/display-scale.patch, which this
+/// returns as `flex`: points to pixels on macOS, 1 where windows are measured
+/// in pixels already.
+pub fn flex_geometry(screen: &Screen) -> Option<Geometry> {
+    if !(screen.scale.is_finite() && screen.scale > 0.0) {
+        return None;
+    }
+    let unit = match screen.units {
+        Units::Points => screen.scale,
+        Units::Pixels => 1.0,
+    };
+    let w = (f64::from(screen.work_w) / unit - SCRCPY_MARGINS).floor();
+    let h = (f64::from(screen.work_h) / unit - SCRCPY_MARGINS).floor();
+    let width = (w * unit).round() as u32;
+    let height = (h * unit).round() as u32;
+    if width < MIN_WIDTH || height < MIN_HEIGHT {
+        return None;
+    }
+    Some(Geometry {
+        width,
+        height,
+        base_dpi: ((160.0 * screen.scale).round() as i32).clamp(80, 960),
+        window: None,
+        flex: Some(unit),
+        largest: (screen.work_w, screen.work_h),
+    })
 }
 
 /// The bit rate a desktop of `width` x `height` is streamed at when the user
@@ -282,13 +333,32 @@ fn window_frame(scale: f64) -> Insets {
     }
 }
 
-/// The screen the desktop will open on: the one the app's own window is on —
-/// where the person who clicked "Start" is looking — or the main one.
+/// Whether a desktop here can follow its window. Where SDL measures windows in
+/// pixels (Windows) the phone gets their size as it is; on macOS, in points,
+/// the patched scrcpy server multiplies it. Linux is left fitted once: X11 and
+/// Wayland measure differently and neither has been tried.
+pub fn flex_supported() -> bool {
+    cfg!(any(target_os = "macos", windows))
+}
+
+/// The screen the desktop will open on when it is fitted once: the one the
+/// app's own window is on — where the person who clicked "Start" is looking —
+/// or the main one.
 pub fn screen_for_desktop(app: &AppHandle) -> Option<Screen> {
     let monitor = app
         .get_webview_window("main")
         .and_then(|w| w.current_monitor().ok().flatten())
         .or_else(|| app.primary_monitor().ok().flatten())?;
+    Some(screen_of(&monitor))
+}
+
+/// The main screen — the one SDL centres a window on when it is not told
+/// where, which is how a desktop that follows its window opens.
+pub fn main_screen(app: &AppHandle) -> Option<Screen> {
+    app.primary_monitor().ok().flatten().map(|m| screen_of(&m))
+}
+
+fn screen_of(monitor: &tauri::Monitor) -> Screen {
     let work = monitor.work_area();
     let scale = monitor.scale_factor();
     #[cfg(target_os = "macos")]
@@ -314,7 +384,7 @@ pub fn screen_for_desktop(app: &AppHandle) -> Option<Screen> {
         Units::Pixels,
         false,
     );
-    Some(Screen {
+    Screen {
         work_x: work.position.x,
         work_y: work.position.y,
         work_w: work.size.width,
@@ -323,7 +393,49 @@ pub fn screen_for_desktop(app: &AppHandle) -> Option<Screen> {
         frame,
         units,
         place,
+    }
+}
+
+/// The scale of the screen holding the point (`x`, `y`) in global points, or
+/// None off every screen: what a desktop following its window is re-scaled to
+/// when the window is dragged onto another screen (embed/macos.rs). Windows
+/// asks the window itself instead (GetDpiForWindow).
+#[cfg(target_os = "macos")]
+pub fn scale_at(app: &AppHandle, x: f64, y: f64) -> Option<f64> {
+    let monitors = app.available_monitors().ok()?;
+    monitors.iter().find_map(|m| {
+        let s = m.scale_factor();
+        let (mx, my) = (f64::from(m.position().x) / s, f64::from(m.position().y) / s);
+        let (mw, mh) = (f64::from(m.size().width) / s, f64::from(m.size().height) / s);
+        (x >= mx && x < mx + mw && y >= my && y < my + mh).then_some(s)
     })
+}
+
+/// The display a desktop that follows its window starts at, on the main
+/// screen — or None where it cannot follow (the caller fits it once instead).
+pub fn desktop_flex_geometry(app: &AppHandle) -> Option<Geometry> {
+    if !flex_supported() {
+        return None;
+    }
+    let screen = main_screen(app)?;
+    let g = flex_geometry(&screen);
+    log::info!(
+        "display: main screen {}x{} at {}x scale → {}",
+        screen.work_w,
+        screen.work_h,
+        screen.scale,
+        match &g {
+            Some(g) => format!(
+                "a display following its window, from {}x{} at {} dpi, sizes x{}",
+                g.width,
+                g.height,
+                g.base_dpi,
+                g.flex.unwrap_or(1.0)
+            ),
+            None => "too small to fit, keeping 1920x1080".into(),
+        }
+    );
+    g
 }
 
 /// The desktop for this phone on the screen the app is on, or None when there
@@ -577,6 +689,51 @@ mod tests {
             assert_eq!(g.width % ALIGN, 0);
             assert_eq!(g.height % ALIGN, 0);
         }
+    }
+
+    #[test]
+    fn a_flex_desktop_opens_at_the_window_scrcpy_will_make_one_for_one() {
+        // The 2560x1440 main screen: usable 2560x1316 points at 1x.
+        let g = flex_geometry(&mac((0, 30, 2560, 1316), 1.0)).unwrap();
+        assert_eq!((g.width, g.height), (2560 - 96, 1316 - 96));
+        assert_eq!((g.base_dpi, g.flex, g.window), (160, Some(1.0), None));
+        assert_eq!(g.largest, (2560, 1316));
+        // A Retina main screen: 1512x949 points usable at 2x, so the display
+        // is the window's (1512-96)x(949-96) points in pixels, at 320 dpi.
+        let g = flex_geometry(&mac((0, 66, 3024, 1898), 2.0)).unwrap();
+        assert_eq!((g.width, g.height), (2832, 1706));
+        assert_eq!((g.base_dpi, g.flex), (320, Some(2.0)));
+        // scrcpy fits that display, taken as points, into the same area less
+        // 96: both axes land exactly, so the window needs no resize.
+        let (w_pt, h_pt) = (f64::from(g.width) / 2.0, f64::from(g.height) / 2.0);
+        assert_eq!((w_pt, h_pt), (1512.0 - 96.0, 949.0 - 96.0));
+    }
+
+    #[test]
+    fn a_flex_desktop_on_windows_is_sized_in_pixels_and_told_scale_one() {
+        let s = Screen {
+            work_x: 0,
+            work_y: 0,
+            work_w: 3840,
+            work_h: 2088,
+            scale: 1.5,
+            frame: Insets::default(),
+            units: Units::Pixels,
+            place: true,
+        };
+        let g = flex_geometry(&s).unwrap();
+        assert_eq!((g.width, g.height), (3840 - 96, 2088 - 96));
+        assert_eq!((g.base_dpi, g.flex), (240, Some(1.0)));
+    }
+
+    #[test]
+    fn a_flex_desktop_needs_a_screen_worth_following() {
+        assert!(flex_geometry(&mac((0, 25, 1024, 600), 1.0)).is_none());
+        let broken = Screen {
+            scale: 0.0,
+            ..mac((0, 25, 2560, 1415), 1.0)
+        };
+        assert!(flex_geometry(&broken).is_none());
     }
 
     #[test]

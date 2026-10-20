@@ -452,3 +452,61 @@ pub fn activate(pid: u32) -> Result<(), String> {
         ))
     }
 }
+
+/// The scale of the screen holding the middle of `pid`'s window.
+///
+/// The window's bounds come from the window server's list, which needs no
+/// permission for bounds (only for titles) — unlike everything else in this
+/// file, it works without Accessibility.
+pub fn window_scale(app: &AppHandle, pid: u32) -> Option<f64> {
+    let (x, y, w, h) = window_bounds(pid)?;
+    crate::display::scale_at(app, x + w / 2.0, y + h / 2.0)
+}
+
+/// `pid`'s largest ordinary (layer 0) window, in global points, top-left
+/// origin. Largest, because SDL's process owns a few small helper windows
+/// beside the one it draws in. Off-screen windows count: one in another Space
+/// is still on a screen.
+fn window_bounds(pid: u32) -> Option<(f64, f64, f64, f64)> {
+    use objc2_core_foundation::{CFNumber, CGRect};
+    use objc2_core_graphics::{
+        kCGNullWindowID, kCGWindowBounds, kCGWindowLayer, kCGWindowOwnerPID,
+        CGRectMakeWithDictionaryRepresentation, CGWindowListCopyWindowInfo, CGWindowListOption,
+    };
+    let list = CGWindowListCopyWindowInfo(
+        CGWindowListOption::OptionAll | CGWindowListOption::ExcludeDesktopElements,
+        kCGNullWindowID,
+    )?;
+    let mut best: Option<(f64, f64, f64, f64)> = None;
+    for i in 0..list.count() {
+        // SAFETY: the window list is an array of dictionaries, kept alive by `list`.
+        let entry = unsafe { list.value_at_index(i) } as *const CFDictionary;
+        let Some(dict) = (unsafe { entry.as_ref() }) else {
+            continue;
+        };
+        let get = |key: &CFString| unsafe { dict.value(key as *const CFString as *const c_void) };
+        let number = |key: &CFString| {
+            let v = get(key) as *const CFNumber;
+            unsafe { v.as_ref() }.and_then(CFNumber::as_i64)
+        };
+        // SAFETY: the window server's own key constants.
+        let (owner, layer, bounds) = unsafe { (kCGWindowOwnerPID, kCGWindowLayer, kCGWindowBounds) };
+        if number(owner) != Some(i64::from(pid)) || number(layer) != Some(0) {
+            continue;
+        }
+        let rect = get(bounds) as *const CFDictionary;
+        let Some(rect) = (unsafe { rect.as_ref() }) else {
+            continue;
+        };
+        let mut r = CGRect::default();
+        // SAFETY: `rect` is the bounds dictionary of this entry; `r` is ours.
+        if !unsafe { CGRectMakeWithDictionaryRepresentation(Some(rect), &mut r) } {
+            continue;
+        }
+        let area = r.size.width * r.size.height;
+        if best.is_none_or(|(_, _, w, h)| area > w * h) {
+            best = Some((r.origin.x, r.origin.y, r.size.width, r.size.height));
+        }
+    }
+    best
+}

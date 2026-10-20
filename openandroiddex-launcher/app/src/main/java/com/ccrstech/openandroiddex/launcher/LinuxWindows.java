@@ -336,6 +336,25 @@ final class LinuxWindows implements LinuxWm.Host {
         }
     }
 
+    /**
+     * The desktop display changed under a running session — a desktop that
+     * follows its window, resized or dragged to a screen of another scale. The
+     * X screen grows to the display (LinuxWm#displaySize: the pointer cannot
+     * pass the screen's edge), and the apps are told the display's new DPI.
+     */
+    void desktopChanged() {
+        LinuxWm w = wm;
+        LauncherActivity desktop = LauncherActivity.desktopShell();
+        if (w == null || !w.running() || desktop == null) return;
+        Point size = displaySize(desktop);
+        int dpi = Math.round(96f * desktop.getResources().getDisplayMetrics().densityDpi / 160f);
+        // Off the main thread: both are writes to the X connection.
+        new Thread(() -> {
+            w.displaySize(size.x, size.y);
+            w.dpi(dpi);
+        }, "linuxwin-display").start();
+    }
+
     private static Point displaySize(LauncherActivity desktop) {
         Point p = new Point();
         desktop.getWindowManager().getDefaultDisplay().getRealSize(p);

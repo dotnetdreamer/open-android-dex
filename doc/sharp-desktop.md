@@ -4,12 +4,13 @@ The desktop used to be 1920x1080 at 160 dpi on every computer. On a Retina
 laptop or a 4K monitor scrcpy's window stretched it 1.6 to 2 times, and
 everything on it — Android windows, Linux windows, the taskbar — looked soft.
 
-Now the desktop is made at the pixel size of the screen the app is on, scrcpy's
-window opens at exactly the size that shows it one pixel for one, and the
-desktop's density follows the computer's own scaling: one dp is one point of
+Now the desktop is the size of its window, in the screen's own pixels, and
+follows the window as it is resized, maximised, made fullscreen or dragged to
+another screen: one phone pixel for each screen pixel, whatever the window's
+size. Its density follows the computer's own scaling: one dp is one point of
 the Mac's or Windows' UI, so an Android window is the size a native one is
-beside it. The stream's bit rate grows with the pixels. On a 14" MacBook Pro
-that is a 3024x1824 desktop at 320 dpi in a 1512x912-point window.
+beside it, on a Retina laptop (320 dpi) and on a 1x monitor (160) alike. The
+stream's bit rate grows with the pixels.
 
 Settings → Scrcpy Config shows it as two new defaults, "Match the computer's
 screen" and a bit rate of "Auto". A resolution or a rate picked there still
@@ -22,39 +23,73 @@ is the second half of this record.
 
 | Piece | File | What it owns |
 | --- | --- | --- |
-| The fit | `src-tauri/src/display.rs` | the screen, the display's size and Default density, scrcpy's window rect, the bit rate, what each phone has taught us |
+| The fit | `src-tauri/src/display.rs` | the screen, the display's size and Default density, the bit rate, what each phone has taught us |
 | Applying it | `scrcpy.rs` (`apply_stored_config`, `apply_stored_density`, `build_args`) | the command line of every desktop spawn and respawn |
+| Following the window | `openandroiddex-scrcpy` (`display-scale.patch`, `build.mjs`) | scrcpy's server, rebuilt: a window's size asked for in pixels |
+| …and the screen | `scrcpy.rs` (`watch_window_scale`), `embed::window_scale` | the scale of the screen the window is on; the density with it |
+| …and the window manager | `scrcpy.rs` (`parse_display_resized`, the enforcer's `refit`) | the display's live size; maximised windows kept maximised |
 | Telling the launcher | `adb.rs` (`adb_start_launcher`) | `--ei base_dpi` on every launcher start |
 | The presets | `SettingsActivity`, `DexPrefs.sizeIndex`, `LauncherActivity.reapplyDensity` | Display size as a multiple of the Default; the two new rows |
 | Title bars | `CaptionService` (`px`, `trackDensity`) | bars in the display's own pixels |
-| Linux | `LinuxWm.atDpi`, `LinuxActivity.pixelsPerGuestPixel` | GTK's scale in a window; XFCE's framebuffer |
+| Linux | `LinuxWm.atDpi`/`dpi`/`displaySize`, `LinuxWindows.desktopChanged`, `LinuxActivity.pixelsPerGuestPixel` | GTK's scale in a window, the X screen following the display; XFCE's framebuffer |
 | Who gets in | `openandroiddex-wmd`: `Peers.java`, `WmDaemon.callerOf`, `PC_ONLY`; `UnplugWatch.ARMED_KEYS` | the caller's uid; what each caller may ask |
 | Check | `cargo test display::`, `test/sharp-desktop-test.mjs`, `test/linux-windows-test.mjs` | the arithmetic and the parsing, off a phone |
 
-## Why not `--flex-display`
+## Following the window
 
-scrcpy 5's `--flex-display` resizes the virtual display to follow the window,
-which looks like exactly this feature. On a Mac it is the opposite: the client
-takes the window's size from `SDL_EVENT_WINDOW_RESIZED`, which SDL3 reports in
-*points* on macOS (and Wayland), so on a 2x screen the display gets half the
-screen's pixels and `--render-fit=unscaled` draws each one twice as big. It is
-softer than the stretched 1080p it would replace. Upstream knows
-([#7096](https://github.com/Genymobile/scrcpy/issues/7096), October 2026); the
-maintainer's answer is that the logical size is deliberate and that a
-`--display-scale=logical|physical` option would make sense. It does not exist
-in 5.0.1, the newest release.
+scrcpy 5's `--flex-display` resizes the virtual display to follow the window.
+Stock, on a Mac, it is softer than the stretched 1080p it would replace: the
+client takes the window's size from `SDL_EVENT_WINDOW_RESIZED`, which SDL3
+reports in *points* on macOS (and Wayland), so on a 2x screen the display gets
+half the screen's pixels and `--render-fit=unscaled` draws each one twice as
+big. Upstream knows ([#7096](https://github.com/Genymobile/scrcpy/issues/7096),
+October 2026): the logical size is deliberate, and a
+`--display-scale=logical|physical` option "would make sense". It is not in
+5.0.1, the newest release.
 
-On Windows (and X11) SDL3 measures windows in pixels, so flex would be sharp
-there. It is not switched on: a display whose size changes under the session
-needs the PC's window manager to follow it (maximised windows, the phone-shaped
-ones, the enforcer's rects all hold the size from "New display"), and none of
-that can be tried on a Windows machine from here. Resizing scrcpy's window
-therefore still scales the picture, as it always did; the desktop is fitted
-once per session.
+So the part of scrcpy that runs on the phone is rebuilt with a small patch
+(`openandroiddex-scrcpy/display-scale.patch`, built by `build.mjs` from scrcpy's
+own source at the bundled release, by `npm run apk` locally and in CI's
+launcher job): every size the client asks for is multiplied by a scale the
+computer writes to `/data/local/tmp/oadx-display-scale` — 2 on a Retina screen,
+1 elsewhere and always on Windows, where SDL already measures in pixels. The
+client stays the stock release, started with `--flex-display` and
+`--render-fit=letterbox`: the frame is then the window's size in pixels, and
+letterboxing draws it into the window one for one. Mouse positions map through
+the drawn rectangle, so they need nothing. A frame the server marks as a
+client resize never makes the client resize its window, which is what keeps the
+doubled size from fighting the window. Without the file, or with the release's
+own server, it is stock flex — and the log says so ("does not follow the
+screen's scale").
 
-## The fit
+- **Opening.** SDL centres the window on the main screen and fits it to that
+  screen's usable area less 96 on each axis. The first display is exactly that
+  area times the scale (`display::flex_geometry`), so the window opens one for
+  one with no resize; macOS may then place it on another screen, which the
+  next point covers.
+- **Resizing.** The client asks for the new size in points; the phone makes it
+  in pixels, says "Display resized: WxH/dpi", and the PC's window manager reads
+  that line — and `wm size -d` every 2.5 s, for a server that does not say —
+  and re-fits maximised windows to the new display instead of reading them as
+  resized by hand.
+- **Another screen.** A window dragged from a 1x monitor to a Retina screen
+  asks for nothing: its size in points is unchanged. `watch_window_scale` asks
+  the window server once a second which screen the window is on
+  (`CGWindowListCopyWindowInfo`, no permission needed; `GetDpiForWindow` on
+  Windows), writes the new scale for the phone, which applies it to the last
+  size asked for, and moves the density with it (`wm density`, Default × the
+  phone's preset) so the UI stays the size it was. The launcher re-derives its
+  Default from the new density (`followBaseDpi`).
 
-`display::screen_for_desktop` takes the screen the app's own window is on —
+A resolution picked in Settings is a fixed display, as before, and Linux hosts
+keep the display fitted once (below): X11 and Wayland measure windows
+differently and neither has been tried.
+
+## The fit, where the window is not followed
+
+On Linux the display is fitted once, and on macOS and Windows this is the
+fallback should a following display be impossible (a screen too small for
+one). `display::screen_for_desktop` takes the screen the app's own window is on —
 where the person who clicked Start is looking — or the main one, and its work
 area from Tauri: no menu bar, no Dock or taskbar, in physical pixels.
 
@@ -116,8 +151,9 @@ both sides, of whatever the session's Default is.
 
 ## Bit rate
 
-When none was picked: scrcpy's own 8 Mbps for 1080p, scaled by the display's
-pixels — 20 Mbps for a 14" MacBook's desktop — and held between 8 and 32 over a
+When none was picked: scrcpy's own 8 Mbps for 1080p, scaled by the most pixels
+the display will have — the screen's usable area, for one that follows its
+window: 22 Mbps on a 14" MacBook — and held between 8 and 32 over a
 cable and at most 16 over Wi-Fi, where scrcpy cannot slow down for a busy link
 and asking for more than arrives is felt as lag. A still desktop costs a
 fraction of either; the encoder only spends on change. "Reduce quality" still
@@ -197,12 +233,17 @@ is the follow-up.
 
 ## Verified, and not yet
 
-Off a phone: `cargo test display::` (12: a Retina laptop, a 1x monitor, a 5K
-screen capped, Windows at 150 %, the learned cap, Linux, a screen too small,
-alignment, bit rates, Wi-Fi routes, presets, the texture line);
-`node test/sharp-desktop-test.mjs` (19, against `/proc/net` lines read off the
-phone); `node test/linux-windows-test.mjs` (54, five for `atDpi`); `tsc`; the
-whole app type-checked for Windows (`AdjustWindowRectExForDpi` included).
+Off a phone: `cargo test` (116; `display::` 15 — the following display opening
+one for one on a 1x and a Retina main screen and on Windows at 150 %, a fitted
+Retina laptop, a 1x monitor, a 5K screen capped, the learned cap, Linux,
+screens too small, alignment, bit rates, Wi-Fi routes, presets, the texture
+line — and the server's "Display resized" and `wm size` lines);
+`node test/sharp-desktop-test.mjs` (29: the daemon's callers against
+`/proc/net` lines read off the phone, and the patch's `DisplayScale` lifted out
+of the patch file); `node test/linux-windows-test.mjs` (58, five for `atDpi`);
+`tsc`; the whole app type-checked for Windows (`AdjustWindowRectExForDpi`,
+`GetDpiForWindow` included); the patched server built by `build.mjs` and by
+upstream's own `build_without_gradle.sh`, byte for byte the same size.
 
 On the phone (Galaxy S25 Ultra, Android 16, the desktop app from `tauri dev`,
 on a 14" MacBook Pro with a 2560x1440 1x monitor as its main screen, macOS
@@ -226,6 +267,24 @@ on a 14" MacBook Pro with a 2560x1440 1x monitor as its main screen, macOS
   by GTK at 2x; its title bar 40 px with One UI's caption showing below before
   the CaptionService fix, 80 px and covering it after. Calculator's the same.
 
+The desktop following its window (2026-10-21, the patched server staged by
+`npm run apk`):
+
+- The server announced itself ("Flex display: 1.0x the window's size") and made
+  2464x1220 at 160 dpi for the 1x main screen; macOS put the window on the
+  Retina screen, the watcher saw it within a second ("the window is on a 2x
+  screen now"), and the phone re-made the display at 3024x1834 at 320 dpi — the
+  window's content in pixels; a 2x capture one for one. With the release's own
+  server the same session had warned and stayed at 1512x916, in points.
+- Resized to 1000x700 points: "Display resized: 2000x1336/320", the taskbar and
+  the tray laid out across the new width, the UI the same size, the capture
+  2000 pixels wide.
+- Dragged onto the 1x monitor: "Display scale: 1.0x", "Display resized:
+  1000x668/160".
+- Calculator maximised at (0,0)-(1796,916) on a 1800x968 desktop; the window
+  grown to 2160x1112 (macOS kept it on the screen): "re-fitted to the display",
+  (0,0)-(2156,1060), still maximised.
+
 Not yet:
 
 - a Windows or Linux computer: only type-checked, so the frame insets, SDL's
@@ -233,9 +292,14 @@ Not yet:
 - the learned encoder cap on a phone that needs it (the A13);
 - the launcher's side of `PC_ONLY` on a phone — no debuggable build to run as
   its uid — and the daemon on Android 10–12;
-- fullscreen one for one (arithmetic only), and a window moved to another
-  screen mid-session (scaled, not refitted);
-- the desktop following a window resize: flex with physical sizes, see above;
+- fullscreen and the green button's zoom with a following display (the same
+  resize path, not watched happen); a window straddling two screens (the one
+  holding its middle wins);
+- Linux windows growing their X screen as the desktop grows mid-session
+  (`desktopChanged` → RANDR), and GTK picking up a new scale when the window
+  changes screen while a Linux app is open;
+- a desktop that follows its window on Windows: SDL there sizes in pixels and
+  the scale stays 1, but the density following `GetDpiForWindow` is untried;
 - XFCE in DeX at 320 dpi, Qt apps in Linux windows (they read `Xft.dpi` from X
   resources, not XSETTINGS);
 - the higher bit rates over Wi-Fi.

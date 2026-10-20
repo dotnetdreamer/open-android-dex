@@ -224,3 +224,33 @@ if (process.env.SKIP_WMD_DEX === '1') {
   stage(builtDex, bundledDex)
   console.log(`[wmd] bundled ${statSync(bundledDex).size} bytes → ${bundledDex}`)
 }
+
+// ── scrcpy's server, with the flex display following the screen's pixels ────
+// The part of scrcpy that runs on the phone, rebuilt from scrcpy's own source
+// with openandroiddex-scrcpy/display-scale.patch: a desktop that follows its
+// window would otherwise come out at half resolution on a Retina screen. The
+// client stays the stock release. The release's own server is what is replaced
+// here, so skipping this keeps that one — the desktop still follows the window,
+// at the window's size in points rather than pixels.
+const scrcpyDir = resolve(here, '..', '..', 'openandroiddex-scrcpy')
+const builtServer = join(scrcpyDir, 'build', 'scrcpy-server')
+const bundledServer = resolve(here, '..', 'src-tauri', 'resources', 'bin', 'scrcpy-server')
+
+if (process.env.SKIP_SCRCPY_SERVER === '1') {
+  console.log('[scrcpy-server] SKIP_SCRCPY_SERVER=1 — keeping the bundled server as is')
+} else {
+  console.log('[scrcpy-server] building the server…')
+  try {
+    execFileSync(process.execPath, [join(scrcpyDir, 'build.mjs')], { stdio: 'inherit', env: buildEnv })
+  } catch {
+    console.error(
+      '[scrcpy-server] build failed. Needs git and network the first time (it clones\n' +
+        '               scrcpy at the bundled release), a JDK, and the Android SDK\n' +
+        '               (android-36, build-tools with d8 and aidl). Set SKIP_SCRCPY_SERVER=1\n' +
+        "               to keep the release's own server."
+    )
+    process.exit(1)
+  }
+  stage(builtServer, bundledServer)
+  console.log(`[scrcpy-server] bundled ${statSync(bundledServer).size} bytes → ${bundledServer}`)
+}

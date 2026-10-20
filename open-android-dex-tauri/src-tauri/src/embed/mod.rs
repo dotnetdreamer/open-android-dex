@@ -147,3 +147,11 @@ pub fn activate(app: &AppHandle, session_key: &str) -> Result<(), String> {
     let (pid, _) = session(app, session_key)?;
     backend::activate(pid)
 }
+
+/// The scale of the screen a scrcpy window is on — pixels per point on macOS,
+/// the window's dpi / 96 on Windows — or None when it cannot be told (no such
+/// window yet, or a host that is not asked). A desktop that follows its window
+/// re-scales to it when the window is dragged onto another screen.
+pub fn window_scale(app: &AppHandle, pid: u32) -> Option<f64> {
+    backend::window_scale(app, pid)
+}

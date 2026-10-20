@@ -44,3 +44,7 @@ pub fn exit_fullscreen(_pid: u32, _stored: isize) -> Result<bool, String> {
 pub fn activate(_pid: u32) -> Result<(), String> {
     Err(UNSUPPORTED.into())
 }
+
+pub fn window_scale(_app: &AppHandle, _pid: u32) -> Option<f64> {
+    None
+}

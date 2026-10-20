@@ -1199,6 +1199,22 @@ final class LinuxWm {
     }
 
     /**
+     * The desktop display's DPI changed (a desktop dragged onto a screen of
+     * another scale): every app is told the new settings, which GTK applies
+     * as it runs — scale factor included — and the rest at their next start.
+     */
+    void dpi(int dpi) {
+        if (dpi == opt.dpi || dpi <= 0) return;
+        opt.dpi = dpi;
+        try {
+            publishSettings();
+            host.log("x11: settings at " + dpi + " dpi");
+        } catch (IOException e) {
+            host.log("x11: cannot publish the settings at " + dpi + " dpi: " + e.getMessage());
+        }
+    }
+
+    /**
      * The desktop display is {@code w} × {@code h}: the X screen grows to it
      * if it is smaller — the pointer cannot go past the screen's edge, so a
      * part of the display beyond it could take no input. Never shrinks: a
