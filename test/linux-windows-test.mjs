@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Linux apps as windows of their own (doc/linux-windows.md), checked as far as
-// a computer can without a phone: the launcher's own X11, X11Keys, LinuxWm and
-// LinuxApps, compiled for this JVM as they are, and run by
+// a computer can without a phone: the launcher's own X11, X11Keys, LinuxWm,
+// LinuxApps and LinuxAudioLag, compiled for this JVM as they are, and run by
 // test/linux-windows/UnitCheck.java.
 //
 //   node test/linux-windows-test.mjs
@@ -33,7 +33,9 @@ const javac = spawnSync(
     "-nowarn",
     "-d",
     classes,
-    ...["X11.java", "X11Keys.java", "LinuxWm.java", "LinuxApps.java"].map((f) => path.join(LAUNCHER, f)),
+    ...["X11.java", "X11Keys.java", "LinuxWm.java", "LinuxApps.java", "LinuxAudioLag.java"].map((f) =>
+      path.join(LAUNCHER, f),
+    ),
     path.join(HERE, "linux-windows/UnitCheck.java"),
   ],
   { encoding: "utf8" },
@@ -57,6 +59,7 @@ const sections = [
   ["XSETTINGS:", "the XSETTINGS wire format"],
   ["rectangles", "damage, coalesced"],
   ["the apps the menu", "LinuxApps — the guest's .desktop files"],
+  ["a 300 ms burst", "LinuxAudioLag — the sound tap's drift cap"],
 ];
 for (const line of run.stdout.split("\n")) {
   if (!line) continue;

@@ -225,11 +225,12 @@ audio output once, when it starts.
 
 ## Verified, and not yet
 
-Off the phone (`node test/linux-windows-test.mjs`, 49 checks): the pure parts
+Off the phone (`node test/linux-windows-test.mjs`, 53 checks): the pure parts
 on a computer's JVM — keysyms in a us layout's columns, Shift and Level 3,
 keycodes lent and never taken back while held; the cookie; xfconf to
 XSETTINGS and the wire format read back; damage merged; the `.desktop` scanner
-on a scratch rootfs, links that name guest paths included.
+on a scratch rootfs, links that name guest paths included; the sound tap's
+drift cap against the bursts the phone's tap really sends.
 
 Against the guest's real Xvnc (TigerVNC 1.13.1, Ubuntu 24.04 arm64, in an
 Android 16 emulator under adb root; the window manager on a computer's JVM over

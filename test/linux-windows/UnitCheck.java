@@ -40,7 +40,57 @@ public final class UnitCheck {
         xsettings();
         coalesce();
         apps();
+        audioLag();
         System.out.println("done " + failed);
+    }
+
+    // ── LinuxAudioLag ──
+
+    private static void audioLag() {
+        long[] quiet = tap(false, 0);
+        check("a 300 ms burst every 300 ms, as the tap sends them, is never dropped while paused",
+                quiet[0] == 0, quiet[0] + " bytes skipped");
+        long[] steady = tap(true, 0);
+        check("…nor while playing", steady[0] == 0, steady[0] + " bytes skipped");
+        long[] stalled = tap(true, 192_000);
+        check("a second of backlog that never drains is dropped",
+                stalled[0] > 150_000 && stalled[0] <= 192_000, stalled[0] + " bytes skipped");
+        check("…back to the bursts' own sawtooth", stalled[1] <= 57_600 + 16_384, stalled[1] + " bytes left");
+    }
+
+    /**
+     * Ten seconds of a tap as the phone's sends it, in 1 ms steps: 57,600 bytes
+     * every 300 ms, and {@code extra} more at once at 1 s, a stall's worth. The
+     * reader looks at the backlog before each read, as LinuxAudio does. Paused,
+     * it reads everything as it comes; playing, it writes each 4 KB chunk into a
+     * 16 KB track that plays 192 bytes a millisecond. Returns {bytes skipped,
+     * backlog at the end}.
+     */
+    private static long[] tap(boolean playing, int extra) {
+        LinuxAudioLag lag = new LinuxAudioLag(48_000, 4096, 2000);
+        long backlog = 0, skipped = 0, written = 0, played = 0;
+        boolean blocked = false;                       // in read(), nothing there yet
+        for (int t = 0; t < 10_000; t++) {
+            if (t % 300 == 0) backlog += 57_600;
+            if (t == 1000) backlog += extra;
+            played += Math.min(192, written - played);
+            while (!playing || written - played <= 16_384 - 4096) {
+                if (!blocked) {
+                    int s = lag.skip((int) backlog, t);
+                    skipped += s;
+                    backlog -= s;
+                }
+                if (backlog == 0) {
+                    blocked = true;
+                    break;
+                }
+                blocked = false;
+                long n = Math.min(backlog, 4096);
+                backlog -= n;
+                written += n;
+            }
+        }
+        return new long[]{skipped, backlog};
     }
 
     // ── X11Keys ──

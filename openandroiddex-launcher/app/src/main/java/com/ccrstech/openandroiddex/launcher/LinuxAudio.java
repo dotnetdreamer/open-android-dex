@@ -82,8 +82,9 @@ final class LinuxAudio {
     private static final long SILENCE_HOLD_MS = 3000;
 
     /**
-     * The most unplayed audio allowed to sit in the socket before it is thrown
-     * away, ≈250 ms.
+     * The most unplayed audio allowed to stay in the socket before it is thrown
+     * away, ≈250 ms — measured at the backlog's low point, not after a burst:
+     * see {@link LinuxAudioLag}.
      *
      * The guest is a real-time producer with no flow control of any kind, and
      * the two clocks it runs between — the guest's system timer and the phone's
@@ -94,6 +95,9 @@ final class LinuxAudio {
      * further behind its picture the longer it is used.
      */
     private static final int MAX_LAG = RATE / 4 * 4;
+
+    /** How long the backlog's low point is watched: several of the tap's 300 ms bursts. */
+    private static final long LAG_WINDOW_MS = 2000;
 
     /** The live pump of each tap. Guards against two draining one tap. */
     private static final java.util.Map<Integer, Pump> pumps = new java.util.HashMap<>();
@@ -212,12 +216,13 @@ final class LinuxAudio {
                 byte[] buf = new byte[CHUNK];
                 boolean playing = false;
                 long quietSince = 0;
+                LinuxAudioLag lag = new LinuxAudioLag(MAX_LAG, CHUNK, LAG_WINDOW_MS);
                 while (live) {
-                    int lag = in.available();
-                    if (lag > MAX_LAG) {
-                        long dropped = in.skip(lag - CHUNK);
+                    int skip = lag.skip(in.available(), SystemClock.uptimeMillis());
+                    if (skip > 0) {
+                        long dropped = in.skip(skip);
                         DexLog.step("linux", "audio: dropped " + (dropped * 1000 / (RATE * 4))
-                                + "ms of backlog");
+                                + "ms of backlog on " + port);
                     }
                     int n = in.read(buf);
                     if (n <= 0) return;               // the guest went away

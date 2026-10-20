@@ -121,6 +121,16 @@ of those bytes is latency that can never be worked off, so more than ~250 ms of
 them is skipped. It costs one click; carrying it costs a desktop whose sound
 runs further behind its picture the longer it is open.
 
+**The 250 ms is held against the backlog's low point, not its size**
+(`LinuxAudioLag`). The tap does not trickle: protocol-simple asks its source for
+300 ms of latency, and a quiet guest's tap arrives as 57,600 bytes — one 300 ms
+burst — every 300 ms (measured on the S25, 2026-10-20). Held against the size
+after a burst, the cap fired on every burst and skipped 257 ms of each, logging
+it 200 times a minute for as long as a session ran, and it would have cut the
+start off a sound that arrived inside one. A sawtooth of bursts bottoms out near
+zero every time; only drift or a stall lifts the bottom, so the lowest the
+backlog gets over two seconds is what is compared, and what is skipped.
+
 **No audio focus is requested.** The tap runs for the whole life of the window
 and is silent for most of it — asking for focus would pause the user's music the
 moment a Linux window opened.
@@ -151,11 +161,12 @@ None of this has run on a device. Roughly in order of how quietly it would fail:
   only `--system` without root is fatal. If some build refuses, the daemon
   simply never appears and `rt.log` says so. *Test:* `pactl info` in the guest
   terminal.
-- **Whether `in.available()` reports the socket backlog usefully on this
-  platform.** If it under-reports, the drift cap never fires and latency grows
-  slowly over a long session; if it over-reports, audio is dropped for no
-  reason. *Test:* play a long video and watch A/V sync after an hour, and watch
-  for "dropped Nms of backlog" in the log while nothing is wrong.
+- **Whether the drift cap fires when it should.** `in.available()` does report
+  the backlog on the phone — it is how the bursts above were found, when the
+  first cap fired on all of them. The low-point cap has run only off the phone
+  (`node test/linux-windows-test.mjs`). *Test:* "dropped Nms of backlog" should
+  not appear in the log while nothing is wrong; then play a long video and
+  watch A/V sync after an hour.
 - **Whether the panel plugin picks the daemon up on the first session.**
   pulseaudio is started a second before `startxfce4`, and the plugin retries its
   connection, but the ordering has not been watched on hardware. *Test:* the
