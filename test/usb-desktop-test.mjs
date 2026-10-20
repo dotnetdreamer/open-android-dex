@@ -150,28 +150,62 @@ function java(main, mainArgs, onLine) {
 }
 
 console.log("LinuxStreamRfb against a stand-in Xvnc");
+// What Xvnc counts a text at: UTF-8, CRLF line ends, and a NUL.
+const guestSize = (t) => Buffer.byteLength(t.replace(/\r?\n/g, "\r\n"), "utf8") + 1;
+const lfOf = (t) => t.replace(/\r\n?/g, "\n");
+/** Lines of every kind of character, CRLF, until Xvnc would count `bytes`. */
+function longText(bytes, tag) {
+  let s = "";
+  for (let i = 0; guestSize(s) < bytes; i++) s += `${tag} ${i} — Ünïcödé, 日本語, 한국어 and 🙂 on one line\r\n`;
+  return s;
+}
+const writeTexts = (texts) => {
+  const file = path.join(tmp, `texts-${texts.length}-${Math.random().toString(36).slice(2)}.txt`);
+  fs.writeFileSync(file, texts.map((t) => Buffer.from(t, "utf8").toString("base64")).join("\n") + "\n");
+  return file;
+};
+const clipsOf = (r) => (r.clips ?? []).map((b) => Buffer.from(b, "base64").toString("utf8"));
+async function rfbCheck(xvnc, texts, clips, onReady) {
+  const run = java("RfbCheck", [String(xvnc.port), "standin1", writeTexts(texts), String(clips)], (line) => {
+    if (line === '{"offered":true}') xvnc.paste();
+    if (line === '{"ready":true}') onReady();
+  });
+  const killer = setTimeout(() => run.p.kill(), 40_000);
+  const out = await run.done;
+  clearTimeout(killer);
+  try {
+    return JSON.parse(out.lines[out.lines.length - 1]);
+  } catch {
+    check("RfbCheck reported", false, out.lines.join(" ").slice(0, 400) + out.err);
+    return {};
+  }
+}
 {
   const xvnc = await startRfbStandin({ password: "standin1", width: 640, height: 400 });
   const wrong = await java("RfbCheck", [String(xvnc.port), "nope"]).done;
   check("a wrong password is AuthFailed, not a hang", wrong.lines[0] === '{"authFailed":true}', wrong.lines.join(" ") + wrong.err);
-  const run = java("RfbCheck", [String(xvnc.port), "standin1"], (line) => {
-    if (line === '{"ready":true}') setTimeout(() => xvnc.sendClipboard("from the guést"), 100);
+  // The computer's: CRLF and Latin-1, an em dash, CJK and an emoji, 200 KB,
+  // and then more than Xvnc takes. From the guest: the same kinds, and 200 KB.
+  const mine = ["héllo\r\nworld ☃", "an em — dash, 日本語, 🙂\r\nand a second line\r\n", longText(200_000, "mine"), longText(300_000, "huge")];
+  const guest = ["from the guést — 日本語 🙂\r\nsecond line", longText(200_000, "guest")];
+  const requests = () => xvnc.events.filter((e) => e.type === "clip-request").length;
+  const r = await rfbCheck(xvnc, mine, guest.length, async () => {
+    for (const t of guest) {
+      const asked = requests();
+      xvnc.sendClipboard(t);
+      for (let i = 0; i < 50 && requests() === asked; i++) await sleep(50);
+    }
   });
-  const killer = setTimeout(() => run.p.kill(), 20_000);
-  const out = await run.done;
-  clearTimeout(killer);
-  let r = {};
-  try {
-    r = JSON.parse(out.lines[out.lines.length - 1]);
-  } catch {
-    check("RfbCheck reported", false, out.lines.join(" ") + out.err);
-  }
   const ev = xvnc.events;
   // (the wrong password before it left its own auth-failed in the log)
   check("logs in with VncAuth (the DES is right)", ev.some((e) => e.type === "client-init") && r.updates > 0);
   check("asks to share the desktop, never to own it", ev.some((e) => e.type === "client-init" && e.shared === 1));
   const enc = ev.find((e) => e.type === "set-encodings")?.encodings ?? [];
-  check("asks for raw, both desktop sizes and the cursor, nothing else", JSON.stringify(enc) === JSON.stringify([0, -308, -223, -239]), JSON.stringify(enc));
+  check(
+    "asks for raw, both desktop sizes, the cursor and the extended clipboard, nothing else",
+    JSON.stringify(enc) === JSON.stringify([0, -308, -223, -239, 0xc0a1e5ce | 0]),
+    JSON.stringify(enc),
+  );
   check("keeps Xvnc's own pixel format: no conversion on its side", !ev.some((e) => e.type === "set-pixel-format"));
   check("reads B,G,R,X back as RGB in the shader", r.swizzle === "bgr", r.swizzle);
   check("every sampled pixel is the stand-in's", r.checked > 1000 && r.mismatches === 0, `${r.mismatches}/${r.checked}`);
@@ -183,9 +217,35 @@ console.log("LinuxStreamRfb against a stand-in Xvnc");
   check("pointer, and one off the edge held to it", pointers.some((p) => p.x === 10 && p.y === 20 && p.buttons === 1) && pointers.some((p) => p.x === 639 && p.y === 399));
   const keys = ev.filter((e) => e.type === "key");
   check("key down and up", keys.length === 2 && keys[0].down && !keys[1].down && keys[0].keysym === 0x61);
-  check("the clipboard goes as Latin-1, LF, '?' for what it cannot carry", ev.find((e) => e.type === "clipboard")?.text === "héllo\nworld ?");
   check("SetDesktopSize with the size asked", ev.some((e) => e.type === "set-desktop-size" && e.w === 800 && e.h === 600));
-  check("the guest's clipboard comes back", r.clip === "from the guést", r.clip);
+
+  const caps = ev.find((e) => e.type === "clip-caps");
+  const want = (1 << 24) | (1 << 25) | (1 << 27) | (1 << 28) | 1;
+  check("the extended clipboard: its capabilities in answer to Xvnc's, text, nothing unasked", caps && (caps.flags & want) === want && JSON.stringify(caps.sizes) === "[0]", JSON.stringify(caps));
+  const notifies = ev.filter((e) => e.type === "clip-notify");
+  const provides = ev.filter((e) => e.type === "clip-provide");
+  check("each text is announced, and handed over only when the guest asks", notifies.filter((n) => n.text).length === 3 && provides.length === 4, `${notifies.length} notify, ${provides.length} provide`);
+  check("UTF-8 whole: CRLF and Latin-1, an em dash, CJK, an emoji", provides[0]?.text === lfOf(mine[0]) && provides[1]?.text === lfOf(mine[1]), JSON.stringify(provides.slice(0, 2).map((p) => p.text)));
+  check("as Xvnc counts it: CRLF line ends, a NUL, the length with it", provides.slice(0, 3).every((p) => p.crlf && p.nul && p.valid) && provides[1].bytes === guestSize(mine[1]), JSON.stringify(provides.slice(0, 3).map((p) => [p.crlf, p.nul, p.valid, p.bytes])));
+  check("200 KB in one piece", provides[2]?.text === lfOf(mine[2]) && provides[2].bytes > 200_000 && provides[2].bytes <= 262_144, `${provides[2]?.bytes}`);
+  check("more than Xvnc's MaxCutText is never offered: the guest keeps the last", provides[3]?.text === lfOf(mine[2]) && !ev.some((e) => e.type === "clip-too-long"), JSON.stringify(provides.map((p) => p.bytes)));
+  check("the text is kept, for a paste later on", provides[3]?.text === lfOf(mine[2]));
+  check("taking it back offers nothing, so Xvnc lets go", notifies.at(-1)?.text === false, JSON.stringify(notifies.at(-1)));
+  check("nothing went the Latin-1 way, and nothing was refused", !ev.some((e) => ["clipboard", "clip-too-long", "clip-bad-zlib", "clip-unexpected"].includes(e.type)));
+  const back = clipsOf(r);
+  check("the guest's comes back whole: UTF-8, LF", back[0] === lfOf(guest[0]), JSON.stringify(back[0]));
+  check("…and 200 KB of it", back[1] === lfOf(guest[1]), `${back[1]?.length} of ${lfOf(guest[1]).length}`);
+  check("…each asked for once", ev.filter((e) => e.type === "clip-request").length === 2);
+  await xvnc.close();
+}
+{
+  // A server without the extended clipboard: standard cut text, Latin-1.
+  const xvnc = await startRfbStandin({ password: "standin1", width: 640, height: 400, extendedClipboard: false });
+  const r = await rfbCheck(xvnc, ["héllo\r\nworld ☃"], 1, () => setTimeout(() => xvnc.sendClipboard("from the guést"), 100));
+  const cut = xvnc.events.filter((e) => e.type === "clipboard");
+  check("without it, the clipboard goes as Latin-1, LF, '?' for what it cannot carry", cut[0]?.text === "héllo\nworld ?", JSON.stringify(cut));
+  check("…taking it back is an empty cut text", cut[1]?.text === "", JSON.stringify(cut[1]));
+  check("…and the guest's comes back", clipsOf(r)[0] === "from the guést", JSON.stringify(clipsOf(r)));
   await xvnc.close();
 }
 
@@ -329,7 +389,7 @@ async function onDevice() {
   // What the stand-in was told, from its EV lines.
   const xvnc = {
     events: [],
-    sendClipboard: (text) => harness.stdin.write(`clip ${text}\n`),
+    sendClipboard: (text) => harness.stdin.write(`clip ${Buffer.from(text, "utf8").toString("base64")}\n`),
     close: async () => {},
   };
   let partial = "";
@@ -506,13 +566,19 @@ async function onDevice() {
   check("the pointer's shape arrives as a bitmap", r.cursor && r.cursor.size[0] === 12 && r.cursor.bytes === 12 * 18 * 4, JSON.stringify(r.cursor));
 
   await evaluate("window.act({pointer:[100,200,1]}) && window.act({pointer:[100,200,0]}) && window.act({key:[0x62,true]}) && window.act({key:[0x62,false]})");
-  await evaluate('window.act({json:{t:"clip",text:"cl\\u00e9"}})');
+  const mine = "cl\u00e9 — 日本語 🙂\nline two";
+  await evaluate(`window.act({json:{t:"clip",text:${JSON.stringify(mine)}}})`);
   await sleep(800);
   const ev = xvnc.events;
   check("pointer through to Xvnc", ev.some((e) => e.type === "pointer" && e.x === 100 && e.y === 200 && e.buttons === 1));
   check("keys through to Xvnc", ev.some((e) => e.type === "key" && e.keysym === 0x62 && e.down) && ev.some((e) => e.type === "key" && e.keysym === 0x62 && !e.down));
-  check("the clipboard through to Xvnc", ev.some((e) => e.type === "clipboard" && e.text === "clé"));
-  xvnc.sendClipboard("guest copy");
+  check(
+    "the clipboard through to Xvnc, UTF-8 by the extended clipboard (zlib on the phone)",
+    ev.some((e) => e.type === "clip-provide" && e.text === mine && e.nul) && !ev.some((e) => e.type === "clipboard" || e.type === "clip-bad"),
+    JSON.stringify(ev.filter((e) => e.type.startsWith("clip"))),
+  );
+  const theirs = "guest copy — 한국어 ✓ 🙂\nsecond line";
+  xvnc.sendClipboard(theirs);
   await evaluate('window.act({json:{t:"resize",w:1920,h:1080}})');
   await sleep(1500);
   const d0 = (await evaluate("window.result.decodedSizes['1920x1080']")) || 0;
@@ -533,7 +599,7 @@ async function onDevice() {
     (wireless ? fps2 > 5 : fps2 >= 45) && r.decodeErrors.length === 0,
     fps2.toFixed(1) + r.decodeErrors.join(";"),
   );
-  check("the guest's clipboard reaches the page", r.clip === "guest copy", String(r.clip));
+  check("the guest's clipboard reaches the page, whole", r.clip === theirs, JSON.stringify(r.clip));
 
   cdp.close();
   await xvnc.close();

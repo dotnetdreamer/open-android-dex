@@ -63,7 +63,8 @@ The first runs the window's H.264 handling and key mapping as they are (Node
 imports the `.ts` files), and the launcher's own `LinuxStreamRfb` and
 `LinuxStreamSocket`, compiled for this JVM, against a stand-in Xvnc in Node:
 VncAuth, the encodings asked for, every sampled pixel, the cursor, a resize,
-input and the clipboard, the probe and the WebSocket. `--device` then runs the
+input, the clipboard — TigerVNC's extended one, UTF-8 both ways up to Xvnc's
+256 KB, and Latin-1 against a server without it — the probe and the WebSocket. `--device` then runs the
 stream classes on a phone under `app_process` as the shell user — nothing is
 installed and the launcher is not touched — against a stand-in Xvnc on the
 phone's own loopback that changes every pixel of every frame, and a headless

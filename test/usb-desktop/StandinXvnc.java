@@ -11,6 +11,8 @@ import java.net.Socket;
 import java.nio.charset.StandardCharsets;
 import java.security.SecureRandom;
 import java.util.Arrays;
+import java.util.zip.Deflater;
+import java.util.zip.Inflater;
 
 /**
  * A stand-in for Xvnc on the phone's own loopback, for StreamHarness: what
@@ -21,6 +23,12 @@ import java.util.Arrays;
  * pixel — a patterned strip sliding sideways eight pixels a frame, fine lines
  * included — sent as raw at up to 60 updates a second. Xvnc only ever sends
  * what changed, so a real desktop asks less of everything downstream.
+ *
+ * <p>The clipboard is TigerVNC's extended one, as Xvnc 1.13 does it: its
+ * capabilities in answer to the encodings, the guest's text announced and
+ * provided when asked for, a client's text asked for as soon as it is
+ * announced (something in the guest pasting at once) — so the stream's
+ * zlib runs on the phone's own runtime.
  *
  * <p>Says what it is told as {@code EV {...}} lines on stdout.
  */
@@ -34,6 +42,17 @@ final class StandinXvnc {
     private final Object writeLock = new Object();
     private byte[] strip;
     private int stripW;
+    /** The client asked for the extended clipboard, and was told it is there. */
+    private volatile boolean extClip;
+    /** The guest's clipboard, for a client that asks. */
+    private volatile String guestText = "";
+
+    private static final int CLIP_TEXT = 1;
+    private static final int CLIP_CAPS = 1 << 24;
+    private static final int CLIP_REQUEST = 1 << 25;
+    private static final int CLIP_PEEK = 1 << 26;
+    private static final int CLIP_NOTIFY = 1 << 27;
+    private static final int CLIP_PROVIDE = 1 << 28;
 
     StandinXvnc(int w, int h, String password) throws IOException {
         this.width = w;
@@ -81,9 +100,58 @@ final class StandinXvnc {
         }
     }
 
+    /** A JSON string, every character outside ASCII escaped, so the EV line survives any console. */
+    static String json(String t) {
+        StringBuilder b = new StringBuilder("\"");
+        for (int i = 0; i < t.length(); i++) {
+            char c = t.charAt(i);
+            if (c == '"' || c == '\\') b.append('\\').append(c);
+            else if (c < 0x20 || c > 0x7e) b.append(String.format("\\u%04x", (int) c));
+            else b.append(c);
+        }
+        return b.append('"').toString();
+    }
+
+    /** ServerCutText in its extended form. */
+    private void extended(OutputStream o, int flags, byte[] rest) throws IOException {
+        int n = 4 + rest.length;
+        java.nio.ByteBuffer m = java.nio.ByteBuffer.allocate(8 + n);
+        m.put((byte) 3).put(new byte[3]).putInt(-n).putInt(flags).put(rest);
+        synchronized (writeLock) {
+            o.write(m.array());
+            o.flush();
+        }
+    }
+
+    /** As Xvnc provides text: its length, UTF-8 with CRLF and a NUL, deflated and sync-flushed. */
+    private static byte[] provideBody(String text) {
+        byte[] t = (text.replace("\r\n", "\n").replace("\n", "\r\n") + "\0").getBytes(StandardCharsets.UTF_8);
+        java.nio.ByteBuffer raw = java.nio.ByteBuffer.allocate(4 + t.length);
+        raw.putInt(t.length).put(t);
+        Deflater d = new Deflater();
+        d.setInput(raw.array());
+        java.io.ByteArrayOutputStream z = new java.io.ByteArrayOutputStream();
+        byte[] buf = new byte[16 * 1024];
+        int n;
+        do {
+            n = d.deflate(buf, 0, buf.length, Deflater.SYNC_FLUSH);
+            z.write(buf, 0, n);
+        } while (n == buf.length);
+        d.end();
+        return z.toByteArray();
+    }
+
     void sendClipboard(String text) {
         OutputStream o = out;
         if (o == null) return;
+        guestText = text;
+        if (extClip) {
+            try {
+                extended(o, CLIP_NOTIFY | CLIP_TEXT, new byte[0]);
+            } catch (IOException ignored) {
+            }
+            return;
+        }
         byte[] t = text.getBytes(StandardCharsets.ISO_8859_1);
         byte[] m = new byte[8 + t.length];
         m[0] = 3;
@@ -150,7 +218,13 @@ final class StandinXvnc {
                     case 2: {
                         in.readUnsignedByte();
                         int n = in.readUnsignedShort();
-                        in.readFully(new byte[4 * n]);
+                        boolean wantsClip = false;
+                        for (int i = 0; i < n; i++) wantsClip |= in.readInt() == 0xC0A1E5CE;
+                        if (wantsClip && !extClip) {
+                            // Xvnc's answer, ahead of any picture: its actions, text, nothing unasked.
+                            extClip = true;
+                            extended(o, CLIP_CAPS | CLIP_REQUEST | CLIP_PEEK | CLIP_NOTIFY | CLIP_PROVIDE | CLIP_TEXT, new byte[4]);
+                        }
                         break;
                     }
                     case 3: {
@@ -182,10 +256,14 @@ final class StandinXvnc {
                     }
                     case 6: {
                         in.readFully(new byte[3]);
-                        byte[] t = new byte[in.readInt()];
+                        int len = in.readInt();
+                        byte[] t = new byte[Math.abs(len)];
                         in.readFully(t);
-                        String text = new String(t, StandardCharsets.ISO_8859_1).replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n");
-                        ev("{\"type\":\"clipboard\",\"text\":\"" + text + "\"}");
+                        if (len >= 0) {
+                            ev("{\"type\":\"clipboard\",\"text\":" + json(new String(t, StandardCharsets.ISO_8859_1)) + "}");
+                        } else {
+                            clientClipboard(o, t);
+                        }
                         break;
                     }
                     case 251: {
@@ -213,6 +291,51 @@ final class StandinXvnc {
             try {
                 s.close();
             } catch (IOException ignored) {
+            }
+        }
+    }
+
+    /** A client's extended clipboard message: its flags, then what the action carries. */
+    private void clientClipboard(OutputStream o, byte[] m) throws IOException {
+        int flags = ((m[0] & 0xff) << 24) | ((m[1] & 0xff) << 16) | ((m[2] & 0xff) << 8) | (m[3] & 0xff);
+        if ((flags & CLIP_CAPS) != 0) {
+            ev("{\"type\":\"clip-caps\",\"flags\":" + (flags & 0xffffffffL) + "}");
+        } else if ((flags & CLIP_REQUEST) != 0) {
+            ev("{\"type\":\"clip-request\"}");
+            extended(o, CLIP_PROVIDE | CLIP_TEXT, provideBody(guestText));
+        } else if ((flags & CLIP_PEEK) != 0) {
+            extended(o, CLIP_NOTIFY | (guestText.isEmpty() ? 0 : CLIP_TEXT), new byte[0]);
+        } else if ((flags & CLIP_NOTIFY) != 0) {
+            boolean text = (flags & CLIP_TEXT) != 0;
+            ev("{\"type\":\"clip-notify\",\"text\":" + text + "}");
+            // Something in the guest pastes straight away.
+            if (text) extended(o, CLIP_REQUEST | CLIP_TEXT, new byte[0]);
+        } else if ((flags & CLIP_PROVIDE) != 0) {
+            Inflater inf = new Inflater();
+            try {
+                inf.setInput(m, 4, m.length - 4);
+                byte[] head = new byte[4];
+                int got = 0;
+                while (got < 4) {
+                    int k = inf.inflate(head, got, 4 - got);
+                    if (k == 0 && (inf.finished() || inf.needsInput())) throw new IOException("short");
+                    got += k;
+                }
+                int n = ((head[0] & 0xff) << 24) | ((head[1] & 0xff) << 16) | ((head[2] & 0xff) << 8) | (head[3] & 0xff);
+                byte[] t = new byte[n];
+                got = 0;
+                while (got < n) {
+                    int k = inf.inflate(t, got, n - got);
+                    if (k == 0 && (inf.finished() || inf.needsInput())) throw new IOException("short");
+                    got += k;
+                }
+                String text = new String(t, 0, Math.max(0, n - 1), StandardCharsets.UTF_8);
+                ev("{\"type\":\"clip-provide\",\"bytes\":" + n + ",\"nul\":" + (n > 0 && t[n - 1] == 0)
+                        + ",\"text\":" + json(text.replace("\r\n", "\n")) + "}");
+            } catch (Exception e) {
+                ev("{\"type\":\"clip-bad\",\"error\":" + json(String.valueOf(e)) + "}");
+            } finally {
+                inf.end();
             }
         }
     }

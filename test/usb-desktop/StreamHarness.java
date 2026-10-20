@@ -9,8 +9,8 @@ package com.ccrstech.openandroiddex.launcher;
  *
  * Usage: StreamHarness <socket name> <rfb port | standin:WxH> <password>
  *
- * A line {@code clip <text>} on stdin is the stand-in's clipboard, sent to
- * the client. Exits when its stdin closes (the adb shell that started it went
+ * A line {@code clip <base64 UTF-8>} on stdin is the stand-in's clipboard,
+ * sent to the client. Exits when its stdin closes (the adb shell that started it went
  * away), or after two minutes with no session.
  */
 public final class StreamHarness {
@@ -70,7 +70,10 @@ public final class StreamHarness {
                 java.io.BufferedReader r = new java.io.BufferedReader(new java.io.InputStreamReader(System.in));
                 String line;
                 while ((line = r.readLine()) != null) {
-                    if (line.startsWith("clip ") && xvnc != null) xvnc.sendClipboard(line.substring(5));
+                    if (line.startsWith("clip ") && xvnc != null) {
+                        xvnc.sendClipboard(new String(java.util.Base64.getDecoder().decode(line.substring(5).trim()),
+                                java.nio.charset.StandardCharsets.UTF_8));
+                    }
                 }
             } catch (Exception ignored) {
             }

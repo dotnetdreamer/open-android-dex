@@ -7,6 +7,9 @@ import java.net.InetSocketAddress;
 import java.nio.ByteBuffer;
 import java.nio.channels.SocketChannel;
 import java.nio.charset.StandardCharsets;
+import java.util.zip.DataFormatException;
+import java.util.zip.Deflater;
+import java.util.zip.Inflater;
 
 /**
  * Xvnc's own pixels, for {@link LinuxStream}: a VNC client on loopback that
@@ -31,6 +34,12 @@ import java.nio.charset.StandardCharsets;
  * <p>Shared, always: the phone's own Linux window may be watching the same
  * desktop, and an exclusive client would throw it off.
  *
+ * <p>The clipboard is UTF-8 wherever Xvnc speaks TigerVNC's extended
+ * clipboard, which it has since 1.10: Xvnc is told there is text and asks for
+ * it only when something in the guest pastes, so the computer's latest text is
+ * kept here to hand over then ({@link #clipboard}). A server without it gets
+ * standard cut text, which is Latin-1.
+ *
  * <p>Pure Java, so the stand-in test on a computer runs this very file.
  */
 final class LinuxStreamRfb implements Closeable {
@@ -40,6 +49,27 @@ final class LinuxStreamRfb implements Closeable {
     static final int ENC_DESKTOP_SIZE = -223;
     static final int ENC_CURSOR = -239;
     static final int ENC_EXTENDED_DESKTOP_SIZE = -308;
+    /** TigerVNC's extended clipboard: UTF-8, deflated, and handed over when asked for. */
+    static final int ENC_EXTENDED_CLIPBOARD = 0xC0A1E5CE;
+
+    // Its flags: the formats in the low bits, the actions in the high byte.
+    static final int CLIP_TEXT = 1;
+    static final int CLIP_CAPS = 1 << 24;
+    static final int CLIP_REQUEST = 1 << 25;
+    static final int CLIP_PEEK = 1 << 26;
+    static final int CLIP_NOTIFY = 1 << 27;
+    static final int CLIP_PROVIDE = 1 << 28;
+
+    /**
+     * The most Xvnc takes in one clipboard update (its MaxCutText), counted
+     * the way it counts: UTF-8, CRLF line ends, and a NUL. The window holds
+     * back anything larger (clipboardShare.ts's GUEST_MAX).
+     */
+    static final int GUEST_MAX = 262144;
+    /** The most of the guest's clipboard handed on (clipboardShare.ts's COMPUTER_MAX). */
+    static final int COMPUTER_MAX = 4 * 1024 * 1024;
+    /** An extended clipboard message larger than any text handed on, deflated, is skipped unread. */
+    private static final int MAX_CLIP_MESSAGE = COMPUTER_MAX + 64 * 1024;
 
     /** Xvnc refused the password — Linux was reinstalled with a new one, say. */
     static final class AuthFailed extends IOException {
@@ -66,6 +96,7 @@ final class LinuxStreamRfb implements Closeable {
         /** A new pointer shape, as RGBA rows; w or h of 0 is no cursor at all. */
         void onCursor(int hotX, int hotY, int w, int h, byte[] rgba) throws IOException;
 
+        /** The guest's clipboard changed: its text, line ends as the guest has them (LF from the extended clipboard). */
         void onClipboard(String text) throws IOException;
     }
 
@@ -90,6 +121,17 @@ final class LinuxStreamRfb implements Closeable {
     private volatile boolean canResize;
     /** The desktop's name, as Xvnc gives it. */
     String name = "";
+
+    /** The clipboard's state: written from the computer's side and from Xvnc's. */
+    private final Object clipLock = new Object();
+    /** Xvnc has answered the encodings, so which clipboard it speaks is known. */
+    private boolean clipKnown;
+    /** ...and it is the extended one. */
+    private boolean extendedClip;
+    /** The computer's text as the guest was last given it, kept for Xvnc to ask for; null for none. */
+    private String offered;
+    /** The computer's text from before Xvnc answered the encodings. */
+    private String early;
 
     private LinuxStreamRfb(SocketChannel ch) {
         this.ch = ch;
@@ -222,7 +264,7 @@ final class LinuxStreamRfb implements Closeable {
     }
 
     private void sendEncodings() throws IOException {
-        int[] encodings = {ENC_RAW, ENC_EXTENDED_DESKTOP_SIZE, ENC_DESKTOP_SIZE, ENC_CURSOR};
+        int[] encodings = {ENC_RAW, ENC_EXTENDED_DESKTOP_SIZE, ENC_DESKTOP_SIZE, ENC_CURSOR, ENC_EXTENDED_CLIPBOARD};
         ByteBuffer m = ByteBuffer.allocate(4 + 4 * encodings.length);
         m.put((byte) 2).put((byte) 0).putShort((short) encodings.length);
         for (int e : encodings) m.putInt(e);
@@ -254,15 +296,123 @@ final class LinuxStreamRfb implements Closeable {
     }
 
     /**
-     * The computer's clipboard, for the guest. Standard cut text is Latin-1
-     * with LF line ends; a character it cannot carry becomes '?'.
+     * The computer's clipboard, for the guest. With the extended clipboard
+     * Xvnc is only told there is text, and asks for it when something in the
+     * guest pastes ({@link #provide}); without it, it goes at once as standard
+     * cut text, Latin-1, where a character it cannot carry becomes '?'. Empty
+     * text takes back what this connection gave the guest. Text Xvnc would
+     * refuse — over its MaxCutText — is not offered at all.
      */
     void clipboard(String text) throws IOException {
         String lf = text.replace("\r\n", "\n").replace('\r', '\n');
-        byte[] b = lf.getBytes(StandardCharsets.ISO_8859_1);
-        ByteBuffer m = ByteBuffer.allocate(8 + b.length);
-        m.put((byte) 6).put(new byte[3]).putInt(b.length).put(b);
+        synchronized (clipLock) {
+            // Asked before Xvnc's answer to the encodings, which says how.
+            if (!clipKnown) {
+                early = lf;
+                return;
+            }
+            offer(lf);
+        }
+    }
+
+    /** Under {@link #clipLock}, once it is known which clipboard Xvnc speaks. */
+    private void offer(String lf) throws IOException {
+        if (lf.isEmpty()) {
+            offered = null;
+            // No formats: nothing on offer, and Xvnc lets go of what was.
+            if (extendedClip) writeClipboard(CLIP_NOTIFY, null);
+            else cutText(new byte[0]);
+            return;
+        }
+        if (extendedClip) {
+            if (guestSize(lf) > GUEST_MAX) return;
+            offered = lf;
+            writeClipboard(CLIP_NOTIFY | CLIP_TEXT, null);
+        } else {
+            byte[] b = lf.getBytes(StandardCharsets.ISO_8859_1);
+            if (b.length > GUEST_MAX) return;
+            offered = lf;
+            cutText(b);
+        }
+    }
+
+    /** The size Xvnc counts a text at: UTF-8, CRLF line ends, and a NUL. */
+    static int guestSize(String lf) {
+        return utf8Crlf(lf).length + 1;
+    }
+
+    private static byte[] utf8Crlf(String lf) {
+        return lf.replace("\n", "\r\n").getBytes(StandardCharsets.UTF_8);
+    }
+
+    /** Standard cut text: Latin-1, LF line ends. */
+    private void cutText(byte[] latin1) throws IOException {
+        ByteBuffer m = ByteBuffer.allocate(8 + latin1.length);
+        m.put((byte) 6).put(new byte[3]).putInt(latin1.length).put(latin1);
         write(m.array());
+    }
+
+    /** ClientCutText in its extended form: a negative length, then the flags and the rest. */
+    private void writeClipboard(int flags, byte[] rest) throws IOException {
+        int n = 4 + (rest == null ? 0 : rest.length);
+        ByteBuffer m = ByteBuffer.allocate(8 + n);
+        m.put((byte) 6).put(new byte[3]).putInt(-n).putInt(flags);
+        if (rest != null) m.put(rest);
+        write(m.array());
+    }
+
+    /**
+     * Xvnc's capabilities, its answer to the encodings: ours in return — the
+     * same actions, text only, and none of it unasked (a size of 0), so Xvnc
+     * says when the guest has text and this asks for it — and then whatever
+     * the computer gave before they were known.
+     */
+    private void serverCaps(int flags) throws IOException {
+        int needed = CLIP_TEXT | CLIP_NOTIFY | CLIP_REQUEST | CLIP_PROVIDE;
+        if ((flags & needed) != needed) return;
+        synchronized (clipLock) {
+            boolean was = extendedClip;
+            extendedClip = true;
+            if (!was) writeClipboard(CLIP_CAPS | CLIP_REQUEST | CLIP_PEEK | CLIP_NOTIFY | CLIP_PROVIDE | CLIP_TEXT, new byte[4]);
+            if (!clipKnown) known();
+            // A server that answered after its first picture was taken for one
+            // without it: what went as Latin-1 is offered again, whole.
+            else if (!was && offered != null) offer(offered);
+        }
+    }
+
+    /** Under {@link #clipLock}: which clipboard Xvnc speaks is settled. Offer what was waiting. */
+    private void known() throws IOException {
+        clipKnown = true;
+        String e = early;
+        early = null;
+        if (e != null) offer(e);
+    }
+
+    /** Xvnc asks for the text: something in the guest is pasting it. */
+    private void provide() throws IOException {
+        synchronized (clipLock) {
+            // Nothing on offer is a request that crossed a take-back: an empty
+            // text answers it, rather than leave the paste waiting.
+            byte[] text = utf8Crlf(offered == null ? "" : offered);
+            ByteBuffer raw = ByteBuffer.allocate(4 + text.length + 1);
+            raw.putInt(text.length + 1).put(text).put((byte) 0);
+            writeClipboard(CLIP_PROVIDE | CLIP_TEXT, deflate(raw.array()));
+        }
+    }
+
+    private static byte[] deflate(byte[] data) {
+        Deflater d = new Deflater();
+        try {
+            d.setInput(data);
+            d.finish();
+            java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream(Math.max(64, data.length / 3));
+            byte[] buf = new byte[16 * 1024];
+            while (!d.finished()) out.write(buf, 0, d.deflate(buf));
+            return out.toByteArray();
+        } finally {
+            d.end();
+        }
     }
 
     boolean canResize() {
@@ -313,8 +463,8 @@ final class LinuxStreamRfb implements Closeable {
                 skip(3);
                 int len = s32();
                 if (len < 0) {
-                    skip(-(long) len); // extended clipboard, which this client never asked for
-                } else if (len > 4 * 1024 * 1024) {
+                    extendedClipboard(h, -(long) len);
+                } else if (len > COMPUTER_MAX) {
                     skip(len);
                 } else {
                     String text = new String(readBytes(len), StandardCharsets.ISO_8859_1);
@@ -327,7 +477,76 @@ final class LinuxStreamRfb implements Closeable {
         }
     }
 
+    /** One extended clipboard message, {@code n} bytes: its flags, then what the action carries. */
+    private void extendedClipboard(Handler h, long n) throws IOException {
+        if (n < 4 || n > MAX_CLIP_MESSAGE) {
+            skip(n);
+            return;
+        }
+        int flags = s32();
+        byte[] rest = readBytes((int) n - 4);
+        // One action a message; caps may name several, as what the sender takes.
+        if ((flags & CLIP_CAPS) != 0) {
+            serverCaps(flags);
+        } else if ((flags & CLIP_REQUEST) != 0) {
+            if ((flags & CLIP_TEXT) != 0) provide();
+        } else if ((flags & CLIP_PEEK) != 0) {
+            synchronized (clipLock) {
+                writeClipboard(CLIP_NOTIFY | (offered != null ? CLIP_TEXT : 0), null);
+            }
+        } else if ((flags & CLIP_NOTIFY) != 0) {
+            // The guest has new text: asked for at once, as TigerVNC's own
+            // viewer does. Whether it reaches the computer is the window's call.
+            if ((flags & CLIP_TEXT) != 0) writeClipboard(CLIP_REQUEST | CLIP_TEXT, null);
+        } else if ((flags & CLIP_PROVIDE) != 0) {
+            String text = inflateText(flags, rest);
+            if (text != null) h.onClipboard(text);
+        }
+    }
+
+    /**
+     * The text in a provide: the first format's length, its bytes, the NUL
+     * taken off and line ends made LF. Null when it holds no text, is larger
+     * than is handed on, or is not what it says.
+     */
+    static String inflateText(int flags, byte[] deflated) {
+        if ((flags & CLIP_TEXT) == 0) return null;
+        Inflater inf = new Inflater();
+        try {
+            inf.setInput(deflated);
+            byte[] head = new byte[4];
+            if (!inflateFully(inf, head)) return null;
+            long len = ((head[0] & 0xffL) << 24) | ((head[1] & 0xffL) << 16) | ((head[2] & 0xffL) << 8) | (head[3] & 0xffL);
+            if (len > COMPUTER_MAX) return null;
+            byte[] text = new byte[(int) len];
+            if (!inflateFully(inf, text)) return null;
+            int end = text.length;
+            while (end > 0 && text[end - 1] == 0) end--;
+            return new String(text, 0, end, StandardCharsets.UTF_8).replace("\r\n", "\n");
+        } catch (DataFormatException e) {
+            return null;
+        } finally {
+            inf.end();
+        }
+    }
+
+    /** Fill {@code out} from {@code inf}; false if the stream ends first. TigerVNC sync-flushes, never finishes. */
+    private static boolean inflateFully(Inflater inf, byte[] out) throws DataFormatException {
+        int off = 0;
+        while (off < out.length) {
+            int got = inf.inflate(out, off, out.length - off);
+            if (got == 0 && (inf.finished() || inf.needsInput() || inf.needsDictionary())) return false;
+            off += got;
+        }
+        return true;
+    }
+
     private void framebufferUpdate(Handler h) throws IOException {
+        // Xvnc answers the encodings ahead of any picture: no capabilities by
+        // now is a server without the extended clipboard.
+        synchronized (clipLock) {
+            if (!clipKnown) known();
+        }
         u8();
         int n = u16();
         for (int i = 0; i < n; i++) {

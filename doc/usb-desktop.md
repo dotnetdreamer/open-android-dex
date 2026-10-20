@@ -22,7 +22,7 @@ look arbitrary until you know what was measured.
 | Piece | File | What it owns |
 | --- | --- | --- |
 | The server | `LinuxStream.java` (in `:linux`, started with `LinuxService`) | the abstract socket, who gets in, one session at a time, the desktop's state and start, pacing |
-| Xvnc's pixels | `LinuxStreamRfb.java` | a VNC client for loopback: VncAuth (its own DES), raw rectangles, the cursor's shape, resizes, input, Latin-1 clipboard |
+| Xvnc's pixels | `LinuxStreamRfb.java` | a VNC client for loopback: VncAuth (its own DES), raw rectangles, the cursor's shape, resizes, input, the clipboard (UTF-8) |
 | The encoder | `LinuxStreamEncoder.java` | a GL texture the size of the desktop, drawn into MediaCodec's input surface; low-latency H.264 |
 | The socket | `LinuxStreamSocket.java` | the server end of a WebSocket, and `GET /probe` |
 | Waking it | `RemoteProvider.java`, method `stream` | one `content call` that starts the service the socket lives in |
@@ -173,8 +173,29 @@ The clipboard is the window's, the same one the tunnel's page uses
 Linux when the window comes to the front, Linux's to this computer while it is
 there, and the switch for it — on the status pill here, as on the viewer's bar
 through the tunnel — remembered per phone. The stream only carries the text
-(`clip`, both ways) and the phone hands it to Xvnc. Standard cut text only, so
-Latin-1 — see below.
+(`clip`, both ways) and the phone hands it to Xvnc.
+
+**On the phone it is TigerVNC's extended clipboard**, the one noVNC speaks
+through the tunnel, so every character crosses: standard cut text is Latin-1,
+where an em dash, 日本語 or an emoji becomes `?`. `LinuxStreamRfb` asks for it
+among the encodings (`0xC0A1E5CE`); Xvnc answers with its capabilities ahead
+of its first picture, and gets this client's back — text only, and a size of
+0, so none of it comes unasked. Then, as Xvnc does it:
+
+- *Computer → Linux*: Xvnc is only told there is text (notify). It asks for
+  it (request) when a program in the guest pastes, which may be minutes
+  later, so the phone keeps the computer's latest text to hand over then
+  (provide). Empty text — the switch turned off — offers nothing, and Xvnc
+  lets go of what this connection gave the guest.
+- *Linux → computer*: Xvnc says the guest has new text, and the phone asks
+  for it at once, as TigerVNC's own viewer does; the window decides whether
+  it lands (clipboardShare.ts).
+- The text is UTF-8 with CRLF line ends and a NUL, deflated, behind its
+  length — counted that way against Xvnc's MaxCutText of 256 KB, past which
+  Xvnc drops it unread. The window holds such a text back and says so; the
+  phone does not offer one either. What comes back is handed on up to 4 MB.
+- A server that sends no capabilities before its first picture has no
+  extended clipboard, and gets standard cut text, Latin-1.
 
 Files dropped on the window, and what Linux sends this computer, are the
 window's too (`DesktopRouter.tsx`): they go through the tunnel whichever way
@@ -224,12 +245,18 @@ and its switch over the stream, a drop on the video, the cable pulled in the
 middle of a copy and the copy finishing on the tunnel, the clipboard given
 again on the new connection, and the move back to adb within three seconds.
 
-Off the phone (`node test/usb-desktop-test.mjs`, 50 checks): the window's H.264
+Off the phone (`node test/usb-desktop-test.mjs`, 63 checks): the window's H.264
 handling and key mapping; the launcher's own `LinuxStreamRfb` against a stand-in
 Xvnc — VncAuth against OpenSSL's DES, a wrong password refused, shared, raw and
-the three pseudo-encodings asked for and nothing else, Xvnc's format kept, every
+the four pseudo-encodings asked for and nothing else, Xvnc's format kept, every
 sampled pixel right, the cursor's shape and mask, a resize and the pictures
-after it, pointer (held to the desktop), keys, clipboard both ways; its
+after it, pointer (held to the desktop), keys; the extended clipboard as
+TigerVNC 1.13 speaks it — the capabilities both ways, each text announced and
+handed over only when asked, CRLF and Latin-1, an em dash, CJK and an emoji
+whole, CRLF line ends and the NUL as Xvnc counts them, 200 KB in one piece,
+300 KB never offered, the last text kept for a paste later on, a take-back
+that offers nothing, and from the guest the same kinds and 200 KB; and against
+a stand-in without it, Latin-1 both ways; its
 `LinuxStreamSocket` — the probe, a 300 KB message both ways, RFC 6455's accept,
 another origin and another host refused. `cargo test`: adb's framing against a
 stand-in server, serials with spaces, the window port's checks.
@@ -272,7 +299,7 @@ Not yet:
   tunnel and back, and the title following it;
 - Windows (WebView2) and Linux (WebKitGTK) — the latter may have no WebCodecs and
   would use the tunnel;
-- a UTF-8 clipboard (TigerVNC's extended clipboard) — standard cut text is
-  Latin-1, so anything else becomes `?`;
+- the extended clipboard against the real Xvnc (1.13.1 on the phone): the
+  stand-ins are written from TigerVNC's behaviour, not run against it;
 - the same video through the tunnel when the phone is not on adb — the daemon
   would splice it to the same socket, as it splices websockify.

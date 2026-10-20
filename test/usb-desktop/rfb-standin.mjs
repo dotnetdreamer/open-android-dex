@@ -8,16 +8,34 @@
 // can be recomputed from its position and the frame number, so a client's
 // copy can be checked.
 //
+// The clipboard is TigerVNC 1.13's extended one, as Xvnc does it: its
+// capabilities in answer to the encodings, ahead of any picture, with a size
+// of 0 (nothing unasked); the guest's text announced, then provided when
+// asked for — UTF-8, CRLF, a NUL, zlib sync-flushed; a client's text asked
+// for when "something in the guest pastes" (at once, by default, and again on
+// `paste()`), and refused over MaxCutText. `extendedClipboard: false` is a
+// server without it: Latin-1 cut text both ways.
+//
 // VncAuth's DES comes from OpenSSL's legacy provider: run node with
 // --openssl-legacy-provider (the test re-executes itself with it).
 
 import net from "node:net";
 import crypto from "node:crypto";
+import zlib from "node:zlib";
 
 const ENC_RAW = 0;
 const ENC_DESKTOP_SIZE = -223;
 const ENC_CURSOR = -239;
 const ENC_EXTENDED_DESKTOP_SIZE = -308;
+const ENC_EXTENDED_CLIPBOARD = 0xc0a1e5ce | 0;
+const CLIP_TEXT = 1;
+const CLIP_CAPS = 1 << 24;
+const CLIP_REQUEST = 1 << 25;
+const CLIP_PEEK = 1 << 26;
+const CLIP_NOTIFY = 1 << 27;
+const CLIP_PROVIDE = 1 << 28;
+/** Xvnc's default MaxCutText. */
+const MAX_CUT_TEXT = 262144;
 
 /** The colour of pixel (x, y) in frame `n`, as [r, g, b]. */
 export function pixelAt(x, y, n, w) {
@@ -44,21 +62,47 @@ function vncExpected(password, challenge) {
   return Buffer.concat([c.update(challenge), c.final()]);
 }
 
+/** ServerCutText in its extended form: a negative length, then the flags and the rest. */
+function extended(sock, flags, rest = Buffer.alloc(0)) {
+  const head = Buffer.alloc(12);
+  head[0] = 3;
+  head.writeInt32BE(-(4 + rest.length), 4);
+  head.writeUInt32BE(flags >>> 0, 8);
+  sock.write(Buffer.concat([head, rest]));
+}
+
+/** A text as Xvnc provides one: its length, UTF-8 with CRLF and a NUL, deflated and sync-flushed. */
+function provideBody(text) {
+  const bytes = Buffer.from(text.replace(/\r?\n/g, "\r\n") + "\0", "utf8");
+  const len = Buffer.alloc(4);
+  len.writeUInt32BE(bytes.length);
+  return zlib.deflateSync(Buffer.concat([len, bytes]), { finishFlush: zlib.constants.Z_SYNC_FLUSH });
+}
+
 /**
- * Start one. Returns { port, close, events, clients, sendClipboard(text) }:
+ * Start one. Returns { port, close, events, clients, sendClipboard(text), paste() }:
  * `events` collects everything clients said, as plain objects.
  */
-export function startRfbStandin({ password = "standin1", width = 640, height = 400, fps = 60 } = {}) {
+export function startRfbStandin({
+  password = "standin1",
+  width = 640,
+  height = 400,
+  fps = 60,
+  extendedClipboard = true,
+  pasteAtOnce = true,
+} = {}) {
   const events = [];
   const clients = new Set();
   const server = net.createServer((sock) => serve(sock));
   let fb = { w: width, h: height };
+  /** The guest's clipboard, for a client that asks. */
+  let guestText = "";
 
   function serve(sock) {
     sock.setNoDelay(true);
     let buf = Buffer.alloc(0);
     let waiters = [];
-    const client = { sock, encodings: [], frame: 0, pendingResize: null, sentLayout: false, sentCursor: false, timer: null };
+    const client = { sock, encodings: [], frame: 0, pendingResize: null, sentLayout: false, sentCursor: false, timer: null, extClip: false };
     clients.add(client);
     sock.on("data", (d) => {
       buf = Buffer.concat([buf, d]);
@@ -133,6 +177,12 @@ export function startRfbStandin({ password = "standin1", width = 640, height = 4
           client.encodings = [];
           for (let i = 0; i < n; i++) client.encodings.push(list.readInt32BE(4 * i));
           events.push({ type: "set-encodings", encodings: client.encodings });
+          if (extendedClipboard && client.encodings.includes(ENC_EXTENDED_CLIPBOARD) && !client.extClip) {
+            // Xvnc's answer, written before it handles the update request
+            // behind it: its actions, text, and a size of 0 for text.
+            client.extClip = true;
+            extended(sock, CLIP_CAPS | CLIP_REQUEST | CLIP_PEEK | CLIP_NOTIFY | CLIP_PROVIDE | CLIP_TEXT, Buffer.alloc(4));
+          }
         } else if (type === 3) {
           const req = await need(9);
           const incremental = req[0] === 1;
@@ -146,9 +196,15 @@ export function startRfbStandin({ password = "standin1", width = 640, height = 4
           events.push({ type: "pointer", buttons: p[0], x: p.readUInt16BE(1), y: p.readUInt16BE(3) });
         } else if (type === 6) {
           const h = await need(7);
-          const len = h.readUInt32BE(3);
-          const text = (await need(len)).toString("latin1");
-          events.push({ type: "clipboard", text });
+          const len = h.readInt32BE(3);
+          if (len >= 0) {
+            const text = (await need(len)).toString("latin1");
+            if (len > MAX_CUT_TEXT) events.push({ type: "clip-too-long", bytes: len });
+            else events.push({ type: "clipboard", text });
+          } else {
+            const body = await need(-len);
+            onExtended(client, body, -len);
+          }
         } else if (type === 251) {
           const h = await need(7);
           const w = h.readUInt16BE(1);
@@ -165,6 +221,64 @@ export function startRfbStandin({ password = "standin1", width = 640, height = 4
         }
       }
     })().catch(() => sock.destroy());
+  }
+
+  /** A client's extended clipboard message, as Xvnc (SMsgReader) reads one. */
+  function onExtended(client, body, n) {
+    if (!client.extClip || n < 4) {
+      events.push({ type: "clip-unexpected", n });
+      return;
+    }
+    const flags = body.readUInt32BE(0);
+    const rest = body.subarray(4);
+    if (flags & CLIP_CAPS) {
+      const sizes = [];
+      for (let o = 0; o + 4 <= rest.length; o += 4) sizes.push(rest.readUInt32BE(o));
+      events.push({ type: "clip-caps", flags, sizes });
+    } else if (flags & CLIP_REQUEST) {
+      events.push({ type: "clip-request", text: !!(flags & CLIP_TEXT) });
+      if (flags & CLIP_TEXT) extended(client.sock, CLIP_PROVIDE | CLIP_TEXT, provideBody(guestText));
+    } else if (flags & CLIP_PEEK) {
+      events.push({ type: "clip-peek" });
+      extended(client.sock, CLIP_NOTIFY | (guestText ? CLIP_TEXT : 0));
+    } else if (flags & CLIP_NOTIFY) {
+      const text = !!(flags & CLIP_TEXT);
+      events.push({ type: "clip-notify", text });
+      client.offers = text;
+      // Something in the guest pastes straight away.
+      if (text && pasteAtOnce) extended(client.sock, CLIP_REQUEST | CLIP_TEXT);
+    } else if (flags & CLIP_PROVIDE) {
+      if (n > MAX_CUT_TEXT) {
+        events.push({ type: "clip-too-long", bytes: n });
+        return;
+      }
+      let raw;
+      try {
+        raw = zlib.inflateSync(rest, { finishFlush: zlib.constants.Z_SYNC_FLUSH });
+      } catch (e) {
+        events.push({ type: "clip-bad-zlib", error: String(e) });
+        return;
+      }
+      const bytes = raw.readUInt32BE(0);
+      if (bytes > MAX_CUT_TEXT) {
+        events.push({ type: "clip-too-long", bytes });
+        return;
+      }
+      const data = raw.subarray(4, 4 + bytes);
+      const text = data.toString("utf8");
+      events.push({
+        type: "clip-provide",
+        // As Xvnc keeps it: the NUL off, CRLF back to LF.
+        text: text.replace(/\0$/, "").replace(/\r\n/g, "\n"),
+        bytes,
+        nul: data[data.length - 1] === 0,
+        // Every line end CRLF, none bare.
+        crlf: !/[^\r]\n/.test(text) && !/^\n/.test(text),
+        valid: Buffer.from(text, "utf8").equals(data),
+      });
+    } else {
+      events.push({ type: "clip-unknown", flags });
+    }
   }
 
   function scheduleUpdate(client, incremental) {
@@ -277,15 +391,25 @@ export function startRfbStandin({ password = "standin1", width = 640, height = 4
         get size() {
           return { ...fb };
         },
+        /** The guest copies `text`: announced to each client, or sent whole as Latin-1 to one without the extension. */
         sendClipboard(text) {
+          guestText = text;
           const t = Buffer.from(text, "latin1");
           for (const c of clients) {
+            if (c.extClip) {
+              extended(c.sock, CLIP_NOTIFY | CLIP_TEXT);
+              continue;
+            }
             const m = Buffer.alloc(8 + t.length);
             m[0] = 3;
             m.writeUInt32BE(t.length, 4);
             t.copy(m, 8);
             c.sock.write(m);
           }
+        },
+        /** Something in the guest pastes: the text is asked for from each client that offered some. */
+        paste() {
+          for (const c of clients) if (c.extClip && c.offers) extended(c.sock, CLIP_REQUEST | CLIP_TEXT);
         },
         close() {
           for (const c of clients) c.sock.destroy();
