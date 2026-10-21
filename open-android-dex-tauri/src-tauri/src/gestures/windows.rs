@@ -548,10 +548,6 @@ fn read_raw_input(lparam: LPARAM) -> Option<(HANDLE, Vec<u8>, usize)> {
 
 /// Is the desktop's own scrcpy window the one the user is looking at?
 fn desktop_is_foreground(app: &AppHandle, key: &str) -> bool {
-    // The desktop in this app's own window: whether that window has the keyboard.
-    if crate::dex::window_in_front(key) {
-        return true;
-    }
     let Some(pid) = crate::scrcpy::session_pid(app, key) else {
         return false;
     };

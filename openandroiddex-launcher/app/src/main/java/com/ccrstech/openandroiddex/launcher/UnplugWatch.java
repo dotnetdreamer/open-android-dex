@@ -108,23 +108,15 @@ final class UnplugWatch {
     }
 
     /**
-     * What a desktop's display is called: scrcpy's, or the one the window
-     * daemon's own video makes (openandroiddex-wmd, Desktop.DISPLAY_NAME).
-     */
-    private static final java.util.Set<String> DESKTOP_DISPLAYS =
-            new java.util.HashSet<>(java.util.Arrays.asList("scrcpy", "Open Android DeX"));
-
-    /**
-     * The desktop's display, or any other desktop display, still exists. Asked
-     * of the platform rather than the daemon, which is gone by the time this
-     * matters.
+     * The desktop's display, or any scrcpy display, still exists. Asked of the
+     * platform rather than the daemon, which is gone by the time this matters.
      */
     private boolean desktopShowing() {
         DisplayManager dm = service.getSystemService(DisplayManager.class);
         if (dm == null) return true;            // no way to tell: do nothing
         if (desktop > 0 && dm.getDisplay(desktop) != null) return true;
         for (Display d : dm.getDisplays()) {
-            if (d.getDisplayId() != Display.DEFAULT_DISPLAY && DESKTOP_DISPLAYS.contains(d.getName())) return true;
+            if (d.getDisplayId() != Display.DEFAULT_DISPLAY && "scrcpy".equals(d.getName())) return true;
         }
         return false;
     }

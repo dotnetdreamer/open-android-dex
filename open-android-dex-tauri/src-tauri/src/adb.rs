@@ -1940,11 +1940,6 @@ pub fn adb_start_launcher(
     let base = crate::scrcpy::desktop_base_dpi(&app, &serial)
         .map(|dpi| format!(" --ei base_dpi {dpi}"))
         .unwrap_or_default();
-    // Over wireless debugging the launcher keeps the phone's Wi-Fi out of
-    // power save for as long as the desktop is up (WifiLow): a dozing radio is
-    // a frame and a click that wait for it. Said on every start, so a desktop
-    // that moved to the cable lets go.
-    let wifi = format!(" --ez wifi_lock {}", crate::display::is_wireless(&serial));
     let started_out = run_adb(
         &app,
         &[
@@ -1952,7 +1947,7 @@ pub fn adb_start_launcher(
             &serial,
             "shell",
             &format!(
-                "{stop}am start --display {display_id} --windowingMode 1{base}{wifi} -n {LAUNCHER_COMPONENT}"
+                "{stop}am start --display {display_id} --windowingMode 1{base} -n {LAUNCHER_COMPONENT}"
             ),
         ],
     )?;

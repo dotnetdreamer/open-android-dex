@@ -22,8 +22,7 @@
 //! against the second a `content call` costs. Only a phone whose launcher is
 //! asleep needs one (`stream`, which wakes the service the socket lives in).
 //!
-//! Design record: doc/usb-desktop.md. The Android desktop's own window
-//! (dex.rs) reaches its phone the same way, with these same checks.
+//! Design record: doc/usb-desktop.md.
 
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr};
@@ -53,7 +52,7 @@ fn adb_server() -> SocketAddr {
 
 // ── adb's wire ───────────────────────────────────────────────────────────
 
-pub(crate) async fn adb_connect() -> Result<TcpStream, String> {
+async fn adb_connect() -> Result<TcpStream, String> {
     let s = tokio::time::timeout(Duration::from_secs(2), TcpStream::connect(adb_server()))
         .await
         .map_err(|_| "adb's server did not answer".to_string())?
@@ -64,7 +63,7 @@ pub(crate) async fn adb_connect() -> Result<TcpStream, String> {
 
 /// One request to adb's server — four hex digits of length, then the text —
 /// and its OKAY.
-pub(crate) async fn adb_ask(s: &mut TcpStream, request: &str) -> Result<(), String> {
+async fn adb_ask(s: &mut TcpStream, request: &str) -> Result<(), String> {
     s.write_all(format!("{:04x}{request}", request.len()).as_bytes())
         .await
         .map_err(|e| format!("adb: {e}"))?;
@@ -260,7 +259,7 @@ fn links() -> &'static Mutex<HashMap<String, Link>> {
     LINKS.get_or_init(Default::default)
 }
 
-pub(crate) fn new_token() -> Result<String, String> {
+fn new_token() -> Result<String, String> {
     let mut b = [0u8; 16];
     if !crate::wireless::fill_random(&mut b) {
         return Err("the system random number generator is unavailable".into());
@@ -371,7 +370,7 @@ async fn forward(mut tcp: TcpStream, port: u16, token: &str, device: &Device, de
     }
 }
 
-pub(crate) async fn read_head(tcp: &mut TcpStream) -> Option<Vec<u8>> {
+async fn read_head(tcp: &mut TcpStream) -> Option<Vec<u8>> {
     let mut received = Vec::with_capacity(1024);
     let mut chunk = [0u8; 4096];
     let read = async {
@@ -411,7 +410,7 @@ fn app_origin(origin: &str, dev: Option<&str>) -> bool {
 /// A page from another site names itself in `Origin`, a DNS-rebinding one
 /// carries its own name in `Host`, and neither knows the token; the app's
 /// page is the only one that gets the URL.
-pub(crate) fn check_request(received: &[u8], port: u16, token: &str, dev: Option<&str>) -> Result<(), &'static str> {
+fn check_request(received: &[u8], port: u16, token: &str, dev: Option<&str>) -> Result<(), &'static str> {
     let end = head_end(received).ok_or("no request")?;
     let head = std::str::from_utf8(&received[..end]).map_err(|_| "not text")?;
     let mut lines = head.split("\r\n");
@@ -456,7 +455,7 @@ pub(crate) fn check_request(received: &[u8], port: u16, token: &str, dev: Option
 }
 
 /// `received` with its request line's path replaced.
-pub(crate) fn with_path(received: &[u8], path: &str) -> Vec<u8> {
+fn with_path(received: &[u8], path: &str) -> Vec<u8> {
     let Some(line_end) = received.windows(2).position(|w| w == b"\r\n") else {
         return received.to_vec();
     };

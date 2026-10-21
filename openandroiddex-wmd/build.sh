@@ -66,26 +66,10 @@ else
   exit 1
 fi
 
-# The stream classes the Android desktop's own video shares with the launcher's
-# Linux one (doc/dex-video.md) — the WebSocket, the encoder's choice and set-up,
-# the log — compiled from the launcher's sources rather than copied, so the two
-# streams cannot drift apart. Plain Java and framework calls, no resources: the
-# launcher's on-phone test (test/usb-desktop-test.mjs) compiles them the same way.
-# build.cmd names the same three.
-LAUNCHER_SRC="$HERE/../openandroiddex-launcher/app/src/main/java/com/ccrstech/openandroiddex/launcher"
-SHARED="LinuxStreamSocket LinuxStreamEncoder DexLog"
-
 echo "[1/3] javac  ($JAVAC)"
 rm -rf "$HERE/build"
 mkdir -p "$HERE/build/classes"
 find "$HERE/src" -name '*.java' > "$HERE/build/sources.txt"
-for c in $SHARED; do
-  if [ ! -f "$LAUNCHER_SRC/$c.java" ]; then
-    echo "ERROR: $LAUNCHER_SRC/$c.java is missing" >&2
-    exit 1
-  fi
-  echo "$LAUNCHER_SRC/$c.java" >> "$HERE/build/sources.txt"
-done
 # android.jar goes on the classpath, not the bootclasspath: JDK 17+ rejects
 # -bootclasspath alongside -target 17. Everything we touch outside android.*
 # is java.lang/util/io/net, which Android provides at runtime anyway.

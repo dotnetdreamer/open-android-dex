@@ -336,12 +336,6 @@
     <string name="st_nav_stream_sub">રિઝોલ્યુશન · કોડેક · કામગીરી</string>
     <string name="st_nav_clipboard">ક્લિપબોર્ડ મેનેજર</string>
     <string name="st_nav_clipboard_sub">સિંક · હાલનું · ઇતિહાસ</string>
-    <string name="st_window">ડેસ્કટોપ વિન્ડો</string>
-    <string name="st_window_own">સ્મૂથ</string>
-    <string name="st_window_own_sub">કમ્પ્યુટર પર Open Android DeX ઍપ તેને બતાવે છે. વાઇ-ફાઇની ઝડપ સાથે ચાલે છે: ફ્રેમ છોડી દેવાય છે, ક્યારેય મોડી નથી આવતી.</string>
-    <string name="st_window_scrcpy">ક્લાસિક</string>
-    <string name="st_window_scrcpy_sub">scrcpy તેને બતાવે છે, પહેલાંની જેમ. જો સ્મૂથ વિન્ડોમાં તકલીફ હોય તો આ પસંદ કરો. નીચેના વિડિયો કોડેક અને વિડિયો એન્કોડર ફક્ત આને જ લાગુ પડે છે.</string>
-    <string name="st_window_note">જ્યારે ફોન પોઇન્ટર દોરે છે (માઉસ અને કર્સર), ત્યારે ડેસ્કટોપ હંમેશાં ક્લાસિક વિન્ડોમાં ખૂલે છે.</string>
     <string name="st_resolution">ડિસ્પ્લે રિઝોલ્યુશન</string>
     <string name="st_res_note">આ બદલવાથી તમારો ડિસ્પ્લે-માપ પ્રીસેટ જળવાઈ રહે છે, નવા રિઝોલ્યુશન માટે ફરી ગણીને.</string>
     <string name="st_res_auto">કમ્પ્યુટરની સ્ક્રીન જેટલું</string>

@@ -128,13 +128,6 @@ pub struct MirrorOptions {
     /// window coordinate (display::flex_geometry). None: fitted once.
     #[serde(skip)]
     pub flex: Option<f64>,
-    /// The desktop goes to this app's own window (dex.rs): the window daemon's
-    /// dex makes the display and sends it at the pace the link takes, and
-    /// scrcpy's window is the fallback. Decided on every spawn from what the
-    /// settings and the phone allow ([`own_video_wanted`]), never sent by the
-    /// frontend.
-    #[serde(skip)]
-    pub own_video: bool,
 }
 
 fn default_true() -> bool {
@@ -339,12 +332,6 @@ fn build_args(opts: &MirrorOptions) -> Vec<String> {
     // frame arrives this is all it shows. An empty virtual display is black,
     // so gray would flash on every desktop start and every reconnect.
     args.push("--background-color=000000".into());
-    // Once a second, the frames scrcpy's window showed: the classic window's
-    // half of the readout every change to the desktop's video is measured by.
-    // The log gets a summary, not the lines (`FpsTally`).
-    if opts.new_display.is_some() && opts.app_package.is_none() {
-        args.push("--print-fps".into());
-    }
     if let Some(display) = &opts.new_display {
         args.push(format!("--new-display={display}"));
         if opts.vd_no_decorations {
@@ -554,15 +541,6 @@ fn spawn_scrcpy(app: &AppHandle, opts: &MirrorOptions) -> Result<Child, String> 
         .map_err(|e| format!("failed to start scrcpy: {e}"))
 }
 
-/// The session's next child: the desktop's own server (dex.rs), or scrcpy.
-fn spawn_session(app: &AppHandle, opts: &MirrorOptions) -> Result<Child, String> {
-    if opts.own_video {
-        crate::dex::spawn(app, opts)
-    } else {
-        spawn_scrcpy(app, opts)
-    }
-}
-
 /// Where the next session's scrcpy starts looking for a port to listen on
 /// while its server dials back — Windows only.
 ///
@@ -637,47 +615,6 @@ fn parse_display_resized(line: &str) -> Option<(i32, i32, i32)> {
     Some((w, h, dpi.trim().parse().ok()?))
 }
 
-/// "INFO: 58 fps" or "INFO: 45 fps (+3 frames skipped)" — scrcpy's fps counter
-/// (`--print-fps`) — as the number of frames its window showed.
-fn parse_fps(line: &str) -> Option<u32> {
-    let rest = line.trim();
-    let rest = rest.strip_prefix("INFO:").unwrap_or(rest).trim();
-    let (n, tail) = rest.split_once(' ')?;
-    (tail == "fps" || tail.starts_with("fps (")).then_some(())?;
-    n.parse().ok()
-}
-
-/// scrcpy's frame counts, a line a second, turned into one line in the log
-/// every half minute: what the classic window showed, against which the
-/// desktop's own window's numbers are read.
-struct FpsTally {
-    since: Instant,
-    counts: Vec<u32>,
-}
-
-impl FpsTally {
-    const EVERY: Duration = Duration::from_secs(30);
-
-    fn new() -> Self {
-        Self { since: Instant::now(), counts: Vec::new() }
-    }
-
-    /// One second's count; a summary when a half minute of them is in.
-    fn add(&mut self, fps: u32) -> Option<String> {
-        self.counts.push(fps);
-        if self.since.elapsed() < Self::EVERY {
-            return None;
-        }
-        let n = self.counts.len().max(1) as u32;
-        let mean = self.counts.iter().sum::<u32>() / n;
-        let low = self.counts.iter().copied().min().unwrap_or(0);
-        let line = format!("{mean} fps on average, {low} at the lowest, over {n} moving seconds");
-        self.counts.clear();
-        self.since = Instant::now();
-        Some(line)
-    }
-}
-
 /// Drain one of scrcpy's output pipes: record every line, watch for the
 /// virtual display id and announce it to the webview once seen.
 ///
@@ -701,16 +638,9 @@ fn spawn_output_reader<R: Read + Send + 'static>(
     thread::spawn(move || {
         // The patched server says it is one before it makes the display.
         let mut follows_scale = false;
-        let mut tally = FpsTally::new();
         for line in BufReader::new(stream).lines().map_while(Result::ok) {
             let line = line.trim_end().to_string();
             if line.is_empty() {
-                continue;
-            }
-            if let Some(fps) = parse_fps(&line) {
-                if let Some(summary) = tally.add(fps) {
-                    log::info!("scrcpy [{key}] the picture: {summary}");
-                }
                 continue;
             }
             if line.contains("ERROR") {
@@ -952,60 +882,19 @@ fn watch_window_scale(
             if cfg!(target_os = "macos") {
                 write_display_scale(&app, &serial, now);
             }
-            if move_density(&app, &serial, &key, display, now, &density, &base_dpi) {
-                scale = now;
+            let base = ((160.0 * now).round() as i32).clamp(80, 960);
+            let factor = display::size_factor(&app, &serial, (1920, 1080));
+            let dpi = ((f64::from(base) * factor).round() as i32).clamp(DPI_MIN, DPI_MAX);
+            match adb::run_adb(&app, &["-s", &serial, "shell", &format!("wm density {dpi} -d {display}")]) {
+                Ok(_) => {
+                    base_dpi.store(base, Ordering::SeqCst);
+                    density.store(dpi, Ordering::SeqCst);
+                    scale = now;
+                }
+                Err(e) => log::warn!("scrcpy [{key}] could not move the density to {dpi}: {e}"),
             }
         }
     });
-}
-
-/// The density of a desktop whose window is on a screen of `scale` now: the
-/// Default goes with the scale — one dp stays one point — at the phone's
-/// Display size preset. True once the phone has it.
-fn move_density(
-    app: &AppHandle,
-    serial: &str,
-    key: &str,
-    display: i32,
-    scale: f64,
-    density: &AtomicI32,
-    base_dpi: &AtomicI32,
-) -> bool {
-    let base = ((160.0 * scale).round() as i32).clamp(80, 960);
-    let factor = display::size_factor(app, serial, (1920, 1080));
-    let dpi = ((f64::from(base) * factor).round() as i32).clamp(DPI_MIN, DPI_MAX);
-    match adb::run_adb(app, &["-s", serial, "shell", &format!("wm density {dpi} -d {display}")]) {
-        Ok(_) => {
-            base_dpi.store(base, Ordering::SeqCst);
-            density.store(dpi, Ordering::SeqCst);
-            true
-        }
-        Err(e) => {
-            log::warn!("scrcpy [{key}] could not move the density to {dpi}: {e}");
-            false
-        }
-    }
-}
-
-/// The desktop's own window moved to a screen of another scale (dex.rs): the
-/// density goes with it, as `watch_window_scale` moves it for scrcpy's. The
-/// window has told the phone its new size in pixels itself.
-pub(crate) fn desktop_scale_changed(app: &AppHandle, key: &str, scale: f64) {
-    let (serial, display, density, base_dpi) = {
-        let state = app.state::<MirrorState>();
-        let map = state.0.lock().unwrap();
-        let Some(s) = map.get(key) else { return };
-        (s.serial.clone(), s.display_id.load(Ordering::SeqCst), s.density.clone(), s.base_dpi.clone())
-    };
-    if display < 0 || !(scale.is_finite() && scale > 0.0) {
-        return;
-    }
-    let was = f64::from(base_dpi.load(Ordering::SeqCst).max(80)) / 160.0;
-    if (was - scale).abs() < 0.01 {
-        return;
-    }
-    log::info!("dex [{key}] the window is on a {scale}x screen now (was {was}x)");
-    move_density(app, &serial, key, display, scale, &density, &base_dpi);
 }
 
 /// The Default density of this phone's running desktop, if it has one — the
@@ -1050,7 +939,7 @@ fn probe_scrcpy_displays(app: &AppHandle, serial: &str) -> HashSet<i32> {
             "shell",
             // `|| true`: no match is the expected answer most of the time, and
             // grep's exit 1 for it would be logged as a failed adb call
-            "dumpsys display | grep -i -E 'scrcpy|Open Android DeX' | grep -oE 'displayId=[0-9]+' || true",
+            "dumpsys display | grep -i scrcpy | grep -oE 'displayId=[0-9]+' || true",
         ],
     )
     .unwrap_or_default()
@@ -1524,12 +1413,8 @@ fn apply_stored_config(app: &AppHandle, opts: &mut MirrorOptions) {
     // The display that follows its window where the host can (macOS, Windows),
     // else one fitted to the screen once.
     let picked = map.get("res").filter(|r| parse_display_size(r).is_some());
-    opts.own_video = own_video_wanted(app, opts, &map);
     let fit = match picked {
         Some(_) => None,
-        // A window of our own opens filling the screen the app is on, and its
-        // display follows it from there (dex.rs) — scrcpy's flex is scrcpy's.
-        None if opts.own_video => display::desktop_window_geometry(app),
         None => display::desktop_flex_geometry(app).or_else(|| {
             display::desktop_geometry(app, &opts.serial, opts.video_codec.as_deref())
         }),
@@ -1547,7 +1432,7 @@ fn apply_stored_config(app: &AppHandle, opts: &mut MirrorOptions) {
             opts.window = g.window;
             opts.base_dpi = Some(g.base_dpi);
             opts.fitted = true;
-            opts.flex = if opts.own_video { None } else { g.flex };
+            opts.flex = g.flex;
         }
         // No screen to fit (none reported, or too small): the size the
         // frontend asked for, as before this existed.
@@ -1634,58 +1519,6 @@ fn apply_stored_config(app: &AppHandle, opts: &mut MirrorOptions) {
     }
 }
 
-/// Whether a desktop goes to this app's own window (dex.rs) — the default — or
-/// to scrcpy's: picked in the phone's Settings (`video`), needed by a pointer
-/// the phone draws itself (uhid is scrcpy's alone), or because this path has
-/// already failed on this phone since the app started. `OPENDEX_VIDEO=scrcpy`
-/// asks for scrcpy's from the command line.
-fn own_video_wanted(app: &AppHandle, opts: &MirrorOptions, map: &HashMap<String, String>) -> bool {
-    if opts.audio_only || opts.app_package.is_some() || opts.new_display.is_none() {
-        return false;
-    }
-    if std::env::var("OPENDEX_VIDEO").is_ok_and(|v| v == "scrcpy")
-        || map.get("video").map(String::as_str) == Some("scrcpy")
-        || map.get("mouse").map(String::as_str) == Some("uhid")
-    {
-        return false;
-    }
-    !crate::dex::fell_back(&opts.serial) && crate::dex::bundled(app)
-}
-
-/// A bit rate picked in the phone's Settings, or "Reduce quality"'s cap, for
-/// the desktop's own window — bits a second. None: the window's own, by the
-/// display's size and the route, which the phone then holds to what gets
-/// through.
-pub(crate) fn picked_bitrate_bps(app: &AppHandle) -> Option<u32> {
-    let map = load_config(app);
-    let picked = map
-        .get("bitrate")
-        .and_then(|v| v.parse::<u32>().ok())
-        .filter(|m| (1..=100).contains(m));
-    let perf = map.get("perf").map(String::as_str) == Some("on");
-    let mbps = match (picked, perf) {
-        (Some(m), true) => m.min(PERF_BIT_RATE_MBPS),
-        (Some(m), false) => m,
-        (None, true) => PERF_BIT_RATE_MBPS,
-        (None, false) => return None,
-    };
-    Some(mbps * 1_000_000)
-}
-
-/// The frame rate picked in the phone's Settings; 60 when it was left alone.
-pub(crate) fn stored_fps(app: &AppHandle) -> u32 {
-    load_config(app)
-        .get("fps")
-        .and_then(|v| v.parse::<u32>().ok())
-        .filter(|f| (10..=120).contains(f))
-        .unwrap_or(60)
-}
-
-/// Settings → Clipboard on the phone.
-pub(crate) fn clipboard_shared(app: &AppHandle) -> bool {
-    load_config(app).get("clipboard").map(|v| v != "off").unwrap_or(true)
-}
-
 /// Bitrate ceiling (Mbps) while "Reduce quality" is on. Half the 8 Mbps
 /// default: enough for a desktop of text and windows, and low enough that a
 /// Wi-Fi link with something else on it stops being the bottleneck.
@@ -1744,7 +1577,6 @@ fn audio_companion_options(serial: &str, dup: bool) -> MirrorOptions {
         base_dpi: None,
         fitted: false,
         flex: None,
-        own_video: false,
     }
 }
 
@@ -2992,9 +2824,7 @@ impl RequestPump {
                 // Toggle the desktop-side scrcpy window between fullscreen and
                 // its previous frame. What "fullscreen" means is the host's
                 // answer, not ours — see the embed backends.
-                let toggled = crate::dex::toggle_fullscreen(&self.app, &self.key)
-                    .unwrap_or_else(|| crate::embed::toggle_fullscreen(&self.app, &self.key));
-                match toggled {
+                match crate::embed::toggle_fullscreen(&self.app, &self.key) {
                     Ok(on) => self.shared.record_fullscreen(on),
                     Err(e) => {
                         // The taskbar button is on the PHONE, so an error here
@@ -3627,38 +3457,6 @@ pub(crate) fn session_display(app: &AppHandle, key: &str) -> Option<(i32, i32)> 
     })
 }
 
-/// The session's current child has its display: its server is up and listening.
-pub(crate) fn session_has_display(app: &AppHandle, key: &str) -> bool {
-    session_display(app, key).is_some_and(|(display, _)| display >= 0)
-}
-
-/// End the session's child and not the session: the monitor reads it as a
-/// failure and acts on it — dex.rs's way of handing a desktop to scrcpy.
-pub(crate) fn kill_child(app: &AppHandle, key: &str) {
-    let child = {
-        let state = app.state::<MirrorState>();
-        let map = state.0.lock().unwrap();
-        map.get(key).map(|s| s.child.clone())
-    };
-    if let Some(child) = child {
-        let _ = child.lock().unwrap().kill();
-    }
-}
-
-/// Each live desktop's shared state, for what reaches it from outside its own
-/// threads: the desktop's own window going fullscreen by itself.
-fn shared_states() -> &'static Mutex<HashMap<String, std::sync::Weak<Shared>>> {
-    static SHARED: std::sync::OnceLock<Mutex<HashMap<String, std::sync::Weak<Shared>>>> = std::sync::OnceLock::new();
-    SHARED.get_or_init(Default::default)
-}
-
-/// The desktop's window is fullscreen now, or not: the taskbar's ⛶ follows.
-pub(crate) fn record_desktop_fullscreen(key: &str, on: bool) {
-    if let Some(shared) = shared_states().lock().unwrap().get(key).and_then(|w| w.upgrade()) {
-        shared.record_fullscreen(on);
-    }
-}
-
 /// The size a session's display was actually created at, once scrcpy has
 /// announced it. None before that, and for a display only ever found through
 /// dumpsys (see `spawn_display_watchdog`), where the size asked for is all
@@ -3731,7 +3529,6 @@ fn spawn_freeform_enforcer(
     stop: Arc<AtomicBool>,
 ) {
     let shared = Arc::new(Shared::default());
-    shared_states().lock().unwrap().insert(key.clone(), Arc::downgrade(&shared));
 
     // Task poller: reads the display's task list and keeps windows freeform,
     // maximized windows pinned above the taskbar, and the taskbar's open-apps
@@ -4045,43 +3842,6 @@ fn monitor(app: AppHandle, mut opts: MirrorOptions, attempt: Attempt, stop: Arc<
             if had_display { "yes" } else { "never" }
         );
 
-        // The desktop's own video could not start — its server never made a
-        // display — or its window asked for scrcpy's (no WebCodecs, or the
-        // person): the same desktop in scrcpy's window. Remembered for this
-        // phone until the app starts again, so a reconnect does not try first.
-        let asked = opts.own_video && crate::dex::take_fallback(&key);
-        if opts.own_video && !intentional && (asked || !had_display) {
-            log::warn!(
-                "mirror [{key}] the desktop's own video {} — scrcpy's window instead. Last output:\n{}",
-                if asked { "was given up by its window" } else { "could not start" },
-                output_tail(&output, 20)
-            );
-            crate::dex::remember_fell_back(&opts.serial);
-            crate::dex::close_window(&app, &key);
-            apply_stored_config(&app, &mut opts);
-            apply_stored_density(&app, &mut opts);
-            notice(
-                &app,
-                &key,
-                if asked {
-                    "The desktop is in its classic window now."
-                } else {
-                    "This phone could not send the desktop's own video, so it opened in the classic window."
-                },
-            );
-            match spawn_scrcpy(&app, &opts) {
-                Ok(new_child) => {
-                    let next = register_session(&app, &opts, new_child, stop.clone());
-                    pid = next.pid;
-                    child = next.child;
-                    display_id = next.display_id;
-                    output = next.output;
-                    continue;
-                }
-                Err(e) => log::error!("mirror [{key}] scrcpy could not be started either: {e}"),
-            }
-        }
-
         // A session that died without ever getting a display did not lose the
         // phone — it could not work with the options it was given. Reconnecting
         // it forever (which is what auto-reconnect used to do) just repeats the
@@ -4166,19 +3926,9 @@ fn monitor(app: AppHandle, mut opts: MirrorOptions, attempt: Attempt, stop: Arc<
                     apply_stored_config(&app, &mut opts);
                 }
                 apply_stored_density(&app, &mut opts);
-                // Settings changed while the phone was away may have moved the
-                // desktop between the two windows.
-                if !opts.own_video {
-                    crate::dex::close_window(&app, &key);
-                }
-                match spawn_session(&app, &opts) {
+                match spawn_scrcpy(&app, &opts) {
                     Ok(new_child) => {
                         let next = register_session(&app, &opts, new_child, stop.clone());
-                        if opts.own_video {
-                            if let Err(e) = crate::dex::open_window(&app, &key, &opts) {
-                                log::warn!("mirror [{key}] the desktop's window did not open again: {e}");
-                            }
-                        }
                         pid = next.pid;
                         child = next.child;
                         display_id = next.display_id;
@@ -4223,9 +3973,6 @@ fn monitor(app: AppHandle, mut opts: MirrorOptions, attempt: Attempt, stop: Arc<
         stop.store(true, Ordering::SeqCst);
         transfer::forget(&key);
         files::forget(&key);
-        // The desktop's own window goes with its session, however it ended.
-        crate::dex::close_window(&app, &key);
-        shared_states().lock().unwrap().remove(&key);
         // …and so does the audio companion, whose lifetime nests inside the
         // desktop's. Left running it would keep diverting the phone's sound
         // to a computer that no longer shows anything. A desktop RESTART
@@ -4300,9 +4047,7 @@ fn sweep_orphan_servers(app: &AppHandle, serial: &str) {
             "-s",
             serial,
             "shell",
-            "s=; pkill -f '[c]om.genymobile.scrcpy.Server' && s=1; \
-             pkill -f '[c]om.ccrstech.openandroiddex.wmd.Desktop' && s=1; \
-             [ -n \"$s\" ] && echo swept || true",
+            "pkill -f '[c]om.genymobile.scrcpy.Server' && echo swept || true",
         ],
     ) {
         Ok(out) if out.contains("swept") => log::info!(
@@ -4519,7 +4264,7 @@ pub fn start_mirror(app: AppHandle, mut options: MirrorOptions) -> Result<Sessio
     log::info!("── start session [{key}] ──");
     log::info!(
         "options: display={:?} fitted={} default={:?}dpi window={:?} decorations={} audio={} \
-         codec={:?} encoder={:?} bitrate={}Mbps fps={} freeform={} reconnect={} video={}",
+         codec={:?} encoder={:?} bitrate={}Mbps fps={} freeform={} reconnect={}",
         options.new_display,
         options.fitted,
         options.base_dpi,
@@ -4531,8 +4276,7 @@ pub fn start_mirror(app: AppHandle, mut options: MirrorOptions) -> Result<Sessio
         options.video_bit_rate_mbps,
         options.max_fps,
         options.freeform,
-        options.auto_reconnect,
-        if options.own_video { "own window" } else { "scrcpy" }
+        options.auto_reconnect
     );
 
     let state = app.state::<MirrorState>();
@@ -4560,7 +4304,7 @@ pub fn start_mirror(app: AppHandle, mut options: MirrorOptions) -> Result<Sessio
 
     sweep_orphan_servers(&app, &options.serial);
 
-    let spawned = spawn_session(&app, &options)?;
+    let spawned = spawn_scrcpy(&app, &options)?;
     let stop = Arc::new(AtomicBool::new(false));
     let attempt = register_session(&app, &options, spawned, stop.clone());
     let pid = attempt.pid;
@@ -4593,8 +4337,7 @@ pub fn start_mirror(app: AppHandle, mut options: MirrorOptions) -> Result<Sessio
             options.serial.clone(),
             key.clone(),
             size,
-            // The desktop's own window's display follows it too.
-            options.flex.is_some() || options.own_video,
+            options.flex.is_some(),
             stop.clone(),
         );
     }
@@ -4605,17 +4348,6 @@ pub fn start_mirror(app: AppHandle, mut options: MirrorOptions) -> Result<Sessio
     // launch pipeline's critical path.
     if options.new_display.is_some() && options.app_package.is_none() && !options.audio_only {
         reconcile_audio_session_bg(&app, &options.serial);
-    }
-
-    // The desktop's own window, opened as its server starts: it says what it is
-    // waiting for until the picture comes. One that cannot be opened hands the
-    // desktop to scrcpy's window, through the monitor.
-    if options.own_video {
-        if let Err(e) = crate::dex::open_window(&app, &key, &options) {
-            log::warn!("mirror [{key}] the desktop's own window did not open ({e}) — scrcpy's instead");
-            crate::dex::request_fallback(&key);
-            kill_child(&app, &key);
-        }
     }
 
     let info = SessionInfo {
@@ -4730,9 +4462,6 @@ pub fn stop_mirror(app: AppHandle, session_key: String) -> Result<(), String> {
 /// the native window control is.
 #[tauri::command(async)]
 pub fn focus_session(app: AppHandle, session_key: String) -> Result<(), String> {
-    if crate::dex::focus(&app, &session_key) {
-        return Ok(());
-    }
     crate::embed::activate(&app, &session_key)
 }
 

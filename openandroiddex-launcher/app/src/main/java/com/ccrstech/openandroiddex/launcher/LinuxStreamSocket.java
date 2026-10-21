@@ -32,13 +32,12 @@ import java.util.concurrent.locks.ReentrantLock;
  * else.
  *
  * <p>Pure Java — no android.* — so the stand-in test on a computer runs this
- * very file. So does the window daemon's dex (openandroiddex-wmd/build.sh), for
- * the Android desktop's own stream (doc/dex-video.md): hence public.
+ * very file.
  */
-public final class LinuxStreamSocket implements Closeable {
+final class LinuxStreamSocket implements Closeable {
 
-    public static final int OP_TEXT = 0x1;
-    public static final int OP_BINARY = 0x2;
+    static final int OP_TEXT = 0x1;
+    static final int OP_BINARY = 0x2;
     private static final int OP_CONT = 0x0;
     private static final int OP_CLOSE = 0x8;
     private static final int OP_PING = 0x9;
@@ -56,11 +55,11 @@ public final class LinuxStreamSocket implements Closeable {
     private static final int MAX_INBOUND = 2 * 1024 * 1024;
 
     /** The request a connection opened with. */
-    public static final class Request {
-        public final String method;
-        public final String path;
+    static final class Request {
+        final String method;
+        final String path;
         /** Lower-cased names; the last value of a repeated header. */
-        public final Map<String, String> headers;
+        final Map<String, String> headers;
 
         Request(String method, String path, Map<String, String> headers) {
             this.method = method;
@@ -70,16 +69,16 @@ public final class LinuxStreamSocket implements Closeable {
     }
 
     /** One message from the computer. */
-    public static final class Message {
-        public final int opcode;
-        public final byte[] data;
+    static final class Message {
+        final int opcode;
+        final byte[] data;
 
         Message(int opcode, byte[] data) {
             this.opcode = opcode;
             this.data = data;
         }
 
-        public String text() {
+        String text() {
             return new String(data, StandardCharsets.UTF_8);
         }
     }
@@ -95,14 +94,14 @@ public final class LinuxStreamSocket implements Closeable {
     private final ReentrantLock writeLock = new ReentrantLock();
     private volatile boolean closed;
 
-    public LinuxStreamSocket(InputStream in, OutputStream out, Closeable underlying) {
+    LinuxStreamSocket(InputStream in, OutputStream out, Closeable underlying) {
         this.in = new BufferedInputStream(in, 16 * 1024);
         this.out = new BufferedOutputStream(out, 64 * 1024);
         this.underlying = underlying;
     }
 
     /** The request line and headers the connection opened with. */
-    public Request readRequest() throws IOException {
+    Request readRequest() throws IOException {
         String head = readHead();
         String[] lines = head.split("\r\n");
         String[] first = lines.length == 0 ? new String[0] : lines[0].split(" ");
@@ -128,7 +127,7 @@ public final class LinuxStreamSocket implements Closeable {
      * and Origin before passing the request on. The checks here are the same
      * two again, looser, for a computer app older or newer than this one.
      */
-    public void upgrade(Request req) throws IOException {
+    void upgrade(Request req) throws IOException {
         String key = req.headers.get("sec-websocket-key");
         String host = req.headers.get("host");
         String origin = req.headers.get("origin");
@@ -146,7 +145,7 @@ public final class LinuxStreamSocket implements Closeable {
     }
 
     /** A plain HTTP answer, after which the connection closes. */
-    public void respond(int status, String reason, String type, byte[] body) throws IOException {
+    void respond(int status, String reason, String type, byte[] body) throws IOException {
         String head = "HTTP/1.1 " + status + " " + reason + "\r\n"
                 + "Content-Type: " + type + "\r\n"
                 + "Content-Length: " + body.length + "\r\n"
@@ -178,7 +177,7 @@ public final class LinuxStreamSocket implements Closeable {
     }
 
     /** `127.0.0.1:<port>` or `localhost:<port>`, the way the computer's forward addresses itself. */
-    public static boolean loopback(String host) {
+    static boolean loopback(String host) {
         String h = host.toLowerCase(Locale.ROOT);
         int colon = h.lastIndexOf(':');
         if (colon > 0) h = h.substring(0, colon);
@@ -191,7 +190,7 @@ public final class LinuxStreamSocket implements Closeable {
      * localhost — or a page on loopback. A web page anywhere else names itself
      * here and is refused.
      */
-    public static boolean allowedOrigin(String origin) {
+    static boolean allowedOrigin(String origin) {
         String o = origin.toLowerCase(Locale.ROOT);
         if (o.equals("tauri://localhost") || o.equals("http://tauri.localhost")
                 || o.equals("https://tauri.localhost")) {
@@ -226,7 +225,7 @@ public final class LinuxStreamSocket implements Closeable {
      * The next text or binary message, continuations assembled; pings
      * answered on the way. Null once the computer closed it.
      */
-    public Message read() throws IOException {
+    Message read() throws IOException {
         byte[] assembled = null;
         int assembledOp = 0;
         while (true) {
@@ -278,13 +277,13 @@ public final class LinuxStreamSocket implements Closeable {
         }
     }
 
-    public void sendText(String text) throws IOException {
+    void sendText(String text) throws IOException {
         byte[] b = text.getBytes(StandardCharsets.UTF_8);
         writeFrame(OP_TEXT, null, b, b.length);
     }
 
     /** One binary message: {@code head} then the first {@code len} bytes of {@code body}. */
-    public void sendBinary(byte[] head, byte[] body, int len) throws IOException {
+    void sendBinary(byte[] head, byte[] body, int len) throws IOException {
         writeFrame(OP_BINARY, head, body, len);
     }
 
@@ -329,7 +328,7 @@ public final class LinuxStreamSocket implements Closeable {
         }
     }
 
-    public boolean isClosed() {
+    boolean isClosed() {
         return closed;
     }
 

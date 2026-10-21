@@ -462,27 +462,6 @@ pub fn desktop_geometry(app: &AppHandle, serial: &str, codec: Option<&str>) -> O
     g
 }
 
-/// The desktop for this app's own window (dex.rs): the screen the app is on,
-/// at its own pixels, held only to [`MAX_LONG_SIDE`]. What scrcpy has taught us
-/// about a phone's encoder ([`video_cap`]) is not this path's limit — its
-/// encoder draws a display it cannot take a step smaller by itself — and
-/// shrinking the display for it would shrink the density with it.
-pub fn desktop_window_geometry(app: &AppHandle) -> Option<Geometry> {
-    let screen = screen_for_desktop(app)?;
-    let g = geometry(&screen, MAX_LONG_SIDE);
-    log::info!(
-        "display: screen {}x{} at {}x scale → {} for the desktop's own window",
-        screen.work_w,
-        screen.work_h,
-        screen.scale,
-        match &g {
-            Some(g) => format!("{}x{} at {} dpi", g.width, g.height, g.base_dpi),
-            None => "too small to fit, keeping 1920x1080".into(),
-        }
-    );
-    g
-}
-
 // ── What each phone has taught us ────────────────────────────────────────────
 //
 // Both kept per PHONE, by the identity adb.rs keys its restore records by

@@ -77,29 +77,6 @@ resize, and prints the frame rate and where the time goes. It cleans up after
 itself; the frame rate is checked only on a cable, since wireless debugging's
 is the link's.
 
-The Android desktop's own video (`doc/dex-video.md`) has one too, with Node
-24, and for `--device` a JDK, the Android SDK and Google Chrome:
-
-```sh
-node test/dex-video-test.mjs
-node test/dex-video-test.mjs --device [serial] [--size 1280x800]
-```
-
-The first runs the window's pure parts as they are: keys and characters as
-Android takes them — text in any layout, AltGr and Option, Ctrl shortcuts by
-the letter a layout types, a Mac's Cmd as Ctrl and its Cmd+C/X/V as Android's
-Copy, Cut and Paste, its line and word moves — the mouse's buttons and wheel,
-and a frame's age from the phone's clock. `--device` then runs the window
-daemon's own dex on a phone as the computer runs it, `app_process` as the
-shell user, on a display of its own (a DeX desktop that is running is not
-touched): the display trusted and announced in scrcpy's words, the phone's
-Settings opened on it, a headless Chrome decoding the stream with WebCodecs
-through the app's `h264.ts`, a still desktop costing nothing, the wheel
-scrolling Settings — the frame rate and the latency from the phone's
-compositor printed — a resize the display follows, the clipboard both ways
-with the phone's own put back afterwards, and the display gone when the
-server's stdin closes.
-
 Linux apps as windows of their own (`doc/linux-windows.md`) have their pure
 parts checked the same way, with a JDK:
 

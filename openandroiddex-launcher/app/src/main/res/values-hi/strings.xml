@@ -336,12 +336,6 @@
     <string name="st_nav_stream_sub">रिज़ॉल्यूशन · कोडेक · प्रदर्शन</string>
     <string name="st_nav_clipboard">क्लिपबोर्ड प्रबंधक</string>
     <string name="st_nav_clipboard_sub">सिंक · मौजूदा · इतिहास</string>
-    <string name="st_window">डेस्कटॉप विंडो</string>
-    <string name="st_window_own">स्मूद</string>
-    <string name="st_window_own_sub">कंप्यूटर पर Open Android DeX ऐप इसे दिखाता है। वाई-फ़ाई की रफ़्तार के साथ चलता है: फ़्रेम छोड़े जाते हैं, कभी देर से नहीं आते।</string>
-    <string name="st_window_scrcpy">क्लासिक</string>
-    <string name="st_window_scrcpy_sub">scrcpy इसे दिखाता है, पहले की तरह। अगर स्मूद विंडो में दिक्कत हो तो इसे चुनें। नीचे दिए वीडियो कोडेक और वीडियो एन्कोडर सिर्फ़ इसी पर लागू होते हैं।</string>
-    <string name="st_window_note">जब फ़ोन पॉइंटर बनाता है (माउस और कर्सर), तो डेस्कटॉप हमेशा क्लासिक विंडो में खुलता है।</string>
     <string name="st_resolution">डिस्प्ले रिज़ॉल्यूशन</string>
     <string name="st_res_note">इसे बदलने पर आपका डिस्प्ले-साइज़ प्रीसेट बना रहता है, नए रिज़ॉल्यूशन के लिए दोबारा गणना करके।</string>
     <string name="st_res_auto">कंप्यूटर की स्क्रीन जितना</string>

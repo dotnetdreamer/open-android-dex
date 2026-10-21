@@ -336,12 +336,6 @@
     <string name="st_nav_stream_sub">Résolution · Codec · Performance</string>
     <string name="st_nav_clipboard">Presse-papiers</string>
     <string name="st_nav_clipboard_sub">Synchro · Contenu · Historique</string>
-    <string name="st_window">Fenêtre du bureau</string>
-    <string name="st_window_own">Fluide</string>
-    <string name="st_window_own_sub">Affichée par l’app Open Android DeX sur l’ordinateur. Suit le rythme du Wi-Fi : des images sont sautées, jamais retardées.</string>
-    <string name="st_window_scrcpy">Classique</string>
-    <string name="st_window_scrcpy_sub">Affichée par scrcpy, comme avant. Choisissez-la si la fenêtre fluide vous pose problème. Le codec et l’encodeur ci-dessous ne s’appliquent qu’à elle.</string>
-    <string name="st_window_note">Quand le téléphone dessine le pointeur (Souris et curseur), le bureau s’ouvre toujours dans la fenêtre classique.</string>
     <string name="st_resolution">Résolution d\'affichage</string>
     <string name="st_res_note">Changer de résolution conserve votre préréglage de taille d\'affichage, recalculé pour la nouvelle.</string>
     <string name="st_res_auto">Comme l’écran de l’ordinateur</string>

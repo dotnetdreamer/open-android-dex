@@ -224,19 +224,6 @@ window's too (`DesktopRouter.tsx`): they go through the tunnel whichever way
 the picture comes — SFTP into the guest's Desktop, and from its outbox into
 Downloads — so a copy under way carries on when the cable is pulled.
 
-**The pill's numbers** are the picture's size, the frames shown a second, the
-bitrate, and how old a frame is when it shows: the phone answers each ping
-with its own clock (`at`), the clock every frame's pts is on, and the window
-reads each frame's age against it — the same readout as the Android desktop's
-own window ([dex-video.md](dex-video.md), "Measuring it"). A phone whose pongs
-carry no clock gets the round trip instead, as before.
-
-**The window says its route in the hello** (`tier`: cable, wifi, remote,
-relay), and for a route that is not the cable the phone keeps its Wi-Fi out of
-power save while the session lasts (`WifiLow`, dex-video.md, "The Wi-Fi"); a
-session through the tunnel, which is the app's own uid, counts as one without
-being told.
-
 **The title says how the window gets there**: `<phone> — Linux · USB` on the
 cable, `· Wi-Fi` on wireless debugging, and through the tunnel `· Wi-Fi` on the
 same network, `· Remote` across the internet (mobile data, someone else's Wi-Fi)
