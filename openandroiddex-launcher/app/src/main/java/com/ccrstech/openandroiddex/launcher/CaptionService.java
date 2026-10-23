@@ -306,6 +306,27 @@ public final class CaptionService extends AccessibilityService {
     private static final long HOST_GRACE_MS = 1200L;
 
     /**
+     * Displays on which a shell caption window has been seen — the grace is worth waiting
+     * out there, because the caption that is missing this pass will be back.
+     */
+    private final Set<Integer> hostDisplays = new HashSet<>();
+
+    /**
+     * Displays whose shell has shown it draws no caption windows: a task there waited out
+     * the whole grace for one and no task there has ever had one. Every later window on
+     * such a display is hosted on its app window at once instead of after the grace again
+     * — the wait is for a caption that might be about to appear, and here none ever does.
+     * Measured on an Android 15 emulator, whose shell draws none on this display: 1.2 s
+     * added to the bar of every new window. The first shell caption seen on the display
+     * takes it off this list, and the grace applies again.
+     */
+    private final Set<Integer> captionlessDisplays = new HashSet<>();
+
+    private boolean captionless(int displayId) {
+        return captionlessDisplays.contains(displayId) && !hostDisplays.contains(displayId);
+    }
+
+    /**
      * Accessibility title stamped on our own bars, so a host picker can tell OUR caption
      * from the platform's. Geometry cannot: ours sits at the same origin, spans the same
      * width and is the same height as the thing it covers.
@@ -511,6 +532,16 @@ public final class CaptionService extends AccessibilityService {
                         desktopDisplayId = display;
                         dropAnchor();               // the anchor belongs to the old display
                         hostWaitSince.clear();      // those task ids are on the old display
+                        hostDisplays.clear();
+                        captionlessDisplays.clear();
+                        // The new one now, not at the first caption: a window added this
+                        // pass has no surface until it is laid out, so the first bar built
+                        // on a fresh anchor finds no token and waits a pass for it (seen
+                        // on an Android 15 emulator: ~0.45 s on the first window).
+                        Display d = display < 0 ? null
+                                : getSystemService(android.hardware.display.DisplayManager.class)
+                                        .getDisplay(display);
+                        if (d != null) anchorToken(d);
                     }
                     if (ticks++ % 25 == 0) {
                         trace("tick display=" + display + " tasks="
@@ -652,6 +683,7 @@ public final class CaptionService extends AccessibilityService {
                 host = hostOnAppWindow(windows, t);   // null until the grace runs out
             } else {
                 hostWaitSince.remove(t.taskId);
+                hostDisplays.add(display);
             }
             if (host != null) captionHeights.put(t.taskId, measureCaption(host));
             final int px = captionHeight(t.taskId);
@@ -934,16 +966,20 @@ public final class CaptionService extends AccessibilityService {
         // seconds. Keeping the bar it has is what the null-host path already does.
         if (captions.get(task.taskId) != null) return null;
         long now = SystemClock.uptimeMillis();
+        boolean captionless = captionless(task.displayId);
         Long since = hostWaitSince.get(task.taskId);
         if (since == null) {
             hostWaitSince.put(task.taskId, now);
-            return null;
+            if (!captionless) return null;
+            since = now;
         }
-        if (now - since < HOST_GRACE_MS) return null;
+        if (!captionless && now - since < HOST_GRACE_MS) return null;
         AccessibilityWindowInfo app = appHost(windows, task);
         if (app != null) {
             trace("no caption host for task " + task.taskId
-                    + " after " + (now - since) + "ms — hosting on its app window");
+                    + " after " + (now - since) + "ms — hosting on its app window"
+                    + (captionless ? " (this display's shell draws none)" : ""));
+            if (!hostDisplays.contains(task.displayId)) captionlessDisplays.add(task.displayId);
         }
         return app;
     }

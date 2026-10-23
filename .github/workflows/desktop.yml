@@ -1,5 +1,12 @@
 name: Build Desktop
 
+# Run from main, this cuts a release. Run from any other branch — or as a dry
+# run on main — it is a TEST BUILD: every installer is built from that exact
+# commit and left on the run as an artifact to download, and nothing is
+# versioned, tagged or released.
+run-name: >-
+  ${{ (github.ref_name != 'main' || inputs.dry_run) && format('Test build: {0}', github.ref_name) || 'Release' }}
+
 on:
   workflow_dispatch:
     inputs:
@@ -16,12 +23,13 @@ on:
         type: string
         default: ""
       dry_run:
-        description: "Dry run — build artifacts only, skip release"
+        description: "Test build — installers as artifacts, no release (always so on a branch other than main)"
         type: boolean
         default: false
 
 concurrency:
-  group: desktop-build
+  # Per branch: a test build must never cancel a release, nor another branch's.
+  group: desktop-build-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -46,12 +54,22 @@ jobs:
   version:
     runs-on: ubuntu-latest
     outputs:
+      # The release's version — meaningful only when `publish` is true.
       version: ${{ steps.calc.outputs.version }}
+      # What the installers' file names say: the version on a release, and on a
+      # test build the version it was built at plus where from, e.g.
+      # 0.3.25-my-branch.1a2b3c4 — the app inside still reports 0.3.25.
+      label: ${{ steps.calc.outputs.label }}
+      publish: ${{ steps.calc.outputs.publish }}
     steps:
       - uses: actions/checkout@v4
 
       - name: Calculate version
         id: calc
+        env:
+          # Through the environment, never spliced into the script: a branch
+          # name is whatever someone typed.
+          REF_NAME: ${{ github.ref_name }}
         run: |
           CURRENT=$(jq -r .version open-android-dex-tauri/package.json)
           if [ -n "${{ inputs.version }}" ]; then
@@ -65,11 +83,25 @@ jobs:
             esac
             VERSION="$MAJOR.$MINOR.$PATCH"
           fi
+          # Only main releases. Anywhere else, and on a dry run, this is a test
+          # build: nothing below bumps, commits, tags or publishes, every job
+          # builds this run's exact commit, and the installers stay on the run.
+          if [ "$GITHUB_REF" = "refs/heads/main" ] && [ "${{ inputs.dry_run }}" != "true" ]; then
+            PUBLISH=true
+            LABEL="$VERSION"
+          else
+            PUBLISH=false
+            BRANCH=$(printf '%s' "$REF_NAME" | tr -c 'A-Za-z0-9._-' '-')
+            LABEL="$CURRENT-$BRANCH.${GITHUB_SHA::7}"
+            echo "Test build of \`$REF_NAME\` at \`${GITHUB_SHA::7}\` — the installers are this run's artifacts, kept 14 days. Nothing was versioned, tagged or released." >> "$GITHUB_STEP_SUMMARY"
+          fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "Version: $VERSION"
+          echo "label=$LABEL" >> "$GITHUB_OUTPUT"
+          echo "publish=$PUBLISH" >> "$GITHUB_OUTPUT"
+          echo "Version: $VERSION  label: $LABEL  publish: $PUBLISH"
 
       - name: Update version in project files
-        if: ${{ !inputs.dry_run }}
+        if: steps.calc.outputs.publish == 'true'
         run: |
           VERSION="${{ steps.calc.outputs.version }}"
           # package.json
@@ -118,7 +150,7 @@ jobs:
           grep -E '^ *version(Code|Name) ' "$GRADLE"
 
       - name: Commit and tag
-        if: ${{ !inputs.dry_run }}
+        if: steps.calc.outputs.publish == 'true'
         run: |
           VERSION="${{ steps.calc.outputs.version }}"
           git config user.name "github-actions[bot]"
@@ -140,7 +172,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.dry_run && github.ref || format('refs/tags/v{0}', needs.version.outputs.version) }}
+          ref: ${{ needs.version.outputs.publish == 'true' && format('refs/tags/v{0}', needs.version.outputs.version) || github.sha }}
 
       - name: Setup JDK 17
         uses: actions/setup-java@v4
@@ -259,7 +291,7 @@ jobs:
         # from here on the same phone.
         run: |
           mkdir -p standalone
-          V="${{ needs.version.outputs.version }}"
+          V="${{ needs.version.outputs.label }}"
           cp openandroiddex-launcher/app/build/outputs/apk/debug/app-debug.apk \
              "standalone/OpenAndroidDeX-Launcher-v$V.apk"
           cp openandroiddex-launcher/linuxapp/build/outputs/apk/debug/linuxapp-debug.apk \
@@ -271,10 +303,13 @@ jobs:
           # release-* is exactly what the release job globs, so attaching these
           # to the GitHub release takes no change there at all. Not retention-
           # limited like phone-payloads: that one is a build input, these are
-          # the things being published.
-          name: release-android
+          # the things being published. A test build names its artifacts for
+          # what they are, and keeps them two weeks (0 = the repository's
+          # default, for a release as before).
+          name: ${{ needs.version.outputs.publish == 'true' && 'release-android' || format('Open.Android.DeX_{0}_phone', needs.version.outputs.label) }}
           path: standalone/*
           if-no-files-found: error
+          retention-days: ${{ needs.version.outputs.publish != 'true' && 14 || 0 }}
 
   build-windows:
     needs: [version, launcher]
@@ -291,7 +326,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.dry_run && github.ref || format('refs/tags/v{0}', needs.version.outputs.version) }}
+          ref: ${{ needs.version.outputs.publish == 'true' && format('refs/tags/v{0}', needs.version.outputs.version) || github.sha }}
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -394,7 +429,7 @@ jobs:
       - name: Create portable zip
         shell: pwsh
         run: |
-          $version = "${{ needs.version.outputs.version }}"
+          $version = "${{ needs.version.outputs.label }}"
           $exe_path = "open-android-dex-tauri/src-tauri/target/release/open-android-dex-tauri.exe"
           $zip_name = "Open.Android.DeX_${version}_x64_portable.zip"
 
@@ -421,10 +456,11 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: release-windows
+          # A day as the release's input; two weeks as a test build's download.
+          name: ${{ needs.version.outputs.publish == 'true' && 'release-windows' || format('Open.Android.DeX_{0}_windows', needs.version.outputs.label) }}
           path: dist/*
           if-no-files-found: error
-          retention-days: 1
+          retention-days: ${{ needs.version.outputs.publish == 'true' && 1 || 14 }}
 
   build-macos:
     needs: [version, launcher]
@@ -458,7 +494,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.dry_run && github.ref || format('refs/tags/v{0}', needs.version.outputs.version) }}
+          ref: ${{ needs.version.outputs.publish == 'true' && format('refs/tags/v{0}', needs.version.outputs.version) || github.sha }}
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -602,7 +638,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          V="${{ needs.version.outputs.version }}"
+          V="${{ needs.version.outputs.label }}"
           # `--target` moves the whole tree under the triple.
           B="open-android-dex-tauri/src-tauri/target/${{ matrix.target }}/release/bundle"
           mkdir -p dist
@@ -617,10 +653,10 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: release-macos-${{ matrix.label }}
+          name: ${{ needs.version.outputs.publish == 'true' && format('release-macos-{0}', matrix.label) || format('Open.Android.DeX_{0}_macos-{1}', needs.version.outputs.label, matrix.label) }}
           path: dist/*
           if-no-files-found: error
-          retention-days: 1
+          retention-days: ${{ needs.version.outputs.publish == 'true' && 1 || 14 }}
 
   build-linux:
     needs: [version, launcher]
@@ -644,7 +680,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.dry_run && github.ref || format('refs/tags/v{0}', needs.version.outputs.version) }}
+          ref: ${{ needs.version.outputs.publish == 'true' && format('refs/tags/v{0}', needs.version.outputs.version) || github.sha }}
 
       # Tauri's Linux build needs the system webview and GTK; the bundler needs
       # librsvg for the icons and patchelf to fix the AppImage's rpaths. Each of
@@ -852,7 +888,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          V="${{ needs.version.outputs.version }}"
+          V="${{ needs.version.outputs.label }}"
           # No `--target`, so the bundle tree is directly under release/ — the
           # same shape as the Windows job, not the macOS one.
           B="open-android-dex-tauri/src-tauri/target/release/bundle"
@@ -875,16 +911,16 @@ jobs:
       # itself, so the packaged installs are unaffected.
       - uses: actions/upload-artifact@v4
         with:
-          name: release-linux
+          name: ${{ needs.version.outputs.publish == 'true' && 'release-linux' || format('Open.Android.DeX_{0}_linux', needs.version.outputs.label) }}
           path: dist/*
           if-no-files-found: error
-          retention-days: 1
+          retention-days: ${{ needs.version.outputs.publish == 'true' && 1 || 14 }}
 
   # One release, cut once, with every platform's artifacts already in hand.
   # Naming every build job in `needs` waits for the macOS matrix in full.
   release:
     needs: [version, build-windows, build-macos, build-linux]
-    if: ${{ !inputs.dry_run }}
+    if: needs.version.outputs.publish == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
