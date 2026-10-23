@@ -295,6 +295,9 @@ pub fn stream_device_log(app: &AppHandle, serial: &str, key: &str, stop: Arc<Ato
             return;
         }
     };
+    // logcat never ends by itself, and an app killed mid-session never gets
+    // to the kill below.
+    adb::end_with_this_app(&child);
     let Some(out) = child.stdout.take() else {
         return;
     };

@@ -148,10 +148,35 @@ pub fn activate(app: &AppHandle, session_key: &str) -> Result<(), String> {
     backend::activate(pid)
 }
 
-/// The scale of the screen a scrcpy window is on — pixels per point on macOS,
-/// the window's dpi / 96 on Windows — or None when it cannot be told (no such
-/// window yet, or a host that is not asked). A desktop that follows its window
-/// re-scales to it when the window is dragged onto another screen.
-pub fn window_scale(app: &AppHandle, pid: u32) -> Option<f64> {
-    backend::window_scale(app, pid)
+/// Where a scrcpy window is and how it is shown: what a desktop that comes back
+/// after a reconnect needs to come back the same.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct WindowState {
+    /// The content's top-left and size, in the units scrcpy's `--window-*`
+    /// take (display.rs: points on macOS, pixels on Windows).
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+    /// The scale of the screen it is on — pixels per point on macOS, the
+    /// window's dpi / 96 on Windows. A desktop that follows its window
+    /// re-scales to it when the window is dragged onto another screen.
+    pub scale: f64,
+    pub maximized: bool,
+    pub minimized: bool,
+    pub fullscreen: bool,
+    /// The frame a maximized window goes back to, in the host's own terms
+    /// (Windows: the placement's normal rect). None where there is none.
+    pub restore: Option<(i32, i32, i32, i32)>,
+}
+
+/// `pid`'s window as it is now, or None when it cannot be told.
+pub fn window_state(app: &AppHandle, pid: u32) -> Option<WindowState> {
+    backend::window_state(app, pid)
+}
+
+/// Maximize `pid`'s window, keeping `restore` (from a [`WindowState`]) as the
+/// frame it is restored to. Waits for the window to appear, up to `wait`.
+pub fn show_maximized(pid: u32, restore: (i32, i32, i32, i32), wait: std::time::Duration) -> Result<(), String> {
+    backend::show_maximized(pid, restore, wait)
 }

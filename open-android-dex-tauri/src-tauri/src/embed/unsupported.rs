@@ -45,6 +45,10 @@ pub fn activate(_pid: u32) -> Result<(), String> {
     Err(UNSUPPORTED.into())
 }
 
-pub fn window_scale(_app: &AppHandle, _pid: u32) -> Option<f64> {
+pub fn window_state(_app: &AppHandle, _pid: u32) -> Option<super::WindowState> {
     None
+}
+
+pub fn show_maximized(_pid: u32, _restore: (i32, i32, i32, i32), _wait: std::time::Duration) -> Result<(), String> {
+    Err(UNSUPPORTED.into())
 }

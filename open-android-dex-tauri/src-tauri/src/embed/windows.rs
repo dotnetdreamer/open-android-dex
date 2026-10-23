@@ -10,15 +10,16 @@ use std::thread;
 use std::time::Duration;
 
 use tauri::{AppHandle, Manager};
-use windows_sys::Win32::Foundation::{HWND, LPARAM, RECT};
+use windows_sys::Win32::Foundation::{HWND, LPARAM, POINT, RECT};
 use windows_sys::Win32::Graphics::Gdi::{
-    GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+    ClientToScreen, GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    BringWindowToTop, EnumWindows, GetWindowLongPtrW, GetWindowRect, GetWindowTextW,
-    GetWindowThreadProcessId, IsWindowVisible, SetParent, SetWindowLongPtrW, SetWindowPos,
-    ShowWindow, GWL_STYLE, HWND_TOP, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_SHOWWINDOW, SW_HIDE,
-    SW_SHOW, WS_CAPTION, WS_CHILD, WS_POPUP, WS_THICKFRAME,
+    BringWindowToTop, EnumWindows, GetClientRect, GetWindowLongPtrW, GetWindowPlacement,
+    GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindowVisible, IsZoomed,
+    SetParent, SetWindowLongPtrW, SetWindowPlacement, SetWindowPos, ShowWindow, GWL_STYLE,
+    HWND_TOP, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_SHOWWINDOW, SW_HIDE, SW_SHOW,
+    SW_SHOWMAXIMIZED, WINDOWPLACEMENT, WS_CAPTION, WS_CHILD, WS_POPUP, WS_THICKFRAME,
 };
 
 struct FindCtx {
@@ -244,13 +245,80 @@ pub fn activate(pid: u32) -> Result<(), String> {
     Ok(())
 }
 
-/// The window's own dpi, as Windows scales it on the monitor it is on, over
-/// 96. Per window rather than per monitor so a window straddling two is
-/// answered the way Windows itself decided.
-pub fn window_scale(_app: &AppHandle, pid: u32) -> Option<f64> {
+/// The window's client area on the screen, its placement, and whether it is
+/// maximized, minimized or made fullscreen by [`toggle_fullscreen`]. SDL takes
+/// `--window-*` as the client area in pixels, which is what this answers.
+///
+/// The scale is the window's own dpi, as Windows scales it on the monitor it
+/// is on, over 96. Per window rather than per monitor so a window straddling
+/// two is answered the way Windows itself decided.
+pub fn window_state(_app: &AppHandle, pid: u32) -> Option<super::WindowState> {
     use windows_sys::Win32::UI::HiDpi::GetDpiForWindow;
     let hwnd = find_window_for_pid(pid)?;
-    // SAFETY: a handle EnumWindows just returned; a window gone since answers 0.
-    let dpi = unsafe { GetDpiForWindow(hwnd) };
-    (dpi > 0).then(|| f64::from(dpi) / 96.0)
+    // SAFETY: a handle EnumWindows just returned, and structs of our own; a
+    // window gone since fails the calls, which is answered with None.
+    unsafe {
+        let mut placement: WINDOWPLACEMENT = std::mem::zeroed();
+        placement.length = std::mem::size_of::<WINDOWPLACEMENT>() as u32;
+        let mut client: RECT = std::mem::zeroed();
+        let mut origin = POINT { x: 0, y: 0 };
+        if GetWindowPlacement(hwnd, &mut placement) == 0
+            || GetClientRect(hwnd, &mut client) == 0
+            || ClientToScreen(hwnd, &mut origin) == 0
+        {
+            return None;
+        }
+        let dpi = GetDpiForWindow(hwnd);
+        let normal = placement.rcNormalPosition;
+        let fullscreen = FS_SAVED.lock().unwrap().iter().any(|(h, _, _)| *h == hwnd as isize);
+        Some(super::WindowState {
+            x: origin.x,
+            y: origin.y,
+            width: (client.right - client.left).max(0) as u32,
+            height: (client.bottom - client.top).max(0) as u32,
+            scale: if dpi > 0 { f64::from(dpi) / 96.0 } else { 1.0 },
+            maximized: IsZoomed(hwnd) != 0,
+            minimized: IsIconic(hwnd) != 0,
+            fullscreen,
+            restore: Some((normal.left, normal.top, normal.right, normal.bottom)),
+        })
+    }
+}
+
+/// Maximize the process's window once it appears, with `restore` — a
+/// placement's normal rect, as [`window_state`] read it — as the frame the
+/// restore button goes back to. One `SetWindowPlacement`, so the window never
+/// shows at the restore size on the way.
+pub fn show_maximized(pid: u32, restore: (i32, i32, i32, i32), wait: Duration) -> Result<(), String> {
+    let hwnd = wait_for_window(pid, wait).ok_or("scrcpy window did not appear")?;
+    let (left, top, right, bottom) = restore;
+    // SAFETY: a live handle and a placement of our own.
+    unsafe {
+        let mut placement: WINDOWPLACEMENT = std::mem::zeroed();
+        placement.length = std::mem::size_of::<WINDOWPLACEMENT>() as u32;
+        if GetWindowPlacement(hwnd, &mut placement) == 0 {
+            return Err("GetWindowPlacement failed".into());
+        }
+        placement.showCmd = SW_SHOWMAXIMIZED as u32;
+        placement.rcNormalPosition = RECT { left, top, right, bottom };
+        if SetWindowPlacement(hwnd, &placement) == 0 {
+            return Err("SetWindowPlacement failed".into());
+        }
+    }
+    Ok(())
+}
+
+/// The process's window, polled for until it appears or `wait` runs out —
+/// scrcpy only opens it once the first frame has arrived.
+fn wait_for_window(pid: u32, wait: Duration) -> Option<HWND> {
+    let deadline = std::time::Instant::now() + wait;
+    loop {
+        if let Some(hwnd) = find_window_for_pid(pid) {
+            return Some(hwnd);
+        }
+        if std::time::Instant::now() >= deadline {
+            return None;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
 }

@@ -368,6 +368,15 @@ export function RemotePanel({ devices }: { devices: DeviceInfo[] }) {
         </div>
       )}
 
+      {/* A phone on the cable that cannot run Linux (32-bit Android) has no Linux tile
+          to open, so the steps below would send its owner looking for one. */}
+      {usb && usb.status.ok && !usb.status.available && (
+        <div className="callout fade-in">
+          <Icon name="info" size={16} />
+          <p className="select-text">{usb.status.name} can't run Linux — that needs a phone with 64-bit Android.</p>
+        </div>
+      )}
+
       {usbOffer && (
         <section className="card overflow-hidden px-4 py-4 shadow-[inset_0_0_0_1px_var(--accent-line)]">
           <div className="flex items-start gap-3">

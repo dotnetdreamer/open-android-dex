@@ -1,6 +1,8 @@
 package com.ccrstech.openandroiddex.launcher;
 
 import android.app.Activity;
+import android.content.Context;
+import android.content.Intent;
 
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
@@ -76,5 +78,36 @@ final class OwnWindows {
 
     private static void changed() {
         for (Listener l : listeners) l.onOwnWindowsChanged();
+    }
+
+    /**
+     * Close one of our windows the way its caption's ✕ does — by asking it,
+     * for the windows that must not just go. Answers false for every other
+     * window, whose task the caller then removes.
+     *
+     * The Linux window is asked because closing it ends a container the user
+     * may have unsaved work inside, and removing the task gives the activity no
+     * opportunity to ask first; it closes itself once the user confirms. The
+     * Docker window is asked for the same reason: its ✕ stops a machine with
+     * the user's running containers in it. The File transfer window joins them
+     * once more: its ✕ can land mid-copy, and a half-copied file the user was
+     * never warned about is worse than one more confirmation. A Linux app's
+     * window closes the way any window manager closes one: the app is asked
+     * (WM_DELETE_WINDOW), and may ask about unsaved work first.
+     *
+     * One owner for this, because two sides close our windows: the caption,
+     * and the computer's "Close the front app" (LauncherActivity's "close").
+     */
+    static boolean askToClose(Context ctx, int taskId, String activity) {
+        if (LinuxActivity.class.getName().equals(activity)
+                || DockerActivity.class.getName().equals(activity)
+                || FileTransferActivity.class.getName().equals(activity)) {
+            ctx.sendBroadcast(new Intent(LauncherActivity.ACTION_CLOSE_WINDOW)
+                    .setPackage(ctx.getPackageName())
+                    .putExtra("activity", activity));
+            return true;
+        }
+        return LinuxWindowActivity.class.getName().equals(activity)
+                && LinuxWindows.closeTask(taskId);
     }
 }

@@ -317,9 +317,11 @@ final class LinuxApps {
                 }
                 done.remove(done.size() - 1);
                 // proot's link2symlink writes host paths into the rootfs; a
-                // guest one is relative to the rootfs.
+                // guest one is relative to the rootfs. The host's separator,
+                // which on a phone is "/" as well: test/ runs this on Windows.
                 String rootStr = root.toString();
-                if (target.startsWith(rootStr + "/")) target = target.substring(rootStr.length());
+                if (target.startsWith(rootStr + File.separator)) target = target.substring(rootStr.length());
+                target = target.replace(File.separatorChar, '/');
                 if (target.startsWith("/")) done.clear();
                 String[] t = target.split("/");
                 for (int i = t.length - 1; i >= 0; i--) if (!t[i].isEmpty()) todo.addFirst(t[i]);

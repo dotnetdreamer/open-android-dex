@@ -176,6 +176,20 @@ final class Wm {
         throw new Refl.WmError("no task " + taskId + " on display " + displayId);
     }
 
+    /**
+     * Where a task is in its display's stack, 0 = topmost; -1 when it is not there. How a
+     * reorder applied without a transition is checked: Android 12 leaves the stack as it
+     * was for one it will not do, and a caller told OK would skip the fallback that does
+     * get there — the PC's Home did, raising nothing over a window.
+     */
+    static int depth(int displayId, int taskId) {
+        List<TaskRec> tasks = tasksOnDisplay(displayId);
+        for (int i = 0; i < tasks.size(); i++) {
+            if (tasks.get(i).taskId == taskId) return i;
+        }
+        return -1;
+    }
+
     private static TaskRec read(Object info) {
         TaskRec t = new TaskRec();
         t.info = info;
@@ -334,6 +348,22 @@ final class Wm {
     static Object startNewTransition(Object wct) {
         return Refl.callSig(organizer(), "startNewTransition",
                 new Class<?>[]{int.class, wctClass()}, TRANSIT_CHANGE, wct);
+    }
+
+    /**
+     * A transition where the platform has {@link #startNewTransition}, and the plain
+     * transaction where it does not. Android 12 has no such method, and every verb that
+     * called it unconditionally failed there with "no method". Applied plainly on a
+     * Galaxy A13 (Android 12), a minimise and a restore land, and so does a raise among
+     * windows — but a reorder ACROSS windows and the fullscreen desktop is accepted and
+     * ignored, either way round, so FRONT and BACK check the stack after it ({@link #depth}).
+     */
+    static void transition(Object wct) {
+        if (hasStartNewTransition()) {
+            startNewTransition(wct);
+        } else {
+            applyTransaction(wct);
+        }
     }
 
     /**

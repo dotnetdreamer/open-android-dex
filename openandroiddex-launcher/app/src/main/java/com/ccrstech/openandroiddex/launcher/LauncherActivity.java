@@ -563,11 +563,39 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
                     // toggle needs both.
                     sendBroadcast(new Intent(ACTION_SHOW_DESKTOP).setPackage(getPackageName()));
                     break;
+                case "close":
+                    // Not a gesture: the computer's "Close the front app", when
+                    // the window in front is one of ours.
+                    closeOwnWindow(intent.getIntExtra("task", -1),
+                            intent.getStringExtra("activity"));
+                    break;
                 default:
                     break;
             }
         }
     };
+
+    /**
+     * Close one of our windows as its caption's ✕ would: asked first where
+     * closing ends something running, else its task removed. The computer sends
+     * these here rather than removing the task itself because only this side
+     * knows which of our windows have to be asked — and below Android 14 there
+     * is no caption to press, which leaves this as the computer's way to close
+     * one. The desktop itself is never closed.
+     */
+    private void closeOwnWindow(int taskId, String activity) {
+        if (taskId < 0 || activity == null || activity.equals(LauncherActivity.class.getName())) {
+            return;
+        }
+        if (OwnWindows.askToClose(this, taskId, activity)) return;
+        final int display = displayId();
+        if (qsWm == null) qsWm = new WmClient();
+        final WmClient client = qsWm;
+        client.post(() -> {
+            if (display >= 0) client.unstrip(display, taskId);
+            client.close(taskId);
+        });
+    }
 
     /** Our own windows opened or closed — rebuild their taskbar tiles. */
     private final OwnWindows.Listener ownWindowsListener = this::refreshOpenApps;

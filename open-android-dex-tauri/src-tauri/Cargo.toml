@@ -72,6 +72,9 @@ windows-sys = { version = "0.60", features = [
     # AdjustWindowRectExForDpi: the frame scrcpy's window will get, so its
     # content can be placed one pixel for one on the screen (display.rs).
     "Win32_UI_HiDpi",
+    # The job every scrcpy is put in, which ends them with this app however
+    # it ends (scrcpy.rs, end_with_this_app).
+    "Win32_System_JobObjects",
 ] }
 
 # Native window control for the spawned scrcpy windows (embed/macos.rs).

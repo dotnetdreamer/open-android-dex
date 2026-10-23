@@ -453,14 +453,40 @@ pub fn activate(pid: u32) -> Result<(), String> {
     }
 }
 
-/// The scale of the screen holding the middle of `pid`'s window.
+/// The window's content in global points — its frame less the title bar — and
+/// the scale of the screen holding its middle.
 ///
 /// The window's bounds come from the window server's list, which needs no
 /// permission for bounds (only for titles) — unlike everything else in this
-/// file, it works without Accessibility.
-pub fn window_scale(app: &AppHandle, pid: u32) -> Option<f64> {
+/// file, it works without Accessibility. A window that exactly covers a screen
+/// is in a fullscreen Space, where there is no title bar to take off, and
+/// nothing worth reopening at that size. macOS has no maximized state to tell
+/// apart from a large frame.
+pub fn window_state(app: &AppHandle, pid: u32) -> Option<super::WindowState> {
     let (x, y, w, h) = window_bounds(pid)?;
-    crate::display::scale_at(app, x + w / 2.0, y + h / 2.0)
+    let scale = crate::display::scale_at(app, x + w / 2.0, y + h / 2.0)?;
+    let bar = f64::from(crate::display::title_bar_pt());
+    Some(super::WindowState {
+        x: x.round() as i32,
+        y: (y + bar).round() as i32,
+        width: w.round().max(0.0) as u32,
+        height: (h - bar).round().max(0.0) as u32,
+        scale,
+        maximized: false,
+        minimized: false,
+        fullscreen: crate::display::covers_a_screen(app, x, y, w, h),
+        restore: None,
+    })
+}
+
+/// Nothing to do: a macOS window has no maximized state, and the frame it
+/// had is the one it reopened at.
+pub fn show_maximized(
+    _pid: u32,
+    _restore: (i32, i32, i32, i32),
+    _wait: std::time::Duration,
+) -> Result<(), String> {
+    Ok(())
 }
 
 /// `pid`'s largest ordinary (layer 0) window, in global points, top-left

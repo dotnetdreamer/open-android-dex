@@ -78,6 +78,15 @@ jobs:
           jq --arg v "$VERSION" '.version = $v' open-android-dex-tauri/src-tauri/tauri.conf.json > tmp.json && mv tmp.json open-android-dex-tauri/src-tauri/tauri.conf.json
           # Cargo.toml
           sed -i "s/^version = \".*\"/version = \"$VERSION\"/" open-android-dex-tauri/src-tauri/Cargo.toml
+          # …and Cargo.lock, which records the app's own version too. Left
+          # behind, the next local build rewrites it and every working tree
+          # carries a lockfile change nobody made (0.3.23 and 0.3.24 both
+          # shipped that way). The version line straight after the package's
+          # name is the one cargo would write; the grep fails the release if
+          # the lockfile's shape ever stops matching.
+          LOCK=open-android-dex-tauri/src-tauri/Cargo.lock
+          sed -i "/^name = \"open-android-dex-tauri\"$/{n;s/^version = \".*\"/version = \"$VERSION\"/}" "$LOCK"
+          grep -A1 '^name = "open-android-dex-tauri"$' "$LOCK" | grep -qx "version = \"$VERSION\""
 
           # The launcher APK. versionName is what the phone reports for the
           # on-device half of the product, and versionCode is the number Android

@@ -119,8 +119,11 @@ public final class BuildConfig {
 console.log(`[3/4] aidl + javac  (${javac})`)
 const aidl = join(buildTools, exe('aidl', 'exe'))
 const aidlDir = join(server, 'src', 'main', 'aidl')
-run(aidl, [`-o${gen}`, '-I.', join('android', 'content', 'IOnPrimaryClipChangedListener.aidl')], { cwd: aidlDir })
-run(aidl, [`-o${gen}`, '-I.', '-p', join(platform, 'framework.aidl'), join('android', 'view', 'IDisplayWindowListener.aidl')], { cwd: aidlDir })
+// Absolute paths, as Gradle passes them, not upstream's `-I.` and a relative
+// file: aidl on Windows spells that import path `.\` and the file's directory
+// `./`, and refuses the file for not being under it.
+run(aidl, [`-o${gen}`, `-I${aidlDir}`, join(aidlDir, 'android', 'content', 'IOnPrimaryClipChangedListener.aidl')])
+run(aidl, [`-o${gen}`, `-I${aidlDir}`, '-p', join(platform, 'framework.aidl'), join(aidlDir, 'android', 'view', 'IDisplayWindowListener.aidl')])
 
 function files(dir, ext) {
   const found = []

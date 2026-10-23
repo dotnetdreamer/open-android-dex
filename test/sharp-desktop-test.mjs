@@ -26,8 +26,11 @@ const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "oadx-peers-"));
 process.on("exit", () => fs.rmSync(tmp, { recursive: true, force: true }));
 
 // The patched scrcpy server's new file, exactly as the patch adds it: its
-// lines are lifted out of display-scale.patch rather than kept twice.
-const patch = fs.readFileSync(path.join(ROOT, "openandroiddex-scrcpy/display-scale.patch"), "utf8");
+// lines are lifted out of display-scale.patch rather than kept twice. A
+// Windows checkout (core.autocrlf) has the patch in CRLF, read here as LF.
+const patch = fs
+  .readFileSync(path.join(ROOT, "openandroiddex-scrcpy/display-scale.patch"), "utf8")
+  .replace(/\r\n/g, "\n");
 const added = /\+\+\+ b\/server\/src\/main\/java\/com\/genymobile\/scrcpy\/video\/DisplayScale\.java\n@@[^\n]*\n((?:\+[^\n]*\n)+)/.exec(patch);
 if (!added) {
   console.log("  FAIL display-scale.patch adds DisplayScale.java");
@@ -61,9 +64,12 @@ for (const [title, main] of [
   ["the window daemon's callers, by the kernel's account", "com.ccrstech.openandroiddex.wmd.PeersCheck"],
   ["the scrcpy server's scale for a display that follows its window", "com.genymobile.scrcpy.video.DisplayScaleCheck"],
 ]) {
-  const run = spawnSync("java", ["-cp", tmp, main], { encoding: "utf8" });
+  // UTF-8 out, read as UTF-8: a JVM writing to a pipe on Windows uses the code page.
+  const run = spawnSync("java", ["-Dstdout.encoding=UTF-8", "-cp", tmp, main], { encoding: "utf8" });
   console.log(title);
-  for (const line of run.stdout.split("\n")) {
+  // CRLF from a JVM on Windows: a split on "\n" alone left every line ending
+  // in "\r", which the pattern below never matched — 0 checks, and a pass.
+  for (const line of run.stdout.split(/\r?\n/)) {
     const m = /^(ok|FAIL) (.*)$/.exec(line);
     if (!m) continue;
     if (m[1] === "ok") passed++;
@@ -76,4 +82,5 @@ for (const [title, main] of [
   }
 }
 console.log(`\n${passed} passed, ${failed} failed`);
-process.exit(failed ? 1 : 0);
+// Nothing checked is not a pass.
+process.exit(failed || !passed ? 1 : 0);

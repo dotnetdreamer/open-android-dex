@@ -3,9 +3,11 @@ use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 
 /// Root of our bundled `resources/` tree.
 /// Configured in tauri.conf.json under bundle.resources, so the relative
@@ -71,6 +73,79 @@ pub fn hide_console(cmd: &mut Command) {
     #[cfg(not(windows))]
     {
         let _ = cmd;
+    }
+}
+
+/// Tie a long-lived child — a session's scrcpy, its device-log `adb logcat` —
+/// to this app, so it ends when the app ends however it ends: a crash, Task
+/// Manager, Stop-Process, `tauri dev` rebuilding, and not only through the
+/// Exit path. Left untied, a killed app's desktop stayed up with nothing behind
+/// it — no window management, nothing to put the phone back — and its logcat
+/// ran on for good (seen on the Galaxy A13).
+///
+/// Windows: one job for all of them, killed as its last handle closes, which
+/// is this process ending. Breakaway is silent, so it holds only what is put in
+/// it and none of what those start: one of those can be the adb SERVER, the
+/// user's other tools' as much as ours. The phone keeps its desktop set up for
+/// the next start to resume, as after any restart of this app. macOS and Linux
+/// have no such tie between processes; there, the next start's sweep of the
+/// phone ends an orphaned desktop (scrcpy's sweep_orphan_servers).
+pub fn end_with_this_app(child: &std::process::Child) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+        use windows_sys::Win32::System::JobObjects::{
+            AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+            SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK,
+        };
+        // The handle as a number: a raw pointer cannot live in a static. Never
+        // closed — the system closes it as this process ends, and that is the
+        // moment the job exists for.
+        static JOB: std::sync::OnceLock<isize> = std::sync::OnceLock::new();
+        let job = *JOB.get_or_init(|| {
+            // SAFETY: no attributes and no name; the limits struct is ours and
+            // its size is passed with it.
+            unsafe {
+                let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+                if job.is_null() {
+                    log::warn!("no job to tie children to: {}", std::io::Error::last_os_error());
+                    return 0;
+                }
+                let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+                limits.BasicLimitInformation.LimitFlags =
+                    JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK;
+                if SetInformationJobObject(
+                    job,
+                    JobObjectExtendedLimitInformation,
+                    &limits as *const _ as *const std::ffi::c_void,
+                    std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+                ) == 0
+                {
+                    log::warn!("no job to tie children to: {}", std::io::Error::last_os_error());
+                    CloseHandle(job);
+                    return 0;
+                }
+                job as isize
+            }
+        });
+        if job == 0 {
+            return;
+        }
+        // SAFETY: the job above, and the handle of a child we own and that is
+        // still running or waiting to be reaped.
+        if unsafe { AssignProcessToJobObject(job as HANDLE, child.as_raw_handle() as HANDLE) } == 0 {
+            log::warn!(
+                "pid {} will outlive this app if it is killed: {}",
+                child.id(),
+                std::io::Error::last_os_error()
+            );
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = child;
     }
 }
 
@@ -357,6 +432,62 @@ fn device_name(app: &tauri::AppHandle, serial: &str, key: &str) -> Option<String
     name
 }
 
+/// What a phone tells the device poll about itself.
+#[derive(Clone)]
+struct PhoneProps {
+    brand: Option<String>,
+    android_version: Option<String>,
+    /// ro.serialno rather than the adb serial: it is the same string whichever
+    /// way the phone is attached, so it is what tells the UI that the device on
+    /// the cable and the device on Wi-Fi are one phone.
+    hardware_serial: Option<String>,
+}
+
+/// Each phone's [`PhoneProps`], by adb serial, for as long as adb keeps the
+/// phone: none of it changes while it stays connected. Asked on every 2.5s
+/// poll, one phone after another, a single phone slow to answer stalled the
+/// list for all of them — a Redmi 9A on Wi-Fi made polls of up to 21s, with
+/// the phone on the cable waiting behind it.
+fn props_cache() -> &'static std::sync::Mutex<HashMap<String, PhoneProps>> {
+    static PROPS: std::sync::OnceLock<std::sync::Mutex<HashMap<String, PhoneProps>>> = std::sync::OnceLock::new();
+    PROPS.get_or_init(Default::default)
+}
+
+/// How long the poll waits for one phone's properties. A phone slower than
+/// this is listed without them and asked again on the next poll — not after
+/// adb's own 25s, which is what a phone that had stopped answering cost.
+const PROPS_TIMEOUT: Duration = Duration::from_secs(4);
+
+fn phone_props(app: &tauri::AppHandle, serial: &str) -> Option<PhoneProps> {
+    if let Some(p) = props_cache().lock().unwrap().get(serial) {
+        return Some(p.clone());
+    }
+    let out = run_adb_full(
+        app,
+        &[
+            "-s",
+            serial,
+            "shell",
+            "getprop ro.product.brand; getprop ro.build.version.release; getprop ro.serialno",
+        ],
+        PROPS_TIMEOUT,
+        false,
+    )
+    .ok()?;
+    let mut lines = out.lines().map(|l| l.trim().to_string());
+    let props = PhoneProps {
+        brand: lines.next().filter(|s| !s.is_empty()),
+        android_version: lines.next().filter(|s| !s.is_empty()),
+        hardware_serial: lines.next().filter(|s| !s.is_empty()),
+    };
+    // Every phone has a version: without one, the answer was not the phone's
+    // properties, and the next poll asks again.
+    if props.android_version.is_some() {
+        props_cache().lock().unwrap().insert(serial.to_string(), props.clone());
+    }
+    Some(props)
+}
+
 /// `settings get` prints "null" for a name that was never set.
 pub(crate) fn clean_device_name(out: &str) -> Option<String> {
     let name = out.trim();
@@ -453,48 +584,39 @@ pub fn adb_list_devices(app: tauri::AppHandle) -> Result<Vec<DeviceInfo>, String
             "usb"
         };
 
-        // ro.serialno rather than the adb serial: it is the same string
-        // whichever way the phone is attached, so it is what tells the UI that
-        // the device on the cable and the device on Wi-Fi are one phone.
-        let (brand, android_version, hardware_serial) = if state == "device" {
-            let out = run_adb_quiet(
-                &app,
-                &[
-                    "-s",
-                    serial,
-                    "shell",
-                    "getprop ro.product.brand; getprop ro.build.version.release; getprop ro.serialno",
-                ],
-            )
-            .unwrap_or_default();
-            let mut lines = out.lines().map(|l| l.trim().to_string());
-            (
-                lines.next().filter(|s| !s.is_empty()),
-                lines.next().filter(|s| !s.is_empty()),
-                lines.next().filter(|s| !s.is_empty()),
-            )
-        } else {
-            (None, None, None)
-        };
-        let name = if state == "device" {
-            let key = format!("{}|{model}", hardware_serial.as_deref().unwrap_or(serial));
-            device_name(&app, serial, &key)
-        } else {
-            None
-        };
-
         devices.push(DeviceInfo {
             serial: serial.to_string(),
             state,
             model,
             product,
             connection: connection.to_string(),
-            brand,
-            android_version,
-            hardware_serial,
-            name,
+            brand: None,
+            android_version: None,
+            hardware_serial: None,
+            name: None,
         });
     }
+
+    // What each phone says about itself, every phone at once: one that is slow
+    // to answer costs the poll its own wait, not everyone's in turn.
+    props_cache()
+        .lock()
+        .unwrap()
+        .retain(|serial, _| devices.iter().any(|d| d.serial == *serial && d.state == "device"));
+    std::thread::scope(|scope| {
+        let app = &app;
+        for d in devices.iter_mut().filter(|d| d.state == "device") {
+            scope.spawn(move || {
+                if let Some(p) = phone_props(app, &d.serial) {
+                    d.brand = p.brand;
+                    d.android_version = p.android_version;
+                    d.hardware_serial = p.hardware_serial;
+                }
+                let key = format!("{}|{}", d.hardware_serial.as_deref().unwrap_or(&d.serial), d.model);
+                d.name = device_name(app, &d.serial, &key);
+            });
+        }
+    });
 
     let summary = if devices.is_empty() {
         "none".to_string()
@@ -936,6 +1058,8 @@ pub fn adb_prepare_desktop(
 #[tauri::command(async)]
 pub fn adb_end_desktop(app: tauri::AppHandle, serial: String) -> Result<(), String> {
     restore_phone(&app, &serial);
+    // Over for good, so the next desktop opens its window fresh.
+    crate::scrcpy::forget_window(&app, &serial);
     Ok(())
 }
 
@@ -949,6 +1073,21 @@ const RESTORE_TIMEOUT: Duration = Duration::from_secs(8);
 /// manager) exactly where it was.
 fn without_caption_service(list: &str) -> String {
     without_component(list, CAPTION_SERVICE_COMPONENT)
+}
+
+/// The two `enabled_accessibility_services` values that restart our caption
+/// service, from the value there now: the list without it, then with it. The
+/// user's own services stay in both, so restarting ours never switches theirs
+/// off — writing ours alone, as the enforcer's restart once did, turned
+/// TalkBack off for the length of every desktop.
+pub(crate) fn caption_service_lists(current: &str) -> (String, String) {
+    let without = without_caption_service(current);
+    let with = if without.is_empty() {
+        CAPTION_SERVICE_COMPONENT.to_string()
+    } else {
+        format!("{without}:{CAPTION_SERVICE_COMPONENT}")
+    };
+    (without, with)
 }
 
 /// The same, for any component. Both of the secure settings we touch are
@@ -1697,28 +1836,66 @@ fn bundled_apk_sha256(apk: &std::path::Path) -> Option<String> {
     Some(hex)
 }
 
-/// The phone runs the launcher's Linux, and its launcher is this very build.
-///
-/// Installing the same APK again would stop the package — `install -r` does —
-/// and that Linux with it, for nothing: a dev app restarting, or a launch after
-/// one that failed, would end a session someone is in. Asked in one round
-/// trip; any doubt answers no, which is the plain install.
-fn linux_on_this_build(app: &tauri::AppHandle, serial: &str, apk: &std::path::Path) -> bool {
+/// What the phone has of the launcher: whether its installed APK is this very
+/// build, and whether its Linux is running. One round trip; any doubt answers
+/// no, which is the plain install.
+fn installed_launcher(app: &tauri::AppHandle, serial: &str, apk: &std::path::Path) -> (bool, bool) {
     let out = run_adb(
         app,
         &[
             "-s",
             serial,
             "shell",
+            // `; true`: a Linux that is not running fails the `pidof`, and a
+            // shell that exits 1 hands back no answer at all.
             &format!(
-                "pidof {LAUNCHER_PACKAGE}:linux >/dev/null && \
-                 p=$(pm path {LAUNCHER_PACKAGE} | head -n 1) && sha256sum \"${{p#package:}}\""
+                "p=$(pm path {LAUNCHER_PACKAGE} | head -n 1) && sha256sum \"${{p#package:}}\"; \
+                 pidof {LAUNCHER_PACKAGE}:linux >/dev/null && echo linux-running; true"
             ),
         ],
     )
     .unwrap_or_default();
-    let installed = out.split_whitespace().next().unwrap_or("");
-    !installed.is_empty() && bundled_apk_sha256(apk).as_deref() == Some(installed)
+    (same_build(&out, bundled_apk_sha256(apk).as_deref()), out.contains("linux-running"))
+}
+
+/// Whether `sha256sum`'s answer about the installed APK is `bundled`.
+fn same_build(sha256sum: &str, bundled: Option<&str>) -> bool {
+    let installed = sha256sum.split_whitespace().next().unwrap_or("");
+    installed.len() == 64 && bundled == Some(installed)
+}
+
+/// Packages whose window in front, while the launcher installs, means the
+/// phone is waiting on its owner: Google Play Protect's "Send app for a
+/// security check?", the package installer's own confirmation, MIUI's
+/// "Install via USB". `adb install` waits on them without a word.
+const INSTALL_PROMPTS: [&str; 4] = [
+    "com.android.vending/",
+    "com.google.android.packageinstaller/",
+    "com.android.packageinstaller/",
+    "com.miui.securitycenter/",
+];
+
+/// Tell the window when the phone stops an install to ask its owner
+/// something, once: an install held there looks, from this side, like one
+/// that hung. Seen on a Galaxy A13 — Play Protect asked about the launcher
+/// with nobody at the phone, and the desktop gave up after 45s with "took too
+/// long to start" while the answer it was waiting for was on the phone.
+fn watch_for_install_prompt(app: &tauri::AppHandle, serial: &str, done: Arc<AtomicBool>, asked: Arc<AtomicBool>) {
+    let (app, serial) = (app.clone(), serial.to_string());
+    thread::spawn(move || {
+        thread::sleep(Duration::from_secs(3));
+        while !done.load(Ordering::SeqCst) {
+            let front = run_adb_quiet(&app, &["-s", &serial, "shell", "dumpsys window | grep -m1 mCurrentFocus"])
+                .unwrap_or_default();
+            if INSTALL_PROMPTS.iter().any(|p| front.contains(p)) && !done.load(Ordering::SeqCst) {
+                log::warn!("{serial}: the phone is asking its owner about the install — {}", front.trim());
+                asked.store(true, Ordering::SeqCst);
+                let _ = app.emit("launch:phone-asks", serde_json::json!({ "serial": serial }));
+                return;
+            }
+            thread::sleep(Duration::from_secs(2));
+        }
+    });
 }
 
 /// Install (or update) the bundled Open Android DeX launcher APK and start
@@ -1748,15 +1925,38 @@ pub fn adb_start_launcher(
         log::error!("launcher APK missing from the bundle: {}", apk.display());
         return Err("bundled openandroiddex-launcher.apk not found".into());
     }
-    if !resume && linux_on_this_build(&app, &serial, &apk) {
+    let (this_build, linux_running) = if resume { (false, false) } else { installed_launcher(&app, &serial, &apk) };
+    // Installing the same APK again would stop the package — `install -r`
+    // does — and its Linux with it, for nothing: a dev app restarting, or a
+    // launch after one that failed, would end a session someone is in.
+    if !resume && this_build && linux_running {
         log::info!("{LAUNCHER_PACKAGE} is already this build and its Linux is running — resuming around it");
         resume = true;
     }
-    if !resume {
-        // always reinstall: it is tiny and this guarantees updates land
+    if !resume && this_build {
+        // Not installed again when it is byte for byte this build. The APK is
+        // tens of megabytes now, ten seconds on a Galaxy A13 — and each
+        // install of it is a chance for the phone to stop and ask its owner
+        // something (Play Protect), which a launch with nobody at the phone
+        // never gets past.
+        log::info!("{LAUNCHER_PACKAGE} is already this build — not installing it again");
+    } else if !resume {
         let apk_str = apk.to_string_lossy().to_string();
         log::info!("installing {}", apk.display());
-        install_launcher(&app, &serial, &apk_str)?;
+        let (done, asked) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false)));
+        watch_for_install_prompt(&app, &serial, done.clone(), asked.clone());
+        let installed = install_launcher(&app, &serial, &apk_str);
+        done.store(true, Ordering::SeqCst);
+        installed.map_err(|e| {
+            if asked.load(Ordering::SeqCst) {
+                format!(
+                    "Your phone is still waiting for an answer about installing Open Android DeX.\n\
+                     Answer it on the phone, then open the desktop again.\n\n{e}"
+                )
+            } else {
+                e
+            }
+        })?;
         log::info!(
             "launcher installed in {}ms",
             deploy_started.elapsed().as_millis()
@@ -1961,6 +2161,31 @@ pub fn adb_start_launcher(
     // clear) is left looking granted, so the state reads as "permission fine,
     // service just isn't running".
     enable_caption_service(&app, &serial);
+    // …and not always microseconds: the prune rides the package's restart
+    // broadcast, which a phone still busy with the install delivers late. On a
+    // Galaxy A13 it landed 1.5 s after the force-stop, 0.6 s after the grant
+    // above, and the session ran without the service — below Android 14 that
+    // is the cable-pulled undo (UnplugWatch) gone, and the next reconnect read
+    // the session as undone. So look again once the broadcast has had time.
+    if !resume {
+        let (app, serial) = (app.clone(), serial.clone());
+        thread::spawn(move || {
+            for wait in [3, 6] {
+                thread::sleep(Duration::from_secs(wait));
+                // A desktop already closed has had the service taken off on
+                // purpose, by the restore.
+                if crate::scrcpy::session_display_id(&app, &format!("{serial}|desktop")).is_none() {
+                    return;
+                }
+                let on = run_adb_quiet(&app, &["-s", &serial, "shell", "settings get secure enabled_accessibility_services"])
+                    .is_ok_and(|out| out.split(':').any(|s| s.trim() == CAPTION_SERVICE_COMPONENT));
+                if !on {
+                    log::warn!("{serial}: the caption service was pruned after the launcher's restart — enabling it again");
+                    enable_caption_service(&app, &serial);
+                }
+            }
+        });
+    }
     // After the force-stop for the same reason as the line above: force-stop
     // prunes the package's services out of `enabled_notification_listeners`
     // too, so granting first would be wiped microseconds later.
@@ -2125,23 +2350,10 @@ fn enable_caption_service(app: &tauri::AppHandle, serial: &str) {
         ],
     )
     .unwrap_or_default();
-    let current = current.trim();
-    // `settings get` prints the literal string "null" for an unset key.
-    let current = if current == "null" { "" } else { current };
+    let (without, with) = caption_service_lists(&current);
 
-    let wanted = if current.is_empty() {
-        CAPTION_SERVICE_COMPONENT.to_string()
-    } else if current
-        .split(':')
-        .any(|s| s.trim() == CAPTION_SERVICE_COMPONENT)
-    {
-        current.to_string()
-    } else {
-        format!("{current}:{CAPTION_SERVICE_COMPONENT}")
-    };
-
-    // Clear, then set — even when the value is already correct, and as TWO separate adb
-    // invocations rather than one chained shell command.
+    // Off, then on — even when it is on already, and as TWO separate adb invocations
+    // rather than one chained shell command.
     //
     // Writing the same value is a no-op that leaves the service running, and a service that
     // was already running cannot draw on this desktop: the caption surface is attached to
@@ -2160,7 +2372,7 @@ fn enable_caption_service(app: &tauri::AppHandle, serial: &str) {
             "-s",
             serial,
             "shell",
-            "settings put secure enabled_accessibility_services ''",
+            &format!("settings put secure enabled_accessibility_services '{without}'"),
         ],
     );
     let _ = run_adb(
@@ -2170,7 +2382,7 @@ fn enable_caption_service(app: &tauri::AppHandle, serial: &str) {
             serial,
             "shell",
             &format!(
-                "settings put secure enabled_accessibility_services '{wanted}'; \
+                "settings put secure enabled_accessibility_services '{with}'; \
                  settings put secure accessibility_enabled 1"
             ),
         ],
@@ -2309,12 +2521,26 @@ fn enable_notification_listener(app: &tauri::AppHandle, serial: &str) {
 const NOTIFICATION_GRANT_KEY: &str = "notification_listener_granted_by_us";
 
 fn remember_notification_grant(app: &tauri::AppHandle, serial: &str, ours: bool) {
-    let key = restore_key(app, serial);
+    remember_grant(app, serial, NOTIFICATION_GRANT_KEY, ours);
+}
+
+/// Record whether this app is what granted something the exit path takes back.
+///
+/// Only ever raised to "1", never lowered: a grant of ours is still on the phone
+/// at the next deploy — the resume behind every reconnect (Samsung restarts adbd
+/// a few seconds after each plug-in), or a launch after a session the cable or a
+/// killed app ended before its exit could run — and read there as the user's own
+/// it was left behind for good. Seen on the Galaxy A13: one reconnect, and a
+/// clean exit kept the launcher on the doze whitelist. A successful exit clears
+/// the record, so a "1" is always a grant not yet taken back.
+fn remember_grant(app: &tauri::AppHandle, serial: &str, key: &str, ours: bool) {
+    let id = restore_key(app, serial);
     let mut map = load_restore_map(app);
-    map.entry(key).or_default().insert(
-        NOTIFICATION_GRANT_KEY.to_string(),
-        if ours { "1" } else { "0" }.to_string(),
-    );
+    let entry = map.entry(id).or_default();
+    if !ours && entry.contains_key(key) {
+        return;
+    }
+    entry.insert(key.to_string(), if ours { "1" } else { "0" }.to_string());
     save_restore_map(app, &map);
 }
 
@@ -2330,13 +2556,7 @@ fn notification_grant_is_ours(app: &tauri::AppHandle, serial: &str) -> bool {
 const POWER_EXEMPTION_KEY: &str = "power_exemption_granted_by_us";
 
 fn remember_power_exemption(app: &tauri::AppHandle, serial: &str, ours: bool) {
-    let key = restore_key(app, serial);
-    let mut map = load_restore_map(app);
-    map.entry(key).or_default().insert(
-        POWER_EXEMPTION_KEY.to_string(),
-        if ours { "1" } else { "0" }.to_string(),
-    );
-    save_restore_map(app, &map);
+    remember_grant(app, serial, POWER_EXEMPTION_KEY, ours);
 }
 
 /// Absent counts as ours: a session recorded before this key existed was
@@ -2409,7 +2629,24 @@ pub fn reverse_files_port(app: &tauri::AppHandle, serial: &str, host_port: u16) 
 ///
 /// Best-effort: the desktop is fully usable without it, minus window chrome and
 /// the fast command path.
+///
+/// A daemon this run started on the phone a moment ago is kept, not started
+/// again: it is this build's, and armed or about to be. Two starts used to land
+/// seconds apart — the session's enforcer bringing back the daemon adbd took
+/// down, then the deploy right behind it (a reconnect's resume, or a first
+/// install slower than the enforcer's ten seconds: 9.6 s on the Galaxy A13).
+/// The second killed the first, and moved its few seconds of log over
+/// wmd.log.1, which is where the log of the daemon that died had just been put.
 pub(crate) fn start_wmd(app: &tauri::AppHandle, serial: &str) {
+    static STARTED: std::sync::OnceLock<std::sync::Mutex<HashMap<String, Instant>>> = std::sync::OnceLock::new();
+    let started = STARTED.get_or_init(Default::default);
+    let last = started.lock().unwrap().get(serial).copied();
+    if let Some(at) = last.filter(|at| at.elapsed() < WMD_FRESH) {
+        if fresh_wmd_answers(app, serial, at) {
+            log::info!("{serial}: the window daemon started {}ms ago is up — keeping it", at.elapsed().as_millis());
+            return;
+        }
+    }
     let dex = match bin_dir(app) {
         Ok(d) => d.join("openandroiddex-wmd.dex"),
         Err(_) => return,
@@ -2442,6 +2679,7 @@ pub(crate) fn start_wmd(app: &tauri::AppHandle, serial: &str) {
              com.ccrstech.openandroiddex.wmd.WmDaemon > /data/local/tmp/wmd.log 2>&1' &",
         ],
     );
+    started.lock().unwrap().insert(serial.to_string(), Instant::now());
 
     if !forward_wm_port(app, serial) {
         return;
@@ -2453,6 +2691,32 @@ pub(crate) fn start_wmd(app: &tauri::AppHandle, serial: &str) {
         Ok(tail) if !tail.trim().is_empty() => log::info!("wmd log: {}", tail.trim()),
         Ok(_) => log::info!("wmd started (no output yet)"),
         Err(e) => log::warn!("wmd log unreadable: {e}"),
+    }
+}
+
+/// How long a daemon this run started counts as fresh enough to keep: past
+/// the slowest deploy measured, well short of a session's length.
+const WMD_FRESH: Duration = Duration::from_secs(30);
+
+/// What a daemon gets to start listening: app_process on the A13 took over a
+/// second.
+const WMD_BOOT: Duration = Duration::from_secs(3);
+
+/// Whether the daemon started at `at` answers, given until `WMD_BOOT` after
+/// its start to come up. Through a fresh forward: a reconnect drops the old one.
+fn fresh_wmd_answers(app: &tauri::AppHandle, serial: &str, at: Instant) -> bool {
+    if !forward_wm_port(app, serial) {
+        return false;
+    }
+    let wm = crate::wm::WmClient::new();
+    loop {
+        if wm.ping() {
+            return true;
+        }
+        if at.elapsed() >= WMD_BOOT {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(300));
     }
 }
 
@@ -2695,6 +2959,37 @@ unrelated_key=7
         assert_eq!(without_caption_service("null"), "");
         assert_eq!(without_caption_service("  "), "");
         assert_eq!(without_caption_service(theirs), theirs);
+    }
+
+    /// The installed launcher is only "this build" on a full, matching hash —
+    /// an error, a missing package or an empty answer must all mean install.
+    #[test]
+    fn only_a_matching_hash_skips_the_install() {
+        let hash = "a".repeat(64);
+        let path = "/data/app/~~x==/com.ccrstech.openandroiddex.launcher-y==/base.apk";
+        assert!(same_build(&format!("{hash}  {path}\n"), Some(&hash)));
+        assert!(same_build(&format!("{hash}  {path}\nlinux-running\n"), Some(&hash)));
+        assert!(!same_build(&format!("{}  {path}\n", "b".repeat(64)), Some(&hash)));
+        assert!(!same_build("linux-running\n", Some(&hash)));
+        assert!(!same_build("", Some(&hash)));
+        assert!(!same_build("sha256sum: /data/app/base.apk: Permission denied", Some(&hash)));
+        assert!(!same_build(&format!("{hash}  {path}\n"), None));
+    }
+
+    /// Restarting our service — the list without it, then with it — must
+    /// never take the user's own off, in either write.
+    #[test]
+    fn restarting_the_caption_service_keeps_the_users_services_on() {
+        let talkback = "com.google.android.marvin.talkback/.TalkBackService";
+        let ours_too = format!("{talkback}:{CAPTION_SERVICE_COMPONENT}");
+        assert_eq!(caption_service_lists(&ours_too), (talkback.to_string(), ours_too.clone()));
+        assert_eq!(caption_service_lists(talkback), (talkback.to_string(), ours_too));
+        for nothing in ["", "null", "  "] {
+            assert_eq!(
+                caption_service_lists(nothing),
+                (String::new(), CAPTION_SERVICE_COMPONENT.to_string())
+            );
+        }
     }
 
     /// Same rule for the notification-listener list, which is shared with the

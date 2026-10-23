@@ -46,7 +46,8 @@ if (javac.status !== 0) {
   process.exit(1);
 }
 
-const run = spawnSync("java", ["-cp", classes, "com.ccrstech.openandroiddex.launcher.UnitCheck"], {
+// UTF-8 out, read as UTF-8: a JVM writing to a pipe on Windows uses the code page.
+const run = spawnSync("java", ["-Dstdout.encoding=UTF-8", "-cp", classes, "com.ccrstech.openandroiddex.launcher.UnitCheck"], {
   encoding: "utf8",
 });
 let passed = 0;
@@ -61,7 +62,9 @@ const sections = [
   ["the apps the menu", "LinuxApps — the guest's .desktop files"],
   ["a 300 ms burst", "LinuxAudioLag — the sound tap's drift cap"],
 ];
-for (const line of run.stdout.split("\n")) {
+// CRLF from a JVM on Windows: a split on "\n" alone left every line ending in
+// "\r", which the pattern below never matched — 0 checks, and a pass.
+for (const line of run.stdout.split(/\r?\n/)) {
   if (!line) continue;
   const m = /^(ok|FAIL) (.*)$/.exec(line);
   if (!m) continue;
@@ -79,4 +82,5 @@ if (run.status !== 0 && !run.stdout.includes("done ")) {
   failed++;
 }
 console.log(`\n${passed} passed, ${failed} failed`);
-process.exit(failed ? 1 : 0);
+// Nothing checked is not a pass.
+process.exit(failed || !passed ? 1 : 0);

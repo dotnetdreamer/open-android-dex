@@ -345,8 +345,13 @@ fn build_args(opts: &MirrorOptions) -> Vec<String> {
     if let Some(w) = &opts.window {
         args.push(format!("--window-x={}", w.x));
         args.push(format!("--window-y={}", w.y));
-        args.push(format!("--window-width={}", w.width));
-        args.push(format!("--window-height={}", w.height));
+        // A display that follows its window gives the window ITS size, the
+        // display's: scrcpy 5 refuses these two beside --flex-display, and the
+        // session dies before it has a display.
+        if opts.flex.is_none() {
+            args.push(format!("--window-width={}", w.width));
+            args.push(format!("--window-height={}", w.height));
+        }
     }
     // A display that follows its window. Letterbox, not flex's own default of
     // "unscaled": the phone makes the display the window's size in PIXELS
@@ -537,8 +542,11 @@ fn spawn_scrcpy(app: &AppHandle, opts: &MirrorOptions) -> Result<Child, String> 
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     adb::hide_console(&mut cmd);
-    cmd.spawn()
-        .map_err(|e| format!("failed to start scrcpy: {e}"))
+    let child = cmd
+        .spawn()
+        .map_err(|e| format!("failed to start scrcpy: {e}"))?;
+    adb::end_with_this_app(&child);
+    Ok(child)
 }
 
 /// Where the next session's scrcpy starts looking for a port to listen on
@@ -780,7 +788,7 @@ fn register_session(
         app_package: opts.app_package.clone(),
         display_id: display_id.clone(),
         density: density.clone(),
-        display_size,
+        display_size: display_size.clone(),
         hwnd: Arc::new(std::sync::atomic::AtomicIsize::new(0)),
         output: output.clone(),
         audio_playback: opts.audio_playback,
@@ -801,6 +809,7 @@ fn register_session(
             stop.clone(),
             display_id.clone(),
             density.clone(),
+            display_size,
             base_dpi,
         );
     }
@@ -848,8 +857,10 @@ fn write_display_scale(app: &AppHandle, serial: &str, scale: f64) {
 /// changes by itself as Windows rescales it. Either way the density goes with
 /// the scale — one dp stays one point — at the phone's Display size preset.
 ///
-/// Asked once a second, of the window server (embed::window_scale): there is
-/// no event for it that this process could hear.
+/// Asked once a second, of the window server (embed::window_state): there is
+/// no event for it that this process could hear. The same answer is where the
+/// window is, which is remembered for the next window of this desktop
+/// ([`remember_window`]).
 #[allow(clippy::too_many_arguments)]
 fn watch_window_scale(
     app: AppHandle,
@@ -860,10 +871,12 @@ fn watch_window_scale(
     stop: Arc<AtomicBool>,
     display_id: Arc<AtomicI32>,
     density: Arc<AtomicI32>,
+    display_size: Arc<Mutex<Option<(i32, i32)>>>,
     base_dpi: Arc<AtomicI32>,
 ) {
     thread::spawn(move || {
         let mut scale = f64::from(base_dpi.load(Ordering::SeqCst).max(80)) / 160.0;
+        let phone = adb::restore_key(&app, &serial);
         loop {
             thread::sleep(Duration::from_secs(1));
             if stop.load(Ordering::SeqCst)
@@ -872,9 +885,15 @@ fn watch_window_scale(
                 return;
             }
             let display = display_id.load(Ordering::SeqCst);
-            let Some(now) = crate::embed::window_scale(&app, pid) else {
+            let Some(window) = crate::embed::window_state(&app, pid) else {
                 continue;
             };
+            if display >= 0 {
+                if let Some(size) = *display_size.lock().unwrap() {
+                    remember_window(&phone, pid, window, size);
+                }
+            }
+            let now = window.scale;
             if display < 0 || (now - scale).abs() < 0.01 {
                 continue;
             }
@@ -892,6 +911,161 @@ fn watch_window_scale(
                     scale = now;
                 }
                 Err(e) => log::warn!("scrcpy [{key}] could not move the density to {dpi}: {e}"),
+            }
+        }
+    });
+}
+
+/// Where a desktop's window was, and the display it showed then.
+#[derive(Debug, Clone, Copy)]
+struct Remembered {
+    window: crate::embed::WindowState,
+    /// The display, in pixels — the window's content, as the phone made it.
+    display: (i32, i32),
+    /// The scrcpy process it was read from. A window just reopened is not
+    /// read until it has been put back the way this says ([`reshow_window`]):
+    /// halfway there, it would be remembered as the half.
+    pid: u32,
+    settled: bool,
+}
+
+/// Each phone's desktop window, as it last was — by phone (restore_key), so
+/// the cable and Wi-Fi are one desktop.
+///
+/// Every desktop that comes back opens its window from this: a reconnect, a
+/// restart for new stream settings, a desktop the phone undid while it was
+/// away, a move onto Wi-Fi. A window that jumped back to the middle of the
+/// screen at its first size — which Samsung's adb restart after every plug-in
+/// made a once-a-session event — reads as the app losing track of it.
+/// Forgotten when the desktop ends for good ([`forget_window`]).
+fn windows() -> &'static Mutex<HashMap<String, Remembered>> {
+    static WINDOWS: std::sync::OnceLock<Mutex<HashMap<String, Remembered>>> = std::sync::OnceLock::new();
+    WINDOWS.get_or_init(Default::default)
+}
+
+/// Keep what a desktop's window looks like now. Not while it is minimized or
+/// fullscreen: neither is a window to reopen as, and the one before is.
+fn remember_window(phone: &str, pid: u32, window: crate::embed::WindowState, display: (i32, i32)) {
+    if window.minimized || window.fullscreen || window.width == 0 || window.height == 0 {
+        return;
+    }
+    let mut map = windows().lock().unwrap();
+    if map.get(phone).is_some_and(|r| r.pid == pid && !r.settled) {
+        return;
+    }
+    map.insert(phone.to_string(), Remembered { window, display, pid, settled: true });
+}
+
+/// The desktop ended for good: its next window opens fresh.
+pub(crate) fn forget_window(app: &AppHandle, serial: &str) {
+    windows().lock().unwrap().remove(&adb::restore_key(app, serial));
+}
+
+/// Open this desktop's window where the last one was, the way it was, at the
+/// size its display last had. Only for a display that follows its window —
+/// one at a resolution picked in Settings has a window of scrcpy's choosing.
+///
+/// scrcpy takes only the window's position beside `--flex-display`; its size
+/// is the display's, shrunk to fit the main screen less a margin. So a window
+/// that was bigger than that — dragged out near the screen's edges — reopens
+/// at the size scrcpy will give it, with the display made that size too: a
+/// window smaller than its display would show it scaled, soft, until it was
+/// next resized. Sizing scrcpy's window from this process instead is not an
+/// option: SDL answers a size from outside with one of its own (seen on
+/// Windows: asked for a height of 1582 it took 1940, and once threw the
+/// window off the screen). Maximizing it is fine, and so is the fullscreen
+/// toggle: a maximized window keeps its display, and is maximized again once
+/// it appears ([`reshow_window`]).
+fn reopen_where_it_was(app: &AppHandle, opts: &mut MirrorOptions) -> Option<Remembered> {
+    if opts.flex.is_none() || opts.app_package.is_some() || opts.audio_only {
+        return None;
+    }
+    let r = *windows().lock().unwrap().get(&adb::restore_key(app, &opts.serial))?;
+    // Window coordinates are points on macOS, so the phone multiplies by the
+    // scale; pixels everywhere else (display::flex_geometry).
+    let unit = if cfg!(target_os = "macos") { r.window.scale } else { 1.0 };
+    let (mut w, mut h) = r.display;
+    let mut rect = display::WindowRect {
+        x: r.window.x,
+        y: r.window.y,
+        width: (f64::from(w) / unit).round() as u32,
+        height: (f64::from(h) / unit).round() as u32,
+    };
+    if w <= 0 || h <= 0 || !display::on_a_screen(app, rect) {
+        return None;
+    }
+    if !r.window.maximized {
+        if let Some(main) = display::main_screen(app) {
+            let s = if cfg!(target_os = "macos") { main.scale } else { 1.0 };
+            let usable = ((f64::from(main.work_w) / s) as u32, (f64::from(main.work_h) / s) as u32);
+            let (fw, fh) = display::scrcpy_window_for((rect.width, rect.height), usable);
+            if (fw, fh) != (rect.width, rect.height) {
+                (rect.width, rect.height) = (fw, fh);
+                w = (f64::from(fw) * unit).round() as i32;
+                h = (f64::from(fh) * unit).round() as i32;
+            }
+        }
+    }
+    opts.new_display = Some(format!("{w}x{h}"));
+    opts.window = Some(rect);
+    opts.flex = Some(unit);
+    opts.base_dpi = Some(((160.0 * r.window.scale).round() as i32).clamp(80, 960));
+    log::info!(
+        "scrcpy [{}] reopening the window where it was: {rect:?}{}, display {w}x{h}",
+        opts.session_key(),
+        if r.window.maximized { ", maximized" } else { "" }
+    );
+    Some(r)
+}
+
+/// Put a reopened window back the way it was shown — maximized with its own
+/// restore size, and back in fullscreen if it was taken out of it by the
+/// reconnect — once it appears. Until then the window is not remembered
+/// again, or a reconnect in between would keep the halfway state.
+fn reshow_window(
+    app: &AppHandle,
+    serial: &str,
+    key: &str,
+    pid: u32,
+    remembered: Option<Remembered>,
+    fullscreen: Option<Arc<Shared>>,
+) {
+    let maximized = remembered.filter(|r| r.window.maximized).and_then(|r| r.window.restore);
+    let phone = adb::restore_key(app, serial);
+    if remembered.is_some() {
+        if let Some(entry) = windows().lock().unwrap().get_mut(&phone) {
+            entry.pid = pid;
+            entry.settled = maximized.is_none() && fullscreen.is_none();
+        }
+    }
+    if maximized.is_none() && fullscreen.is_none() {
+        return;
+    }
+    let (app, key) = (app.clone(), key.to_string());
+    thread::spawn(move || {
+        const WAIT: Duration = Duration::from_secs(15);
+        if let Some(restore) = maximized {
+            if let Err(e) = crate::embed::show_maximized(pid, restore, WAIT) {
+                log::warn!("scrcpy [{key}] could not maximize the window again: {e}");
+            }
+        }
+        if let Some(shared) = fullscreen {
+            let deadline = Instant::now() + WAIT;
+            let on = loop {
+                match crate::embed::toggle_fullscreen(&app, &key) {
+                    Ok(on) => break on,
+                    Err(e) if Instant::now() >= deadline => {
+                        log::warn!("scrcpy [{key}] could not put the window back in fullscreen: {e}");
+                        break false;
+                    }
+                    Err(_) => thread::sleep(Duration::from_millis(250)),
+                }
+            };
+            shared.record_fullscreen(on);
+        }
+        if let Some(entry) = windows().lock().unwrap().get_mut(&phone) {
+            if entry.pid == pid {
+                entry.settled = true;
             }
         }
     });
@@ -3263,21 +3437,25 @@ impl Enforcer {
     /// session is simply blind, which is what made captions "sometimes" not appear.
     ///
     /// `adb_start_launcher` does this too, but only on connect; a respawn never went
-    /// through it. Clearing and re-writing the setting is what forces the restart, and the
-    /// two writes must be separate invocations — chained in one shell command they land
-    /// faster than AccessibilityManagerService tears the service down, and it never
-    /// disconnects.
+    /// through it. Writing the setting without the service and then with it is what
+    /// forces the restart, and the two writes must be separate invocations — chained in
+    /// one shell command they land faster than AccessibilityManagerService tears the
+    /// service down, and it never disconnects. The user's own services stay in both
+    /// (adb::caption_service_lists).
     fn restart_caption_service(&mut self, display: i32) {
         log::info!(
             "freeform-enforcer [{}] display {display} — restarting CaptionService so it \
              can see this display",
             self.key
         );
-        self.run("settings put secure enabled_accessibility_services ''");
+        let current = self
+            .run("settings get secure enabled_accessibility_services")
+            .unwrap_or_default();
+        let (without, with) = adb::caption_service_lists(&current);
+        self.run(&format!("settings put secure enabled_accessibility_services '{without}'"));
         self.run(&format!(
-            "settings put secure enabled_accessibility_services '{}'; \
-             settings put secure accessibility_enabled 1",
-            adb::CAPTION_SERVICE_COMPONENT
+            "settings put secure enabled_accessibility_services '{with}'; \
+             settings put secure accessibility_enabled 1"
         ));
     }
 
@@ -3527,8 +3705,10 @@ fn spawn_freeform_enforcer(
     display_size: Option<(i32, i32)>,
     flex: bool,
     stop: Arc<AtomicBool>,
-) {
+) -> Arc<Shared> {
     let shared = Arc::new(Shared::default());
+    // For the session's monitor: a reconnect puts a fullscreen window back.
+    let handle = shared.clone();
 
     // Task poller: reads the display's task list and keeps windows freeform,
     // maximized windows pinned above the taskbar, and the taskbar's open-apps
@@ -3644,6 +3824,7 @@ fn spawn_freeform_enforcer(
             thread::sleep(pump.poll_interval());
         }
     });
+    handle
 }
 
 /// The ways scrcpy reports "I could not launch the adb you gave me", on either
@@ -3808,7 +3989,16 @@ fn fallback_options(opts: &MirrorOptions) -> Option<MirrorOptions> {
 
 /// Watch one scrcpy process: report exits, optionally respawn when the
 /// device drops (non-zero exit while auto-reconnect is on).
-fn monitor(app: AppHandle, mut opts: MirrorOptions, attempt: Attempt, stop: Arc<AtomicBool>) {
+///
+/// `shared` is the desktop's enforcer state, for the one thing a respawn has to
+/// put back that lives there: the window being fullscreen.
+fn monitor(
+    app: AppHandle,
+    mut opts: MirrorOptions,
+    attempt: Attempt,
+    stop: Arc<AtomicBool>,
+    shared: Option<Arc<Shared>>,
+) {
     let key = opts.session_key();
     let Attempt {
         mut child,
@@ -3925,6 +4115,7 @@ fn monitor(app: AppHandle, mut opts: MirrorOptions, attempt: Attempt, stop: Arc<
                 if !tried_fallback {
                     apply_stored_config(&app, &mut opts);
                 }
+                let remembered = reopen_where_it_was(&app, &mut opts);
                 apply_stored_density(&app, &mut opts);
                 match spawn_scrcpy(&app, &opts) {
                     Ok(new_child) => {
@@ -3933,6 +4124,14 @@ fn monitor(app: AppHandle, mut opts: MirrorOptions, attempt: Attempt, stop: Arc<
                         child = next.child;
                         display_id = next.display_id;
                         output = next.output;
+                        reshow_window(
+                            &app,
+                            &opts.serial,
+                            &key,
+                            pid,
+                            remembered,
+                            shared.clone().filter(|s| s.is_fullscreen()),
+                        );
                         emit_status(
                             &app,
                             MirrorEvent {
@@ -4258,6 +4457,9 @@ pub fn start_mirror(app: AppHandle, mut options: MirrorOptions) -> Result<Sessio
     // resolution/codec first: it rewrites the --new-display base that the
     // density is appended to
     apply_stored_config(&app, &mut options);
+    // A desktop that comes back — restarted for new settings, set up again
+    // after the phone undid it, moved onto Wi-Fi — opens where the last was.
+    let remembered = reopen_where_it_was(&app, &mut options);
     // desktop displays are born at the user's chosen density — no zoom flash
     apply_stored_density(&app, &mut options);
     let key = options.session_key();
@@ -4308,6 +4510,7 @@ pub fn start_mirror(app: AppHandle, mut options: MirrorOptions) -> Result<Sessio
     let stop = Arc::new(AtomicBool::new(false));
     let attempt = register_session(&app, &options, spawned, stop.clone());
     let pid = attempt.pid;
+    reshow_window(&app, &options.serial, &key, pid, remembered, None);
 
     // The phone's own log for as long as this session lives: scrcpy's server
     // logs there too, and so does our launcher. Not for the audio companion —
@@ -4330,17 +4533,18 @@ pub fn start_mirror(app: AppHandle, mut options: MirrorOptions) -> Result<Sessio
         },
     );
 
-    if options.freeform && options.new_display.is_some() && options.app_package.is_none() {
-        let size = options.new_display.as_deref().and_then(parse_display_size);
-        spawn_freeform_enforcer(
-            app.clone(),
-            options.serial.clone(),
-            key.clone(),
-            size,
-            options.flex.is_some(),
-            stop.clone(),
-        );
-    }
+    let shared = (options.freeform && options.new_display.is_some() && options.app_package.is_none())
+        .then(|| {
+            let size = options.new_display.as_deref().and_then(parse_display_size);
+            spawn_freeform_enforcer(
+                app.clone(),
+                options.serial.clone(),
+                key.clone(),
+                size,
+                options.flex.is_some(),
+                stop.clone(),
+            )
+        });
 
     // A desktop brings its sound along: the audio companion is spawned (or
     // not — "phone only") to match the stored choice. On a thread, because
@@ -4358,7 +4562,7 @@ pub fn start_mirror(app: AppHandle, mut options: MirrorOptions) -> Result<Sessio
         display_id: None,
     };
     let app2 = app.clone();
-    thread::spawn(move || monitor(app2, options, attempt, stop));
+    thread::spawn(move || monitor(app2, options, attempt, stop, shared));
     Ok(info)
 }
 
@@ -4945,6 +5149,29 @@ mod tests {
         let args = build_args(&opts);
         assert!(args.iter().any(|a| a == "--keep-active"));
         assert!(args.iter().any(|a| a == "--background-color=000000"));
+    }
+
+    /// scrcpy 5 exits at once — "--window-width and --window-height are
+    /// disabled when using -x/--flex-display" — so a desktop reopened where its
+    /// window was may say where, but never how big: the display says that.
+    #[test]
+    fn a_window_that_follows_its_display_is_placed_but_never_sized() {
+        let mut opts: MirrorOptions = serde_json::from_value(serde_json::json!({
+            "serial": "X",
+            "newDisplay": "804x1542/160",
+        }))
+        .expect("desktop options");
+        opts.window = Some(display::WindowRect { x: 128, y: 149, width: 804, height: 1542 });
+        opts.flex = Some(1.0);
+        let args = build_args(&opts);
+        assert!(args.iter().any(|a| a == "--window-x=128"));
+        assert!(args.iter().any(|a| a == "--window-y=149"));
+        assert!(!args.iter().any(|a| a.starts_with("--window-width") || a.starts_with("--window-height")));
+        // A display fitted once is still sized, so it shows one pixel for one.
+        opts.flex = None;
+        let args = build_args(&opts);
+        assert!(args.iter().any(|a| a == "--window-width=804"));
+        assert!(args.iter().any(|a| a == "--window-height=1542"));
     }
 
     /// The companion runs with --no-control, and scrcpy refuses to start with

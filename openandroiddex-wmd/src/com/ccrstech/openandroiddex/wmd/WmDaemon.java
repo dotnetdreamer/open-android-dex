@@ -585,21 +585,20 @@ public final class WmDaemon {
                 Object wct = Wm.newTransaction();
                 Wm.setBounds(wct, t.token, want);
                 Wm.setAppBounds(wct, t.token, app);
-                if (Wm.hasStartNewTransition()) {
-                    Wm.startNewTransition(wct);
-                } else {
-                    Wm.applyTransaction(wct);
-                }
+                Wm.transition(wct);
                 out.println("OK");
                 return;
             }
 
             case "FRONT": {
-                Wm.TaskRec t = Wm.taskById(i(a, 1), i(a, 2));
+                int d = i(a, 1);
+                Wm.TaskRec t = Wm.taskById(d, i(a, 2));
                 Object wct = Wm.newTransaction();
                 Wm.reorder(wct, t.token, true);
-                Wm.startNewTransition(wct);   // a raise should animate
-                out.println("OK");
+                Wm.transition(wct);   // a raise should animate
+                // Without a transition the raise may not have happened (Wm.transition).
+                boolean raised = Wm.hasStartNewTransition() || Wm.depth(d, t.taskId) == 0;
+                out.println(raised ? "OK" : "ERR not raised");
                 return;
             }
 
@@ -607,11 +606,17 @@ public final class WmDaemon {
                 // Just a restack. NOT a minimise: the fullscreen launcher occludes whatever
                 // lands at the bottom, so the window manager stops the task and it looks
                 // closed. Use HIDE for minimise.
-                Wm.TaskRec t = Wm.taskById(i(a, 1), i(a, 2));
+                int d = i(a, 1);
+                Wm.TaskRec t = Wm.taskById(d, i(a, 2));
+                int before = Wm.depth(d, t.taskId);
                 Object wct = Wm.newTransaction();
                 Wm.reorder(wct, t.token, false);
-                Wm.startNewTransition(wct);
-                out.println("OK");
+                Wm.transition(wct);
+                // As FRONT: a restack that did not happen is said so.
+                boolean lowered = Wm.hasStartNewTransition()
+                        || Wm.depth(d, t.taskId) > before
+                        || before == Wm.tasksOnDisplay(d).size() - 1;
+                out.println(lowered ? "OK" : "ERR not lowered");
                 return;
             }
 
@@ -619,7 +624,7 @@ public final class WmDaemon {
                 Wm.TaskRec t = Wm.taskById(i(a, 1), i(a, 2));
                 Object wct = Wm.newTransaction();
                 Wm.setHidden(wct, t.token, true);
-                Wm.startNewTransition(wct);   // minimising should animate
+                Wm.transition(wct);   // minimising should animate
                 out.println("OK");
                 return;
             }
@@ -629,7 +634,7 @@ public final class WmDaemon {
                 Object wct = Wm.newTransaction();
                 Wm.setHidden(wct, t.token, false);
                 Wm.reorder(wct, t.token, true);    // restore to the front, like a real WM
-                Wm.startNewTransition(wct);
+                Wm.transition(wct);
                 out.println("OK");
                 return;
             }

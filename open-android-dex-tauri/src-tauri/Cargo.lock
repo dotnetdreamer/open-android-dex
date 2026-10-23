@@ -4039,7 +4039,7 @@ dependencies = [
 
 [[package]]
 name = "open-android-dex-tauri"
-version = "0.3.23"
+version = "0.3.24"
 dependencies = [
  "log",
  "objc2",

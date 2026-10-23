@@ -433,6 +433,13 @@ async function main() {
   }
 
   // ── Phase C: the desktop ────────────────────────────────────────────────
+  // The desktop's video is a Unix socket on the phone (phone.rs), which a
+  // Windows daemon cannot dial nor Node stand in for, and Ctrl+C cannot be
+  // sent to a child there: kill('SIGINT') ends it outright.
+  if (process.platform === 'win32') {
+    console.log('phase C skipped — the desktop\'s video is a Unix socket, and Windows has none');
+    return;
+  }
   console.log('phase C — the desktop');
   await desktopPhase(daemon.peers);
 }

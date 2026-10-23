@@ -403,6 +403,18 @@ fn parse_task(line: &str) -> Option<Task> {
 /// The package whose task IS the desktop, rather than a window on it.
 const LAUNCHER: &str = "com.ccrstech.openandroiddex.launcher";
 
+/// The activity of that task. The launcher's other windows — its Settings, the
+/// task manager, every Linux app's window — are tasks of the same package, each
+/// with a taskAffinity of its own, so it is this that tells the desktop apart.
+const DESKTOP_ACTIVITY: &str = "com.ccrstech.openandroiddex.launcher.LauncherActivity";
+
+impl Task {
+    /// The desktop itself, rather than a window on it.
+    fn is_desktop(&self) -> bool {
+        self.package == LAUNCHER && self.activity == DESKTOP_ACTIVITY
+    }
+}
+
 /// Bring the desktop's own launcher back in front of whatever is covering it.
 ///
 /// THE WAY OUT. On a phone that can draw titlebars this is a convenience — the
@@ -419,9 +431,12 @@ const LAUNCHER: &str = "com.ccrstech.openandroiddex.launcher";
 pub fn desktop_home() -> Result<bool, String> {
     let wm = WmClient::new();
     // The good path, where the platform has the task API: reorder the launcher's
-    // existing task, which keeps its state and skips the intent entirely.
+    // existing task, which keeps its state and skips the intent entirely. The
+    // desktop's task, not the first of the launcher's: with its Settings or a
+    // Linux app's window open, that window was raised and the desktop stayed
+    // behind the app covering it.
     if let Some(display) = wm.desktop_display() {
-        if let Some(task) = wm.list(display).into_iter().find(|t| t.package == LAUNCHER) {
+        if let Some(task) = wm.list(display).into_iter().find(Task::is_desktop) {
             if wm.front(display, task.task_id) {
                 return Ok(true);
             }
@@ -437,24 +452,75 @@ pub fn desktop_home() -> Result<bool, String> {
 
 /// Close the topmost app window on the desktop.
 ///
-/// The launcher is skipped rather than closed: it is the desktop itself, and
-/// removing its task leaves a black display with nothing left to bring anything
-/// back. A desktop with no app on it answers false, which is not an error.
+/// The desktop itself is skipped rather than closed: removing its task leaves a
+/// black display with nothing left to bring anything back. A desktop with no
+/// window on it answers false, which is not an error.
+///
+/// The launcher's OTHER windows are closed like any window, but by the launcher
+/// (`ask_launcher_to_close`), because some of them must be asked: closing the
+/// Linux or Docker window ends what runs inside it. Passing them over, as this
+/// once did for the whole package, closed the app BEHIND the launcher's Settings
+/// instead — and below Android 14, with no caption to press, left nothing on a
+/// computer's screen that could close them at all.
 #[tauri::command(async)]
-pub fn desktop_close_top() -> Result<bool, String> {
+pub fn desktop_close_top(app: tauri::AppHandle) -> Result<bool, String> {
     let wm = WmClient::new();
     if let Some(display) = wm.desktop_display() {
         // LIST is topmost-first, so the first task that is not the desktop
         // itself is the window a person would call the one in front.
-        if let Some(task) = wm.list(display).into_iter().find(|t| t.package != LAUNCHER) {
+        if let Some(task) = wm.list(display).into_iter().find(|t| !t.is_desktop()) {
+            if task.package == LAUNCHER {
+                return Ok(ask_launcher_to_close(&app, &task));
+            }
             return Ok(wm.close(task.task_id));
         }
-        // The display answered and holds nothing but the launcher: an empty
+        // The display answered and holds nothing but the desktop: an empty
         // desktop, which is not a failure and must not fall through to a second
         // attempt that would say the same thing more slowly.
         return Ok(false);
     }
     Ok(wm.close_top())
+}
+
+/// Have the launcher close one of its own windows the way its caption's ✕
+/// does (LauncherActivity's "close"): asked first where that ends something
+/// running, else removed.
+fn ask_launcher_to_close(app: &tauri::AppHandle, task: &Task) -> bool {
+    // A class name of ours, but it came off the phone and goes into a shell.
+    if !task.activity.chars().all(|c| c.is_ascii_alphanumeric() || "._$".contains(c)) {
+        return false;
+    }
+    let Some(serial) = forwarded_serial(app) else {
+        return false;
+    };
+    let cmd = format!(
+        "am broadcast -a {LAUNCHER}.GESTURE -p {LAUNCHER} --es action close --ei task {} --es activity {}",
+        task.task_id, task.activity
+    );
+    match crate::adb::run_adb_quiet(app, &["-s", &serial, "shell", &cmd]) {
+        Ok(_) => true,
+        Err(e) => {
+            log::warn!("{serial}: could not ask the launcher to close task {}: {e}", task.task_id);
+            false
+        }
+    }
+}
+
+/// The phone the daemon client is talking to: the one `adb forward` points
+/// [`HOST_PORT`] at. The desktop commands take no serial — they act on the
+/// desktop the forward leads to — and what goes by adb has to name it.
+fn forwarded_serial(app: &tauri::AppHandle) -> Option<String> {
+    serial_forwarding(&crate::adb::run_adb_quiet(app, &["forward", "--list"]).ok()?)
+}
+
+/// `adb forward --list`'s "<serial> tcp:7191 tcp:7191", cut at the port rather
+/// than at the first space: a phone on wireless debugging can have a space in
+/// its serial.
+fn serial_forwarding(list: &str) -> Option<String> {
+    let host = format!(" tcp:{HOST_PORT} ");
+    list.lines()
+        .find_map(|l| l.find(&host).map(|at| l[..at].trim().to_string()))
+        .filter(|s| !s.is_empty())
 }
 
 #[cfg(test)]
@@ -475,6 +541,41 @@ mod tests {
         assert_eq!(t.app_top, 212);
         assert!(t.is_freeform());
         assert!(t.has_strip(), "app_top 212 > top 178");
+    }
+
+    #[test]
+    fn the_desktop_is_the_launchers_own_activity_not_its_other_windows() {
+        // LIST on the Galaxy A13, the launcher's Settings open over the desktop.
+        let settings = parse_task(
+            "TASK 0 2404 22 5 1 1 49 281 934 921 49 281 934 921 \
+             com.ccrstech.openandroiddex.launcher com.ccrstech.openandroiddex.launcher.SettingsActivity",
+        )
+        .unwrap();
+        let desktop = parse_task(
+            "TASK 1 2403 22 1 1 1 0 0 984 1202 0 0 984 1202 \
+             com.ccrstech.openandroiddex.launcher com.ccrstech.openandroiddex.launcher.LauncherActivity",
+        )
+        .unwrap();
+        assert!(!settings.is_desktop());
+        assert!(desktop.is_desktop());
+        assert_eq!(
+            [settings, desktop].into_iter().find(Task::is_desktop).map(|t| t.task_id),
+            Some(2403)
+        );
+    }
+
+    #[test]
+    fn finds_the_phone_the_daemon_port_is_forwarded_to() {
+        let list = "R58T51N3G2X tcp:27183 localabstract:scrcpy_1234\n\
+                    YPKRA6VS754L6XTO tcp:17191 tcp:7191\n\
+                    adb-R5CT30-vWgJpq (2)._adb-tls-connect._tcp tcp:7191 tcp:7191\n";
+        assert_eq!(
+            serial_forwarding(list).as_deref(),
+            Some("adb-R5CT30-vWgJpq (2)._adb-tls-connect._tcp")
+        );
+        assert_eq!(serial_forwarding("R58T51N3G2X tcp:7191 tcp:7191\n").as_deref(), Some("R58T51N3G2X"));
+        assert_eq!(serial_forwarding("R58T51N3G2X tcp:17191 tcp:7191\n"), None);
+        assert_eq!(serial_forwarding(""), None);
     }
 
     #[test]

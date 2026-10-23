@@ -39,6 +39,8 @@ const DESKTOP_RES = "1920x1080";
  * for the case where the backend never answers at all.
  */
 const LAUNCH_TIMEOUT_MS = 45_000;
+/** How long a launch waits once the phone has asked its owner about the install — adb.rs's INSTALL_TIMEOUT. */
+const PHONE_ANSWER_TIMEOUT_MS = 240_000;
 
 const ISSUES_URL = "https://github.com/dotnetdreamer/open-android-dex/issues";
 
@@ -94,6 +96,8 @@ export default function App() {
    * One-off feedback to a click goes to the toast instead.
    */
   const [notice, setNotice] = useState("");
+  /** The launcher's install is held up by a question on the phone (Play Protect). */
+  const [askedOnPhone, setAskedOnPhone] = useState(false);
   const { toast, say, dismiss } = useToast();
   const [tab, setTab] = useState<Tab>("desktop");
   /** Cable or Wi-Fi, on the connect screen. Wi-Fi first for someone who has used it before. */
@@ -244,6 +248,7 @@ export default function App() {
     sawDesktop.current = false;
     exiting.current = false;
     setNotice("");
+    setAskedOnPhone(false);
     setSwitching(false);
     setProgress({ step: 0, mode });
     setPhase({ kind: "launching", device });
@@ -304,20 +309,40 @@ export default function App() {
     };
   }, [failLaunch]);
 
+  // ── The phone stopped the launcher's install to ask its owner something ──
+  // Play Protect's "Send app for a security check?" is the usual one. The
+  // install waits on the answer without a word, so say where the hold-up is.
+  useEffect(() => {
+    const un = listen<{ serial: string }>("launch:phone-asks", () => {
+      logWarn("launch: the phone is asking about installing the launcher — waiting for an answer there");
+      setAskedOnPhone(true);
+      setNotice("Check your phone: it's asking about installing Open Android DeX. Answer it there, and the desktop carries on.");
+    });
+    return () => {
+      un.then((f) => f());
+    };
+  }, []);
+
   // ── Backstop: a launch that goes quiet must not spin forever ──
+  // Longer once the phone has asked its owner something: the answer can take
+  // a while, and the install itself gives up on its own after four minutes.
   useEffect(() => {
     if (phase.kind !== "launching") return;
+    const wait = askedOnPhone ? PHONE_ANSWER_TIMEOUT_MS : LAUNCH_TIMEOUT_MS;
     const timer = setTimeout(() => {
       if (phaseRef.current.kind !== "launching") return;
-      logError(`launch: nothing happened for ${LAUNCH_TIMEOUT_MS / 1000}s — giving up`);
+      logError(`launch: nothing happened for ${wait / 1000}s — giving up`);
       failLaunch(
-        "The desktop took too long to start.\n" +
-          "Unplug the phone, plug it back in and try again. If it keeps happening, the log " +
-          "has every step of this attempt — attach it to a bug report.",
+        askedOnPhone
+          ? "Your phone is still waiting for an answer about installing Open Android DeX.\n" +
+              "Answer it on the phone, then open the desktop again."
+          : "The desktop took too long to start.\n" +
+              "Unplug the phone, plug it back in and try again. If it keeps happening, the log " +
+              "has every step of this attempt — attach it to a bug report.",
       );
-    }, LAUNCH_TIMEOUT_MS);
+    }, wait);
     return () => clearTimeout(timer);
-  }, [phase, failLaunch]);
+  }, [phase, failLaunch, askedOnPhone]);
 
   // ── Auto-launch as soon as a ready device shows up ──
   useEffect(() => {

@@ -177,6 +177,31 @@ fn align_down(v: u32) -> u32 {
 /// window coordinates on every side combined (DISPLAY_MARGINS, screen.c).
 const SCRCPY_MARGINS: f64 = 96.0;
 
+/// The window scrcpy opens for a display that follows its window, `content`
+/// in window coordinates, on a main screen whose usable area is `usable`: the
+/// display's own size, shrunk to fit inside that area less scrcpy's margins,
+/// keeping its shape — get_optimal_size in screen.c, integer for integer. It
+/// takes no size of its own beside `--flex-display`, and a window that opens
+/// smaller than its display shows it scaled until it is next resized.
+pub fn scrcpy_window_for(content: (u32, u32), usable: (u32, u32)) -> (u32, u32) {
+    let (cw, ch) = (u64::from(content.0), u64::from(content.1));
+    if cw == 0 || ch == 0 {
+        return content;
+    }
+    let margins = SCRCPY_MARGINS as u64;
+    let mut w = cw.min(u64::from(usable.0).saturating_sub(margins));
+    let mut h = ch.min(u64::from(usable.1).saturating_sub(margins));
+    let optimal = h == w * ch / cw || w == h * cw / ch;
+    if !optimal {
+        if cw * h > ch * w {
+            h = ch * w / cw;
+        } else {
+            w = cw * h / ch;
+        }
+    }
+    (w as u32, h as u32)
+}
+
 /// A desktop that follows its window (`--flex-display`), started at the size
 /// scrcpy will open its window at on `screen` — the main screen, where SDL
 /// centres it — so the first frame already fills it one pixel for one.
@@ -294,6 +319,12 @@ pub fn measure_window_frame() {
 #[cfg(not(target_os = "macos"))]
 pub fn measure_window_frame() {}
 
+/// The title bar [`measure_window_frame`] measured, in points.
+#[cfg(target_os = "macos")]
+pub fn title_bar_pt() -> u32 {
+    TITLE_BAR_PT.load(Ordering::Relaxed)
+}
+
 /// The frame scrcpy's window gets on a Windows screen at `scale`.
 ///
 /// AdjustWindowRectExForDpi with SDL's style for a resizable titled window
@@ -408,6 +439,38 @@ pub fn scale_at(app: &AppHandle, x: f64, y: f64) -> Option<f64> {
         let (mx, my) = (f64::from(m.position().x) / s, f64::from(m.position().y) / s);
         let (mw, mh) = (f64::from(m.size().width) / s, f64::from(m.size().height) / s);
         (x >= mx && x < mx + mw && y >= my && y < my + mh).then_some(s)
+    })
+}
+
+/// Whether the rect (`x`, `y`, `w`, `h`), in global points, is exactly one
+/// screen's whole area — a window in a fullscreen Space.
+#[cfg(target_os = "macos")]
+pub fn covers_a_screen(app: &AppHandle, x: f64, y: f64, w: f64, h: f64) -> bool {
+    let Ok(monitors) = app.available_monitors() else {
+        return false;
+    };
+    monitors.iter().any(|m| {
+        let s = m.scale_factor();
+        let (mx, my) = (f64::from(m.position().x) / s, f64::from(m.position().y) / s);
+        let (mw, mh) = (f64::from(m.size().width) / s, f64::from(m.size().height) / s);
+        (x - mx).abs() < 1.0 && (y - my).abs() < 1.0 && (w - mw).abs() < 1.0 && (h - mh).abs() < 1.0
+    })
+}
+
+/// Whether a window opened at `rect` would be on a screen at all: its middle
+/// is on one. A remembered window can outlive the monitor it was on.
+pub fn on_a_screen(app: &AppHandle, rect: WindowRect) -> bool {
+    let Ok(monitors) = app.available_monitors() else {
+        return false;
+    };
+    let cx = f64::from(rect.x) + f64::from(rect.width) / 2.0;
+    let cy = f64::from(rect.y) + f64::from(rect.height) / 2.0;
+    monitors.iter().any(|m| {
+        // Window coordinates are points on macOS, pixels elsewhere (Units).
+        let s = if cfg!(target_os = "macos") { m.scale_factor() } else { 1.0 };
+        let (mx, my) = (f64::from(m.position().x) / s, f64::from(m.position().y) / s);
+        let (mw, mh) = (f64::from(m.size().width) / s, f64::from(m.size().height) / s);
+        cx >= mx && cx < mx + mw && cy >= my && cy < my + mh
     })
 }
 
@@ -583,6 +646,28 @@ mod tests {
             units: Units::Points,
             place: true,
         }
+    }
+
+    #[test]
+    fn scrcpy_opens_a_display_that_fits_at_its_own_size() {
+        // The Galaxy A13's desktop, windowed on this PC's portrait screen
+        // (work area 1080x1872, so scrcpy allows 984x1776).
+        assert_eq!(scrcpy_window_for((804, 1542), (1080, 1872)), (804, 1542));
+        assert_eq!(scrcpy_window_for((984, 1776), (1080, 1872)), (984, 1776));
+    }
+
+    #[test]
+    fn scrcpy_shrinks_a_bigger_display_keeping_its_shape() {
+        // Dragged out to the screen's height: 1776 tall is the most it opens at.
+        let (w, h) = scrcpy_window_for((804, 1900), (1080, 1872));
+        assert_eq!(h, 1776);
+        assert_eq!(w, 804 * 1776 / 1900);
+        // Too wide instead: the width is what gives.
+        let (w, h) = scrcpy_window_for((1060, 600), (1080, 1872));
+        assert_eq!((w, h), (984, 600 * 984 / 1060));
+        // A maximized window's display, which is reopened scaled and then
+        // maximized again.
+        assert_eq!(scrcpy_window_for((1080, 1848), (1080, 1872)), (984, 1848 * 984 / 1080));
     }
 
     #[test]

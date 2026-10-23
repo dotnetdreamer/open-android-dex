@@ -1516,36 +1516,15 @@ public final class CaptionService extends AccessibilityService {
     /**
      * ✕ — a real close (wmd removeTask), not One UI's hide.
      *
-     * The Linux window is the exception: closing it ends a container the user
-     * may have unsaved work inside, and removing the task gives the activity no
-     * opportunity to ask first. So that one is ASKED rather than closed, and it
-     * closes itself once the user confirms. Everything else, including our own
-     * Settings window, closes here as before.
+     * Our own windows that would end something running — Linux, Docker, File
+     * transfer, a Linux app's — are ASKED rather than closed, and close
+     * themselves once the user confirms (OwnWindows.askToClose). Everything
+     * else, including our own Settings window, closes here as before.
      */
     private void onClose(WmClient.Task task) {
         final int display = task.displayId;
         final int id = task.taskId;
-        // The Docker window is asked for the same reason as the Linux one: its
-        // ✕ stops a machine with the user's running containers in it, and a
-        // task removal gives the activity no chance to say so.
-        // The File transfer window joins them for the same reason once more:
-        // its ✕ can land mid-copy, and a half-copied file the user was never
-        // warned about is worse than one more confirmation.
-        if (getPackageName().equals(task.pkg)
-                && (LinuxActivity.class.getName().equals(task.activity)
-                || DockerActivity.class.getName().equals(task.activity)
-                || FileTransferActivity.class.getName().equals(task.activity))) {
-            sendBroadcast(new android.content.Intent(LauncherActivity.ACTION_CLOSE_WINDOW)
-                    .setPackage(getPackageName())
-                    .putExtra("activity", task.activity));
-            return;
-        }
-        // A Linux app's window closes the way any window manager closes one:
-        // the app is asked (WM_DELETE_WINDOW), and may ask about unsaved work
-        // first. The window, and its task with it, goes when the app lets it.
-        if (getPackageName().equals(task.pkg)
-                && LinuxWindowActivity.class.getName().equals(task.activity)
-                && LinuxWindows.closeTask(task.taskId)) {
+        if (getPackageName().equals(task.pkg) && OwnWindows.askToClose(this, id, task.activity)) {
             return;
         }
         wm.post(() -> {

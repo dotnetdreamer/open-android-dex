@@ -138,7 +138,9 @@ function java(main, mainArgs, onLine) {
     rest += d;
     let i;
     while ((i = rest.indexOf("\n")) >= 0) {
-      const line = rest.slice(0, i);
+      // A JVM on Windows ends its lines in CRLF, and every line here is
+      // compared whole: '{"offered":true}\r' never triggered the paste.
+      const line = rest.slice(0, i).replace(/\r$/, "");
       rest = rest.slice(i + 1);
       lines.push(line);
       onLine?.(line);
@@ -329,7 +331,7 @@ async function onDevice() {
   const at = args.indexOf("--device");
   let serial = args[at + 1] && !args[at + 1].startsWith("--") ? args[at + 1] : null;
   if (!serial) {
-    const list = spawnSync(ADB, ["devices"], { encoding: "utf8" }).stdout.split("\n").slice(1);
+    const list = spawnSync(ADB, ["devices"], { encoding: "utf8" }).stdout.split(/\r?\n/).slice(1);
     const ready = list.map((l) => l.split("\t")).filter((p) => p[1] === "device");
     if (ready.length !== 1) {
       check("exactly one phone on adb (or name one: --device <serial>)", false, `${ready.length}`);
