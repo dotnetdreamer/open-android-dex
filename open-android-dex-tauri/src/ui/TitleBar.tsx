@@ -4,11 +4,11 @@ import { IS_MAC, TITLEBAR_LEAD } from "../lib/host";
 import { Icon } from "./Icon";
 import { Segmented } from "./kit";
 
-export type Tab = "desktop" | "linux";
+export type Tab = "desktop" | "apps" | "linux";
 
 /**
- * The window's top strip: the app's name, the switch between the two things
- * it does, and the help menu.
+ * The window's top strip: the app's name, the switch between the things it
+ * does, and the help menu.
  *
  * The caption buttons are ours on Windows and Linux and the system's on macOS,
  * where `titleBarStyle: "Overlay"` floats the real traffic lights over this
@@ -42,6 +42,7 @@ export function TitleBar({
         onChange={onTab}
         options={[
           { value: "desktop", label: "Desktop", icon: "laptop", busy: desktopBusy && tab !== "desktop" },
+          { value: "apps", label: "Apps", icon: "apps" },
           { value: "linux", label: "Linux", icon: "terminal" },
         ]}
       />

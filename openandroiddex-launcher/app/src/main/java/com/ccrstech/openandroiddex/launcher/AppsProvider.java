@@ -1,0 +1,224 @@
+package com.ccrstech.openandroiddex.launcher;
+
+import android.content.ContentProvider;
+import android.content.ContentValues;
+import android.content.Context;
+import android.database.Cursor;
+import android.graphics.Bitmap;
+import android.net.Uri;
+import android.os.Binder;
+import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
+import android.util.Base64;
+
+import org.json.JSONArray;
+import org.json.JSONObject;
+
+import java.io.ByteArrayOutputStream;
+import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+
+/**
+ * The phone's Linux apps, for a computer that shows the phone's apps in
+ * windows of its own (doc/apps-on-pc.md, "Linux apps").
+ *
+ * <p>The computer's half on the phone — the app server, the shell's process —
+ * cannot see the guest: it lives in this app's own storage. So it asks here,
+ * in-process and as the shell, through these methods; each answers with one
+ * {@code json} extra:
+ *
+ * <ul>
+ * <li>{@code linux.apps} — whether Linux can run here and is installed, and
+ *     its apps: what XFCE's Applications menu lists.</li>
+ * <li>{@code linux.icon} {@code {id, px}} — one app's icon, a PNG in base64.</li>
+ * <li>{@code linux.run} {@code {id, w, h, dpi}} — open it, its windows bound
+ *     for the computer: the window session starts at that size and density
+ *     if it is not up. {@code ok} false, with a {@code message}, when it cannot
+ *     be: the phone's own desktop has the window session.</li>
+ * <li>{@code linux.events} {@code {wait}} — what happened to its windows
+ *     since the last call (opened, retitled, closed), waiting up to
+ *     {@code wait} ms for something to: the app server asks again at once.</li>
+ * <li>{@code linux.close} {@code {xid}} — ask the app to close a window, as
+ *     the computer's ✕ does; the app may ask about unsaved work first.</li>
+ * <li>{@code linux.install} — set Linux up, as opening it on the phone does:
+ *     the computer's Apps page offers it when the phone can run Linux and has
+ *     none yet, or its setup stopped.</li>
+ * </ul>
+ *
+ * <p>{@code linux.apps} also says how far the setup is ({@code phase},
+ * {@code pct}): Linux.readStatus's reading of the guest's state.env.
+ *
+ * <b>Only the shell may call this</b>, as {@link RemoteProvider}: the manifest
+ * guards it with {@code android.permission.DUMP}, and {@link #call} checks the
+ * uid itself, because Android applies no permission check to {@code call()}.
+ */
+public class AppsProvider extends ContentProvider {
+
+    private static final int SHELL_UID = 2000;
+    private static final int ROOT_UID = 0;
+    private static final long LIST_WAIT_S = 20;
+    private static final long EVENTS_WAIT_MAX_MS = 30_000;
+
+    @Override
+    public boolean onCreate() {
+        return true;
+    }
+
+    @Override
+    public Bundle call(String method, String arg, Bundle extras) {
+        int uid = Binder.getCallingUid();
+        if (uid != SHELL_UID && uid != ROOT_UID) {
+            throw new SecurityException("the phone's apps on a computer are for adb only");
+        }
+        Context ctx = getContext();
+        JSONObject out = new JSONObject();
+        long token = Binder.clearCallingIdentity();
+        try {
+            JSONObject in = arg == null || arg.isEmpty() ? new JSONObject() : new JSONObject(arg);
+            LinuxWindows windows = LinuxWindows.get(ctx);
+            switch (method == null ? "" : method) {
+                case "linux.apps": {
+                    boolean supported = Linux.abiSupported();
+                    boolean installed = supported && Linux.isInstalled(ctx);
+                    out.put("supported", supported).put("installed", installed);
+                    if (installed) {
+                        Linux.Status st = Linux.readStatus(ctx);
+                        out.put("phase", st.phase).put("pct", st.pct);
+                    }
+                    JSONArray list = new JSONArray();
+                    if (installed) {
+                        CountDownLatch done = new CountDownLatch(1);
+                        windows.loadApps(done::countDown);
+                        done.await(LIST_WAIT_S, TimeUnit.SECONDS);
+                        for (LinuxApps.App a : windows.apps()) {
+                            list.put(new JSONObject().put("id", a.id).put("name", a.name)
+                                    .put("cls", a.wmClass).put("comment", a.comment));
+                        }
+                    }
+                    out.put("list", list);
+                    break;
+                }
+                case "linux.icon": {
+                    LinuxApps.App a = find(windows, in.optString("id"));
+                    int px = Math.max(16, Math.min(256, in.optInt("px", 96)));
+                    Bitmap b = a == null ? null : windows.appIcon(a);
+                    if (b == null && a != null && a.icon != null) b = LinuxWindows.decodeIcon(a.icon, px);
+                    if (b != null) out.put("png", png(b, px));
+                    break;
+                }
+                case "linux.run": {
+                    LinuxApps.App a = find(windows, in.optString("id"));
+                    if (a == null) {
+                        out.put("ok", false).put("message", "no Linux app " + in.optString("id"));
+                        break;
+                    }
+                    int w = in.optInt("w", 1280);
+                    int h = in.optInt("h", 800);
+                    int dpi = in.optInt("dpi", 96);
+                    String[] refused = new String[1];
+                    onMain(() -> refused[0] = windows.launchForPc(a, w, h, dpi));
+                    if (refused[0] != null) out.put("ok", false).put("message", refused[0]);
+                    else out.put("ok", true);
+                    break;
+                }
+                case "linux.events": {
+                    long wait = Math.max(0, Math.min(EVENTS_WAIT_MAX_MS, in.optLong("wait", 10_000)));
+                    out.put("events", windows.takePcEvents(wait)).put("pc", windows.forPc());
+                    break;
+                }
+                case "linux.install": {
+                    if (!Linux.abiSupported()) {
+                        out.put("ok", false).put("message", "this phone cannot run Linux");
+                        break;
+                    }
+                    // Asked for by a person on the computer: an earlier uninstall is undone.
+                    Linux.setUninstalled(ctx, false);
+                    LinuxService.provision(ctx);
+                    out.put("ok", true);
+                    break;
+                }
+                case "linux.close": {
+                    int xid = in.optInt("xid");
+                    onMain(() -> windows.closeXid(xid));
+                    out.put("ok", true);
+                    break;
+                }
+                default:
+                    out.put("ok", false).put("message", "no method " + method);
+            }
+        } catch (Exception e) {
+            try {
+                out.put("ok", false).put("message", e.toString());
+            } catch (Exception ignored) {
+            }
+        } finally {
+            Binder.restoreCallingIdentity(token);
+        }
+        Bundle b = new Bundle();
+        b.putString("json", out.toString());
+        return b;
+    }
+
+    private static LinuxApps.App find(LinuxWindows windows, String id) {
+        List<LinuxApps.App> apps = windows.apps();
+        if (apps.isEmpty()) {
+            CountDownLatch done = new CountDownLatch(1);
+            windows.loadApps(done::countDown);
+            try {
+                done.await(LIST_WAIT_S, TimeUnit.SECONDS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+            apps = windows.apps();
+        }
+        for (LinuxApps.App a : apps) if (a.id.equals(id)) return a;
+        return null;
+    }
+
+    /** LinuxWindows' own thread is the main one; a binder thread waits for its turn there. */
+    private static void onMain(Runnable r) throws InterruptedException {
+        CountDownLatch done = new CountDownLatch(1);
+        new Handler(Looper.getMainLooper()).post(() -> {
+            try {
+                r.run();
+            } finally {
+                done.countDown();
+            }
+        });
+        done.await(5, TimeUnit.SECONDS);
+    }
+
+    private static String png(Bitmap b, int px) {
+        Bitmap scaled = b.getWidth() == px && b.getHeight() == px ? b : Bitmap.createScaledBitmap(b, px, px, true);
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        scaled.compress(Bitmap.CompressFormat.PNG, 100, out);
+        return Base64.encodeToString(out.toByteArray(), Base64.NO_WRAP);
+    }
+
+    @Override
+    public Cursor query(Uri uri, String[] projection, String selection, String[] selectionArgs, String sortOrder) {
+        return null;
+    }
+
+    @Override
+    public String getType(Uri uri) {
+        return null;
+    }
+
+    @Override
+    public Uri insert(Uri uri, ContentValues values) {
+        return null;
+    }
+
+    @Override
+    public int delete(Uri uri, String selection, String[] selectionArgs) {
+        return 0;
+    }
+
+    @Override
+    public int update(Uri uri, ContentValues values, String selection, String[] selectionArgs) {
+        return 0;
+    }
+}

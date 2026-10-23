@@ -36,6 +36,7 @@ public class LinuxWindowActivity extends Activity {
     private LinuxWindows windows;
     private LinuxWindows.Entry entry;
     private LinuxWinView view;
+    private FrameLayout root;
     private boolean listening;
 
     /** The caption's ✕ for this task: the app is asked, not the task removed. */
@@ -65,7 +66,7 @@ public class LinuxWindowActivity extends Activity {
             finishAndRemoveTask();
             return;
         }
-        FrameLayout root = new FrameLayout(this);
+        root = new FrameLayout(this);
         root.setBackgroundColor(0xff000000);
         // The caption strip is the desktop's: the content starts below it.
         root.setOnApplyWindowInsetsListener((v, insets) -> {
@@ -156,6 +157,30 @@ public class LinuxWindowActivity extends Activity {
     public void onConfigurationChanged(android.content.res.Configuration newConfig) {
         super.onConfigurationChanged(newConfig);
         if (view != null) view.place();
+    }
+
+    // ── a menu inside this window: on a computer (LinuxWindows.showPopupInWindow) ──
+
+    /** Show {@code popup} over the window, at x, y, w × h in the window's pixels. */
+    void showPopup(android.view.View popup, int x, int y, int w, int h) {
+        if (root == null) return;
+        root.addView(popup, popupParams(x, y, w, h));
+    }
+
+    void movePopup(android.view.View popup, int x, int y, int w, int h) {
+        if (popup.getParent() == root) popup.setLayoutParams(popupParams(x, y, w, h));
+    }
+
+    void hidePopup(android.view.View popup) {
+        if (root != null && popup.getParent() == root) root.removeView(popup);
+    }
+
+    private FrameLayout.LayoutParams popupParams(int x, int y, int w, int h) {
+        FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(w, h);
+        // The window's content starts after the root's padding (the insets, none on a computer's display).
+        lp.leftMargin = x - root.getPaddingLeft();
+        lp.topMargin = y - root.getPaddingTop();
+        return lp;
     }
 
     /** The app closed its window, or the session ended: this task goes with it. */

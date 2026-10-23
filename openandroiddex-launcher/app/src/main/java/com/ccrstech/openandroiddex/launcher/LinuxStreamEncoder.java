@@ -44,11 +44,17 @@ import java.util.List;
  * GL context. The encoded output is drained on a thread of its own and handed
  * to {@link Output}, which may block: that is how a slow link slows the
  * encoder down rather than piling frames up.
+ *
+ * <p>The choice of encoder and its configuration ({@link #candidates},
+ * {@link #fit}, {@link #configure}) are public: the app windows on the computer
+ * (openandroiddex-wmd, AppVideo) feed a hardware encoder the same way, from a
+ * virtual display instead of a texture of Xvnc's pixels, and the window
+ * daemon's dex compiles this file for them.
  */
-final class LinuxStreamEncoder {
+public final class LinuxStreamEncoder {
 
-    static final int FLAG_KEY = 1;
-    static final int FLAG_CONFIG = 2;
+    public static final int FLAG_KEY = 1;
+    public static final int FLAG_CONFIG = 2;
 
     private static final String MIME = MediaFormat.MIMETYPE_VIDEO_AVC;
     /** EGL_RECORDABLE_ANDROID: a config the encoder's surface will take. */
@@ -59,7 +65,7 @@ final class LinuxStreamEncoder {
     private static final long REPEAT_AFTER_US = 100_000;
 
     /** Where the encoded units go, on the drain thread. */
-    interface Output {
+    public interface Output {
         void packet(byte[] data, int len, long ptsUs, int flags) throws IOException;
 
         /** The encoder stopped by itself. */
@@ -183,7 +189,7 @@ final class LinuxStreamEncoder {
     }
 
     /** Encoders for H.264 that take a surface, hardware first. */
-    private static List<MediaCodecInfo> candidates() {
+    public static List<MediaCodecInfo> candidates() {
         List<MediaCodecInfo> hw = new ArrayList<>(), sw = new ArrayList<>();
         for (MediaCodecInfo info : new MediaCodecList(MediaCodecList.REGULAR_CODECS).getCodecInfos()) {
             if (!info.isEncoder()) continue;
@@ -205,7 +211,7 @@ final class LinuxStreamEncoder {
         return hw;
     }
 
-    private static boolean isHardware(MediaCodecInfo info) {
+    public static boolean isHardware(MediaCodecInfo info) {
         if (Build.VERSION.SDK_INT >= 29) return info.isHardwareAccelerated();
         String n = info.getName().toLowerCase(java.util.Locale.ROOT);
         return !(n.startsWith("omx.google.") || n.startsWith("c2.android.") || n.contains(".sw."));
@@ -216,7 +222,7 @@ final class LinuxStreamEncoder {
      * to the encoder's alignment, if the encoder takes that at {@code fps};
      * otherwise the largest step down that it does. Null if none.
      */
-    static int[] fit(MediaCodecInfo.VideoCapabilities vc, int w, int h, int fps) {
+    public static int[] fit(MediaCodecInfo.VideoCapabilities vc, int w, int h, int fps) {
         int wa = Math.max(2, vc.getWidthAlignment());
         int ha = Math.max(2, vc.getHeightAlignment());
         double[] steps = {1.0, 0.875, 0.75, 2.0 / 3.0, 0.5};
@@ -241,7 +247,7 @@ final class LinuxStreamEncoder {
     }
 
     /** @return which attempt took: 0 with every low-latency key, 1 the plain one */
-    private static int configure(MediaCodec codec, MediaCodecInfo info, int w, int h, int bitrate, int fps) {
+    public static int configure(MediaCodec codec, MediaCodecInfo info, int w, int h, int bitrate, int fps) {
         MediaCodecInfo.CodecCapabilities caps = info.getCapabilitiesForType(MIME);
         // Everything that makes it faster first; if the encoder will not take
         // the lot, again with only what every encoder takes.
@@ -294,7 +300,7 @@ final class LinuxStreamEncoder {
     }
 
     /** The lowest H.264 level that holds this many macroblocks, per frame and per second. */
-    static int levelFor(int w, int h, int fps) {
+    public static int levelFor(int w, int h, int fps) {
         long mbs = (long) ((w + 15) / 16) * ((h + 15) / 16);
         long rate = mbs * fps;
         if (mbs <= 8192 && rate <= 245760) return MediaCodecInfo.CodecProfileLevel.AVCLevel4;

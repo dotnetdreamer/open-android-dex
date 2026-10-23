@@ -463,6 +463,122 @@
     border-radius: var(--r-md);
   }
 
+  /* ── The phone's apps (Apps tab) ──────────────────────────────────── */
+
+  /* A launcher's grid: as many columns as fit, every tile the same width. */
+  .apps-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(92px, 1fr));
+    gap: 6px 4px;
+  }
+  .app-tile {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 7px;
+    padding: 12px 4px 10px;
+    border-radius: var(--r-md);
+    transition: background 120ms ease;
+  }
+  .app-tile:hover {
+    background: var(--surface-1);
+  }
+  .app-tile:active .app-icon {
+    transform: scale(0.94);
+  }
+  .app-icon {
+    position: relative;
+    display: inline-flex;
+    width: 52px;
+    height: 52px;
+    transition: transform 140ms var(--ease-spring);
+  }
+  .app-icon img {
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    filter: drop-shadow(0 3px 6px rgba(0, 0, 0, 0.35));
+  }
+  .app-icon-blank {
+    width: 100%;
+    height: 100%;
+    border-radius: 30%;
+    background: var(--surface-3);
+  }
+  /* The phone's own launcher marks its Linux apps the same way. */
+  .app-badge {
+    position: absolute;
+    left: -3px;
+    bottom: -3px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 18px;
+    height: 18px;
+    border-radius: 9px;
+    color: #f3f5f9;
+    background: #e95420;
+    box-shadow: 0 0 0 2px var(--bg);
+  }
+  .app-icon-spinner {
+    position: absolute;
+    right: -4px;
+    bottom: -4px;
+    width: 18px;
+    height: 18px;
+    background: var(--bg);
+  }
+  .app-label {
+    display: -webkit-box;
+    max-width: 100%;
+    overflow: hidden;
+    font-size: 12px;
+    line-height: 15px;
+    text-align: center;
+    color: var(--ink-2);
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    overflow-wrap: anywhere;
+  }
+  .app-tile:hover .app-label {
+    color: var(--ink-1);
+  }
+  /* Under the icon of an app that has a window open, as a taskbar marks one. */
+  .app-dot {
+    position: absolute;
+    top: 66px;
+    left: 50%;
+    width: 4px;
+    height: 4px;
+    margin-left: -2px;
+    border-radius: 2px;
+    background: var(--accent);
+    opacity: 0;
+    transition:
+      opacity 160ms ease,
+      width 160ms ease,
+      margin-left 160ms ease;
+  }
+  .app-tile[data-open] .app-dot {
+    opacity: 1;
+    width: 14px;
+    margin-left: -7px;
+  }
+  .apps-pref {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 12px 14px;
+    border-radius: var(--r-lg);
+    background: var(--surface-1);
+    box-shadow: inset 0 0 0 1px var(--line);
+  }
+  .apps-pref input {
+    margin-top: 2px;
+    accent-color: var(--accent);
+  }
+
   /* ── Callouts ─────────────────────────────────────────────────────── */
 
   .callout {

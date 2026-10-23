@@ -185,8 +185,8 @@ final class LinuxWinView extends SurfaceView implements SurfaceHolder.Callback {
         int h = (int) scrollH;
         scrollV -= v;
         scrollH -= h;
-        if (v != 0) wm.wheel(x, y, -v, false);
-        if (h != 0) wm.wheel(x, y, h, true);
+        if (v != 0) wm.wheel(popup ? null : win, x, y, -v, false);
+        if (h != 0) wm.wheel(popup ? null : win, x, y, h, true);
         return true;
     }
 

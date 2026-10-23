@@ -1,0 +1,523 @@
+# The phone's apps in windows of their own
+
+The computer used to show a phone one way: its whole desktop, in scrcpy's
+window. Now the app's **Apps** page lists what the phone's own launcher lists,
+with the real names and icons, and a click opens that one app in a native
+window on the computer: sized like a phone, sharp at the screen's scale, with
+the system's own window controls, its picture decoded by the computer's
+graphics hardware. No desktop is set up on the phone at all. Closing the
+window hands the app back to the phone, where it was. The phone's Linux apps
+are on the same page and open the same way.
+
+It is lighter than the desktop because only the app's own pixels are
+composed, encoded, sent and decoded, and an app that is still costs nothing.
+It is faster to open than scrcpy's per-app windows because the phone's half is
+one process that stays up: a click costs a display, a launch and an encoder,
+never a JVM.
+
+This record exists for the reason the others do: several decisions below look
+arbitrary until you know what was measured, or what the platform refuses.
+
+## Shape
+
+| Piece | File | What it owns |
+| --- | --- | --- |
+| The page | `src/features/apps/AppsPanel.tsx`, `App.tsx` | the list, the icons, a click, "Open my apps here when my phone connects" |
+| The phone's server | `openandroiddex-wmd/…/AppServer.java` | one process per phone: the socket, the control connection, the warm-up, keeping the displays awake |
+| What the phone has | `AppCatalog.java`, `PhoneContext.java`, `Providers.java` | the launcher's apps and their icons, as the shell; the Linux apps, from the launcher |
+| A window, phone side | `AppWindow.java`, `AppVideo.java`, `AppTasks.java`, `AppInput.java` | a display, the app started on it, its encoder, its input, the watcher that notices the app has gone |
+| The clipboard | `AppClipboard.java`, `apps/clipboard.rs` | one for the phone, both ways |
+| The wire | `Wire.java`, `apps/wire.rs` | the framing, both ends |
+| The phone's half, from here | `apps/host.rs`, `apps/adbsock.rs` | starting the server, the control connection, reaching a socket on the phone |
+| A window's link | `apps/link.rs` | one window's own socket to the server, its reader, writer and clock; what both windows share |
+| The window, Windows | `apps/win/mod.rs`, `apps/win/frame.rs`, `apps/keys.rs` | a Win32 window, its title bar, the mouse and keyboard as Android takes them |
+| The picture, Windows | `apps/win/render.rs` | decoding, drawing, presenting |
+| The window, Mac | `apps/mac/mod.rs`, `apps/mac/video.rs`, `apps/h264.rs`, `apps/keys.rs` (`mac`) | an AppKit window, its input, the display layer macOS decodes into |
+| Linux apps | launcher `AppsProvider.java`, `LinuxWindows.java`, `LinuxWindowActivity.java` | the guest's apps and icons, starting one, its X window on an app window's display |
+| Sound | `scrcpy.rs` (the audio companion) | the phone's sound here while any of its apps has a window |
+| Probe | `src-tauri/examples/app_window.rs` | one window, without the rest of the app (Windows) |
+
+Windows and Mac have windows of this app's own. On a Linux computer a click
+opens an Android app in scrcpy's per-app window (`--new-display
+--start-app`), and the phone's Linux apps are not listed there: scrcpy can
+only start Android packages.
+
+## Why not scrcpy's per-app windows
+
+scrcpy 3 can already start an app on a display of its own. Measured on a
+Galaxy A13 over USB, the same app at the same size, scrcpy's window and this
+one taking turns:
+
+| | scrcpy, a window per app | this |
+| --- | --- | --- |
+| A click on the Apps page to the first picture presented | 1.6–2.0 s, every time | 243–318 ms, about 260 typically |
+| A pinned taskbar button, nothing running yet, to the first picture presented | the same 1.6–2.0 s | 1.72–1.77 s |
+| Phone memory of the servers, one window (PSS) | 76.9 MB: its server and its clean-up process, a JVM each | 56.9 MB: one server, shared by every window |
+| Phone CPU, everything the window involves, the Clock's stopwatch at 15 fps | 49.8–50.5 % of a core | 50.5–52.6 % |
+| From the phone composing a frame to Windows presenting it | not measurable | 7–9 ms median, 95 % within 10–15 ms |
+| …and to the refresh it goes out on the screen at | not measurable | 12–28 ms median, 95 % within 36–43 ms |
+| Computer CPU time per frame, in runs at the same clock state | 3.7–3.8 M time-stamp cycles | 5.6–5.8 M |
+
+What each row is:
+
+- **A click** is timed from the moment the page's request reaches this app to
+  the first frame the window presents. scrcpy's is its process starting to
+  its first frame: a new server each time, so there is no warm case.
+- **A pinned button** is timed from this app's process starting, in a debug
+  build: about 0.4 s of it is the app itself starting, before it asks for the
+  phone's server; then 0.95–1 s for the server, of which its JVM is 0.75–0.8
+  s; then 330–350 ms for the window. scrcpy pays a JVM too, so the two are
+  close; this one opens every later app in about 260 ms, and scrcpy's in 1.6–2.0 s again.
+- **Memory** is PSS: pages shared between processes are split between them,
+  not counted in each. Counted as RSS, the same runs come to 144 MB and 88.5
+  MB, which overstates what scrcpy's two processes really add. The app, the
+  codec and the compositor are the same on both sides and not counted.
+- **Phone CPU** is every process the window involves: the servers, the media
+  codec, SurfaceFlinger, system_server and the app. The codec (6.9–7.3 %),
+  SurfaceFlinger (18.0–18.2 %) and the app (18.5–18.8 %) cost the same on both
+  sides. This server costs 3.9–4.0 % to scrcpy's 3.5–3.6 %. system_server was
+  at scrcpy's 2.5–2.7 % in three runs of seven and at 4.5–5.0 % in four, which
+  scrcpy's never was; it is not the task watcher (slowed to a minute, the same
+  happened). Not yet explained.
+- **Latency** is in "Measuring it". This computer's screen is composed at
+  55.5 Hz, every 18 ms, which is most of the difference between the two rows.
+- **Computer CPU** is in "The picture" and "Measuring it": the time-stamp
+  counter runs at a fixed rate, so these are CPU time, and both windows came
+  out lower (1.6–1.9 M) in runs where the processor ran faster.
+
+Each scrcpy window is a server of its own, so each pays for a JVM, a display
+manager and a codec list. Here they are paid once.
+
+## The phone's server
+
+One per phone, started as soon as the Apps page is first looked at (so its JVM
+is up before anyone clicks), under `app_process` as the shell, from the window
+daemon's dex pushed to `/data/local/tmp/oadx-apps.dex` by rename, so a running
+server keeps the copy it started with. It is held by the `adb shell` that
+started it and ends when that shell's stdin closes: the app quitting, the
+cable pulled, adbd restarting. Every app on its displays then goes back to the
+phone. On an A13 it is ready 740–780 ms after its process starts (it logs
+how long), and the push and rename before that take about 110 ms.
+
+**Warm-up.** Everything the first window would otherwise pay for is paid while
+nobody waits: the GPU driver (`eglInitialize`), the codec list, one encoder
+made and let go, the display and package managers. Cold, an A13's first
+window spent 534 ms on its display and 404 ms on its encoder; warm, its first
+frame comes 222–243 ms after the window asks.
+
+But a server started *for* a window — a pinned taskbar button, nothing running
+yet — is started with `--no-warm-up`: the window pays those costs anyway, and
+the warm-up beside it only slowed it. On that path everything else waits for
+the window too. The page's list of apps waits (up to four seconds) while a
+window of that phone is opening, and the phone's sound starts once the
+picture is there: its companion is a second JVM starting on the phone. Each
+of the three had made the first frame later; together they took the pinned
+start from 3.7 s to 1.72–1.77 s, the window's own part from 1.37 s to 330–350
+ms.
+
+**The list and the icons** come from the package manager in this process,
+through `PhoneContext` — `cmd package` gives no labels and no icons. Two things
+the framework assumes of an app process had to be made true: an `Application`
+on the bare ActivityThread (an `AdaptiveIconDrawable` needs one), and the
+shell's own ContentResolver (Samsung's live icons, the calendar's date, ask
+for it and refuse "android"). The A13's 26 apps list in 13–18 ms warm; an icon
+is 25–40 ms and comes once, then only when the app is updated.
+
+## A window's display
+
+A virtual display per window, owned by the shell:
+
+- `PUBLIC | PRESENTATION | OWN_CONTENT_ONLY | SUPPORTS_TOUCH` always.
+- `TRUSTED` from Android 11 where the shell may make one. Android 12's shell
+  lacks `ADD_TRUSTED_DISPLAY`, so on an A13 the display is untrusted: it gets
+  the keyboard only once its task is focused (`setFocusedTask` when the window
+  is clicked), and Android 12 shows the phone's own soft keyboard on the
+  phone's screen when a text field takes focus — the IME policy that hides it
+  needs a trusted display. (The first Back after that closes the phone's
+  keyboard, as Back does on a phone.)
+- `OWN_DISPLAY_GROUP | ALWAYS_UNLOCKED | TOUCH_FEEDBACK_DISABLED` from 13,
+  `OWN_FOCUS | DEVICE_DISPLAY_GROUP` from 14: a window keeps its own focus, and
+  two windows typed into in turn both keep theirs.
+- Never `DESTROY_CONTENT_ON_REMOVAL`: when the window closes, Android moves
+  the app's task to the phone's screen, behind what is there, as Recents keeps
+  it. Then the task that was on top of the phone before is put back on top
+  (`handBack`), so closing a window never changes what the phone shows.
+
+**The launch** is in this process, `IActivityTaskManager.startActivity` with
+the display and fullscreen windowing in the ActivityOptions: 39–62 ms. An app
+whose task is already on the phone (a window closed earlier) is moved onto the
+new display, not started twice.
+
+**When the app goes** — Back on its last screen, its own finish — the window
+closes too. Nothing tells a shell process that; the server looks at the
+display's tasks, every 300 ms for four seconds after the window opened or was
+used, every two seconds otherwise. An empty display for 900 ms after it had
+the app means it has gone. Each look is a binder call that unpacks every
+task's configuration; at a steady 400 ms it was the largest part of an idle
+window's cost. Only the person's own input counts as use: the clock's ping
+every two seconds once did, which kept the watcher fast for good.
+
+**Awake.** A display in its own power group (13+) has its own screen timeout,
+and a person reading a page moves nothing, so the server tells each display it
+is in use every four seconds (`userActivity`).
+
+## The pace
+
+On a cable the display draws straight into the encoder's input surface, as
+scrcpy's does, and every frame the phone composes is encoded (`direct` in the
+window's `open`). The link never falls behind there, and anything between the
+two costs: a GL copy per frame put an idle window's server at 6.8 % of a phone
+core, twice scrcpy's.
+
+Over Wi-Fi it is the Android desktop's stream (built when the desktop had a
+window of this app's own, commit 8f666e8, and LinuxStream's before it): the
+display draws into a SurfaceTexture, and one GL draw puts the newest frame into
+the encoder when
+
+- the encoder holds fewer than two frames,
+- the link holds fewer than its round trip in frames, plus the one on the wire
+  — the computer acknowledges each frame as it lands (`0x10`), the median of
+  the last 32 round trips sizes it, between 2 and 12 frames,
+- and it is not faster than the window asked for (60).
+
+A second in which a frame waited on the link for a fifth of it drops the
+bitrate by 30 %; three seconds it kept up raise it by 25 %, to the ceiling the
+window asked for. A slow link costs frames, never latency. A display size no
+encoder takes as it is goes this way too, scaled by the draw.
+
+**The drain** waits for the encoder's output a second at a time rather than
+asking every 50 ms: each ask is a round trip through MediaCodec's own looper,
+and those were most of an idle window's cost. Letting an encoder go signals
+end-of-stream, which ends the wait at once. A direct stream is not
+acknowledged at all (`paced: false` in the `video` message): an ack a frame is
+a wake-up on both ends for nothing.
+
+Together these took the server's own share of a 10 fps window on an A13 from
+6.8 % of a core to 3.6 %, against scrcpy's server at 3.3–3.45 % for the same
+app at the same size. Everything a window involves is in the table above.
+
+## The wire
+
+One connection per window, and one more for what is the phone's as a whole
+(the list, the icons, the clipboard, the clock). Every message is a type byte,
+a big-endian u32 length and that many bytes:
+
+| Type | Way | Body |
+| --- | --- | --- |
+| `0x01` | both | JSON, UTF-8 |
+| `0x02` | phone → computer | flags u8 (1 key frame, 2 codec config), pts µs u64, H.264 Annex B |
+| `0x03` | phone → computer | package length u8, package, PNG — an icon |
+| `0x10` | computer → phone | a frame arrived (paced streams only) |
+| `0x20` | computer → phone | buttons u8, x u16, y u16, meta u32 — the mouse, in display pixels |
+| `0x21` | computer → phone | x u16, y u16, h f32, v f32, meta u32 — the wheel, in notches |
+| `0x22` | computer → phone | down u8, repeat u8, code u16, meta u32 — a key, Android's code and meta |
+| `0x23` | computer → phone | UTF-8 — characters typed |
+
+A window's JSON: `open` (package or Linux window, size, dpi, fps, `direct`,
+what closing does), `resize`, `focus`/`blur`/`leave`, `clip`, `keyframe`,
+`bitrate`, `close`, `ping` one way; `video` (the encoder, its size, the part
+of it that is the display, `paced`), `display` (the app's name), `state`
+(`closed`, `failed`), `stats` once a second, `pong` the other. The control
+connection's: `apps`, `icons`, `linuxApps`, `linuxIcons`, `linuxRun` (answered
+by `linuxRan`), `clip`.
+
+Each window's connection is its own adb stream, side by side on the one USB or
+Wi-Fi link, so one app's key frame never waits behind another's.
+
+## Who gets in
+
+The server listens on an abstract socket named afresh for every run, and asks
+the kernel who each connection is (SO_PEERCRED): the shell, which adbd is, or
+root. Not the launcher, whose uid is also the Linux guest's: this socket takes
+a mouse and a keyboard into any app on the phone.
+
+The computer reaches it through the adb server's own protocol —
+`host:transport:<serial>`, then `localabstract:<name>` — on a connection this
+process opens, so nothing listens on the computer. An `adb forward` would be a
+loopback port any program here, or any page in any browser, could reach and
+type into the phone with.
+
+## The window
+
+Whatever draws it, a window's link to the phone is `link.rs`: its own socket,
+and three threads — the reader, which hands each piece of the picture to the
+window as it lands (and over Wi-Fi acknowledges it); the writer (a slow link
+can make a write wait; the window never does); the clock, a ping a few times a
+minute. The link asks the phone for the display the window wants, maps a
+point in the window to a pixel on that display, and hands the clipboard over.
+
+**On Windows** it is a real Win32 window, not a webview, with two threads of
+its own: the window's messages, and the picture (never stopped by Windows'
+modal loops while the window is dragged or resized, which a picture drawn
+from the message loop would be).
+
+The title bar is ours — Back, the app's icon, "App · phone", minimise,
+maximise, close — and Windows keeps the rest of what it gives a window:
+`WM_NCCALCSIZE` keeps the side and bottom resize borders, the maximise button
+answers `HTMAXBUTTON` so Windows 11's Snap layouts open on it, and the shadow,
+rounded corners, system menu and Alt+Tab are the system's. Each app's window
+has an AppUserModelID of its own and a relaunch command, `--phone-app <serial>
+<package>`: WhatsApp and Gmail are two taskbar buttons, either can be pinned,
+and a pinned one starts this app with just that window — no desktop.
+
+A window opens at a current phone's shape, 412 × 915 dp, fitted to 90 % of the
+screen's height, at that screen's scale; the phone's display gets the window's
+pixels and 160 dpi times the scale, so text is the size it would be on the
+phone and one pixel is one pixel. Resizing the window resizes the display (a
+new encoder at the new size; the app lays itself out again).
+
+## On a Mac
+
+The same link and the same phone; an AppKit window (`mac/mod.rs`) whose
+picture is an `AVSampleBufferDisplayLayer` (`mac/video.rs`). That layer is
+macOS's own way to show a stream: it decodes on the Mac's media engine
+(VideoToolbox) and the window server composites the decoded surfaces as they
+are, so this process neither decodes, copies nor draws a frame. Every frame is
+marked to be shown the moment it is decoded (`DisplayImmediately`), not at its
+timestamp. The layer wants H.264 its own way (`h264.rs`): the parameter sets
+as a format description, and each frame's NAL units after their lengths
+instead of start codes. A new stream (a resize) is a new format description
+and waits for its key frame; a layer whose decoder fails is flushed and the
+phone asked for a key frame.
+
+The link's reader feeds the layer from its own thread — enqueuing is what the
+layer means to be done from a media queue — so the main thread, busy while a
+window is dragged, is never in a frame's way. Everything else AppKit is done
+on the main thread, through the main dispatch queue, which runs during a
+drag and a live resize too. The phone pads its picture to its encoder's
+alignment at the right and the bottom; the layer sits in a clip the size of
+the app's part, which cuts the padding off, letterboxed for the moment a
+resize takes to reach the phone, as on Windows.
+
+The title bar is macOS's own, with Back beside the window's buttons (a title
+bar accessory): an Android app needs one, and a Mac keyboard has no key for
+it. ⌘[ is Back as well, as in Safari and Finder, and so is a mouse's side
+button. The app's name is the title and the phone's the subtitle; minimised,
+the window is the app's own icon in the Dock. A Mac pins applications to the
+Dock, not windows, so there is no relaunch command: the windows are this
+app's, under its Dock icon and in its Window menu.
+
+The keyboard (`keys.rs`, `mac`): text goes through AppKit's own input
+(`NSTextInputClient`), so dead keys and input methods type what they type,
+and what they finish goes to the phone as text. ⌘ is Android's Ctrl, as
+Control is, so ⌘C copies and ⌘V pastes (the Mac's clipboard reaching the phone
+first); a shortcut's letter is the one the layout types, by
+`charactersIgnoringModifiers`, and by its place on the keyboard where the
+layout's letter has no key code. The Mac's own ways through text become
+Android's: ⌥← a word, ⌘← the line's start, ⌘↑ the text's, ⌥⌫ a word gone.
+⌘Q, ⌘W, ⌘M, ⌘H, ⌘\`, ⌘, and ⌃⌘F stay the Mac's. The trackpad scrolls in points,
+ten to a notch, momentum included; Control+click is a right click.
+
+This was written on a Windows computer and checked there by compiling it
+against the macOS bindings (`cargo check --target aarch64-apple-darwin`, with
+a stand-in C compiler for the build scripts, since `check` never links) and by
+the unit tests of the parts that are pure functions (the key mapping, the
+H.264 framing). It has not run on a Mac yet ("Verified, and not yet").
+
+## Input
+
+The pointer is the computer's own: the phone is told where it is and what is
+held, so it moves at the screen's rate whatever the video does. The mouse goes
+as position and buttons, and the server makes the sequence a real mouse makes
+on Android: hover, DOWN and BUTTON_PRESS for the first button, MOVE while
+held, BUTTON_RELEASE, UP with the last, each with the keyboard's modifiers and
+the window's display id, so nothing lands on the phone's own screen. The side
+buttons are Back and Forward. The wheel goes in notches.
+
+A character the computer's layout typed goes as that character, so é on a
+French keyboard is é on the phone whatever layout the phone thinks it has;
+characters it has no key for go as one string, which text fields take whole. A
+key that does something — Enter, the arrows, Backspace — and any key held with
+Ctrl or the Windows key goes as Android's key code with its modifiers, a
+letter by the letter the layout types (Ctrl+A on AZERTY is select all). The
+computer's key repeat is the phone's.
+
+The clipboard follows the person: what they copied here goes to the phone when
+a window comes to the front and again before a paste, and what the phone
+copies comes back at once. Neither side is handed its own text back, and an
+empty clipboard here never empties the phone's. The shell holds
+`READ_CLIPBOARD_IN_BACKGROUND`, the permission that exists for exactly this.
+
+## The picture
+
+```
+the app's display ──▶ MediaCodec (H.264, the phone's hardware) ──▶ adbd ──▶ adb server ──▶ this window's socket
+──▶ Media Foundation's H.264 decoder (DXVA, on the window's D3D11 device) ──▶ one pixel-shader draw ──▶ flip-model swap chain
+```
+
+That is Windows; a Mac's is the display layer above.
+
+**The decoder** is Media Foundation's own, given the window's device, so it
+decodes in hardware into a texture that never leaves the GPU, in low-latency
+mode (a frame in, that frame out; the phone sends no B-frames). Its surfaces
+are asked for with `D3D11_BIND_SHADER_RESOURCE` as well as the decoder's own
+binding, so a shader can sample them. Software decoding is the fallback.
+
+**One draw** turns NV12 into the window's colours: the two planes sampled as
+textures, BT.601 or BT.709, limited or full range as the stream says,
+scaled only for the moment a resize takes to reach the phone and come back.
+The D3D11 video processor does the same in one call, and stays for a decoder
+whose surfaces cannot be sampled — but on an Intel UHD that call cost the CPU
+1.6–2.8 M cycles a frame, and a draw costs a few thousand.
+
+**The swap chain** is flip-discard, three buffers, at most one frame queued
+(the latency waitable object is waited on before drawing). Three, so the next
+back buffer is free even while the compositor holds the last two; after every
+Present the back buffer's view is discarded (`DiscardView`), since every pixel
+is drawn again. Binding the back buffer cost 0.9–2 M cycles a frame without
+those two, 0.004 M with them.
+
+**The title bar** is part of the same back buffer, put there after the
+picture, so the window and its bar are one surface and can never separate.
+Direct2D draws it only when it changes — a hover, the window's focus, its
+width, the scale — into a texture of its own, and each frame copies that on
+the GPU (0.01 M cycles). Its text formats are made once per scale; they were
+once made every frame at 100 %.
+
+**Where a frame's CPU goes now** (Intel UHD, Windows 11, an A13's stopwatch at
+15 fps, 404 × 896, the probe on its own): the decode call 0.11 M cycles on the
+picture's thread, the draw 0.02 M, Present 0.4–1 M, and Microsoft's decoder's
+own worker threads about half of the 5.2–5.9 M the process spends in all.
+scrcpy, which decodes in software and uploads, spends 3.7–3.8 M at that size
+and 1.75 M at 1600 × 960, where so little changes per frame that software
+decoding is cheap. The decoder's worker-thread count (one, two, the default)
+changed nothing measurable, and waiting on its output with a GPU fence made it
+worse. Whether another decoder front end would be cheaper — FFmpeg's D3D11VA,
+through the avcodec that already ships with scrcpy — is untried.
+
+**The screen** is the last step and the longest: Windows composes a window's
+frame at its next refresh and sends it out at the one after, so a frame
+presented 7–9 ms after the phone made it is on the screen 12–28 ms after
+(median) on this computer's 55.5 Hz screen. Skipping the compositor needs
+presenting to a hardware overlay plane (Windows' composition swap chains);
+not tried.
+
+## Measuring it
+
+**Start** is timed by the app: each window logs "on screen N ms after the
+click", from the moment the page's request arrived (or "after this run
+started", for a pinned button: from the process starting) to its first frame
+presented. The phone's server logs what its own part took: "ready N ms after
+the process started", and each window's display, launch, encoder and first
+frame.
+
+**Latency** is two numbers, from the moment the phone's compositor made a
+frame: when this window presented it, and when Windows put it on the screen.
+The phone stamps each frame with its own clock (CLOCK_MONOTONIC); every `pong`
+says what that clock read, half way through the ping's round trip is the best
+guess of when, and the ping with the shortest round trip is the guess with the
+least doubt. The screen's time comes from the swap chain's frame statistics:
+the present count of the frame Windows last showed and the refresh it went
+out at (`SyncQPCTime`, less a refresh period for each refresh since), matched
+to the frames presented. Each window logs, every ten seconds, the frames it
+showed, the decode time, and both ages' median and 95th percentile; the
+phone's side logs its frame rate, bitrate and encode time. A Mac's window logs
+when each frame was handed to macOS instead: the layer does not say when it
+was shown.
+
+**CPU** on the computer is `QueryProcessCycleTime`, which counts the
+processor's time-stamp counter. That counter runs at a fixed rate, so this is
+CPU time at a fine grain, not work: it still moves with the processor's clock,
+and scrcpy's own window came out at 1.6 M and at 3.8 M per frame in two runs.
+So runs are interleaved, scrcpy's and this one's in turn, and compared in like
+states. Content matters as much: the Clock app's main screens draw 0–10 frames
+a second depending on the tab, so its stopwatch (a steady 15) is the workload
+the numbers above come from. On the phone, jiffies of every process a window
+involves (`/proc/<pid>/stat`: the servers, `media.codec`, `surfaceflinger`,
+`system_server`, the app), per thread (`/proc/<pid>/task/*/stat`) to see
+which part, and the servers' memory as PSS (`/proc/<pid>/smaps_rollup`).
+
+**The probe**, `cargo run --release --example app_window -- <serial> <package>
+[label]`, opens one window with everything a real one has, without the rest of
+the app: it pushes the dex from `resources/bin` and starts the server itself.
+Like `cargo test`, its executable needs a Common Controls v6 manifest beside it
+(`app_window.exe.manifest`), which tauri-build only writes for the app itself.
+Close it with its ✕ (or `WM_CLOSE`), not by killing it: that is what ends its
+server on the phone.
+
+## Linux apps
+
+The Linux apps the launcher lists — everything in XFCE's Applications menu —
+are on the same page with a Linux mark, read from the launcher's
+`AppsProvider` (`linux.apps`, `linux.icon`): shell only (DUMP), because the
+guest lives in the launcher's storage, not the server's. The server calls it
+in-process (`getContentProviderExternal`), about 20 ms.
+
+Opening one: `linux.run` starts it on the launcher's window display (`:2`),
+first putting the launcher on Android's temporary allow-list for 30 s, since a
+foreground service may not be started from the background otherwise. The X
+window it makes is reported over `linux.events`, a long poll, and the computer
+opens a window for it like any other, except that what goes on its display is
+the launcher's `LinuxWindowActivity` for that X window, started there by the
+shell (it is exported to holders of DUMP). Its menus and popups are drawn
+inside the window.
+
+**One session, one place.** Linux's windows live in one window session on the
+phone, and it is either the phone's own desktop's or a computer's. While the
+desktop has it, `linux.run` refuses and says why ("Linux is showing its windows
+on your phone's desktop right now…"), and the page shows that, rather than the
+app quietly opening on the phone. (It used to open there.)
+
+**Closing.** An Android app has somewhere to go back to — its task, on the
+phone — and a Linux window has not: its ✕ asks the app to close it
+(`linux.close`, as a Linux desktop's close button does), the app may ask about
+unsaved work first, and the window goes when the X window does. A second ✕
+within six seconds closes the window here, for an app that does not answer.
+
+## Sound
+
+While any app of a phone has a window here, the phone's sound comes here too,
+through the same audio companion the desktop uses (scrcpy with no video), if
+the person chose to hear it here and the phone is Android 11 or later. It
+starts once the first window's picture is there — the companion is a JVM of
+its own on the phone, and starting it beside a window slowed the window — and
+stops with the last window. On exit the windows close first, and the
+companion is stopped without the desktop's undo: that undo force-stops the
+launcher and sends the phone to its home screen, from whatever its owner had
+open on it.
+
+## Verified, and not yet
+
+On a Galaxy A13 (Android 12, USB), from the app itself and from the probe, on
+Windows 11:
+
+- the list and icons; opening, a second window beside the first, reopening an
+  app handed back earlier; the start times in the table, three of each;
+- the mouse, the wheel, typing (after a click, the display being untrusted);
+  resizing; Back, in the title bar;
+- pasting both ways as a person does it: Ctrl+V in Settings' search field put
+  what this computer had copied there, and Ctrl+A, Ctrl+C there put the field's
+  text on this computer's clipboard (input posted to the window itself, with
+  Ctrl set in its thread's key state: no other window saw a key);
+- an app finishing closes its window; ✕ hands the app back and leaves the
+  phone's screen as it was; exit leaving no server, display or forward on the
+  phone;
+- the command a pinned taskbar button runs (`--phone-app`), started the way
+  Windows starts it — not a real pin and click on the taskbar;
+- the sound companion.
+
+On the Android 15 emulator: the trusted display's flags (`OWN_FOCUS`
+included), `linux.apps` in-process, and the shell starting
+`LinuxWindowActivity` on a window's display.
+
+On a Mac: nothing has run. It compiles against the macOS bindings for Apple
+silicon, and its pure parts pass their tests.
+
+Not yet:
+
+- **The Mac window, run on a Mac**: opening, the picture (the display layer
+  with the phone's stream, a resize's new stream, the crop), input methods,
+  ⌘ shortcuts, the title bar's Back, closing. And a check for Intel Macs
+  (`x86_64-apple-darwin`).
+- A Linux app end to end on a real phone: the test phones are 32-bit, and the
+  emulators cannot install the guest (proot's `apt` fails with ENOSYS on
+  x86_64). That includes the refusal while the phone's desktop has the session.
+- Wi-Fi measured end to end. The paced path is the one measured on a cable
+  before direct existed; the link's side of it is the desktop stream's.
+- Why system_server is sometimes 2 points busier with this window than with
+  scrcpy's.
+- Android 12's soft keyboard on the phone's screen when a field focuses: the
+  policy that hides it needs a trusted display, which the shell cannot make
+  there.
+- Windows of this app's own on a Linux computer (it gets scrcpy's).
+- The compositor's refresh of latency: presenting to a hardware overlay.

@@ -125,6 +125,39 @@ else you have installed.
 
 ![Settings, LinuxOnDroid, Docker and the Web viewer at the top of the app drawer](doc/img/app-drawer.png)
 
+### Or just your apps, each in its own window
+
+Sometimes you only want WhatsApp or your calendar on the big screen, not a
+whole desktop. Open the **Apps** tab on your computer and you will see the apps
+on your phone, with their real names and icons. Click one and it opens in its
+own window, right next to your other programs. It is usually there in under
+half a second.
+
+- **They behave like your computer's own windows.** Move them, resize them,
+  snap them side by side, minimise them. Each app gets its own button on the
+  taskbar, and you can pin it there to open that app straight away next time
+- **Use your mouse and keyboard.** Click, scroll and type, in your own keyboard
+  layout. Copy something on your computer and paste it into the phone app, or
+  the other way round
+- **Close the window and the app goes back to your phone,** right where you
+  left it. Whatever was on your phone's screen stays there
+- **It is light.** Only the app you are looking at gets sent, and an app that is
+  sitting still costs next to nothing. Your phone does not have to run a
+  desktop at all
+- **Your Linux apps are there too,** if you have set up Linux on the phone.
+  Closing one of their windows closes it, as on a Linux computer, and the app
+  may ask you to save first
+
+If that is all you ever want, tick **Open my apps here when my phone
+connects**, and the Apps tab opens instead of the desktop when you plug the
+phone in. The desktop is still one click away.
+
+On a Mac the apps open in proper Mac windows too, with a Back button at the
+top (⌘[ works as well), and ⌘C and ⌘V copy and paste as you would expect.
+Pinning an app on its own is a Windows thing: on a Mac they all sit under this
+app's icon in the Dock. On a Linux computer an Android app opens in a simpler
+window, and Linux apps are not offered there.
+
 ### Ubuntu, a whole Linux computer, running on your phone
 
 This is Ubuntu 24.04 with a full desktop, running on the phone itself, in a

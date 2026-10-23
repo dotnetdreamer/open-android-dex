@@ -160,6 +160,15 @@
             android:authorities="com.ccrstech.openandroiddex.launcher.remote"
             android:exported="true"
             android:permission="android.permission.DUMP" />
+        <!-- The phone's Linux apps for a computer that shows the phone's apps in
+             windows of its own: its app server, the shell's process, asks here
+             for the list and its icons, to open one, and what its windows do.
+             Guarded as the provider above, and checked again in call(). -->
+        <provider
+            android:name=".AppsProvider"
+            android:authorities="com.ccrstech.openandroiddex.launcher.apps"
+            android:exported="true"
+            android:permission="android.permission.DUMP" />
         <!-- Brings remote access back after a reboot, an update, and the
              desktop app's end-of-session force-stop (which sends RESUME over
              adb). DUMP for the same reason as the provider above: the system
@@ -259,9 +268,14 @@
 
              Every configuration change is handled in place: rebuilding the
              activity would take the surface from under a window mid-resize. -->
+        <!-- Exported to the shell alone (DUMP, which no ordinary app holds): on a
+             computer that shows the phone's apps in windows of their own, each
+             Linux window's task goes on a display the shell made, and only a
+             system-level caller may start an activity on one of those. -->
         <activity
             android:name=".LinuxWindowActivity"
-            android:exported="false"
+            android:exported="true"
+            android:permission="android.permission.DUMP"
             android:icon="@mipmap/ic_linux"
             android:label="@string/ln_label"
             android:launchMode="standard"

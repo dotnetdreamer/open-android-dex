@@ -66,10 +66,24 @@ else
   exit 1
 fi
 
+# The encoder's choice and set-up that the app windows (AppVideo) share with
+# the launcher's Linux stream — compiled from the launcher's sources rather
+# than copied, so the two cannot drift apart. Plain Java and framework calls,
+# no resources. build.cmd names the same two.
+LAUNCHER_SRC="$HERE/../openandroiddex-launcher/app/src/main/java/com/ccrstech/openandroiddex/launcher"
+SHARED="LinuxStreamEncoder DexLog"
+
 echo "[1/3] javac  ($JAVAC)"
 rm -rf "$HERE/build"
 mkdir -p "$HERE/build/classes"
 find "$HERE/src" -name '*.java' > "$HERE/build/sources.txt"
+for c in $SHARED; do
+  if [ ! -f "$LAUNCHER_SRC/$c.java" ]; then
+    echo "ERROR: $LAUNCHER_SRC/$c.java is missing" >&2
+    exit 1
+  fi
+  echo "$LAUNCHER_SRC/$c.java" >> "$HERE/build/sources.txt"
+done
 # android.jar goes on the classpath, not the bootclasspath: JDK 17+ rejects
 # -bootclasspath alongside -target 17. Everything we touch outside android.*
 # is java.lang/util/io/net, which Android provides at runtime anyway.
