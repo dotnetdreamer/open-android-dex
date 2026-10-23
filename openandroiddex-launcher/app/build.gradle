@@ -21,8 +21,8 @@ android {
         // finding a stale one meant pulling base.apk off the device and reading
         // its manifest. Keep these in step with open-android-dex-tauri/
         // package.json when changing them by hand.
-        versionCode 324
-        versionName "0.3.24"
+        versionCode 325
+        versionName "0.3.25"
 
         // armeabi-v7a is here for the desktop, not for Linux or Docker. Plenty
         // of phones run 32-bit Android on a 64-bit chip (Galaxy A13, Redmi 9A,
