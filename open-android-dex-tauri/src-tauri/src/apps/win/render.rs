@@ -16,7 +16,9 @@
 //! so the window and its bar are one surface and can never separate. Direct2D
 //! draws it only when it changes (a hover, the window's focus, its width),
 //! into a texture of its own; each frame copies that texture on the GPU. A
-//! frame costs the CPU no text, no brushes and no Direct2D at all.
+//! note under the bar — where the sound went, how a drop goes — is the same:
+//! drawn once for what it says, copied while it lasts. A frame costs the CPU
+//! no text, no brushes and no Direct2D at all.
 //!
 //! Everything here lives on the window's render thread.
 
@@ -46,8 +48,8 @@ use windows::Win32::Graphics::DirectWrite::{
     DWriteCreateFactory, IDWriteFactory, IDWriteFontCollection, IDWriteTextFormat, DWRITE_FACTORY_TYPE_SHARED,
     DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT_NORMAL,
     DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_MEASURING_MODE_NATURAL, DWRITE_PARAGRAPH_ALIGNMENT_CENTER,
-    DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_TRIMMING, DWRITE_TRIMMING_GRANULARITY_CHARACTER,
-    DWRITE_WORD_WRAPPING_NO_WRAP,
+    DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_TEXT_METRICS, DWRITE_TRIMMING,
+    DWRITE_TRIMMING_GRANULARITY_CHARACTER, DWRITE_TRIMMING_GRANULARITY_WORD, DWRITE_WORD_WRAPPING_NO_WRAP,
 };
 use windows::Win32::Graphics::Dxgi::Common::{
     DXGI_ALPHA_MODE_IGNORE, DXGI_FORMAT, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_NV12, DXGI_FORMAT_R8G8_UNORM,
@@ -81,6 +83,8 @@ pub struct Look<'a> {
     pub dark: bool,
     /// Said in the middle of the window while there is no picture: what is happening, or what went wrong.
     pub message: Option<&'a str>,
+    /// Said for a while just under the bar: where the sound went, how a drop goes.
+    pub note: Option<&'a str>,
 }
 
 /// One decoded picture, held until the next replaces it — the window is
@@ -110,6 +114,8 @@ pub struct Renderer {
     subtle: IDWriteTextFormat,
     glyphs: IDWriteTextFormat,
     big: IDWriteTextFormat,
+    /// A note's: wrapped, two lines at most, and an ellipsis for the rest.
+    note_text: IDWriteTextFormat,
     /// The text formats above are for `scale` (made once per scale, not per frame).
     formats_ready: bool,
     icon: Option<ID2D1Bitmap1>,
@@ -117,6 +123,8 @@ pub struct Renderer {
     target: Option<Target>,
     /// The bar as last drawn.
     bar: Option<BarCache>,
+    /// The note under the bar as last drawn.
+    note: Option<NoteCache>,
     decoder: Option<Decoder>,
     /// The picture through a pixel shader, if this computer's GPU took it.
     shading: Option<Shading>,
@@ -181,6 +189,24 @@ impl BarKey {
             dark: look.dark,
         }
     }
+}
+
+/// A note, in a strip of its own just under the bar, drawn once for what it
+/// says and copied each frame as the bar is: a note costs a frame no
+/// Direct2D either.
+struct NoteCache {
+    texture: ID3D11Texture2D,
+    size: (u32, u32),
+    key: NoteKey,
+}
+
+/// Everything the note strip's pixels depend on.
+#[derive(Clone, PartialEq)]
+struct NoteKey {
+    width: u32,
+    scale: u32,
+    text: String,
+    dark: bool,
 }
 
 struct Processor {
@@ -261,6 +287,7 @@ impl Renderer {
             let big = text_format(&dwrite, w!("Segoe UI"), DWRITE_FONT_WEIGHT_SEMI_BOLD, 15.0)?;
             big.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER)?;
             big.SetWordWrapping(windows::Win32::Graphics::DirectWrite::DWRITE_WORD_WRAPPING_WRAP)?;
+            let note_text = note_format(&dwrite, 1.0)?;
 
             let icon = icon_png.and_then(|png| decode_png(&d2d, png).ok());
             let shading = Shading::new(&device)
@@ -283,10 +310,12 @@ impl Renderer {
                 subtle,
                 glyphs,
                 big,
+                note_text,
                 formats_ready: false,
                 icon,
                 target: None,
                 bar: None,
+                note: None,
                 decoder: None,
                 shading,
                 said_path: false,
@@ -324,6 +353,7 @@ impl Renderer {
             self.glyphs.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER)?;
             self.big = text_format(&self.dwrite, w!("Segoe UI"), DWRITE_FONT_WEIGHT_SEMI_BOLD, 15.0 * scale)?;
             self.big.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER)?;
+            self.note_text = note_format(&self.dwrite, scale)?;
         }
         self.formats_ready = true;
         Ok(())
@@ -437,6 +467,10 @@ impl Renderer {
         let area = RECT { left: 0, top: bar.h, right: w as i32, bottom: h as i32 };
         self.ensure_target()?;
         self.ensure_bar(&bar, w, look)?;
+        match look.note {
+            Some(text) => self.ensure_note(&bar, w, text, look.dark)?,
+            None => self.note = None,
+        }
         let drew_picture = self.blit(area).unwrap_or_else(|e| {
             log::warn!("apps: showing the picture: {e}");
             false
@@ -454,6 +488,11 @@ impl Renderer {
             }
             let rows = D3D11_BOX { left: 0, top: 0, front: 0, right: cache.size.0.min(w), bottom: cache.size.1.min(h), back: 1 };
             self.context.CopySubresourceRegion(&target.back, 0, 0, 0, 0, &cache.texture, 0, Some(&rows));
+            if let Some(note) = &self.note {
+                let below = h.saturating_sub(bar.h as u32);
+                let rows = D3D11_BOX { left: 0, top: 0, front: 0, right: note.size.0.min(w), bottom: note.size.1.min(below), back: 1 };
+                self.context.CopySubresourceRegion(&target.back, 0, 0, bar.h as u32, 0, &note.texture, 0, Some(&rows));
+            }
             // Presented at once: the compositor shows it at its next refresh.
             let presented = self.swap.Present(0, DXGI_PRESENT(0)).ok();
             // Every pixel is drawn again next frame (the picture or the empty
@@ -541,6 +580,59 @@ impl Renderer {
         }
         if let Some(cache) = &mut self.bar {
             cache.key = Some(key);
+        }
+        Ok(())
+    }
+
+    /// The note's strip, drawn again only when what it says, the width, the
+    /// scale or the theme changes: a line, or two for a longer note, lined up
+    /// with the app's name in the bar above it.
+    fn ensure_note(&mut self, bar: &Bar, width: u32, text: &str, dark: bool) -> Result<()> {
+        let key = NoteKey { width, scale: self.scale.to_bits(), text: text.to_string(), dark };
+        if self.note.as_ref().is_some_and(|n| n.key == key) {
+            return Ok(());
+        }
+        let theme = Theme::of(dark);
+        let s = self.scale;
+        let left = bar.text_x as f32;
+        let pad = (7.0 * s).round();
+        let wide: Vec<u16> = text.encode_utf16().collect();
+        self.note = None;
+        unsafe {
+            let max_w = (width as f32 - left - (12.0 * s).round()).max(40.0);
+            // Measured unbounded for its lines; drawn into two at most, the ellipsis ending the second.
+            let layout = self.dwrite.CreateTextLayout(&wide, &self.note_text, max_w, f32::MAX)?;
+            let mut m = DWRITE_TEXT_METRICS::default();
+            layout.GetMetrics(&mut m)?;
+            let line = m.height / m.lineCount.max(1) as f32;
+            let text_h = (line * m.lineCount.clamp(1, 2) as f32).ceil();
+            let size = (width.max(1), (text_h + 2.0 * pad) as u32);
+            let desc = D3D11_TEXTURE2D_DESC {
+                Width: size.0,
+                Height: size.1,
+                MipLevels: 1,
+                ArraySize: 1,
+                Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+                Usage: D3D11_USAGE_DEFAULT,
+                BindFlags: D3D11_BIND_RENDER_TARGET.0 as u32,
+                CPUAccessFlags: 0,
+                MiscFlags: 0,
+            };
+            let mut texture = None;
+            self.device.CreateTexture2D(&desc, None, Some(&mut texture))?;
+            let texture = texture.unwrap();
+            let target = self.d2d_target(&texture)?;
+            self.d2d.SetTarget(&target);
+            self.d2d.BeginDraw();
+            self.d2d.FillRectangle(&rectf(0, 0, size.0 as i32, size.1 as i32), &self.brush(theme.note)?);
+            let rect = D2D_RECT_F { left, top: pad, right: left + max_w, bottom: pad + text_h };
+            self.d2d.DrawText(&wide, &self.note_text, &rect, &self.brush(theme.ink)?, D2D1_DRAW_TEXT_OPTIONS_CLIP,
+                DWRITE_MEASURING_MODE_NATURAL);
+            let done = self.d2d.EndDraw(None, None);
+            self.d2d.SetTarget(None);
+            done?;
+            self.note = Some(NoteCache { texture, size, key });
         }
         Ok(())
     }
@@ -765,7 +857,9 @@ impl Renderer {
             let ink = self.brush(if look.active { theme.ink } else { theme.ink_inactive })?;
             let dim = self.brush(theme.ink_dim)?;
             // the buttons' backgrounds, under their glyphs
-            for (hit, r) in [(Hit::Back, bar.back), (Hit::Min, bar.min), (Hit::Max, bar.max), (Hit::Close, bar.close)] {
+            for (hit, r) in
+                [(Hit::Back, bar.back), (Hit::Sound, bar.sound), (Hit::Min, bar.min), (Hit::Max, bar.max), (Hit::Close, bar.close)]
+            {
                 let on = look.hover == hit || look.pressed == hit;
                 if !on {
                     continue;
@@ -786,6 +880,7 @@ impl Renderer {
                 Ok(())
             };
             glyph(Hit::Back, 0xE72B, bar.back)?;
+            glyph(Hit::Sound, 0xE767, bar.sound)?;
             glyph(Hit::Min, 0xE921, bar.min)?;
             glyph(Hit::Max, if look.maximized { 0xE923 } else { 0xE922 }, bar.max)?;
             glyph(Hit::Close, 0xE8BB, bar.close)?;
@@ -796,7 +891,7 @@ impl Renderer {
             }
             // "<app>" and, dimmer, "<phone>": a person with two phones on the cable can tell them apart.
             let name: Vec<u16> = look.label.encode_utf16().collect();
-            let right = bar.min.left - (8.0 * s) as i32;
+            let right = bar.sound.left - (8.0 * s) as i32;
             let label_rect = rectf(bar.text_x, 0, right, bar.h);
             let layout = self.dwrite.CreateTextLayout(&name, &self.text, (right - bar.text_x).max(0) as f32, bar.h as f32)?;
             let mut metrics = Default::default();
@@ -858,14 +953,16 @@ struct Theme {
     ink_dim: u32,
     hover: u32,
     pressed: u32,
+    /// The note's strip under the bar: a shade off the bar, so it reads as the bar's.
+    note: u32,
 }
 
 impl Theme {
     fn of(dark: bool) -> Theme {
         if dark {
-            Theme { bar: 0x202020, empty: 0x161616, ink: 0xFFFFFF, ink_inactive: 0x9A9A9A, ink_dim: 0x9A9A9A, hover: 0x2D2D2D, pressed: 0x292929 }
+            Theme { bar: 0x202020, empty: 0x161616, ink: 0xFFFFFF, ink_inactive: 0x9A9A9A, ink_dim: 0x9A9A9A, hover: 0x2D2D2D, pressed: 0x292929, note: 0x2B2B2B }
         } else {
-            Theme { bar: 0xF3F3F3, empty: 0xFAFAFA, ink: 0x1A1A1A, ink_inactive: 0x8A8A8A, ink_dim: 0x707070, hover: 0xE5E5E5, pressed: 0xCCCCCC }
+            Theme { bar: 0xF3F3F3, empty: 0xFAFAFA, ink: 0x1A1A1A, ink_inactive: 0x8A8A8A, ink_dim: 0x707070, hover: 0xE5E5E5, pressed: 0xCCCCCC, note: 0xE8E8E8 }
         }
     }
 }
@@ -1111,6 +1208,19 @@ unsafe fn text_format(
             size,
             w!("en-us"),
         )
+    }
+}
+
+/// A note's text: wrapped at words, and an ellipsis where a third line would begin.
+fn note_format(dwrite: &IDWriteFactory, scale: f32) -> Result<IDWriteTextFormat> {
+    unsafe {
+        let f = text_format(dwrite, w!("Segoe UI"), DWRITE_FONT_WEIGHT_NORMAL, 12.0 * scale)?;
+        f.SetWordWrapping(windows::Win32::Graphics::DirectWrite::DWRITE_WORD_WRAPPING_WRAP)?;
+        f.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING)?;
+        let sign = dwrite.CreateEllipsisTrimmingSign(&f)?;
+        let trim = DWRITE_TRIMMING { granularity: DWRITE_TRIMMING_GRANULARITY_WORD, delimiter: 0, delimiterCount: 0 };
+        f.SetTrimming(&trim, &sign)?;
+        Ok(f)
     }
 }
 

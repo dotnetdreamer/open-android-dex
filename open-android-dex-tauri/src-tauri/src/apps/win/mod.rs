@@ -18,26 +18,34 @@
 //! menu, Alt+Tab, and a taskbar button of its own with the app's icon — the
 //! window has an AppUserModelID per app, so WhatsApp and Gmail are two
 //! buttons, either of which can be pinned.
+//!
+//! The bar's Sound button opens a menu of where the phone's sound plays
+//! (sound.rs), Windows' own popup menu; a file dropped from Explorer goes to
+//! the phone (drops.rs). How either went is a note in a strip under the bar,
+//! for a few seconds.
 
 mod frame;
 mod render;
 
 use std::collections::HashSet;
-use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, AtomicU8, Ordering};
+use std::ffi::OsString;
+use std::os::windows::ffi::OsStringExt;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use serde_json::json;
-use windows::core::{w, PCWSTR, PWSTR};
+use windows::core::{w, PCSTR, PCWSTR, PWSTR};
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_USE_IMMERSIVE_DARK_MODE};
 use windows::Win32::Graphics::Gdi::{
-    GetMonitorInfoW, MonitorFromPoint, ScreenToClient, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+    ClientToScreen, GetMonitorInfoW, MonitorFromPoint, ScreenToClient, MONITORINFO, MONITOR_DEFAULTTONEAREST,
 };
 use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED, COINIT_MULTITHREADED};
-use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress, LoadLibraryW};
 use windows::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_DWORD};
 use windows::Win32::UI::HiDpi::{
     AdjustWindowRectExForDpi, GetDpiForMonitor, GetDpiForWindow, GetSystemMetricsForDpi, MDT_EFFECTIVE_DPI,
@@ -49,10 +57,12 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     VK_SHIFT, VK_SPACE,
 };
 use windows::Win32::UI::Shell::PropertiesSystem::{IPropertyStore, SHGetPropertyStoreForWindow};
+use windows::Win32::UI::Shell::{DragAcceptFiles, DragFinish, DragQueryFileW, HDROP};
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 use super::keys::{self, Mods, Press};
-use super::link::{self, DisplaySize, Event, Link, NetSpec, Spec, Surface};
+use super::link::{self, DisplaySize, Event, Host, Link, NetSpec, Spec, Surface};
+use super::sound;
 use super::wire;
 use frame::Hit;
 
@@ -131,6 +141,10 @@ struct Shared {
     linux: bool,
     /// When the ✕ last asked a Linux app to close its window; a second ✕ soon after closes it here.
     asked_close: Mutex<Option<Instant>>,
+    /// Said under the bar for a while: where the sound went, how a drop goes.
+    note: Mutex<Option<String>>,
+    /// Counts the notes, so a note's fading never takes the next one with it.
+    note_seq: AtomicU64,
 }
 
 impl Shared {
@@ -231,6 +245,16 @@ impl Surface for Shared {
         Shared::say(self, text);
     }
 
+    fn note(&self, text: Option<String>, busy: bool) {
+        let seq = self.note_seq.fetch_add(1, Ordering::SeqCst) + 1;
+        *self.note.lock().unwrap() = text;
+        self.repaint();
+        // Its fading is the window's own thread's timer.
+        unsafe {
+            let _ = PostMessageW(Some(self.hwnd()), WM_APP_NOTE, WPARAM(busy as usize), LPARAM(seq as isize));
+        }
+    }
+
     fn gone(&self) {
         unsafe {
             let _ = PostMessageW(Some(self.hwnd()), WM_APP_GONE, WPARAM(0), LPARAM(0));
@@ -250,23 +274,26 @@ const CLASS: PCWSTR = w!("OpenAndroidDeXAppWindow");
 const WM_MOUSELEAVE: u32 = 0x02A3;
 /// The phone said the app has gone; the window follows.
 const WM_APP_GONE: u32 = WM_APP + 1;
+/// A note was put up (wparam: busy, lparam: its number): the window times its fading.
+const WM_APP_NOTE: u32 = WM_APP + 2;
 const RESIZE_TIMER: usize = 1;
+const NOTE_TIMER: usize = 2;
 /// How long a resize must hold before the phone is asked for it: the phone
 /// makes a new encoder for each size, and a drag passes through dozens.
 const RESIZE_SETTLE_MS: u32 = 120;
+/// How long a note stays once nothing is happening any more.
+const NOTE_MS: u32 = 4500;
+/// WinUser.h's: the global data a file drop carries, which the windows crate has no name for.
+const WM_COPYGLOBALDATA: u32 = 0x0049;
 
 /// Open a window for `spec`; it runs until it is closed. The window shows
 /// at once, with the app's icon and name, and the picture follows.
-pub fn open(
-    spec: Spec,
-    events: Box<dyn Fn(Event) + Send + Sync>,
-    clipboard: Box<dyn Fn() -> Option<String> + Send + Sync>,
-) -> Result<Arc<Window>, String> {
+pub fn open(spec: Spec, host: Arc<dyn Host>) -> Result<Arc<Window>, String> {
     let (tx, rx) = mpsc::channel::<Result<Arc<Window>, String>>();
     let name = format!("app-window-{}", spec.pkg);
     thread::Builder::new()
         .name(name)
-        .spawn(move || ui_thread(spec, events, clipboard, tx))
+        .spawn(move || ui_thread(spec, host, tx))
         .map_err(|e| e.to_string())?;
     rx.recv_timeout(Duration::from_secs(10))
         .map_err(|_| "the window did not open".to_string())?
@@ -348,6 +375,31 @@ fn dark_mode() -> bool {
     }
 }
 
+/// The window's popup menus dark when the system is. Windows has no public
+/// switch for it: uxtheme's AllowDarkModeForWindow and FlushMenuThemes are
+/// exported by ordinal only (133 and 136, the same since Windows 10 1809),
+/// and the process-wide half is already done — tao allows dark menus for the
+/// app's own windows. Where either is missing the menu is simply light.
+fn dark_menus(hwnd: HWND, dark: bool) {
+    type Allow = unsafe extern "system" fn(HWND, bool) -> bool;
+    type Flush = unsafe extern "system" fn();
+    static UXTHEME: std::sync::OnceLock<(Option<Allow>, Option<Flush>)> = std::sync::OnceLock::new();
+    let (allow, flush) = *UXTHEME.get_or_init(|| unsafe {
+        let Ok(uxtheme) = LoadLibraryW(w!("uxtheme.dll")) else { return (None, None) };
+        let allow = GetProcAddress(uxtheme, PCSTR(133 as *const u8)).map(|f| std::mem::transmute::<_, Allow>(f));
+        let flush = GetProcAddress(uxtheme, PCSTR(136 as *const u8)).map(|f| std::mem::transmute::<_, Flush>(f));
+        (allow, flush)
+    });
+    unsafe {
+        if let Some(allow) = allow {
+            allow(hwnd, dark);
+        }
+        if let Some(flush) = flush {
+            flush();
+        }
+    }
+}
+
 fn register_class() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| unsafe {
@@ -366,18 +418,13 @@ fn register_class() {
 }
 
 /// The window's own thread: makes it, then runs its message loop until it is destroyed.
-fn ui_thread(
-    spec: Spec,
-    events: Box<dyn Fn(Event) + Send + Sync>,
-    clipboard: Box<dyn Fn() -> Option<String> + Send + Sync>,
-    opened: Sender<Result<Arc<Window>, String>>,
-) {
+fn ui_thread(spec: Spec, host: Arc<dyn Host>, opened: Sender<Result<Arc<Window>, String>>) {
     unsafe {
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
     }
     register_class();
     let geo = geometry(spec.cascade, spec.size);
-    let (link, out_rx) = Link::new(spec.clicked, events, clipboard);
+    let (link, out_rx) = Link::new(spec.clicked, host);
     let shared = Arc::new(Shared {
         link,
         hwnd: AtomicIsize::new(0),
@@ -394,6 +441,8 @@ fn ui_thread(
         render: Mutex::new(None),
         linux: spec.linux.is_some(),
         asked_close: Mutex::new(None),
+        note: Mutex::new(None),
+        note_seq: AtomicU64::new(0),
     });
     let state = Box::new(Ui {
         shared: shared.clone(),
@@ -405,6 +454,7 @@ fn ui_thread(
         high_surrogate: None,
         render_thread: None,
         props: None,
+        note_fades: 0,
     });
     let state_ptr = Box::into_raw(state);
     let title: Vec<u16> = spec.label.encode_utf16().chain(std::iter::once(0)).collect();
@@ -447,6 +497,12 @@ fn ui_thread(
             set_icons(hwnd, png);
         }
         (*state_ptr).props = taskbar_identity(hwnd, &spec);
+        // Files from Explorer go to the phone. Let through even to an app run
+        // as administrator, which Windows would otherwise keep Explorer's drop from.
+        DragAcceptFiles(hwnd, true);
+        for m in [WM_DROPFILES, WM_COPYDATA, WM_COPYGLOBALDATA] {
+            let _ = ChangeWindowMessageFilterEx(hwnd, m, MSGFLT_ALLOW, None);
+        }
     }
 
     // the picture
@@ -604,6 +660,8 @@ struct Ui {
     high_surrogate: Option<u16>,
     render_thread: Option<thread::JoinHandle<()>>,
     props: Option<IPropertyStore>,
+    /// The note the fade timer is running for, by its number.
+    note_fades: u64,
 }
 
 fn lo(l: LPARAM) -> i32 {
@@ -689,6 +747,70 @@ impl Ui {
         self.shared.link.hand_clipboard_over();
     }
 
+    /// The Sound button's menu: where the phone's sound plays, Windows' own
+    /// popup menu, under the button. Picking from it is the app's to carry
+    /// out, off this thread; a note says how it went.
+    fn sound_menu(&self, hwnd: HWND) {
+        let host = self.shared.link.host().clone();
+        let items = host.sound_menu();
+        if items.is_empty() {
+            return;
+        }
+        unsafe {
+            let Ok(menu) = CreatePopupMenu() else { return };
+            for (i, item) in items.iter().enumerate() {
+                match item {
+                    sound::Item::Separator => {
+                        let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
+                    }
+                    sound::Item::Choice { label, checked, enabled, .. } => {
+                        let mut flags = MF_STRING;
+                        if *checked {
+                            flags |= MF_CHECKED;
+                        }
+                        if !*enabled {
+                            flags |= MF_GRAYED;
+                        }
+                        // The menu keeps a copy of the text.
+                        let wide: Vec<u16> = label.encode_utf16().chain(std::iter::once(0)).collect();
+                        let _ = AppendMenuW(menu, flags, i + 1, PCWSTR(wide.as_ptr()));
+                    }
+                }
+            }
+            dark_menus(hwnd, self.shared.dark.load(Ordering::SeqCst));
+            // Under the button, right edges in line, as Windows' own title-bar menus open.
+            let b = frame::bar(self.width(), self.shared.scale()).sound;
+            let mut at = POINT { x: b.right, y: b.bottom };
+            let _ = ClientToScreen(hwnd, &mut at);
+            let flags = TPM_RETURNCMD | TPM_RIGHTALIGN | TPM_TOPALIGN | TPM_NONOTIFY;
+            let picked = TrackPopupMenuEx(menu, flags.0, at.x, at.y, hwnd, None).0 as usize;
+            let _ = DestroyMenu(menu);
+            // The menu had the mouse: whatever was under it then is not hovered now.
+            self.set_hover(Hit::None);
+            if let Some(sound::Item::Choice { choice, enabled: true, .. }) = picked.checked_sub(1).and_then(|i| items.get(i)) {
+                host.pick_sound(choice.clone(), self.shared.clone());
+            }
+        }
+    }
+
+    /// Paths dropped from Explorer, for the phone.
+    fn dropped(&self, drop: HDROP) {
+        let mut paths = Vec::new();
+        unsafe {
+            let count = DragQueryFileW(drop, u32::MAX, None);
+            for i in 0..count {
+                let len = DragQueryFileW(drop, i, None) as usize;
+                let mut buf = vec![0u16; len + 1];
+                let got = DragQueryFileW(drop, i, Some(&mut buf)) as usize;
+                paths.push(PathBuf::from(OsString::from_wide(&buf[..got.min(len)])));
+            }
+            DragFinish(drop);
+        }
+        if !paths.is_empty() {
+            self.shared.link.host().dropped(paths, self.shared.clone());
+        }
+    }
+
     fn close(&mut self, hwnd: HWND, tell_phone: bool) {
         if !self.shared.link.close(tell_phone) {
             return;
@@ -761,7 +883,7 @@ impl Ui {
                         Hit::Max => HTMAXBUTTON,
                         Hit::Min => HTMINBUTTON,
                         Hit::Caption => HTCAPTION,
-                        Hit::Back | Hit::None => HTCLIENT,
+                        Hit::Back | Hit::Sound | Hit::None => HTCLIENT,
                     } as isize)
                 }
                 // The caption buttons are non-client parts Windows would draw itself.
@@ -843,10 +965,9 @@ impl Ui {
                         self.tracking = true;
                     }
                     let in_bar = y < self.bar_height();
-                    self.set_hover(if in_bar && frame::hit(self.width(), self.shared.scale(), x, y) == Hit::Back {
-                        Hit::Back
-                    } else {
-                        Hit::None
+                    self.set_hover(match frame::hit(self.width(), self.shared.scale(), x, y) {
+                        h @ (Hit::Back | Hit::Sound) if in_bar => h,
+                        _ => Hit::None,
                     });
                     if self.buttons != 0 || !in_bar {
                         self.pointer(x, y);
@@ -866,8 +987,9 @@ impl Ui {
                     let (x, y) = (lo(lp), hi(lp));
                     if self.buttons == 0 && y < self.bar_height() {
                         if msg == WM_LBUTTONDOWN || msg == WM_LBUTTONDBLCLK {
-                            if frame::hit(self.width(), self.shared.scale(), x, y) == Hit::Back {
-                                self.set_pressed(Hit::Back);
+                            let h = frame::hit(self.width(), self.shared.scale(), x, y);
+                            if matches!(h, Hit::Back | Hit::Sound) {
+                                self.set_pressed(h);
                                 SetCapture(hwnd);
                             }
                         }
@@ -882,11 +1004,15 @@ impl Ui {
                 }
                 WM_LBUTTONUP | WM_RBUTTONUP | WM_MBUTTONUP => {
                     let (x, y) = (lo(lp), hi(lp));
-                    if msg == WM_LBUTTONUP && Hit::from_code(self.shared.pressed.load(Ordering::SeqCst)) == Hit::Back {
+                    let pressed = Hit::from_code(self.shared.pressed.load(Ordering::SeqCst));
+                    if msg == WM_LBUTTONUP && matches!(pressed, Hit::Back | Hit::Sound) {
                         self.set_pressed(Hit::None);
                         let _ = ReleaseCapture();
-                        if frame::hit(self.width(), self.shared.scale(), x, y) == Hit::Back {
-                            self.key_tap(keys::code::BACK);
+                        if frame::hit(self.width(), self.shared.scale(), x, y) == pressed {
+                            match pressed {
+                                Hit::Back => self.key_tap(keys::code::BACK),
+                                _ => self.sound_menu(hwnd),
+                            }
                         }
                         return LRESULT(0);
                     }
@@ -1051,6 +1177,27 @@ impl Ui {
                     self.shared.ask_size();
                     LRESULT(0)
                 }
+                WM_APP_NOTE => {
+                    // A busy note stays until the next; any other fades.
+                    let _ = KillTimer(Some(hwnd), NOTE_TIMER);
+                    if wp.0 == 0 {
+                        self.note_fades = lp.0 as u64;
+                        let _ = SetTimer(Some(hwnd), NOTE_TIMER, NOTE_MS, None);
+                    }
+                    LRESULT(0)
+                }
+                WM_TIMER if wp.0 == NOTE_TIMER => {
+                    let _ = KillTimer(Some(hwnd), NOTE_TIMER);
+                    if self.shared.note_seq.load(Ordering::SeqCst) == self.note_fades {
+                        self.shared.note.lock().unwrap().take();
+                        self.shared.repaint();
+                    }
+                    LRESULT(0)
+                }
+                WM_DROPFILES => {
+                    self.dropped(HDROP(wp.0 as *mut core::ffi::c_void));
+                    LRESULT(0)
+                }
                 WM_EXITSIZEMOVE => {
                     let _ = KillTimer(Some(hwnd), RESIZE_TIMER);
                     self.shared.ask_size();
@@ -1186,6 +1333,7 @@ fn render_thread(shared: Arc<Shared>, rx: Receiver<RenderMsg>, icon: Option<Vec<
             r.wait_ready(20);
             let message = shared.message.lock().unwrap().clone();
             let label = shared.label.lock().unwrap().clone();
+            let note = shared.note.lock().unwrap().clone();
             let look = render::Look {
                 label: &label,
                 device: &shared.device,
@@ -1195,6 +1343,7 @@ fn render_thread(shared: Arc<Shared>, rx: Receiver<RenderMsg>, icon: Option<Vec<
                 pressed: Hit::from_code(shared.pressed.load(Ordering::SeqCst)),
                 dark: shared.dark.load(Ordering::SeqCst),
                 message: if r.has_picture() { None } else { message.as_deref() },
+                note: note.as_deref(),
             };
             let drawn = r.draw(&look);
             if let Err(e) = &drawn {

@@ -240,6 +240,33 @@ final class DexMedia {
         DexLog.step("media", "sound will play on: " + mode + " (live)");
     }
 
+    /**
+     * Where the computer's app windows sent the sound (doc/apps-on-pc.md,
+     * "Where the sound plays"), made this desktop's record of it too — so the
+     * flyout and Settings show that choice the next time they open, rather
+     * than the one made here before.
+     *
+     * Unlike {@link #setAudioMode} nothing is pushed back: the computer made
+     * the choice and holds it already. A phone output comes with its type,
+     * address and product name; a name it has not got is ours to word, in
+     * this phone's language.
+     */
+    static void adoptFromComputer(Context ctx, String mode, Output pick) {
+        if (!java.util.Arrays.asList(AUDIO_MODES).contains(mode)) return;
+        DexPrefs.put(ctx, DexPrefs.KEY_AUDIO, !AUDIO_PHONE.equals(mode));
+        DexPrefs.put(ctx, DexPrefs.KEY_AUDIO_DUP, AUDIO_BOTH.equals(mode));
+        if (AUDIO_PHONE.equals(mode) && pick != null) {
+            if (pick.name.isEmpty()) {
+                pick.name = pick.builtin ? ctx.getString(R.string.lx_output_unknown)
+                        : fallbackName(ctx, pick.type);
+            }
+            rememberPhonePick(ctx, pick);
+        } else {
+            clearPhonePick(ctx);
+        }
+        DexLog.step("media", "the computer's app windows play sound on: " + mode);
+    }
+
     /** A pref key as the PC expects it on the wire: the PC_PREFIX stripped. */
     private static String cfgKey(String prefKey) {
         return prefKey.substring(DexPrefs.PC_PREFIX.length());

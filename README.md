@@ -139,6 +139,18 @@ half a second.
 - **Use your mouse and keyboard.** Click, scroll and type, in your own keyboard
   layout. Copy something on your computer and paste it into the phone app, or
   the other way round
+- **One clipboard, both ways.** What you copy on your computer is on your phone
+  the moment you copy it, so it is in your phone keyboard's clipboard history
+  too, and what you copy in a phone app is in your computer's (Win+V on
+  Windows). A password your password manager copies stays on your computer,
+  unless you paste it into the app yourself
+- **Choose where the sound plays.** The speaker in each window's title bar
+  sends it to your computer, to your computer and your phone, or keeps it on
+  your phone — its speaker or your earbuds, where the phone lets us choose —
+  just like the sound menu on the desktop
+- **Drop files on a window** to put them in your phone's Downloads folder, or
+  drop an app's APK to install it. A file is never overwritten: a second
+  `report.pdf` arrives as `report (2).pdf`
 - **Close the window and the app goes back to your phone,** right where you
   left it. Whatever was on your phone's screen stays there
 - **It is light.** Only the app you are looking at gets sent, and an app that is
@@ -153,7 +165,8 @@ connects**, and the Apps tab opens instead of the desktop when you plug the
 phone in. The desktop is still one click away.
 
 On a Mac the apps open in proper Mac windows too, with a Back button at the
-top (⌘[ works as well), and ⌘C and ⌘V copy and paste as you would expect.
+top (⌘[ works as well) and the speaker at the other end, and ⌘C and ⌘V copy
+and paste as you would expect.
 Pinning an app on its own is a Windows thing: on a Mac they all sit under this
 app's icon in the Dock. On a Linux computer an Android app opens in a simpler
 window, and Linux apps are not offered there.

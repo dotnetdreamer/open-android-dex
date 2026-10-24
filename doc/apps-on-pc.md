@@ -26,7 +26,7 @@ arbitrary until you know what was measured, or what the platform refuses.
 | The phone's server | `openandroiddex-wmd/…/AppServer.java` | one process per phone: the socket, the control connection, the warm-up, keeping the displays awake |
 | What the phone has | `AppCatalog.java`, `PhoneContext.java`, `Providers.java` | the launcher's apps and their icons, as the shell; the Linux apps, from the launcher |
 | A window, phone side | `AppWindow.java`, `AppVideo.java`, `AppTasks.java`, `AppInput.java` | a display, the app started on it, its encoder, its input, the watcher that notices the app has gone |
-| The clipboard | `AppClipboard.java`, `apps/clipboard.rs` | one for the phone, both ways |
+| The clipboard | `AppClipboard.java`, `apps/clipboard.rs` | one for the phone, both ways, as things are copied |
 | The wire | `Wire.java`, `apps/wire.rs` | the framing, both ends |
 | The phone's half, from here | `apps/host.rs`, `apps/adbsock.rs` | starting the server, the control connection, reaching a socket on the phone |
 | A window's link | `apps/link.rs` | one window's own socket to the server, its reader, writer and clock; what both windows share |
@@ -35,6 +35,8 @@ arbitrary until you know what was measured, or what the platform refuses.
 | The window, Mac | `apps/mac/mod.rs`, `apps/mac/video.rs`, `apps/h264.rs`, `apps/keys.rs` (`mac`) | an AppKit window, its input, the display layer macOS decodes into |
 | Linux apps | launcher `AppsProvider.java`, `LinuxWindows.java`, `LinuxWindowActivity.java` | the guest's apps and icons, starting one, its X window on an app window's display |
 | Sound | `scrcpy.rs` (the audio companion) | the phone's sound here while any of its apps has a window |
+| Where the sound plays | `apps/sound.rs`, `AppAudio.java`, `Audio.java`, launcher `AppsProvider.java` (`media.mode`) | the title bar's menu: this computer, both, or one of the phone's own outputs |
+| Dropped files | `apps/drops.rs`, `AppDrop.java` | a file dropped on a window: into the phone's Download folder, an APK installed |
 | Probe | `src-tauri/examples/app_window.rs` | one window, without the rest of the app (Windows) |
 
 Windows and Mac have windows of this app's own. On a Linux computer a click
@@ -198,9 +200,10 @@ app at the same size. Everything a window involves is in the table above.
 
 ## The wire
 
-One connection per window, and one more for what is the phone's as a whole
-(the list, the icons, the clipboard, the clock). Every message is a type byte,
-a big-endian u32 length and that many bytes:
+One connection per window, one more for what is the phone's as a whole (the
+list, the icons, the clipboard, its sound, the clock), and one per dropped
+file. Every message is a type byte, a big-endian u32 length and that many
+bytes:
 
 | Type | Way | Body |
 | --- | --- | --- |
@@ -219,7 +222,15 @@ what closing does), `resize`, `focus`/`blur`/`leave`, `clip`, `keyframe`,
 of it that is the display, `paced`), `display` (the app's name), `state`
 (`closed`, `failed`), `stats` once a second, `pong` the other. The control
 connection's: `apps`, `icons`, `linuxApps`, `linuxIcons`, `linuxRun` (answered
-by `linuxRan`), `clip`.
+by `linuxRan`), `clip` both ways; `audio` — the computer asking, and the phone
+saying where its sound can go, after its hello, as outputs come and go, and
+after a pin; `audioRoute` (answered by `audioRouted`) and `audioMode`, the
+computer's.
+
+A dropped file's connection is the one exception to the framing: its first
+message is `put` (the name, the size, the folder it goes in, whether it is an
+APK to install), and exactly that many bytes follow it, raw. The phone answers
+`got` as they land and `put` once, with how it went.
 
 Each window's connection is its own adb stream, side by side on the one USB or
 Wi-Fi link, so one app's key frame never waits behind another's.
@@ -251,8 +262,8 @@ its own: the window's messages, and the picture (never stopped by Windows'
 modal loops while the window is dragged or resized, which a picture drawn
 from the message loop would be).
 
-The title bar is ours — Back, the app's icon, "App · phone", minimise,
-maximise, close — and Windows keeps the rest of what it gives a window:
+The title bar is ours — Back, the app's icon, "App · phone", where the sound
+plays, minimise, maximise, close — and Windows keeps the rest of what it gives a window:
 `WM_NCCALCSIZE` keeps the side and bottom resize borders, the maximise button
 answers `HTMAXBUTTON` so Windows 11's Snap layouts open on it, and the shadow,
 rounded corners, system menu and Alt+Tab are the system's. Each app's window
@@ -332,11 +343,47 @@ Ctrl or the Windows key goes as Android's key code with its modifiers, a
 letter by the letter the layout types (Ctrl+A on AZERTY is select all). The
 computer's key repeat is the phone's.
 
-The clipboard follows the person: what they copied here goes to the phone when
-a window comes to the front and again before a paste, and what the phone
-copies comes back at once. Neither side is handed its own text back, and an
-empty clipboard here never empties the phone's. The shell holds
+## The clipboard
+
+The clipboard follows the person, both ways, as things are copied: what is
+copied here goes to every phone with a window open the moment it is copied
+(`apps/clipboard.rs`: `WM_CLIPBOARDUPDATE` on Windows; on a Mac, which says
+nothing, the pasteboard's change count, asked twice a second), and again when
+a window comes to the front and before a paste in it; what the phone copies
+comes back at once. Neither side is handed its own text back, and an empty
+clipboard here never empties the phone's. The shell holds
 `READ_CLIPBOARD_IN_BACKGROUND`, the permission that exists for exactly this.
+
+"Its own text" is judged by time as well as by text. The phone takes the
+computer's text as arriving for two seconds after setting it — every
+notification of it, since One UI tells a listener of one set twice (on a
+Galaxy A13 the second went back up as a copy until the two seconds covered
+both) — and after that the same text is a copy like any other. And when
+something is copied here that does not go (below), each phone forgets the
+text last handed over: otherwise "A" copied here, then a password, then "A"
+copied again in a phone app would leave the password on this computer, both
+sides sure "A" was there already.
+
+As it is copied, and not only at a paste, because both sides keep a history,
+and each should have what was copied on the other: copy three things here and
+the phone keyboard's clipboard has all three; copy on the phone and it is in
+Windows' (Win+V). Handed over only when a window came forward or before a
+paste, as it once was, the phone got the last thing copied and never the ones
+before it.
+
+What a password manager marks as not for histories or other devices stays
+here — on Windows `ExcludeClipboardContentFromMonitorProcessing`, or
+`CanIncludeInClipboardHistory` or `CanUploadToCloudClipboard` set to 0, the
+marks Windows' own history and sync obey; on a Mac
+`org.nspasteboard.ConcealedType` or `TransientType` — unless it is pasted into
+a window, which is a person handing it over. Text over 256 KB waits for a
+paste too: the phone takes its clipboard in one binder call.
+
+Text only. An image copied here would have to become a file in the phone's
+shared storage — its gallery — to be a clip there; files go by dropping them
+instead. A Linux app's window shares the phone's clipboard through the
+launcher, which hands it to the X selection while one of its windows has the
+focus (`doc/linux-windows.md`).
 
 ## The picture
 
@@ -476,6 +523,97 @@ companion is stopped without the desktop's undo: that undo force-stops the
 launcher and sends the phone to its home screen, from whatever its owner had
 open on it.
 
+### Where it plays
+
+Every window has a speaker in its title bar — beside minimise on Windows, at
+the bar's right end on a Mac — and it opens the desktop's media-output flyout
+as a menu (`apps/sound.rs`): the same answers, in the same words, and the same
+one setting behind them, the `audio` and `audiodup` this computer keeps for
+the desktop.
+
+- **Computer only** — the companion moves the phone's sound here.
+- **Computer and phone** — it copies it here and the phone plays too: Android
+  13 and later, all scrcpy can do; greyed below it, saying so.
+- **The phone's own outputs** — its speaker, wired headphones, a USB card,
+  earbuds — as the phone lists them (`AppAudio`, the launcher's
+  `DexMedia.outputs` again, the names the products' own): the companion stops
+  and the phone's media is pinned to the one picked, the window daemon's
+  `AUDIOROUTE` lever (`Audio.java`), pulled by the app server, which is the
+  shell too.
+
+A Linux app's window has the same speaker and the same answers: its sound
+leaves the phone through the launcher's own `AudioTrack` (`LinuxAudio`, media
+usage), which the companion captures and a pin routes as it does any app's.
+
+**The pin first.** A phone output is pinned before this computer stops
+playing: a pin that failed must not already have silenced the computer and
+sent the sound somewhere nobody chose — the order the desktop's
+`routeToPhoneOutput` keeps. Back to this computer, the pin is let go of, so
+the phone's half of "computer and phone" plays where the phone would on its own.
+
+**Phones that will not pin.** Pinning is `MODIFY_AUDIO_ROUTING`, and the shell
+does not hold it everywhere: a Galaxy A13 on Android 12 and a Redmi 9A on 11
+refuse it, and the desktop's flyout falls back to the platform's picker there
+for the same reason. The phone says so (`canPin`), and the menu's third answer
+is then the phone as a whole — "Phone only", as the desktop's Settings words it
+— which plays where the phone sends it by itself: earbuds while they are
+connected, else the speaker.
+
+**What is checked** is what happens: the stored answer, "computer and phone"
+shown as "computer only" on a phone below 13; on the phone, the output media
+is pinned to, else where the phone says it plays now (Android 12 and later),
+else the speaker.
+
+**One setting.** A choice is stored as the launcher's `cfg` rows store it,
+carried out for every phone with a window here (its companion cycled, as a
+choice made on the desktop is), and told to the launcher (`AppsProvider`'s
+`media.mode`), so the desktop's flyout and Settings show it the next time
+they open. A launcher too old for the method keeps its own record of the
+choice; that is all it costs.
+
+How a pick went is said for a few seconds under the title bar (a Mac: the
+window's subtitle) — "Sound: Computer only" — and the reason it failed, if it
+did, goes to the log.
+
+## Dropping files
+
+Files dropped on a window — from Explorer, or from Finder — go to the phone as
+a drop on the desktop does: into its Download folder, and an APK installed
+instead. A folder brings its files, in folders of the same names (links not
+followed, at most 5000 files). Nothing is overwritten and nothing is asked: a
+name already there becomes "report (2).pdf", as wherever else files arrive on
+this phone (`WebFiles.uniqueIn`), and the window says the name it got. Names
+are made safe for shared storage, which may be FAT underneath, and none can
+climb out of Download.
+
+Not the desktop's way, scrcpy's `adb push`: a process per file, adb's own
+command line, `run_adb`'s 25-second limit, and no progress a window could
+show. Each file is a connection of its own to the app server (`put`,
+`AppDrop.java`), through adb as a window's is, so nothing listens on this
+computer; its bytes are streamed as they are read here, written to a `.part`
+renamed once the last is there, and the `.part` goes on any failure — a drop
+cut short leaves nothing behind. The phone says how much has landed as it
+lands, and that is the progress the window shows under its title bar (a Mac:
+its subtitle): "Sending 2 of 4 to your phone… 34%", then "4 files are in
+Downloads on your phone" for a few seconds. One drop at a time, from every
+window: a second waits for the first rather than sharing the link with it.
+
+An APK is written to the shell's `/data/local/tmp` and installed with `pm
+install` (`cmd package`: a binder call, not a JVM), as `adb install` would,
+then deleted. When the installer refuses, its reason is worded for a person:
+"a newer version is installed", "the phone doesn't allow installs from a
+computer" (Xiaomi's Install via USB). From Android 11 the phone's shared
+storage tells the media store of a new file itself, as it closes; before it,
+the file is scanned, so the gallery and the file pickers see it either way.
+
+A Linux app's window takes a drop the same way, into the phone's Download
+folder, not Linux's home: the guest sees it as `/root/storage/Download` when
+the launcher may read shared storage (`linux-rt.sh`'s bind, which the window
+session shares).
+
+A 9 MB file took 516 ms over a Galaxy A13's USB (17 MB/s) and 904 ms over a
+Redmi 9A's (10 MB/s).
+
 ## Verified, and not yet
 
 On a Galaxy A13 (Android 12, USB), from the app itself and from the probe, on
@@ -500,10 +638,47 @@ On the Android 15 emulator: the trusted display's flags (`OWN_FOCUS`
 included), `linux.apps` in-process, and the shell starting
 `LinuxWindowActivity` on a window's display.
 
+The sound menu, the clipboard as it is copied, and drops (2026-10-24):
+
+- the phone's half on a Galaxy A13 (Android 12) and a Redmi 9A (Android 11),
+  both on USB, by a harness speaking the wire: the `audio` state after hello,
+  `canPin` false and a pin refused for want of `MODIFY_AUDIO_ROUTING`, the
+  connection going on after it; the clipboard both ways between processes,
+  nothing handed back; `put` — a file whole (by checksum), "(2)" beside one
+  already there, a hostile name and folder kept inside Download, a drop cut
+  short leaving nothing, an APK installed and a file that is not one refused,
+  nothing left in `/data/local/tmp`, the media store knowing the files;
+- in the app on Windows 11 with the A13: the speaker's menu in Windows' dark
+  theme, the Android 13 answer greyed, "Phone only" stopping the companion
+  and "Computer only" starting it again in about 330 ms, the setting stored,
+  the note under the bar; a copy here reaching the phone with the window
+  behind others, three in a row being three items in the Samsung keyboard's
+  clipboard, a copy on the phone on top of Win+V's history, and one marked
+  `ExcludeClipboardContentFromMonitorProcessing` staying here;
+- a drop through a window's own `WM_DROPFILES` handler, posted in-process as
+  Explorer's arrives (the probe's window): a file, a 6 MB file and a folder
+  with one inside it, an APK, the same file again as "(2)", each with its note.
+
 On a Mac: nothing has run. It compiles against the macOS bindings for Apple
 silicon, and its pure parts pass their tests.
 
 Not yet:
+
+- **A pin on a phone that allows one**: the outputs listed, earbuds picked and
+  the sound back from them — no phone here lets the shell route audio.
+- **The launcher told** (`media.mode`): both phones here run a launcher from
+  before `AppsProvider`, and the desktop is what installs a newer one.
+- **The Mac's speaker, drop and clipboard**: the menu under its title-bar
+  button, a drop from Finder (a file reference made a path), the subtitle's
+  notes, the pasteboard watched.
+- A drop from Explorer itself, the system's half of `WM_DROPFILES`, and onto
+  an app run as administrator (the message filter is let through, untried).
+- The same text copied again in a phone app after something that does not go
+  was copied here: nothing on these phones' shells can set a clip that is
+  already there, as an app does.
+- A Linux app's window: its speaker, the clipboard through the launcher, a
+  drop on it — the test phones are 32-bit (below).
+- A drop over Wi-Fi, measured.
 
 - **The Mac window, run on a Mac**: opening, the picture (the display layer
   with the phone's stream, a resize's new stream, the crop), input methods,

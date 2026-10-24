@@ -14,6 +14,7 @@
 use std::collections::HashMap;
 use std::io::Write;
 use std::net::TcpStream;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
@@ -22,7 +23,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
-use super::{adbsock, wire};
+use super::{adbsock, sound, wire};
 
 /// What a window is opened with.
 pub struct Spec {
@@ -114,8 +115,29 @@ pub trait Surface: Send + Sync {
     fn named(&self, name: &str);
     /// A line to show in the window while it has no picture, or none.
     fn say(&self, text: Option<String>);
+    /// A short note in the window — where the sound went, how far a dropped
+    /// file is: in a strip under the title bar on Windows, the window's
+    /// subtitle on a Mac. A `busy` one stays until the next replaces it; any
+    /// other goes after a few seconds. None takes it away.
+    fn note(&self, text: Option<String>, busy: bool);
     /// The phone says the app has gone: the window goes, telling the phone nothing.
     fn gone(&self);
+}
+
+/// What a window asks of the app around it, from the window's own threads
+/// and the link's: the app's policy, which the window only draws.
+pub trait Host: Send + Sync {
+    /// The window's news: its first picture, a failure, its end.
+    fn event(&self, e: Event);
+    /// This computer's clipboard for the phone, if it changed since either
+    /// side last handed it over: on coming to the front, and before a paste.
+    fn clipboard(&self) -> Option<String>;
+    /// The title bar's sound menu, as things stand.
+    fn sound_menu(&self) -> Vec<sound::Item>;
+    /// A choice from that menu; `window` hears how it went.
+    fn pick_sound(&self, choice: sound::Choice, window: Arc<dyn Surface>);
+    /// Files dropped on the window, for the phone; `window` hears how they go.
+    fn dropped(&self, paths: Vec<PathBuf>, window: Arc<dyn Surface>);
 }
 
 /// One window's link: what both its sides and its threads share.
@@ -131,18 +153,12 @@ pub struct Link {
     /// how old it is when it is shown. i64::MIN until the first answer.
     clock_offset_us: AtomicI64,
     best_rtt_us: AtomicU64,
-    events: Box<dyn Fn(Event) + Send + Sync>,
-    /// Hands this computer's clipboard to the phone, if it changed: on coming to the front, and before a paste.
-    clipboard: Box<dyn Fn() -> Option<String> + Send + Sync>,
+    host: Arc<dyn Host>,
 }
 
 impl Link {
     /// A link, and the other end of what it sends: for [`start`].
-    pub fn new(
-        clicked: Instant,
-        events: Box<dyn Fn(Event) + Send + Sync>,
-        clipboard: Box<dyn Fn() -> Option<String> + Send + Sync>,
-    ) -> (Arc<Link>, Receiver<Vec<u8>>) {
+    pub fn new(clicked: Instant, host: Arc<dyn Host>) -> (Arc<Link>, Receiver<Vec<u8>>) {
         let (tx, rx) = mpsc::channel::<Vec<u8>>();
         let link = Link {
             out: Mutex::new(Some(tx)),
@@ -152,8 +168,7 @@ impl Link {
             clicked,
             clock_offset_us: AtomicI64::new(i64::MIN),
             best_rtt_us: AtomicU64::new(u64::MAX),
-            events,
-            clipboard,
+            host,
         };
         (Arc::new(link), rx)
     }
@@ -165,7 +180,12 @@ impl Link {
     }
 
     pub fn event(&self, e: Event) {
-        (self.events)(e);
+        self.host.event(e);
+    }
+
+    /// The app around the window: its sound menu, a drop.
+    pub fn host(&self) -> &Arc<dyn Host> {
+        &self.host
     }
 
     pub fn closing(&self) -> bool {
@@ -215,7 +235,7 @@ impl Link {
     /// This computer's clipboard to the phone, over this window's own socket —
     /// so it lands before the paste that follows it on the same socket.
     pub fn hand_clipboard_over(&self) {
-        if let Some(text) = (self.clipboard)() {
+        if let Some(text) = self.host.clipboard() {
             self.send(wire::json(&json!({"t": "clip", "text": text})));
         }
     }
@@ -223,7 +243,7 @@ impl Link {
     /// The first picture is on screen: said once, timed from the click.
     pub fn shown(&self) {
         if !self.live.swap(true, Ordering::SeqCst) {
-            (self.events)(Event::Live(self.clicked.elapsed()));
+            self.host.event(Event::Live(self.clicked.elapsed()));
         }
     }
 
@@ -453,8 +473,22 @@ fn read_loop(
 mod tests {
     use super::*;
 
+    struct NoHost;
+
+    impl Host for NoHost {
+        fn event(&self, _e: Event) {}
+        fn clipboard(&self) -> Option<String> {
+            None
+        }
+        fn sound_menu(&self) -> Vec<sound::Item> {
+            Vec::new()
+        }
+        fn pick_sound(&self, _choice: sound::Choice, _window: Arc<dyn Surface>) {}
+        fn dropped(&self, _paths: Vec<PathBuf>, _window: Arc<dyn Surface>) {}
+    }
+
     fn link() -> Arc<Link> {
-        Link::new(Instant::now(), Box::new(|_| {}), Box::new(|| None)).0
+        Link::new(Instant::now(), Arc::new(NoHost)).0
     }
 
     #[test]
@@ -469,7 +503,7 @@ mod tests {
 
     #[test]
     fn a_size_is_asked_once() {
-        let (l, rx) = Link::new(Instant::now(), Box::new(|_| {}), Box::new(|| None));
+        let (l, rx) = Link::new(Instant::now(), Arc::new(NoHost));
         let want = DisplaySize::for_area(825, 1831, 2.0);
         assert_eq!(want, DisplaySize { w: 824, h: 1830, dpi: 320 });
         l.ask_size(want);

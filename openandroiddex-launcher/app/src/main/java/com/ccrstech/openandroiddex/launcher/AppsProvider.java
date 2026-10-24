@@ -45,6 +45,9 @@ import java.util.concurrent.TimeUnit;
  * <li>{@code linux.install} — set Linux up, as opening it on the phone does:
  *     the computer's Apps page offers it when the phone can run Linux and has
  *     none yet, or its setup stopped.</li>
+ * <li>{@code media.mode} {@code {mode, pick?}} — where the computer's app
+ *     windows sent the sound ("computer", "both", or "phone" and the output
+ *     picked), recorded as the desktop's own choice so its flyout agrees.</li>
  * </ul>
  *
  * <p>{@code linux.apps} also says how far the setup is ({@code phase},
@@ -142,6 +145,20 @@ public class AppsProvider extends ContentProvider {
                 case "linux.close": {
                     int xid = in.optInt("xid");
                     onMain(() -> windows.closeXid(xid));
+                    out.put("ok", true);
+                    break;
+                }
+                case "media.mode": {
+                    JSONObject p = in.optJSONObject("pick");
+                    DexMedia.Output pick = null;
+                    if (p != null) {
+                        pick = new DexMedia.Output();
+                        pick.type = p.optInt("type");
+                        pick.address = p.optString("address");
+                        pick.name = p.optString("name");
+                        pick.builtin = pick.type == android.media.AudioDeviceInfo.TYPE_BUILTIN_SPEAKER;
+                    }
+                    DexMedia.adoptFromComputer(ctx, in.optString("mode"), pick);
                     out.put("ok", true);
                     break;
                 }

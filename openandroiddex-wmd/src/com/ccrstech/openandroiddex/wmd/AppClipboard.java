@@ -5,6 +5,7 @@ import android.content.ClipboardManager;
 import android.content.Context;
 import android.os.Handler;
 import android.os.HandlerThread;
+import android.os.SystemClock;
 
 import java.lang.reflect.Constructor;
 
@@ -31,11 +32,19 @@ final class AppClipboard {
 
     /** The label a computer's text carries on the phone, where any app may read it. */
     private static final String LABEL = "Open Android DeX";
+    /**
+     * How long after the computer's text is set the same text is its own
+     * arrival, not a copy. Only that long: the same text copied again later,
+     * in an app, is a copy, and the computer's clipboard may hold something
+     * else by then.
+     */
+    private static final long ECHO_MS = 2000;
 
     private final ClipboardManager clipboard;
     private volatile Listener listener;
-    /** What the computer gave, so its arrival is not sent back up as a copy. */
+    /** What the computer gave, and when, so its arrival is not sent back up as a copy. */
     private volatile String given;
+    private volatile long givenAt;
 
     private AppClipboard(ClipboardManager clipboard) {
         this.clipboard = clipboard;
@@ -65,7 +74,10 @@ final class AppClipboard {
 
     private void changed() {
         String text = read();
-        if (text == null || text.equals(given)) return;
+        if (text == null) return;
+        // Every word of it within the window, not only the first: One UI tells
+        // a listener of one set twice (seen on a Galaxy A13).
+        if (text.equals(given) && SystemClock.uptimeMillis() - givenAt < ECHO_MS) return;
         given = null;
         Listener l = listener;
         if (l != null) l.copied(text);
@@ -88,6 +100,7 @@ final class AppClipboard {
         if (text == null || text.isEmpty() || text.equals(read())) return;
         try {
             given = text;
+            givenAt = SystemClock.uptimeMillis();
             clipboard.setPrimaryClip(ClipData.newPlainText(LABEL, text));
         } catch (Throwable t) {
             AppServer.log("cannot set the clipboard (" + t + ")");

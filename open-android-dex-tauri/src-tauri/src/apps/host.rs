@@ -10,7 +10,8 @@
 //! after that costs a display, a launch and an encoder.
 //!
 //! The control connection carries the list of apps, their icons, the
-//! clipboard and the phone's clock. Requests on it are one at a time.
+//! clipboard, where the phone's sound plays and the phone's clock. Requests
+//! on it are one at a time.
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
@@ -24,6 +25,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
+use super::sound::{self, Output, PhoneSound};
 use super::{adbsock, wire};
 use crate::adb;
 
@@ -37,6 +39,8 @@ const READY_TIMEOUT: Duration = Duration::from_secs(12);
 const ANSWER_TIMEOUT: Duration = Duration::from_secs(20);
 /// What opening a Linux app waits to hear: the launcher answers within its main thread's 5 s.
 const LINUX_RUN_TIMEOUT: Duration = Duration::from_secs(8);
+/// Pinning the phone's sound is one call to its audio service.
+const ROUTE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// What the phone said about itself.
 #[derive(Debug, Clone, Default, serde::Serialize)]
@@ -58,6 +62,7 @@ enum Answer {
     LinuxRan(Value),
     Icon(String, Vec<u8>),
     IconsDone,
+    Routed(Value),
 }
 
 pub struct Server {
@@ -73,11 +78,70 @@ pub struct Server {
     alive: Arc<AtomicBool>,
     /// The phone's text last handed over either way, so neither side gets its own back.
     pub clip_last: Arc<Mutex<String>>,
+    /// What the phone last said of its sound outputs: it says so as they come and go.
+    sound: Arc<Mutex<Option<PhoneSound>>>,
 }
 
 impl Server {
     pub fn alive(&self) -> bool {
         self.alive.load(Ordering::SeqCst)
+    }
+
+    /// This computer's clipboard for the phone's next paste, on the phone's own
+    /// connection, unless it is what either side last handed over. True if it went.
+    pub fn give_clipboard(&self, text: &str) -> bool {
+        {
+            let mut last = self.clip_last.lock().unwrap();
+            if *last == text {
+                return false;
+            }
+            *last = text.to_string();
+        }
+        self.send(&json!({"t": "clip", "text": text})).is_ok()
+    }
+
+    /// This computer's clipboard no longer holds what was last handed over
+    /// either way: whatever either side copies next is new.
+    pub fn forget_clipboard(&self) {
+        self.clip_last.lock().unwrap().clear();
+    }
+
+    /// What the phone last said of where its sound can play.
+    pub fn sound(&self) -> Option<PhoneSound> {
+        self.sound.lock().unwrap().clone()
+    }
+
+    /// Ask the phone to say it again; what it says replaces the last, when it comes.
+    pub fn ask_sound(&self) {
+        let _ = self.send(&json!({"t": "audio"}));
+    }
+
+    /// Pin the phone's media to `to` — or, with None, let the phone choose again.
+    pub fn route_audio(&self, to: Option<&Output>) -> Result<(), String> {
+        let _one = self.asking.lock().unwrap();
+        let ask = match to {
+            Some(o) => json!({"t": "audioRoute", "type": o.kind, "address": o.address}),
+            None => json!({"t": "audioRoute", "clear": true}),
+        };
+        self.send(&ask)?;
+        let answers = self.answers.lock().unwrap();
+        let until = Instant::now() + ROUTE_TIMEOUT;
+        loop {
+            match answers.recv_timeout(until.saturating_duration_since(Instant::now())) {
+                Ok(Answer::Routed(v)) if v["ok"].as_bool() == Some(true) => return Ok(()),
+                Ok(Answer::Routed(v)) => {
+                    return Err(v["message"].as_str().filter(|m| !m.is_empty()).unwrap_or("the phone refused").to_string())
+                }
+                Ok(_) => continue,
+                Err(_) => return Err("the phone did not answer".into()),
+            }
+        }
+    }
+
+    /// Tell the phone's launcher where this computer sent the sound, for its
+    /// own record of the choice: the desktop's flyout then shows the same.
+    pub fn tell_launcher_sound(&self, mode: sound::Mode, pick: Option<&Output>) {
+        let _ = self.send(&sound::launcher_message(mode, pick));
     }
 
     /// Every app with a launcher entry, as the phone lists them.
@@ -153,7 +217,7 @@ impl Server {
             match answers.recv_timeout(until.saturating_duration_since(Instant::now())) {
                 Ok(Answer::Icon(pkg, png)) => got(pkg, png),
                 Ok(Answer::IconsDone) => return Ok(()),
-                Ok(Answer::Apps(_)) | Ok(Answer::Linux(_)) | Ok(Answer::LinuxRan(_)) => continue,
+                Ok(Answer::Apps(_)) | Ok(Answer::Linux(_)) | Ok(Answer::LinuxRan(_)) | Ok(Answer::Routed(_)) => continue,
                 Err(_) => return Err("the phone did not send its icons".into()),
             }
         }
@@ -353,8 +417,17 @@ fn start(app: &tauri::AppHandle, serial: &str, warm: bool) -> Result<Server, Str
 
     let (answer_tx, answer_rx) = mpsc::channel::<Answer>();
     let clip_last = Arc::new(Mutex::new(String::new()));
+    let sound = Arc::new(Mutex::new(None));
     let reader = control.try_clone().map_err(|e| e.to_string())?;
-    spawn_control_reader(app.clone(), serial.to_string(), reader, answer_tx, alive.clone(), clip_last.clone());
+    spawn_control_reader(
+        app.clone(),
+        serial.to_string(),
+        reader,
+        answer_tx,
+        alive.clone(),
+        clip_last.clone(),
+        sound.clone(),
+    );
     log::info!(
         "apps [{serial}] app server up in {}ms: Android {} (API {}), {} {}{}",
         t0.elapsed().as_millis(),
@@ -374,11 +447,12 @@ fn start(app: &tauri::AppHandle, serial: &str, warm: bool) -> Result<Server, Str
         asking: Mutex::new(()),
         alive,
         clip_last,
+        sound,
     })
 }
 
 /// What the phone sends on its own: answers go to whoever asked, the
-/// clipboard straight to this computer's.
+/// clipboard straight to this computer's, word of its sound to the menus.
 fn spawn_control_reader(
     app: tauri::AppHandle,
     serial: String,
@@ -386,6 +460,7 @@ fn spawn_control_reader(
     answers: Sender<Answer>,
     alive: Arc<AtomicBool>,
     clip_last: Arc<Mutex<String>>,
+    sound: Arc<Mutex<Option<PhoneSound>>>,
 ) {
     let _ = thread::Builder::new().name("apps-control".into()).spawn(move || {
         loop {
@@ -409,6 +484,12 @@ fn spawn_control_reader(
                         }
                         Some("linuxRan") => {
                             let _ = answers.send(Answer::LinuxRan(v));
+                        }
+                        Some("audio") => {
+                            *sound.lock().unwrap() = Some(PhoneSound::parse(&v));
+                        }
+                        Some("audioRouted") => {
+                            let _ = answers.send(Answer::Routed(v));
                         }
                         Some("linux") => super::linux_event(&app, &serial, &v),
                         Some("clip") => {

@@ -4,7 +4,8 @@
 //! Windows 11's own caption's measurements, in its device-independent pixels:
 //! 32 tall, 46-wide caption buttons. To the left, the one button a phone app
 //! needs that a desktop window has no word for — Back — then the app's icon and
-//! its name, with the phone's after it.
+//! its name, with the phone's after it. Before the caption buttons, the one
+//! more the phone's sound needs: where it plays.
 
 use windows::Win32::Foundation::RECT;
 
@@ -17,6 +18,8 @@ pub enum Hit {
     Close,
     /// The bar itself: dragging moves the window.
     Caption,
+    /// Where the phone's sound plays: a menu.
+    Sound,
 }
 
 impl Hit {
@@ -28,6 +31,7 @@ impl Hit {
             Hit::Max => 3,
             Hit::Close => 4,
             Hit::Caption => 5,
+            Hit::Sound => 6,
         }
     }
 
@@ -38,6 +42,7 @@ impl Hit {
             3 => Hit::Max,
             4 => Hit::Close,
             5 => Hit::Caption,
+            6 => Hit::Sound,
             _ => Hit::None,
         }
     }
@@ -48,6 +53,7 @@ pub struct Bar {
     pub back: RECT,
     pub icon: RECT,
     pub text_x: i32,
+    pub sound: RECT,
     pub min: RECT,
     pub max: RECT,
     pub close: RECT,
@@ -71,10 +77,11 @@ pub fn bar(width: i32, scale: f32) -> Bar {
     let close = RECT { left: width - button, top: 0, right: width, bottom: h };
     let max = RECT { left: close.left - button, top: 0, right: close.left, bottom: h };
     let min = RECT { left: max.left - button, top: 0, right: max.left, bottom: h };
+    let sound = RECT { left: min.left - back_w, top: 0, right: min.left, bottom: h };
     let back = RECT { left: 0, top: 0, right: back_w, bottom: h };
     let icon_x = back_w + (4.0 * scale).round() as i32;
     let icon_rect = RECT { left: icon_x, top: (h - icon) / 2, right: icon_x + icon, bottom: (h - icon) / 2 + icon };
-    Bar { h, back, icon: icon_rect, text_x: icon_rect.right + (10.0 * scale).round() as i32, min, max, close }
+    Bar { h, back, icon: icon_rect, text_x: icon_rect.right + (10.0 * scale).round() as i32, sound, min, max, close }
 }
 
 fn inside(r: &RECT, x: i32, y: i32) -> bool {
@@ -93,6 +100,8 @@ pub fn hit(width: i32, scale: f32, x: i32, y: i32) -> Hit {
         Hit::Max
     } else if inside(&b.min, x, y) {
         Hit::Min
+    } else if inside(&b.sound, x, y) {
+        Hit::Sound
     } else if inside(&b.back, x, y) {
         Hit::Back
     } else {
@@ -116,6 +125,15 @@ mod tests {
         assert_eq!(hit(412, 1.0, 10, 10), Hit::Back);
         assert_eq!(hit(412, 1.0, 150, 10), Hit::Caption);
         assert_eq!(hit(412, 1.0, 150, 40), Hit::None);
+    }
+
+    #[test]
+    fn the_sound_button_is_just_before_minimise() {
+        let b = bar(412, 1.0);
+        assert_eq!((b.sound.left, b.sound.right), (234, 274));
+        assert_eq!(hit(412, 1.0, 250, 10), Hit::Sound);
+        assert_eq!(hit(412, 1.0, 233, 10), Hit::Caption);
+        assert_eq!(Hit::from_code(Hit::Sound.code()), Hit::Sound);
     }
 
     #[test]

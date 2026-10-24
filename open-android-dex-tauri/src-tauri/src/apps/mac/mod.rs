@@ -14,8 +14,11 @@
 //! type what they type (keys.rs, `mac`). Its title bar is macOS's, with a Back
 //! button beside the window's buttons, since an Android app needs one and a
 //! Mac keyboard has none; ⌘[ is Back too, as in Safari, and so is a mouse's
-//! side button. A Mac pins apps to the Dock, not windows, so the windows are
-//! this app's, listed under its Dock icon and in its Window menu.
+//! side button. At the bar's other end, a speaker: where the phone's sound
+//! plays (sound.rs), as a menu. A Mac pins apps to the Dock, not windows, so
+//! the windows are this app's, listed under its Dock icon and in its Window
+//! menu. Files dropped on one from Finder go to the phone (drops.rs), and the
+//! window's subtitle says how it went.
 //!
 //! Everything AppKit is touched on the main thread, through the main dispatch
 //! queue (which runs during a window's drag and resize as well).
@@ -24,31 +27,37 @@ mod video;
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use dispatch2::{DispatchQueue, DispatchTime};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol, ProtocolObject, Sel};
-use objc2::{define_class, msg_send, sel, AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly};
+use objc2::{define_class, msg_send, sel, AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, Message};
 use objc2_app_kit::{
-    NSApplication, NSAutoresizingMaskOptions, NSBackingStoreType, NSButton, NSColor, NSEvent, NSEventModifierFlags,
-    NSImage, NSLayoutAttribute, NSResponder, NSScreen, NSTextAlignment, NSTextField, NSTextInputClient,
-    NSTitlebarAccessoryViewController, NSTrackingArea, NSTrackingAreaOptions, NSView, NSWindow,
-    NSWindowCollectionBehavior, NSWindowDelegate, NSWindowStyleMask, NSWindowTabbingMode,
+    NSApplication, NSAutoresizingMaskOptions, NSBackingStoreType, NSButton, NSColor, NSControlStateValueOn,
+    NSDragOperation, NSDraggingDestination, NSDraggingInfo, NSEvent, NSEventModifierFlags, NSImage,
+    NSLayoutAttribute, NSMenu, NSMenuItem, NSPasteboardTypeFileURL, NSResponder, NSScreen, NSTextAlignment,
+    NSTextField, NSTextInputClient, NSTitlebarAccessoryViewController, NSTrackingArea, NSTrackingAreaOptions, NSView,
+    NSWindow, NSWindowCollectionBehavior, NSWindowDelegate, NSWindowStyleMask, NSWindowTabbingMode,
 };
 use objc2_foundation::{
-    ns_string, NSArray, NSAttributedString, NSAttributedStringKey, NSData, NSNotFound, NSNotification, NSPoint,
-    NSRange, NSRangePointer, NSRect, NSSize, NSString, NSUInteger,
+    ns_string, NSArray, NSAttributedString, NSAttributedStringKey, NSData, NSInteger, NSNotFound, NSNotification,
+    NSPoint, NSRange, NSRangePointer, NSRect, NSSize, NSString, NSUInteger, NSURL,
 };
 use objc2_quartz_core::{CALayer, CATransaction};
 use serde_json::json;
 
 use super::keys::{self, mac as mk};
-use super::link::{self, DisplaySize, Event, Link, NetSpec, Spec, Surface};
+use super::link::{self, DisplaySize, Event, Host, Link, NetSpec, Spec, Surface};
+use super::sound;
 use super::wire;
 use video::{Fed, Feed};
+
+/// How long a note stays as the window's subtitle once nothing is happening any more.
+const NOTE_MS: u64 = 4500;
 
 /// A window, from outside: what the app holds, from any thread.
 pub struct Window {
@@ -113,6 +122,10 @@ struct Shared {
     /// When the window last changed size: the phone is asked once it holds still.
     resized_at: Mutex<Instant>,
     stats: Mutex<Stats>,
+    /// The phone's name: the window's subtitle, when no note has its place.
+    device: String,
+    /// Counts the notes, so a note's fading never takes the next one with it.
+    note_seq: Arc<AtomicU64>,
 }
 
 /// How the picture has been doing, for the log every ten seconds.
@@ -208,6 +221,26 @@ impl Surface for Shared {
         with_window(self.id, move |_, v| v.say(text.as_deref()));
     }
 
+    /// The subtitle, where the phone's name is: a Mac's title bar is its own,
+    /// and the subtitle is the place it gives a window for a line like this.
+    fn note(&self, text: Option<String>, busy: bool) {
+        let seq = self.note_seq.fetch_add(1, Ordering::SeqCst) + 1;
+        let (id, device) = (self.id, self.device.clone());
+        let shown = text.unwrap_or_else(|| device.clone());
+        with_window(id, move |w, _| w.setSubtitle(&NSString::from_str(&shown)));
+        if busy {
+            return;
+        }
+        let latest = self.note_seq.clone();
+        if let Ok(when) = DispatchTime::try_from(Duration::from_millis(NOTE_MS)) {
+            let _ = DispatchQueue::main().after(when, move || {
+                if latest.load(Ordering::SeqCst) == seq {
+                    with_window(id, move |w, _| w.setSubtitle(&NSString::from_str(&device)));
+                }
+            });
+        }
+    }
+
     fn gone(&self) {
         with_window(self.id, |w, v| {
             v.ivars().gone.set(true);
@@ -265,12 +298,8 @@ struct Look {
 
 /// Open a window for `spec`; it runs until it is closed. The window shows at
 /// once, with the app's name, and the picture follows.
-pub fn open(
-    spec: Spec,
-    events: Box<dyn Fn(Event) + Send + Sync>,
-    clipboard: Box<dyn Fn() -> Option<String> + Send + Sync>,
-) -> Result<Arc<Window>, String> {
-    let (link, out_rx) = Link::new(spec.clicked, events, clipboard);
+pub fn open(spec: Spec, host: Arc<dyn Host>) -> Result<Arc<Window>, String> {
+    let (link, out_rx) = Link::new(spec.clicked, host);
     let shared = Arc::new(Shared {
         link,
         id: spec.id,
@@ -283,6 +312,8 @@ pub fn open(
         asked_close: Mutex::new(None),
         resized_at: Mutex::new(Instant::now()),
         stats: Mutex::new(Stats { since: Instant::now(), frames: 0, ages: Vec::new() }),
+        device: spec.device.clone(),
+        note_seq: Arc::new(AtomicU64::new(0)),
     });
     let look = Look {
         id: spec.id,
@@ -405,6 +436,7 @@ fn make(mtm: MainThreadMarker, look: &Look, shared: &Arc<Shared>) {
     window.setAcceptsMouseMovedEvents(true);
     window.makeFirstResponder(Some(&view));
     add_back_button(mtm, &window, &view);
+    add_sound_button(mtm, &window, &view);
 
     shared.scale_milli.store((window.backingScaleFactor() * 1000.0) as u32, Ordering::SeqCst);
     view.resized(false);
@@ -431,6 +463,27 @@ fn add_back_button(mtm: MainThreadMarker, window: &NSWindow, view: &AppView) {
     let accessory = NSTitlebarAccessoryViewController::new(mtm);
     accessory.setView(&holder);
     accessory.setLayoutAttribute(NSLayoutAttribute::Left);
+    window.addTitlebarAccessoryViewController(&accessory);
+}
+
+/// Where the phone's sound plays, at the title bar's other end: a menu.
+fn add_sound_button(mtm: MainThreadMarker, window: &NSWindow, view: &AppView) {
+    let Some(image) = NSImage::imageWithSystemSymbolName_accessibilityDescription(
+        ns_string!("speaker.wave.2"),
+        Some(ns_string!("Sound")),
+    ) else {
+        return;
+    };
+    let target: &AnyObject = view;
+    let button = unsafe { NSButton::buttonWithImage_target_action(&image, Some(target), Some(sel!(soundMenu:)), mtm) };
+    button.setBordered(false);
+    button.setToolTip(Some(ns_string!("Where the sound plays")));
+    button.setFrame(NSRect::new(NSPoint::new(4.0, 0.0), NSSize::new(28.0, 28.0)));
+    let holder = NSView::initWithFrame(NSView::alloc(mtm), NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(36.0, 28.0)));
+    holder.addSubview(&button);
+    let accessory = NSTitlebarAccessoryViewController::new(mtm);
+    accessory.setView(&holder);
+    accessory.setLayoutAttribute(NSLayoutAttribute::Right);
     window.addTitlebarAccessoryViewController(&accessory);
 }
 
@@ -462,6 +515,8 @@ struct Ui {
     picture: Retained<objc2_av_foundation::AVSampleBufferDisplayLayer>,
     message: RefCell<Option<Retained<NSTextField>>>,
     tracking: RefCell<Option<Retained<NSTrackingArea>>>,
+    /// The sound menu as last shown: its items' tags index it.
+    sound: RefCell<Vec<sound::Item>>,
     /// Closing because the phone said the app had gone: the phone is not told.
     gone: Cell<bool>,
     closed: Cell<bool>,
@@ -645,9 +700,49 @@ define_class!(
             link.send(wire::key(true, 0, keys::code::BACK, 0));
             link.send(wire::key(false, 0, keys::code::BACK, 0));
         }
+
+        /// The title bar's speaker: where the phone's sound plays.
+        #[unsafe(method(soundMenu:))]
+        fn sound_menu(&self, sender: Option<&AnyObject>) {
+            self.show_sound_menu(sender.and_then(|s| s.downcast_ref::<NSView>()));
+        }
+
+        /// A choice from that menu, by its item's tag.
+        #[unsafe(method(pickSound:))]
+        fn pick_sound(&self, sender: Option<&AnyObject>) {
+            let Some(item) = sender.and_then(|s| s.downcast_ref::<NSMenuItem>()) else { return };
+            let picked = self.ivars().sound.borrow().get(item.tag() as usize).cloned();
+            if let Some(sound::Item::Choice { choice, enabled: true, .. }) = picked {
+                let shared = self.ivars().shared.clone();
+                shared.link.host().pick_sound(choice, shared.clone());
+            }
+        }
     }
 
     unsafe impl NSObjectProtocol for AppView {}
+
+    /// Files from Finder, dropped on the window: to the phone.
+    unsafe impl NSDraggingDestination for AppView {
+        #[unsafe(method(draggingEntered:))]
+        fn dragging_entered(&self, sender: &ProtocolObject<dyn NSDraggingInfo>) -> NSDragOperation {
+            if dropped_paths(sender).is_empty() {
+                NSDragOperation::None
+            } else {
+                NSDragOperation::Copy
+            }
+        }
+
+        #[unsafe(method(performDragOperation:))]
+        fn perform_drag_operation(&self, sender: &ProtocolObject<dyn NSDraggingInfo>) -> bool {
+            let paths = dropped_paths(sender);
+            let taken = !paths.is_empty();
+            if taken {
+                let shared = self.ivars().shared.clone();
+                shared.link.host().dropped(paths, shared.clone());
+            }
+            taken
+        }
+    }
 
     /// AppKit's text input: what the layout or an input method types reaches
     /// the phone as text. The composing happens here, the text goes when it is
@@ -775,6 +870,7 @@ impl AppView {
             picture,
             message: RefCell::new(None),
             tracking: RefCell::new(None),
+            sound: RefCell::new(Vec::new()),
             gone: Cell::new(false),
             closed: Cell::new(false),
         });
@@ -784,7 +880,54 @@ impl AppView {
             view.ivars().clip.setFrame(layer.bounds());
             layer.addSublayer(&view.ivars().clip);
         }
+        view.registerForDraggedTypes(&NSArray::from_slice(&[unsafe { NSPasteboardTypeFileURL }]));
         view
+    }
+
+    /// The sound menu, under the button that asked for it: where the phone's
+    /// sound plays. Picking from it is the app's to carry out, off the main
+    /// thread; the window's subtitle says how it went.
+    fn show_sound_menu(&self, anchor: Option<&NSView>) {
+        let mtm = self.mtm();
+        let items = self.ivars().shared.link.host().sound_menu();
+        if items.is_empty() {
+            return;
+        }
+        let menu = NSMenu::initWithTitle(NSMenu::alloc(mtm), ns_string!(""));
+        // Each item says whether it can be picked; AppKit is not to decide by its target.
+        menu.setAutoenablesItems(false);
+        let target: &AnyObject = self;
+        for (i, item) in items.iter().enumerate() {
+            match item {
+                sound::Item::Separator => menu.addItem(&NSMenuItem::separatorItem(mtm)),
+                sound::Item::Choice { label, checked, enabled, .. } => {
+                    let m = unsafe {
+                        NSMenuItem::initWithTitle_action_keyEquivalent(
+                            NSMenuItem::alloc(mtm),
+                            &NSString::from_str(label),
+                            Some(sel!(pickSound:)),
+                            ns_string!(""),
+                        )
+                    };
+                    unsafe { m.setTarget(Some(target)) };
+                    m.setTag(i as NSInteger);
+                    if *checked {
+                        m.setState(NSControlStateValueOn);
+                    }
+                    m.setEnabled(*enabled);
+                    menu.addItem(&m);
+                }
+            }
+        }
+        *self.ivars().sound.borrow_mut() = items;
+        let anchor: Retained<NSView> = match anchor {
+            Some(v) => v.retain(),
+            None => (*self).retain().into_super(),
+        };
+        // Its top left at the button's bottom left, whichever way the button counts.
+        let b = anchor.bounds();
+        let y = if anchor.isFlipped() { b.size.height + 4.0 } else { -4.0 };
+        menu.popUpMenuPositioningItem_atLocation_inView(None, NSPoint::new(0.0, y), Some(&anchor));
     }
 
     /// The view changed size or scale: the picture follows at once, and the
@@ -970,6 +1113,21 @@ impl AppView {
             self.ivars().shared.link.send(wire::text(&text));
         }
     }
+}
+
+/// The files a drag carries, as paths. Finder hands over references to them
+/// (file:///.file/id=…), which are made paths again here.
+fn dropped_paths(sender: &ProtocolObject<dyn NSDraggingInfo>) -> Vec<PathBuf> {
+    let board = sender.draggingPasteboard();
+    let Some(items) = board.pasteboardItems() else { return Vec::new() };
+    items
+        .iter()
+        .filter_map(|item| {
+            let url = item.stringForType(unsafe { NSPasteboardTypeFileURL })?;
+            let path = NSURL::URLWithString(&url)?.filePathURL()?.path()?;
+            Some(PathBuf::from(path.to_string()))
+        })
+        .collect()
 }
 
 /// What AppKit's text input hands over: an NSString or an NSAttributedString.

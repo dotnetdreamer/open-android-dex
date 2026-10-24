@@ -132,6 +132,53 @@ final class Audio {
         System.out.println("audio: media route unpinned");
     }
 
+    /**
+     * What media is pinned to now, each as {type, address}; empty when
+     * nothing is. Asked of the audio service rather than remembered, so it is
+     * the pin whoever set it: the computer's app windows, the desktop's flyout,
+     * an earlier session.
+     */
+    static List<Object[]> pinned() {
+        int strategy = mediaStrategyId();
+        Object svc = svc();
+        Object got;
+        if (Refl.hasMethod(svc.getClass(), "getPreferredDevicesForStrategy", int.class)) {
+            got = Refl.callSig(svc, "getPreferredDevicesForStrategy", new Class<?>[]{int.class}, strategy);
+        } else {
+            got = Refl.callSig(svc, "getPreferredDeviceForStrategy", new Class<?>[]{int.class}, strategy);
+        }
+        return devices(got);
+    }
+
+    /**
+     * Where media plays right now, by the policy's own reckoning — a pin, a
+     * headset just connected, or the speaker. Android 11 and later; empty
+     * where the phone will not say.
+     */
+    static List<Object[]> playing() {
+        AudioAttributes media = new AudioAttributes.Builder()
+                .setUsage(AudioAttributes.USAGE_MEDIA).build();
+        return devices(Refl.callSig(svc(), "getDevicesForAttributes",
+                new Class<?>[]{AudioAttributes.class}, media));
+    }
+
+    /** AudioDeviceAttributes, one or a list, as {type, address} pairs. */
+    private static List<Object[]> devices(Object got) {
+        List<Object[]> out = new ArrayList<>();
+        if (got instanceof List) {
+            for (Object d : (List<?>) got) add(out, d);
+        } else {
+            add(out, got);
+        }
+        return out;
+    }
+
+    private static void add(List<Object[]> out, Object device) {
+        if (device == null) return;
+        Object address = Refl.call(device, "getAddress");
+        out.add(new Object[]{Refl.call(device, "getType"), address == null ? "" : address.toString()});
+    }
+
     private static void checkStatus(Object status, String call) {
         if (status instanceof Integer && (Integer) status != 0) {
             throw new Refl.WmError(call + " answered " + status);

@@ -14,13 +14,18 @@
 //! - `link`: one window's own connection to it, whatever draws the window.
 //! - `win`: the window on Windows (Win32, D3D11, Media Foundation).
 //! - `mac`: the window on a Mac (AppKit, and a display layer macOS decodes into).
+//! - `sound`: where the phone's sound plays, the windows' title-bar menu.
+//! - `drops`: files dropped on a window, to the phone.
 //! - `icons`, `clipboard`, `keys`, `h264`, `wire`, `adbsock`: what those share.
 //!
 //! A Linux computer has no window of ours yet: an Android app opens in
 //! scrcpy's window there, and the phone's Linux apps are not listed.
 
 mod adbsock;
+#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
 mod clipboard;
+#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
+mod drops;
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod h264;
 mod host;
@@ -29,6 +34,8 @@ mod keys;
 mod link;
 #[cfg(target_os = "macos")]
 mod mac;
+#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
+mod sound;
 #[cfg(windows)]
 mod win;
 mod wire;
@@ -40,6 +47,10 @@ use mac as native;
 use win as native;
 
 use std::collections::HashMap;
+#[cfg(any(windows, target_os = "macos"))]
+use std::path::PathBuf;
+#[cfg(any(windows, target_os = "macos"))]
+use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -381,62 +392,131 @@ fn open_window(
     mut opening: Opening,
 ) -> Result<(), String> {
     let id = spec.id;
-    let events = {
-        let (app, serial, pkg, label) = (app.clone(), serial.to_string(), pkg.to_string(), label.to_string());
-        let settled = std::sync::atomic::AtomicBool::new(false);
-        Box::new(move |e: link::Event| {
-            if !settled.swap(true, Ordering::SeqCst) {
-                opening_changed(&serial, false);
-            }
-            match e {
-                link::Event::Live(after) => {
-                    log::info!("apps [{serial}] {pkg}: on screen {}ms after {since}", after.as_millis());
-                    let _ = app.emit("apps:live", serde_json::json!({"serial": serial, "pkg": pkg, "ms": after.as_millis() as u64}));
-                    // The app's sound comes here with it, as the desktop's does —
-                    // once its picture has: the sound's own server is a second
-                    // JVM starting on the phone, which slowed the window it came with.
-                    crate::scrcpy::apps_audio(&app, &serial, true);
-                }
-                link::Event::Failed(message) => {
-                    log::warn!("apps [{serial}] {pkg}: {message}");
-                    let _ = app.emit(
-                        "apps:problem",
-                        serde_json::json!({"serial": serial, "pkg": pkg, "label": label, "message": message}),
-                    );
-                }
-                link::Event::Closed => {
-                    let last = {
-                        let mut all = windows().lock().unwrap();
-                        all.remove(&id);
-                        !all.values().any(|w| w.serial == serial)
-                    };
-                    if last {
-                        crate::scrcpy::apps_audio(&app, &serial, false);
-                    }
-                    emit_windows(&app);
-                }
-            }
-        }) as Box<dyn Fn(link::Event) + Send + Sync>
-    };
-    let clip = {
-        let (app, serial) = (app.clone(), serial.to_string());
-        Box::new(move || {
-            let text = clipboard::get(&app)?;
-            let server = host::running(&serial)?;
-            let mut last = server.clip_last.lock().unwrap();
-            if *last == text {
-                return None;
-            }
-            *last = text.clone();
-            Some(text)
-        }) as Box<dyn Fn() -> Option<String> + Send + Sync>
-    };
-    let window = native::open(spec, events, clip)?;
+    let host = Arc::new(WindowHost {
+        app: app.clone(),
+        id,
+        serial: serial.to_string(),
+        socket: spec.socket.clone(),
+        pkg: pkg.to_string(),
+        label: label.to_string(),
+        since,
+        settled: AtomicBool::new(false),
+    });
+    watch_clipboard();
+    let window = native::open(spec, host)?;
     // The window says when it is no longer opening: its first event.
     opening.armed = false;
     windows().lock().unwrap().insert(id, window);
     emit_windows(app);
     Ok(())
+}
+
+/// What a window of this app asks of it: its news, the clipboard, its sound
+/// menu, a drop.
+#[cfg(any(windows, target_os = "macos"))]
+struct WindowHost {
+    app: tauri::AppHandle,
+    id: u64,
+    serial: String,
+    /// The phone's app server, which a drop is a connection to.
+    socket: String,
+    pkg: String,
+    label: String,
+    since: &'static str,
+    /// Its first event says the window is no longer opening.
+    settled: AtomicBool,
+}
+
+#[cfg(any(windows, target_os = "macos"))]
+impl link::Host for WindowHost {
+    fn event(&self, e: link::Event) {
+        let (app, serial, pkg) = (&self.app, &self.serial, &self.pkg);
+        if !self.settled.swap(true, Ordering::SeqCst) {
+            opening_changed(serial, false);
+        }
+        match e {
+            link::Event::Live(after) => {
+                log::info!("apps [{serial}] {pkg}: on screen {}ms after {}", after.as_millis(), self.since);
+                let _ = app.emit("apps:live", serde_json::json!({"serial": serial, "pkg": pkg, "ms": after.as_millis() as u64}));
+                // The app's sound comes here with it, as the desktop's does —
+                // once its picture has: the sound's own server is a second
+                // JVM starting on the phone, which slowed the window it came with.
+                crate::scrcpy::apps_audio(app, serial, true);
+            }
+            link::Event::Failed(message) => {
+                log::warn!("apps [{serial}] {pkg}: {message}");
+                let _ = app.emit(
+                    "apps:problem",
+                    serde_json::json!({"serial": serial, "pkg": pkg, "label": self.label, "message": message}),
+                );
+            }
+            link::Event::Closed => {
+                let last = {
+                    let mut all = windows().lock().unwrap();
+                    all.remove(&self.id);
+                    !all.values().any(|w| w.serial == *serial)
+                };
+                if last {
+                    crate::scrcpy::apps_audio(app, serial, false);
+                }
+                emit_windows(app);
+            }
+        }
+    }
+
+    fn clipboard(&self) -> Option<String> {
+        let text = clipboard::get(&self.app)?;
+        let server = host::running(&self.serial)?;
+        let mut last = server.clip_last.lock().unwrap();
+        if *last == text {
+            return None;
+        }
+        *last = text.clone();
+        Some(text)
+    }
+
+    fn sound_menu(&self) -> Vec<sound::Item> {
+        sound::menu_for(&self.app, &self.serial)
+    }
+
+    fn pick_sound(&self, choice: sound::Choice, window: Arc<dyn link::Surface>) {
+        sound::pick(&self.app, &self.serial, choice, window);
+    }
+
+    fn dropped(&self, paths: Vec<PathBuf>, window: Arc<dyn link::Surface>) {
+        drops::send(self.serial.clone(), self.socket.clone(), paths, window);
+    }
+}
+
+/// What is copied on this computer, to every phone with a window here, as it
+/// is copied — so the phone's own clipboard history has it, not only the
+/// next paste (doc/apps-on-pc.md, "The clipboard"). Watched from the first
+/// window on, for the rest of the run: with no window open nothing is sent.
+///
+/// Something copied that does not go (a password, an image) still changes
+/// what this computer holds: each phone forgets the text last handed over
+/// either way, so the same text copied on the phone after it is taken again.
+#[cfg(any(windows, target_os = "macos"))]
+fn watch_clipboard() {
+    static WATCHING: std::sync::Once = std::sync::Once::new();
+    WATCHING.call_once(|| {
+        clipboard::watch(|text| {
+            let mut serials: Vec<String> = windows().lock().unwrap().values().map(|w| w.serial.clone()).collect();
+            serials.sort();
+            serials.dedup();
+            for serial in serials {
+                let Some(server) = host::running(&serial) else { continue };
+                match &text {
+                    Some(text) => {
+                        if server.give_clipboard(text) {
+                            log::debug!("apps [{serial}] this computer's clipboard went to the phone ({} chars)", text.chars().count());
+                        }
+                    }
+                    None => server.forget_clipboard(),
+                }
+            }
+        });
+    });
 }
 
 /// Elsewhere, scrcpy's own window does it: a display of its own for the app,
@@ -587,7 +667,7 @@ fn open_when_ready(app: &tauri::AppHandle, want: StartupApp, clicked: Instant, s
 #[cfg(windows)]
 pub fn probe(serial: &str, socket: &str, pkg: &str, label: &str, icon_png: Option<Vec<u8>>) -> Result<(), String> {
     let (tx, rx) = std::sync::mpsc::channel::<()>();
-    let tx = Mutex::new(tx);
+    let host = Arc::new(ProbeHost { serial: serial.to_string(), socket: socket.to_string(), closed: Mutex::new(tx) });
     let spec = link::Spec {
         id: 0,
         serial: serial.to_string(),
@@ -605,16 +685,45 @@ pub fn probe(serial: &str, socket: &str, pkg: &str, label: &str, icon_png: Optio
         direct: on_cable(serial),
         clicked: Instant::now(),
     };
-    let events = Box::new(move |e: link::Event| match e {
-        link::Event::Live(after) => log::info!("probe: on screen {}ms after opening", after.as_millis()),
-        link::Event::Failed(m) => log::warn!("probe: {m}"),
-        link::Event::Closed => {
-            let _ = tx.lock().unwrap().send(());
-        }
-    });
-    let _window = win::open(spec, events, Box::new(|| None))?;
+    let _window = win::open(spec, host)?;
     let _ = rx.recv();
     Ok(())
+}
+
+/// The probe's window has no app around it: no clipboard and no sound menu
+/// (both are the app's settings), but a drop reaches the phone as it would.
+#[cfg(windows)]
+struct ProbeHost {
+    serial: String,
+    socket: String,
+    closed: Mutex<std::sync::mpsc::Sender<()>>,
+}
+
+#[cfg(windows)]
+impl link::Host for ProbeHost {
+    fn event(&self, e: link::Event) {
+        match e {
+            link::Event::Live(after) => log::info!("probe: on screen {}ms after opening", after.as_millis()),
+            link::Event::Failed(m) => log::warn!("probe: {m}"),
+            link::Event::Closed => {
+                let _ = self.closed.lock().unwrap().send(());
+            }
+        }
+    }
+
+    fn clipboard(&self) -> Option<String> {
+        None
+    }
+
+    fn sound_menu(&self) -> Vec<sound::Item> {
+        Vec::new()
+    }
+
+    fn pick_sound(&self, _choice: sound::Choice, _window: Arc<dyn link::Surface>) {}
+
+    fn dropped(&self, paths: Vec<PathBuf>, window: Arc<dyn link::Surface>) {
+        drops::send(self.serial.clone(), self.socket.clone(), paths, window);
+    }
 }
 
 // ── the phone's Linux apps ──

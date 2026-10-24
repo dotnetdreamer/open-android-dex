@@ -26,6 +26,8 @@ import java.nio.charset.StandardCharsets;
  *                  0x22 down u8, repeat u8, code u16, meta u32 — a key: Android's code and meta
  *                  0x23 UTF-8                                 — characters typed
  * </pre>
+ * A dropped file's connection is the one exception: its first message says
+ * what is coming, and the file's bytes follow it raw (AppDrop).
  * Writes come from several threads — the encoder's drain, the session, the
  * task watcher — and each message goes out whole, under one lock, in one write.
  */

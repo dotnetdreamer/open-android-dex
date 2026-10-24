@@ -36,7 +36,8 @@ import java.util.concurrent.atomic.AtomicInteger;
  * is a connection of its own ({@link AppWindow}), each with its own display and
  * encoder, so one app's key frame never waits behind another's; one more
  * connection carries what belongs to the phone as a whole — the list of apps and
- * their icons, the clipboard.
+ * their icons, the clipboard, where its sound plays ({@link AppAudio}). A file
+ * dropped on a window comes on a connection of its own too ({@link AppDrop}).
  *
  * <p>The socket is abstract and named afresh by the computer for every run, and
  * each connection's peer is put to the kernel (SO_PEERCRED): the shell, which
@@ -89,6 +90,8 @@ public final class AppServer {
     private final AppClipboard clipboard;
     /** What the clipboard, and with it the process's Context, took to make. */
     private final long clipboardMs;
+    /** The phone's sound outputs, for the windows' menus; null where the shell may not ask. */
+    private final AppAudio audio;
     private final List<AppWindow> windows = new CopyOnWriteArrayList<>();
     private final AtomicInteger serials = new AtomicInteger();
     private volatile Wire control;
@@ -158,6 +161,7 @@ public final class AppServer {
                 }
             });
         }
+        audio = AppAudio.open(this::audioChanged);
         server = new LocalServerSocket(socketName);
         Thread accept = new Thread(this::acceptLoop, "apps-accept");
         accept.setDaemon(true);
@@ -212,6 +216,66 @@ public final class AppServer {
     /** This computer's text, for the phone's next paste. */
     void setClipboard(String text) {
         if (clipboard != null) clipboard.set(text);
+    }
+
+    /** An output came or went: the computer's menus list what is there. */
+    private void audioChanged() {
+        Wire c = control;
+        if (c != null) sendAudio(c);
+    }
+
+    /**
+     * Where the sound can go, to the computer. Nothing about the phone's
+     * sound may end the control connection it rides on: a phone that will
+     * not say is a menu with the computer's half only.
+     */
+    private void sendAudio(Wire w) {
+        if (audio == null) return;
+        try {
+            w.json(audio.state());
+        } catch (Throwable t) {
+            // the computer's end went, or the phone would not say; either way, nothing to send
+        }
+    }
+
+    /**
+     * Pin the phone's media to one of its outputs, or let the phone choose
+     * again ({@code clear}): what the computer's menu asked. An unpin with
+     * nothing pinned is no error — the audio service would call it one.
+     */
+    private JSONObject route(JSONObject j) throws Exception {
+        JSONObject r = new JSONObject().put("t", "audioRouted");
+        try {
+            if (j.optBoolean("clear")) {
+                if (!Audio.pinned().isEmpty()) Audio.clear();
+            } else {
+                Audio.route(j.getInt("type"), j.optString("address"));
+            }
+            r.put("ok", true);
+        } catch (Throwable e) {
+            log("the sound could not be moved (" + e.getMessage() + ")");
+            r.put("ok", false).put("message", String.valueOf(e.getMessage()));
+        }
+        return r;
+    }
+
+    /**
+     * The launcher's own record of where sound plays — what the desktop's
+     * flyout and Settings show — told what the computer chose here. Best
+     * effort, off the control connection's thread: a launcher not running yet
+     * is a process to start, and one too old to know the method says so.
+     */
+    private static void tellLauncher(JSONObject choice) {
+        Thread t = new Thread(() -> {
+            try {
+                JSONObject r = Providers.call(LINUX_PROVIDER, "media.mode", choice);
+                if (!r.optBoolean("ok", false)) log("the launcher keeps its own sound setting (" + r.optString("message") + ")");
+            } catch (Exception e) {
+                log("the launcher keeps its own sound setting (" + e + ")");
+            }
+        }, "apps-audio-mode");
+        t.setDaemon(true);
+        t.start();
     }
 
     AppCatalog catalog() {
@@ -319,7 +383,7 @@ public final class AppServer {
         }
     }
 
-    /** The first message says what the connection is: the phone's, or a window's. */
+    /** The first message says what the connection is: the phone's, a window's, or a dropped file's. */
     private void serve(LocalSocket s) {
         Wire wire;
         Wire.Msg first;
@@ -354,12 +418,16 @@ public final class AppServer {
                 new AppWindow(this, s, wire, hello, serial).run();
                 break;
             }
+            case "put":
+                Thread.currentThread().setName("apps-put");
+                new AppDrop(s, wire, hello).run();
+                break;
             default:
                 closeQuietly(s);
         }
     }
 
-    /** The phone as a whole: its apps, their icons, the clipboard, the clock. */
+    /** The phone as a whole: its apps, their icons, the clipboard, its sound, the clock. */
     private void control(LocalSocket s, Wire wire) {
         control = wire;
         try {
@@ -370,6 +438,8 @@ public final class AppServer {
                     .put("ownFocus", Build.VERSION.SDK_INT >= 34)
                     .put("clipboard", clipboard != null);
             wire.json(hello);
+            // Where the sound can go, before anyone opens a window's menu to ask.
+            sendAudio(wire);
             while (!stopping) {
                 Wire.Msg m = wire.read();
                 if (m == null) break;
@@ -408,6 +478,16 @@ public final class AppServer {
                         wire.json(new JSONObject().put("t", "clip").put("text", text == null ? "" : text));
                         break;
                     }
+                    case "audio":
+                        sendAudio(wire);
+                        break;
+                    case "audioRoute":
+                        wire.json(route(j));
+                        sendAudio(wire);
+                        break;
+                    case "audioMode":
+                        tellLauncher(j);
+                        break;
                     case "ping":
                         wire.json(new JSONObject().put("t", "pong").put("n", j.opt("n"))
                                 .put("at", System.nanoTime() / 1000));

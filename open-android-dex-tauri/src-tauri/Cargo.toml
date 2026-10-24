@@ -100,7 +100,12 @@ windows = { version = "0.62", features = [
     "Win32_Storage_EnhancedStorage",
     "Win32_System_Com",
     "Win32_System_Com_StructuredStorage",
+    # This computer's clipboard, watched as it changes and read where a
+    # password manager may have marked it as not for other devices
+    # (apps/clipboard.rs).
+    "Win32_System_DataExchange",
     "Win32_System_LibraryLoader",
+    "Win32_System_Memory",
     # When a frame reached the screen: DXGI's frame statistics are in QPC time.
     "Win32_System_Performance",
     "Win32_System_Registry",
@@ -156,6 +161,8 @@ objc2-foundation = { version = "0.3", default-features = false, features = [
     "NSObjCRuntime",
     "NSRange",
     "NSString",
+    # A file dropped on one of them, as Finder hands it over.
+    "NSURL",
 ] }
 # Quartz Event Services, for the trackpad tap. Already in the tree via
 # objc2-app-kit, so this adds resolution rather than compilation — and unlike
@@ -211,6 +218,14 @@ objc2-app-kit = { version = "0.3", default-features = false, features = [
     "NSTrackingArea",
     "NSViewController",
     "objc2-quartz-core",
+    # Their sound menu, the files dropped on them, and this Mac's clipboard
+    # watched as it changes (apps/mac, apps/clipboard.rs).
+    "NSCell",
+    "NSDragging",
+    "NSMenu",
+    "NSMenuItem",
+    "NSPasteboard",
+    "NSPasteboardItem",
 ] }
 # The picture of a phone app's window on a Mac (apps/mac/video.rs): a layer
 # macOS decodes H.264 into, and the CoreMedia buffers it takes. The same

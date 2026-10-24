@@ -1713,6 +1713,28 @@ fn stored_audio_forwarding(app: &AppHandle) -> (bool, bool) {
     (forward, dup)
 }
 
+/// "Where sound plays", as (forward, duplicate), for the app windows' sound menu.
+pub fn audio_forwarding(app: &AppHandle) -> (bool, bool) {
+    stored_audio_forwarding(app)
+}
+
+/// "Where sound plays", chosen in an app window's sound menu (apps/sound.rs):
+/// stored as the launcher's cfg rows store it — it is the desktop's setting
+/// too — and carried out now, for `serial` and every other phone whose apps
+/// have windows here, as the request pump carries out a choice made on the
+/// desktop.
+pub fn set_audio_forwarding(app: &AppHandle, serial: &str, forward: bool, duplicate: bool) {
+    remember_config(app, "audio", if forward { "on" } else { "off" });
+    remember_config(app, "audiodup", if duplicate { "on" } else { "off" });
+    let mut serials = APP_WINDOWS.lock().unwrap().clone();
+    if !serials.iter().any(|s| s == serial) {
+        serials.push(serial.to_string());
+    }
+    for s in serials {
+        reconcile_audio_session_bg(app, &s);
+    }
+}
+
 /// The audio companion's whole command line, by way of MirrorOptions.
 ///
 /// Everything visual is zeroed on purpose: `build_args` short-circuits on
