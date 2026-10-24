@@ -263,12 +263,17 @@ fn start(app: &tauri::AppHandle, serial: &str, warm: bool) -> Result<Server, Str
 
     let socket = format!("openandroiddex-apps-{}", random_name());
     let mut cmd = adb::adb_command(app);
+    // SIGHUP ignored: when the link drops (the cable pulled, adbd restarting)
+    // adbd hangs the server up, which would end it on the spot and leave its
+    // apps on top of the phone's screen. Ignoring it, the server sees its
+    // stdin close instead and stops as it does when this app quits, every app
+    // handed back behind what the phone shows.
     cmd.args([
         "-s",
         serial,
         "shell",
         &format!(
-            "CLASSPATH={PHONE_DEX} exec app_process / com.ccrstech.openandroiddex.wmd.AppServer {socket}{}",
+            "trap '' HUP; CLASSPATH={PHONE_DEX} exec app_process / com.ccrstech.openandroiddex.wmd.AppServer {socket}{}",
             if warm { "" } else { " --no-warm-up" }
         ),
     ])

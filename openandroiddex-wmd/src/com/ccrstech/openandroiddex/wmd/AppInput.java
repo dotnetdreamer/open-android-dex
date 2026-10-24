@@ -8,6 +8,7 @@ import android.view.KeyCharacterMap;
 import android.view.KeyEvent;
 import android.view.MotionEvent;
 
+import java.text.Normalizer;
 import java.util.HashMap;
 import java.util.Map;
 
@@ -26,8 +27,9 @@ import java.util.Map;
  * another, MOVE while any is held, BUTTON_RELEASE for each, UP with the last.
  * Keys arrive as Android key codes with their modifiers; typed characters as
  * text, which goes in as the key presses that type them where the virtual
- * keyboard's map has them, and as one ACTION_MULTIPLE event — a string of
- * characters, which text fields take whole — where it does not.
+ * keyboard's map has them — an accented letter as its accent's dead key and
+ * the letter — and is pasted where it does not. Android refuses a string as a
+ * key event (ACTION_MULTIPLE) from anyone but an input method.
  *
  * <p>Every event is aimed at the window's display by id: an event without one
  * goes to whichever display has focus, which may be the phone's own.
@@ -36,13 +38,19 @@ final class AppInput {
 
     /** InputManager.INJECT_INPUT_EVENT_MODE_ASYNC: queue it and return. */
     private static final int INJECT_ASYNC = 0;
+    /** INJECT_INPUT_EVENT_MODE_WAIT_FOR_FINISH: return once the app has handled it. */
+    private static final int INJECT_WAIT_FOR_FINISH = 2;
     /** The only device id an injected mouse needs: a consistent one. */
     private static final int MOUSE_DEVICE = 0;
+    /** The accents the virtual keyboard has dead keys for: grave, acute, circumflex, tilde, diaeresis. */
+    private static final String DEAD_KEYS = "̀́̂̃̈";
 
     private static Object inputManager;
 
     private final KeyCharacterMap chars = KeyCharacterMap.load(KeyCharacterMap.VIRTUAL_KEYBOARD);
     private final int display;
+    /** The phone's clipboard, which lends itself to paste what no key types; null where the shell has none. */
+    private final AppClipboard clipboard;
 
     // the mouse, as Android last heard of it
     private int buttons;
@@ -54,8 +62,9 @@ final class AppInput {
     private final Map<Integer, Long> keysDown = new HashMap<>();
     private long refusedSaidAt;
 
-    AppInput(int display) {
+    AppInput(int display, AppClipboard clipboard) {
         this.display = display;
+        this.clipboard = clipboard;
         manager();
     }
 
@@ -172,6 +181,12 @@ final class AppInput {
 
     /** A key, by Android key code, with Android's meta bits and the computer's own repeat count. */
     synchronized void key(boolean down, int code, int repeat, int meta) {
+        // The person's own paste: it pastes what they copied, never text lent
+        // to an earlier paste of characters — and is handled before the next
+        // such paste can lend the clipboard again.
+        boolean paste = code == KeyEvent.KEYCODE_PASTE
+                || (code == KeyEvent.KEYCODE_V && (meta & KeyEvent.META_CTRL_ON) != 0);
+        if (paste && down && clipboard != null) clipboard.giveBackNow();
         long now = SystemClock.uptimeMillis();
         long downAt;
         if (down) {
@@ -184,7 +199,7 @@ final class AppInput {
         }
         KeyEvent e = new KeyEvent(downAt, now, down ? KeyEvent.ACTION_DOWN : KeyEvent.ACTION_UP, code,
                 down ? repeat : 0, meta, KeyCharacterMap.VIRTUAL_KEYBOARD, 0, 0, InputDevice.SOURCE_KEYBOARD);
-        inject(e);
+        inject(e, paste ? INJECT_WAIT_FOR_FINISH : INJECT_ASYNC);
     }
 
     /** A key pressed and let go: Back from the window's own button, say. */
@@ -193,35 +208,77 @@ final class AppInput {
         key(false, code, 0, 0);
     }
 
-    /** Characters typed on the computer, in whatever layout it has. */
+    /**
+     * Characters typed on the computer, in whatever layout it has: each as the
+     * keys that type it on the virtual keyboard, and what no key types —
+     * another script, an emoji, € — pasted, a run of them at a time.
+     */
     synchronized void text(String s) {
+        StringBuilder untyped = new StringBuilder();
         for (int i = 0; i < s.length(); ) {
-            int cp = s.codePointAt(i);
-            int n = Character.charCount(cp);
-            char[] one = s.substring(i, i + n).toCharArray();
+            int n = Character.charCount(s.codePointAt(i));
+            String one = s.substring(i, i + n);
             i += n;
+            KeyEvent[] presses = presses(one);
+            if (presses == null) {
+                untyped.append(one);
+                continue;
+            }
+            if (untyped.length() > 0) {
+                paste(untyped.toString());
+                untyped.setLength(0);
+            }
             long now = SystemClock.uptimeMillis();
-            KeyEvent[] presses = n == 1 ? chars.getEvents(one) : null;
-            if (presses != null && presses.length > 0) {
-                for (KeyEvent p : presses) {
-                    KeyEvent e = KeyEvent.changeTimeRepeat(p, now, 0);
-                    e.setSource(InputDevice.SOURCE_KEYBOARD);
-                    inject(e);
-                }
-            } else {
-                KeyEvent e = new KeyEvent(now, new String(one), KeyCharacterMap.VIRTUAL_KEYBOARD, 0);
+            for (KeyEvent p : presses) {
+                KeyEvent e = KeyEvent.changeTimeRepeat(p, now, 0);
                 e.setSource(InputDevice.SOURCE_KEYBOARD);
                 inject(e);
             }
         }
+        if (untyped.length() > 0) paste(untyped.toString());
+    }
+
+    /**
+     * The key presses that type {@code one}, or null if none do: its own key,
+     * or for a letter with one of {@link #DEAD_KEYS} the accent's dead key and
+     * then the bare letter — é is the acute's key and E, as Option-E then E is
+     * on a Mac.
+     */
+    private KeyEvent[] presses(String one) {
+        KeyEvent[] direct = one.length() == 1 ? chars.getEvents(one.toCharArray()) : null;
+        if (direct != null && direct.length > 0) return direct;
+        String parts = Normalizer.normalize(one, Normalizer.Form.NFD);
+        if (parts.length() != 2 || DEAD_KEYS.indexOf(parts.charAt(1)) < 0) return null;
+        KeyEvent[] dead = chars.getEvents(new char[]{parts.charAt(1), parts.charAt(0)});
+        return dead != null && dead.length > 0 ? dead : null;
+    }
+
+    /** Characters no key types, pasted: the phone's clipboard lends itself to one paste (AppClipboard.lend). */
+    private void paste(String text) {
+        if (clipboard == null) {
+            AppServer.log("no clipboard here: " + text.codePointCount(0, text.length())
+                    + " typed characters no key types were dropped");
+            return;
+        }
+        clipboard.lend(text, () -> {
+            long now = SystemClock.uptimeMillis();
+            for (int action : new int[]{KeyEvent.ACTION_DOWN, KeyEvent.ACTION_UP}) {
+                inject(new KeyEvent(now, SystemClock.uptimeMillis(), action, KeyEvent.KEYCODE_PASTE, 0, 0,
+                        KeyCharacterMap.VIRTUAL_KEYBOARD, 0, 0, InputDevice.SOURCE_KEYBOARD), INJECT_WAIT_FOR_FINISH);
+            }
+        });
     }
 
     // ── into the input system ──
 
     private void inject(InputEvent e) {
+        inject(e, INJECT_ASYNC);
+    }
+
+    private void inject(InputEvent e, int mode) {
         try {
             Refl.callSig(e, "setDisplayId", new Class<?>[]{int.class}, display);
-            Refl.callSig(manager(), "injectInputEvent", new Class<?>[]{InputEvent.class, int.class}, e, INJECT_ASYNC);
+            Refl.callSig(manager(), "injectInputEvent", new Class<?>[]{InputEvent.class, int.class}, e, mode);
         } catch (Refl.WmError err) {
             long now = SystemClock.uptimeMillis();
             if (now - refusedSaidAt > 10_000) {
