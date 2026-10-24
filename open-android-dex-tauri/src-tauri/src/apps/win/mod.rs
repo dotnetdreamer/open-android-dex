@@ -23,6 +23,13 @@
 //! (sound.rs), Windows' own popup menu; a file dropped from Explorer goes to
 //! the phone (drops.rs). How either went is a note in a strip under the bar,
 //! for a few seconds.
+//!
+//! The bar's More (☰) is the window's own menu: full screen, for now (F11 as
+//! well). Full screen, the window covers its screen with no frame and no
+//! title bar, and a smaller bar comes down from the top of the screen while
+//! the pointer is up there, in the middle, drawn into the same surface as the
+//! picture — Remote Desktop's connection bar's shape — and while it is up, a
+//! small tab with an arrow pointing down shows where it is. Esc leaves.
 
 mod frame;
 mod render;
@@ -40,9 +47,12 @@ use std::time::{Duration, Instant};
 use serde_json::json;
 use windows::core::{w, PCSTR, PCWSTR, PWSTR};
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
-use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_USE_IMMERSIVE_DARK_MODE};
+use windows::Win32::Graphics::Dwm::{
+    DwmSetWindowAttribute, DWMWA_TRANSITIONS_FORCEDISABLED, DWMWA_USE_IMMERSIVE_DARK_MODE,
+    DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DEFAULT, DWMWCP_DONOTROUND, DWMWINDOWATTRIBUTE,
+};
 use windows::Win32::Graphics::Gdi::{
-    ClientToScreen, GetMonitorInfoW, MonitorFromPoint, MonitorFromRect, ScreenToClient, MONITORINFO,
+    ClientToScreen, GetMonitorInfoW, MonitorFromPoint, MonitorFromRect, MonitorFromWindow, ScreenToClient, MONITORINFO,
     MONITOR_DEFAULTTONEAREST,
 };
 use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED, COINIT_MULTITHREADED};
@@ -54,8 +64,8 @@ use windows::Win32::UI::HiDpi::{
 use windows::Win32::UI::Input::Ime::{ImmGetCompositionStringW, ImmGetContext, ImmReleaseContext, GCS_RESULTSTR};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetKeyState, MapVirtualKeyW, ReleaseCapture, SetCapture, TrackMouseEvent, MAPVK_VK_TO_CHAR, TME_LEAVE,
-    TME_NONCLIENT, TRACKMOUSEEVENT, VK_CAPITAL, VK_CONTROL, VK_F4, VK_LWIN, VK_MENU, VK_NUMLOCK, VK_RMENU, VK_RWIN,
-    VK_SHIFT, VK_SPACE,
+    TME_NONCLIENT, TRACKMOUSEEVENT, VK_CAPITAL, VK_CONTROL, VK_ESCAPE, VK_F11, VK_F4, VK_LWIN, VK_MENU, VK_NUMLOCK,
+    VK_RMENU, VK_RWIN, VK_SHIFT, VK_SPACE,
 };
 use windows::Win32::UI::Shell::PropertiesSystem::{IPropertyStore, SHGetPropertyStoreForWindow};
 use windows::Win32::UI::Shell::{DragAcceptFiles, DragFinish, DragQueryFileW, HDROP};
@@ -109,17 +119,28 @@ impl Window {
     }
 
     /// Where it is on the screen, in pixels: what a window taking over from it
-    /// opens at. None while it is minimised, its rectangle then off-screen.
+    /// opens at — where it was before it went full screen, if it is. None
+    /// while it is minimised, its rectangle then off-screen.
     pub fn frame(&self) -> Option<[f64; 4]> {
         let hwnd = self.shared.hwnd();
-        let mut r = RECT::default();
-        unsafe {
-            if IsIconic(hwnd).as_bool() {
-                return None;
-            }
-            GetWindowRect(hwnd, &mut r).ok()?;
-        }
+        let windowed = self.shared.windowed.lock().unwrap().as_ref().map(|w| w.rect);
+        let r = match windowed {
+            Some(r) => r,
+            None => unsafe {
+                if IsIconic(hwnd).as_bool() {
+                    return None;
+                }
+                let mut r = RECT::default();
+                GetWindowRect(hwnd, &mut r).ok()?;
+                r
+            },
+        };
         Some([r.left as f64, r.top as f64, (r.right - r.left) as f64, (r.bottom - r.top) as f64])
+    }
+
+    /// Whether it is full screen: a window taking over from it is too.
+    pub fn full_screen(&self) -> bool {
+        self.shared.full_screen.load(Ordering::SeqCst)
     }
 }
 
@@ -160,6 +181,26 @@ struct Shared {
     note: Mutex<Option<String>>,
     /// Counts the notes, so a note's fading never takes the next one with it.
     note_seq: AtomicU64,
+    /// Full screen: no frame and no title bar, the picture the whole screen.
+    /// Set before the frame changes, which asks the window about it.
+    full_screen: AtomicBool,
+    /// While full screen: the window as it was, to go back to.
+    windowed: Mutex<Option<Windowed>>,
+    /// The full-screen bar: how far down it is (0 to 100), whether it is
+    /// coming down or going up, and whether it is due to go up (HIDE_TIMER).
+    top_bar: AtomicU8,
+    top_bar_down: AtomicBool,
+    top_bar_leaving: AtomicBool,
+    /// More's menu or the sound menu is open: the full-screen bar stays until it closes.
+    menu_open: AtomicBool,
+}
+
+/// A full-screen window as it was before: its style, where it was, and
+/// whether it was maximised (it is restored first, and maximised again after).
+struct Windowed {
+    style: isize,
+    rect: RECT,
+    maximized: bool,
 }
 
 impl Shared {
@@ -205,11 +246,19 @@ impl Shared {
         self.repaint();
     }
 
+    /// The title bar's height: none, full screen.
+    fn bar_height(&self) -> i32 {
+        if self.full_screen.load(Ordering::SeqCst) {
+            0
+        } else {
+            frame::height(self.scale())
+        }
+    }
+
     /// The part of the window the phone's display fills: the client area under the bar.
     fn area(&self) -> (u32, u32) {
         let (w, h) = *self.client.lock().unwrap();
-        let bar = frame::height(self.scale()) as u32;
-        (w, h.saturating_sub(bar))
+        (w, h.saturating_sub(self.bar_height() as u32))
     }
 
     /// What the display should be for the window as it is now.
@@ -225,8 +274,7 @@ impl Shared {
 
     /// A point in the window's client area as a point on the phone's display.
     fn to_display(&self, x: i32, y: i32) -> (u16, u16) {
-        let bar = frame::height(self.scale());
-        self.link.to_display(x as f64, (y - bar) as f64, self.area())
+        self.link.to_display(x as f64, (y - self.bar_height()) as f64, self.area())
     }
 }
 
@@ -291,6 +339,8 @@ const WM_MOUSELEAVE: u32 = 0x02A3;
 const WM_APP_GONE: u32 = WM_APP + 1;
 /// A note was put up (wparam: busy, lparam: its number): the window times its fading.
 const WM_APP_NOTE: u32 = WM_APP + 2;
+/// Full screen, as the window it takes over from was.
+const WM_APP_FULL_SCREEN: u32 = WM_APP + 3;
 const RESIZE_TIMER: usize = 1;
 const NOTE_TIMER: usize = 2;
 /// How long a resize must hold before the phone is asked for it: the phone
@@ -300,6 +350,21 @@ const RESIZE_SETTLE_MS: u32 = 120;
 const NOTE_MS: u32 = 4500;
 /// WinUser.h's: the global data a file drop carries, which the windows crate has no name for.
 const WM_COPYGLOBALDATA: u32 = 0x0049;
+/// The full-screen bar slides a step each tick, and goes up when this one fires.
+const SLIDE_TIMER: usize = 3;
+const HIDE_TIMER: usize = 4;
+const SLIDE_MS: u32 = 15;
+const SLIDE_STEP: u8 = 20;
+/// How near the top of the screen the pointer must come to bring the bar
+/// down, in pixels; how far off it the pointer may stray before it goes back
+/// up, in device-independent pixels; how long it stays once the pointer has
+/// left it, and when the window has just gone full screen, to show where it is.
+const TOP_EDGE_PX: i32 = 2;
+const BAR_NEAR_DIP: f32 = 24.0;
+const BAR_STAYS_MS: u32 = 600;
+const BAR_ON_ARRIVAL_MS: u32 = 2000;
+/// More's menu.
+const MENU_FULL_SCREEN: usize = 1;
 
 /// Open a window for `spec`; it runs until it is closed. The window shows
 /// at once, with the app's icon and name, and the picture follows.
@@ -488,6 +553,12 @@ fn ui_thread(spec: Spec, host: Arc<dyn Host>, opened: Sender<Result<Arc<Window>,
         asked_close: Mutex::new(None),
         note: Mutex::new(None),
         note_seq: AtomicU64::new(0),
+        full_screen: AtomicBool::new(false),
+        windowed: Mutex::new(None),
+        top_bar: AtomicU8::new(0),
+        top_bar_down: AtomicBool::new(false),
+        top_bar_leaving: AtomicBool::new(false),
+        menu_open: AtomicBool::new(false),
     });
     let state = Box::new(Ui {
         shared: shared.clone(),
@@ -497,6 +568,8 @@ fn ui_thread(spec: Spec, host: Arc<dyn Host>, opened: Sender<Result<Arc<Window>,
         keys_down: HashSet::new(),
         swallow_char: false,
         high_surrogate: None,
+        last_y: 0,
+        esc_held: false,
         render_thread: None,
         props: None,
         note_fades: 0,
@@ -576,6 +649,9 @@ fn ui_thread(spec: Spec, host: Arc<dyn Host>, opened: Sender<Result<Arc<Window>,
     unsafe {
         let _ = ShowWindow(hwnd, SW_SHOWNORMAL);
         let _ = SetForegroundWindow(hwnd);
+        if spec.full_screen {
+            let _ = PostMessageW(Some(hwnd), WM_APP_FULL_SCREEN, WPARAM(0), LPARAM(0));
+        }
     }
     let window = Arc::new(Window {
         id: spec.id,
@@ -703,6 +779,11 @@ struct Ui {
     /// The key just sent as a key also makes a WM_CHAR, which is not text.
     swallow_char: bool,
     high_surrogate: Option<u16>,
+    /// Where the pointer last was, down the client area: leaving a full-screen
+    /// window over its top (onto a screen above) brings the bar down.
+    last_y: i32,
+    /// Esc took the window out of full screen: its repeats go nowhere either.
+    esc_held: bool,
     render_thread: Option<thread::JoinHandle<()>>,
     props: Option<IPropertyStore>,
     /// The note the fade timer is running for, by its number.
@@ -756,9 +837,38 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
     }
 }
 
+/// One of DWM's window attributes that is a number.
+fn set_dwm(hwnd: HWND, attribute: DWMWINDOWATTRIBUTE, value: i32) {
+    unsafe {
+        let _ = DwmSetWindowAttribute(hwnd, attribute, &value as *const i32 as *const _, 4);
+    }
+}
+
+/// The window over the whole of a screen: the one `near` (a rectangle Windows
+/// suggests) is mostly on, else the one the window is on.
+fn fill_screen(hwnd: HWND, near: Option<&RECT>) {
+    unsafe {
+        let monitor = match near {
+            Some(r) => MonitorFromRect(r, MONITOR_DEFAULTTONEAREST),
+            None => MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST),
+        };
+        let mut info = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
+        if !GetMonitorInfoW(monitor, &mut info).as_bool() {
+            return;
+        }
+        let m = info.rcMonitor;
+        let _ = SetWindowPos(hwnd, Some(HWND_TOP), m.left, m.top, m.right - m.left, m.bottom - m.top,
+            SWP_FRAMECHANGED | SWP_NOOWNERZORDER);
+    }
+}
+
 impl Ui {
     fn bar_height(&self) -> i32 {
-        frame::height(self.shared.scale())
+        self.shared.bar_height()
+    }
+
+    fn full_screen(&self) -> bool {
+        self.shared.full_screen.load(Ordering::SeqCst)
     }
 
     fn width(&self) -> i32 {
@@ -824,12 +934,15 @@ impl Ui {
             }
             dark_menus(hwnd, self.shared.dark.load(Ordering::SeqCst));
             // Under the button, right edges in line, as Windows' own title-bar menus open.
-            let b = frame::bar(self.width(), self.shared.scale()).sound;
+            let b = self.button_rect(Hit::Sound);
             let mut at = POINT { x: b.right, y: b.bottom };
             let _ = ClientToScreen(hwnd, &mut at);
             let flags = TPM_RETURNCMD | TPM_RIGHTALIGN | TPM_TOPALIGN | TPM_NONOTIFY;
+            self.shared.menu_open.store(true, Ordering::SeqCst);
             let picked = TrackPopupMenuEx(menu, flags.0, at.x, at.y, hwnd, None).0 as usize;
+            self.shared.menu_open.store(false, Ordering::SeqCst);
             let _ = DestroyMenu(menu);
+            self.after_menu(hwnd);
             // The menu had the mouse: whatever was under it then is not hovered now.
             self.set_hover(Hit::None);
             if let Some(sound::Item::Choice { choice, enabled: true, .. }) = picked.checked_sub(1).and_then(|i| items.get(i)) {
@@ -853,6 +966,250 @@ impl Ui {
         }
         if !paths.is_empty() {
             self.shared.link.host().dropped(paths, self.shared.clone());
+        }
+    }
+
+    fn toggle_full_screen(&mut self, hwnd: HWND) {
+        if self.full_screen() {
+            self.leave_full_screen(hwnd);
+        } else {
+            self.enter_full_screen(hwnd);
+        }
+    }
+
+    /// The whole of the screen the window is on, with no frame and no title
+    /// bar. A maximised window is restored first, so that Windows still knows
+    /// it as the window it was, and maximised again after.
+    fn enter_full_screen(&mut self, hwnd: HWND) {
+        if self.full_screen() {
+            return;
+        }
+        unsafe {
+            // No animation through the states on the way.
+            set_dwm(hwnd, DWMWA_TRANSITIONS_FORCEDISABLED, 1);
+            let maximized = IsZoomed(hwnd).as_bool();
+            if maximized {
+                let _ = ShowWindow(hwnd, SW_RESTORE);
+            }
+            let mut rect = RECT::default();
+            let _ = GetWindowRect(hwnd, &mut rect);
+            let style = GetWindowLongPtrW(hwnd, GWL_STYLE);
+            *self.shared.windowed.lock().unwrap() = Some(Windowed { style, rect, maximized });
+            self.shared.full_screen.store(true, Ordering::SeqCst);
+            let _ = SetWindowLongPtrW(hwnd, GWL_STYLE, style & !((WS_CAPTION | WS_THICKFRAME).0 as isize));
+            set_dwm(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND.0);
+            fill_screen(hwnd, None);
+        }
+        // What the pointer was over in the title bar is not in the new bar.
+        self.set_hover(Hit::None);
+        // Down for a moment, so the person sees where it is.
+        self.top_bar_down(hwnd);
+        self.top_bar_up_soon(hwnd, BAR_ON_ARRIVAL_MS);
+    }
+
+    /// Back to the window it was, where it was.
+    fn leave_full_screen(&mut self, hwnd: HWND) {
+        let Some(w) = self.shared.windowed.lock().unwrap().take() else { return };
+        self.top_bar_up(hwnd, false);
+        self.shared.full_screen.store(false, Ordering::SeqCst);
+        unsafe {
+            let _ = SetWindowLongPtrW(hwnd, GWL_STYLE, w.style);
+            set_dwm(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DEFAULT.0);
+            let r = w.rect;
+            let _ = SetWindowPos(hwnd, None, r.left, r.top, r.right - r.left, r.bottom - r.top,
+                SWP_FRAMECHANGED | SWP_NOZORDER | SWP_NOOWNERZORDER);
+            if w.maximized {
+                let _ = ShowWindow(hwnd, SW_MAXIMIZE);
+            }
+            set_dwm(hwnd, DWMWA_TRANSITIONS_FORCEDISABLED, 0);
+        }
+    }
+
+    /// Whatever was to send the full-screen bar back up, does not.
+    fn keep_top_bar(&self, hwnd: HWND) {
+        unsafe {
+            let _ = KillTimer(Some(hwnd), HIDE_TIMER);
+        }
+        self.shared.top_bar_leaving.store(false, Ordering::SeqCst);
+    }
+
+    /// The full-screen bar slides down, and stays.
+    fn top_bar_down(&self, hwnd: HWND) {
+        self.keep_top_bar(hwnd);
+        if !self.shared.top_bar_down.swap(true, Ordering::SeqCst) {
+            unsafe {
+                let _ = SetTimer(Some(hwnd), SLIDE_TIMER, SLIDE_MS, None);
+            }
+        }
+    }
+
+    /// The full-screen bar goes back up `ms` from now, unless that is called off first.
+    fn top_bar_up_soon(&self, hwnd: HWND, ms: u32) {
+        let s = &self.shared;
+        if !s.top_bar_down.load(Ordering::SeqCst)
+            || s.menu_open.load(Ordering::SeqCst)
+            || s.top_bar_leaving.swap(true, Ordering::SeqCst)
+        {
+            return;
+        }
+        unsafe {
+            let _ = SetTimer(Some(hwnd), HIDE_TIMER, ms, None);
+        }
+    }
+
+    /// The full-screen bar goes up: sliding, or at once.
+    fn top_bar_up(&self, hwnd: HWND, slide: bool) {
+        self.keep_top_bar(hwnd);
+        self.shared.top_bar_down.store(false, Ordering::SeqCst);
+        self.set_hover(Hit::None);
+        unsafe {
+            if slide {
+                let _ = SetTimer(Some(hwnd), SLIDE_TIMER, SLIDE_MS, None);
+            } else {
+                let _ = KillTimer(Some(hwnd), SLIDE_TIMER);
+                self.shared.top_bar.store(0, Ordering::SeqCst);
+                self.shared.repaint();
+            }
+        }
+    }
+
+    /// The pointer at (`x`, `y`) in a full-screen window: at the top of the
+    /// screen it brings the bar down, and off the bar for a moment it sends it
+    /// back up. What of the bar it is on, if anything: the app does not see it there.
+    fn track_top(&self, hwnd: HWND, x: i32, y: i32) -> Hit {
+        let (width, scale) = (self.width(), self.shared.scale());
+        if y < TOP_EDGE_PX || frame::on_handle(width, scale, x, y) {
+            self.top_bar_down(hwnd);
+        }
+        if !self.shared.top_bar_down.load(Ordering::SeqCst) {
+            return Hit::None;
+        }
+        let t = frame::top_bar(width, scale).rect;
+        let near = (BAR_NEAR_DIP * scale) as i32;
+        if x >= t.left - near && x < t.right + near && y < t.bottom + near {
+            self.keep_top_bar(hwnd);
+        } else {
+            self.top_bar_up_soon(hwnd, BAR_STAYS_MS);
+        }
+        frame::top_hit(width, scale, x, y)
+    }
+
+    /// What of a bar is at (`x`, `y`): the title bar, or the full-screen bar
+    /// while it is down (and its tab while it is up, which is the bar's too).
+    fn bar_hit(&self, x: i32, y: i32) -> Hit {
+        let (width, scale) = (self.width(), self.shared.scale());
+        if !self.full_screen() {
+            frame::hit(width, scale, x, y)
+        } else if self.shared.top_bar_down.load(Ordering::SeqCst) {
+            frame::top_hit(width, scale, x, y)
+        } else if frame::on_handle(width, scale, x, y) {
+            Hit::Caption
+        } else {
+            Hit::None
+        }
+    }
+
+    /// The buttons this window works itself, in its client area: the title
+    /// bar's Back, More and Sound (the rest are caption buttons, which Windows
+    /// works), and all of the full-screen bar's.
+    fn ours(&self, hit: Hit) -> bool {
+        match hit {
+            Hit::Back | Hit::More | Hit::Sound => true,
+            Hit::Min | Hit::Windowed | Hit::Close => self.full_screen(),
+            _ => false,
+        }
+    }
+
+    /// One of those buttons, clicked.
+    fn button(&mut self, hwnd: HWND, hit: Hit) {
+        unsafe {
+            match hit {
+                Hit::Back => self.key_tap(keys::code::BACK),
+                Hit::More => self.more_menu(hwnd),
+                Hit::Sound => self.sound_menu(hwnd),
+                Hit::Min => {
+                    let _ = ShowWindow(hwnd, SW_MINIMIZE);
+                }
+                Hit::Windowed => self.leave_full_screen(hwnd),
+                Hit::Close => {
+                    let _ = PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Where a bar's button is in the client area: the full-screen bar's while
+    /// the window is full screen, else the title bar's.
+    fn button_rect(&self, hit: Hit) -> RECT {
+        let (width, scale) = (self.width(), self.shared.scale());
+        if self.full_screen() {
+            let t = frame::top_bar(width, scale);
+            let r = match hit {
+                Hit::Back => t.back,
+                Hit::More => t.more,
+                Hit::Sound => t.sound,
+                Hit::Min => t.min,
+                Hit::Windowed => t.windowed,
+                _ => t.close,
+            };
+            RECT { left: t.rect.left + r.left, right: t.rect.left + r.right, ..r }
+        } else {
+            let b = frame::bar(width, scale);
+            match hit {
+                Hit::Back => b.back,
+                Hit::More => b.more,
+                Hit::Sound => b.sound,
+                Hit::Min => b.min,
+                Hit::Max => b.max,
+                _ => b.close,
+            }
+        }
+    }
+
+    /// A menu has closed: full screen, the bar goes back up if the pointer
+    /// left it while the menu was open.
+    fn after_menu(&self, hwnd: HWND) {
+        if self.full_screen() {
+            let mut pt = POINT::default();
+            unsafe {
+                let _ = GetCursorPos(&mut pt);
+                let _ = ScreenToClient(hwnd, &mut pt);
+            }
+            self.track_top(hwnd, pt.x, pt.y);
+        }
+    }
+
+    /// More's menu, under its button: full screen, for now, with its key beside it.
+    fn more_menu(&mut self, hwnd: HWND) {
+        let full = self.full_screen();
+        let button = self.button_rect(Hit::More);
+        unsafe {
+            let Ok(menu) = CreatePopupMenu() else { return };
+            let text = if full { w!("Exit full screen\tEsc") } else { w!("Full screen\tF11") };
+            let _ = AppendMenuW(menu, MF_STRING, MENU_FULL_SCREEN, text);
+            dark_menus(hwnd, self.shared.dark.load(Ordering::SeqCst));
+            // Under the button, and never over it.
+            let mut corners = [POINT { x: button.left, y: button.top }, POINT { x: button.right, y: button.bottom }];
+            for p in &mut corners {
+                let _ = ClientToScreen(hwnd, p);
+            }
+            let clear = TPMPARAMS {
+                cbSize: std::mem::size_of::<TPMPARAMS>() as u32,
+                rcExclude: RECT { left: corners[0].x, top: corners[0].y, right: corners[1].x, bottom: corners[1].y },
+            };
+            self.shared.menu_open.store(true, Ordering::SeqCst);
+            let flags = TPM_RETURNCMD | TPM_LEFTALIGN | TPM_TOPALIGN | TPM_VERTICAL;
+            let chosen = TrackPopupMenuEx(menu, flags.0, corners[0].x, corners[1].y, hwnd, Some(&clear));
+            self.shared.menu_open.store(false, Ordering::SeqCst);
+            let _ = DestroyMenu(menu);
+            // The menu had the mouse: whatever was under it then is not hovered now.
+            self.set_hover(Hit::None);
+            if chosen.0 as usize == MENU_FULL_SCREEN {
+                self.toggle_full_screen(hwnd);
+            } else {
+                self.after_menu(hwnd);
+            }
         }
     }
 
@@ -890,6 +1247,10 @@ impl Ui {
         unsafe {
             match msg {
                 WM_NCCALCSIZE if wp.0 != 0 => {
+                    if self.full_screen() {
+                        // No frame at all: the client area is the whole window.
+                        return LRESULT(0);
+                    }
                     // Windows' frame, less its caption and top edge: the bar is ours, the
                     // side and bottom borders (and so resizing from them) stay Windows'.
                     let params = &mut *(lp.0 as *mut NCCALCSIZE_PARAMS);
@@ -905,6 +1266,9 @@ impl Ui {
                     r
                 }
                 WM_NCHITTEST => {
+                    if self.full_screen() {
+                        return LRESULT(HTCLIENT as isize);
+                    }
                     let r = DefWindowProcW(hwnd, msg, wp, lp);
                     if r.0 as u32 != HTCLIENT {
                         return r;
@@ -928,7 +1292,7 @@ impl Ui {
                         Hit::Max => HTMAXBUTTON,
                         Hit::Min => HTMINBUTTON,
                         Hit::Caption => HTCAPTION,
-                        Hit::Back | Hit::Sound | Hit::None => HTCLIENT,
+                        Hit::Back | Hit::Sound | Hit::More | Hit::Windowed | Hit::None => HTCLIENT,
                     } as isize)
                 }
                 // The caption buttons are non-client parts Windows would draw itself.
@@ -1009,11 +1373,18 @@ impl Ui {
                         let _ = TrackMouseEvent(&mut t);
                         self.tracking = true;
                     }
+                    self.last_y = y;
+                    if self.full_screen() {
+                        let on = if self.buttons == 0 { self.track_top(hwnd, x, y) } else { Hit::None };
+                        self.set_hover(if self.ours(on) { on } else { Hit::None });
+                        if on == Hit::None {
+                            self.pointer(x, y);
+                        }
+                        return LRESULT(0);
+                    }
                     let in_bar = y < self.bar_height();
-                    self.set_hover(match frame::hit(self.width(), self.shared.scale(), x, y) {
-                        h @ (Hit::Back | Hit::Sound) if in_bar => h,
-                        _ => Hit::None,
-                    });
+                    let on = if in_bar { frame::hit(self.width(), self.shared.scale(), x, y) } else { Hit::None };
+                    self.set_hover(if self.ours(on) { on } else { Hit::None });
                     if self.buttons != 0 || !in_bar {
                         self.pointer(x, y);
                     }
@@ -1022,6 +1393,14 @@ impl Ui {
                 WM_MOUSELEAVE => {
                     self.tracking = false;
                     self.set_hover(Hit::None);
+                    if self.full_screen() {
+                        // Out over the top of the screen, onto one above, is as good as touching it.
+                        if self.last_y < TOP_EDGE_PX * 4 {
+                            self.top_bar_down(hwnd);
+                        } else {
+                            self.top_bar_up_soon(hwnd, BAR_STAYS_MS);
+                        }
+                    }
                     if self.buttons == 0 {
                         self.shared.send(wire::json(&json!({"t": "leave"})));
                     }
@@ -1030,13 +1409,13 @@ impl Ui {
                 WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN | WM_LBUTTONDBLCLK | WM_RBUTTONDBLCLK
                 | WM_MBUTTONDBLCLK => {
                     let (x, y) = (lo(lp), hi(lp));
-                    if self.buttons == 0 && y < self.bar_height() {
-                        if msg == WM_LBUTTONDOWN || msg == WM_LBUTTONDBLCLK {
-                            let h = frame::hit(self.width(), self.shared.scale(), x, y);
-                            if matches!(h, Hit::Back | Hit::Sound) {
-                                self.set_pressed(h);
-                                SetCapture(hwnd);
-                            }
+                    // On a bar (the title bar, or the full-screen bar while it is
+                    // down), a press is the bar's, never the app's.
+                    let on = if self.buttons == 0 { self.bar_hit(x, y) } else { Hit::None };
+                    if on != Hit::None {
+                        if (msg == WM_LBUTTONDOWN || msg == WM_LBUTTONDBLCLK) && self.ours(on) {
+                            self.set_pressed(on);
+                            SetCapture(hwnd);
                         }
                         return LRESULT(0);
                     }
@@ -1050,14 +1429,11 @@ impl Ui {
                 WM_LBUTTONUP | WM_RBUTTONUP | WM_MBUTTONUP => {
                     let (x, y) = (lo(lp), hi(lp));
                     let pressed = Hit::from_code(self.shared.pressed.load(Ordering::SeqCst));
-                    if msg == WM_LBUTTONUP && matches!(pressed, Hit::Back | Hit::Sound) {
+                    if msg == WM_LBUTTONUP && self.ours(pressed) {
                         self.set_pressed(Hit::None);
                         let _ = ReleaseCapture();
-                        if frame::hit(self.width(), self.shared.scale(), x, y) == pressed {
-                            match pressed {
-                                Hit::Back => self.key_tap(keys::code::BACK),
-                                _ => self.sound_menu(hwnd),
-                            }
+                        if self.bar_hit(x, y) == pressed {
+                            self.button(hwnd, pressed);
                         }
                         return LRESULT(0);
                     }
@@ -1092,7 +1468,7 @@ impl Ui {
                 WM_MOUSEWHEEL | WM_MOUSEHWHEEL => {
                     let mut pt = POINT { x: lo(lp), y: hi(lp) };
                     let _ = ScreenToClient(hwnd, &mut pt);
-                    if pt.y >= self.bar_height() {
+                    if pt.y >= self.bar_height() && self.bar_hit(pt.x, pt.y) == Hit::None {
                         let delta = ((wp.0 >> 16) & 0xFFFF) as i16 as f32 / 120.0;
                         let (dx, dy) = self.shared.to_display(pt.x, pt.y);
                         let (h, v) = if msg == WM_MOUSEWHEEL { (0.0, delta) } else { (delta, 0.0) };
@@ -1109,6 +1485,26 @@ impl Ui {
                     }
                     let extended = (lp.0 >> 24) & 1 == 1;
                     let repeat = if (lp.0 >> 30) & 1 == 1 { 1 } else { 0 };
+                    // Esc takes a full-screen window out of full screen, and F11 in
+                    // and out, as in Windows' own apps; neither reaches the app, nor
+                    // do their repeats while they are held.
+                    let alone = msg == WM_KEYDOWN && !(m.ctrl || m.alt || m.shift || m.win);
+                    if vk == VK_ESCAPE.0 as u32 {
+                        if repeat == 1 && self.esc_held {
+                            return LRESULT(0);
+                        }
+                        self.esc_held = alone && self.full_screen();
+                        if self.esc_held {
+                            self.leave_full_screen(hwnd);
+                            return LRESULT(0);
+                        }
+                    }
+                    if vk == VK_F11.0 as u32 && alone {
+                        if repeat == 0 {
+                            self.toggle_full_screen(hwnd);
+                        }
+                        return LRESULT(0);
+                    }
                     let types = MapVirtualKeyW(vk, MAPVK_VK_TO_CHAR) != 0;
                     self.swallow_char = false;
                     match keys::press(vk, extended, types, m) {
@@ -1128,6 +1524,9 @@ impl Ui {
                 }
                 WM_KEYUP | WM_SYSKEYUP => {
                     let vk = wp.0 as u32;
+                    if vk == VK_ESCAPE.0 as u32 {
+                        self.esc_held = false;
+                    }
                     if self.keys_down.remove(&vk) {
                         let extended = (lp.0 >> 24) & 1 == 1;
                         if let Some(code) = keys::android_code(vk, extended) {
@@ -1198,6 +1597,9 @@ impl Ui {
                         self.hand_clipboard_over();
                         self.shared.send(wire::json(&json!({"t": "focus"})));
                     } else {
+                        if self.full_screen() {
+                            self.top_bar_up(hwnd, false);
+                        }
                         for vk in self.keys_down.drain() {
                             if let Some(code) = keys::android_code(vk, false) {
                                 self.shared.send(wire::key(false, 0, code, 0));
@@ -1243,6 +1645,30 @@ impl Ui {
                     self.dropped(HDROP(wp.0 as *mut core::ffi::c_void));
                     LRESULT(0)
                 }
+                WM_TIMER if wp.0 == SLIDE_TIMER => {
+                    let s = &self.shared;
+                    let now = s.top_bar.load(Ordering::SeqCst);
+                    let next = if s.top_bar_down.load(Ordering::SeqCst) {
+                        now.saturating_add(SLIDE_STEP).min(100)
+                    } else {
+                        now.saturating_sub(SLIDE_STEP)
+                    };
+                    s.top_bar.store(next, Ordering::SeqCst);
+                    s.repaint();
+                    if next == 0 || next == 100 {
+                        let _ = KillTimer(Some(hwnd), SLIDE_TIMER);
+                    }
+                    LRESULT(0)
+                }
+                WM_TIMER if wp.0 == HIDE_TIMER => {
+                    let _ = KillTimer(Some(hwnd), HIDE_TIMER);
+                    self.shared.top_bar_leaving.store(false, Ordering::SeqCst);
+                    // Not from under an open menu: the bar is looked at again once it closes.
+                    if !self.shared.menu_open.load(Ordering::SeqCst) {
+                        self.top_bar_up(hwnd, true);
+                    }
+                    LRESULT(0)
+                }
                 WM_EXITSIZEMOVE => {
                     let _ = KillTimer(Some(hwnd), RESIZE_TIMER);
                     self.shared.ask_size();
@@ -1252,10 +1678,22 @@ impl Ui {
                     let dpi = (wp.0 & 0xFFFF) as u32;
                     self.shared.scale_milli.store((dpi as f32 / 96.0 * 1000.0) as u32, Ordering::SeqCst);
                     let r = &*(lp.0 as *const RECT);
-                    let _ = SetWindowPos(hwnd, None, r.left, r.top, r.right - r.left, r.bottom - r.top,
-                        SWP_NOZORDER | SWP_NOACTIVATE);
+                    if self.full_screen() {
+                        // Onto another screen: the whole of that one.
+                        fill_screen(hwnd, Some(r));
+                    } else {
+                        let _ = SetWindowPos(hwnd, None, r.left, r.top, r.right - r.left, r.bottom - r.top,
+                            SWP_NOZORDER | SWP_NOACTIVATE);
+                    }
                     self.shared.ask_size();
                     LRESULT(0)
+                }
+                WM_DISPLAYCHANGE => {
+                    // The screen's resolution changed under a full-screen window: all of it still.
+                    if self.full_screen() {
+                        fill_screen(hwnd, None);
+                    }
+                    DefWindowProcW(hwnd, msg, wp, lp)
                 }
                 WM_SETTINGCHANGE => {
                     let dark = dark_mode();
@@ -1269,7 +1707,9 @@ impl Ui {
                 WM_GETMINMAXINFO => {
                     let info = &mut *(lp.0 as *mut MINMAXINFO);
                     let s = self.shared.scale();
-                    info.ptMinTrackSize = POINT { x: (240.0 * s) as i32, y: (320.0 * s) as i32 };
+                    // Wide enough for the bar's buttons — Back, More, the icon, Sound,
+                    // minimise, maximise, close — side by side, if nothing else.
+                    info.ptMinTrackSize = POINT { x: (300.0 * s) as i32, y: (320.0 * s) as i32 };
                     LRESULT(0)
                 }
                 WM_PAINT => {
@@ -1299,6 +1739,10 @@ impl Ui {
                 }
                 WM_APP_GONE => {
                     self.close(hwnd, false);
+                    LRESULT(0)
+                }
+                WM_APP_FULL_SCREEN => {
+                    self.enter_full_screen(hwnd);
                     LRESULT(0)
                 }
                 _ => DefWindowProcW(hwnd, msg, wp, lp),
@@ -1389,6 +1833,8 @@ fn render_thread(shared: Arc<Shared>, rx: Receiver<RenderMsg>, icon: Option<Vec<
                 dark: shared.dark.load(Ordering::SeqCst),
                 message: if r.has_picture() { None } else { message.as_deref() },
                 note: note.as_deref(),
+                full_screen: shared.full_screen.load(Ordering::SeqCst),
+                top_bar: shared.top_bar.load(Ordering::SeqCst) as f32 / 100.0,
             };
             let drawn = r.draw(&look);
             if let Err(e) = &drawn {

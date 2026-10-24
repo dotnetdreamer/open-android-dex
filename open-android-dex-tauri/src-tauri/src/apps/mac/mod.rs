@@ -14,11 +14,19 @@
 //! type what they type (keys.rs, `mac`). Its title bar is macOS's, with a Back
 //! button beside the window's buttons, since an Android app needs one and a
 //! Mac keyboard has none; ⌘[ is Back too, as in Safari, and so is a mouse's
-//! side button. At the bar's other end, a speaker: where the phone's sound
-//! plays (sound.rs), as a menu. A Mac pins apps to the Dock, not windows, so
-//! the windows are this app's, listed under its Dock icon and in its Window
-//! menu. Files dropped on one from Finder go to the phone (drops.rs), and the
+//! side button. Beside Back is More (☰), the window's own menu: full screen.
+//! At the bar's other end, a speaker: where the phone's sound plays
+//! (sound.rs), as a menu. A Mac pins apps to the Dock, not windows, so the
+//! windows are this app's, listed under its Dock icon and in its Window menu.
+//! Files dropped on one from Finder go to the phone (drops.rs), and the
 //! window's subtitle says how it went.
+//!
+//! Full screen is macOS's own, in a space of its own — whichever way it is
+//! asked for: More, the green button, ⌃⌘F — but with the menu bar kept away,
+//! and with it the title bar that would come down from the top. A small bar
+//! of the window's own comes down instead when the pointer touches the top of
+//! the screen, in the middle, as Remote Desktop's does on Windows; while it is
+//! up, a little tab with an arrow there says where it is. Esc leaves.
 //!
 //! Everything AppKit is touched on the main thread, through the main dispatch
 //! queue (which runs during a window's drag and resize as well).
@@ -28,7 +36,7 @@ mod video;
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -37,11 +45,14 @@ use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol, ProtocolObject, Sel};
 use objc2::{define_class, msg_send, sel, AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, Message};
 use objc2_app_kit::{
-    NSApplication, NSAutoresizingMaskOptions, NSBackingStoreType, NSButton, NSColor, NSControlStateValueOn,
-    NSDragOperation, NSDraggingDestination, NSDraggingInfo, NSEvent, NSEventModifierFlags, NSImage,
-    NSLayoutAttribute, NSMenu, NSMenuItem, NSPasteboardTypeFileURL, NSResponder, NSScreen, NSTextAlignment,
-    NSTextField, NSTextInputClient, NSTitlebarAccessoryViewController, NSTrackingArea, NSTrackingAreaOptions, NSView,
-    NSWindow, NSWindowCollectionBehavior, NSWindowDelegate, NSWindowStyleMask, NSWindowTabbingMode,
+    NSAnimatablePropertyContainer, NSAnimationContext, NSApplication, NSApplicationPresentationOptions,
+    NSAutoresizingMaskOptions, NSBackingStoreType, NSButton, NSColor, NSControlStateValueOn, NSDragOperation,
+    NSDraggingDestination, NSDraggingInfo, NSEvent, NSEventModifierFlags, NSFont, NSFontWeightMedium,
+    NSFontWeightSemibold, NSImage, NSImageSymbolConfiguration, NSLayoutAttribute, NSLineBreakMode, NSMenu,
+    NSMenuItem, NSPasteboardTypeFileURL, NSResponder, NSScreen, NSTextAlignment, NSTextField, NSTextInputClient,
+    NSTitlebarAccessoryViewController, NSTrackingArea, NSTrackingAreaOptions, NSView, NSVisualEffectBlendingMode,
+    NSVisualEffectMaterial, NSVisualEffectState, NSVisualEffectView, NSWindow, NSWindowCollectionBehavior,
+    NSWindowDelegate, NSWindowStyleMask, NSWindowTabbingMode,
 };
 use objc2_foundation::{
     ns_string, NSArray, NSAttributedString, NSAttributedStringKey, NSData, NSInteger, NSNotFound, NSNotification,
@@ -96,13 +107,21 @@ impl Window {
         self.shared.named(title);
     }
 
-    /// Where it is (AppKit's frame, in points): what a window taking over from it opens at.
+    /// Where it is (AppKit's frame, in points): what a window taking over from
+    /// it opens at — where it was before it went full screen, if it is.
     pub fn frame(&self) -> Option<[f64; 4]> {
         let id = self.id;
         dispatch2::run_on_main(move |_| {
-            OPEN.with(|o| o.borrow().get(&id).map(|p| p.window.frame()))
-                .map(|f| [f.origin.x, f.origin.y, f.size.width, f.size.height])
+            OPEN.with(|o| {
+                o.borrow().get(&id).map(|p| p.view.ivars().windowed_frame.get().unwrap_or_else(|| p.window.frame()))
+            })
+            .map(|f| [f.origin.x, f.origin.y, f.size.width, f.size.height])
         })
+    }
+
+    /// Whether it is full screen: a window taking over from it is too.
+    pub fn full_screen(&self) -> bool {
+        self.shared.full_screen.load(Ordering::SeqCst)
     }
 }
 
@@ -130,6 +149,8 @@ struct Shared {
     asked_close: Mutex<Option<Instant>>,
     /// When the window last changed size: the phone is asked once it holds still.
     resized_at: Mutex<Instant>,
+    /// Full screen, or going there: for the app, from any thread.
+    full_screen: AtomicBool,
     stats: Mutex<Stats>,
     /// The window's subtitle — the phone, and how the window reaches it — when no note has its place.
     subtitle: String,
@@ -223,7 +244,13 @@ impl Surface for Shared {
             *label = name.to_string();
         }
         let name = name.to_string();
-        with_window(self.id, move |w, _| w.setTitle(&NSString::from_str(&name)));
+        with_window(self.id, move |w, v| {
+            let name = NSString::from_str(&name);
+            w.setTitle(&name);
+            if let Some(bar) = v.ivars().bar.borrow().as_ref() {
+                bar.title.setStringValue(&name);
+            }
+        });
     }
 
     fn say(&self, text: Option<String>) {
@@ -315,6 +342,7 @@ struct Look {
     cascade: u32,
     size: Option<(u32, u32)>,
     frame: Option<[f64; 4]>,
+    full_screen: bool,
 }
 
 /// Open a window for `spec`; it runs until it is closed. The window shows at
@@ -332,6 +360,7 @@ pub fn open(spec: Spec, host: Arc<dyn Host>) -> Result<Arc<Window>, String> {
         linux: spec.linux.is_some(),
         asked_close: Mutex::new(None),
         resized_at: Mutex::new(Instant::now()),
+        full_screen: AtomicBool::new(false),
         stats: Mutex::new(Stats { since: Instant::now(), frames: 0, ages: Vec::new() }),
         subtitle: subtitle(&spec.device, spec.via),
         note_seq: Arc::new(AtomicU64::new(0)),
@@ -345,6 +374,7 @@ pub fn open(spec: Spec, host: Arc<dyn Host>) -> Result<Arc<Window>, String> {
         cascade: spec.cascade,
         size: spec.size,
         frame: spec.frame,
+        full_screen: spec.full_screen,
     };
     let (tx, rx) = mpsc::channel::<()>();
     {
@@ -457,11 +487,19 @@ fn make(mtm: MainThreadMarker, look: &Look, shared: &Arc<Shared>) {
     );
     container.addSubview(&message);
     *view.ivars().message.borrow_mut() = Some(message);
+    // Over everything, out of sight until the window is full screen: the
+    // bar's tab, and the bar over it.
+    let handle = make_handle(mtm, &view);
+    container.addSubview(&handle);
+    *view.ivars().handle.borrow_mut() = Some(handle);
+    let bar = make_bar(mtm, &view, &look.label);
+    container.addSubview(&bar.view);
+    *view.ivars().bar.borrow_mut() = Some(bar);
     window.setContentView(Some(&container));
     window.setDelegate(Some(ProtocolObject::from_ref(&*view)));
     window.setAcceptsMouseMovedEvents(true);
     window.makeFirstResponder(Some(&view));
-    add_back_button(mtm, &window, &view);
+    add_title_buttons(mtm, &window, &view);
     add_sound_button(mtm, &window, &view);
 
     shared.scale_milli.store((window.backingScaleFactor() * 1000.0) as u32, Ordering::SeqCst);
@@ -469,23 +507,45 @@ fn make(mtm: MainThreadMarker, look: &Look, shared: &Arc<Shared>) {
     window.makeKeyAndOrderFront(None);
     activate(mtm);
     OPEN.with(|o| o.borrow_mut().insert(look.id, Parts { window, view }));
+    // Taking over from a full-screen window: full screen as well, once it is on the screen.
+    if look.full_screen {
+        with_window(look.id, |w, _| w.toggleFullScreen(None));
+    }
 }
 
-/// Back, in the title bar beside the window's own buttons.
-fn add_back_button(mtm: MainThreadMarker, window: &NSWindow, view: &AppView) {
-    let Some(image) = NSImage::imageWithSystemSymbolName_accessibilityDescription(
-        ns_string!("chevron.backward"),
-        Some(ns_string!("Back")),
-    ) else {
-        return;
-    };
-    let target: &AnyObject = view;
-    let button = unsafe { NSButton::buttonWithImage_target_action(&image, Some(target), Some(sel!(goBack:)), mtm) };
+/// A borderless button showing one of the system's symbols, which `target` answers.
+fn symbol_button(
+    mtm: MainThreadMarker,
+    symbol: &str,
+    name: &str,
+    tip: &str,
+    action: Sel,
+    target: &AnyObject,
+) -> Option<Retained<NSButton>> {
+    let image = NSImage::imageWithSystemSymbolName_accessibilityDescription(
+        &NSString::from_str(symbol),
+        Some(&NSString::from_str(name)),
+    )?;
+    let button = unsafe { NSButton::buttonWithImage_target_action(&image, Some(target), Some(action), mtm) };
     button.setBordered(false);
-    button.setToolTip(Some(ns_string!("Back (⌘[)")));
-    button.setFrame(NSRect::new(NSPoint::new(4.0, 0.0), NSSize::new(28.0, 28.0)));
-    let holder = NSView::initWithFrame(NSView::alloc(mtm), NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(36.0, 28.0)));
-    holder.addSubview(&button);
+    button.setToolTip(Some(&NSString::from_str(tip)));
+    Some(button)
+}
+
+/// Back and More, in the title bar beside the window's own buttons.
+fn add_title_buttons(mtm: MainThreadMarker, window: &NSWindow, view: &AppView) {
+    let target: &AnyObject = view;
+    let holder = NSView::initWithFrame(NSView::alloc(mtm), NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(64.0, 28.0)));
+    let buttons = [
+        (4.0, "chevron.backward", "Back", "Back (⌘[)", sel!(goBack:)),
+        (32.0, "line.3.horizontal", "More", "More", sel!(showMore:)),
+    ];
+    for (x, symbol, name, tip, action) in buttons {
+        if let Some(button) = symbol_button(mtm, symbol, name, tip, action, target) {
+            button.setFrame(NSRect::new(NSPoint::new(x, 0.0), NSSize::new(28.0, 28.0)));
+            holder.addSubview(&button);
+        }
+    }
     let accessory = NSTitlebarAccessoryViewController::new(mtm);
     accessory.setView(&holder);
     accessory.setLayoutAttribute(NSLayoutAttribute::Left);
@@ -511,6 +571,98 @@ fn add_sound_button(mtm: MainThreadMarker, window: &NSWindow, view: &AppView) {
     accessory.setView(&holder);
     accessory.setLayoutAttribute(NSLayoutAttribute::Right);
     window.addTitlebarAccessoryViewController(&accessory);
+}
+
+/// The full-screen bar: how wide and tall the part of it that shows is, and
+/// how far its rounded top hangs above the screen, out of sight.
+const BAR_W: f64 = 380.0;
+const BAR_H: f64 = 30.0;
+const BAR_ROUND: f64 = 9.0;
+/// How near the top of the screen the pointer must come to bring the bar down, in points.
+const TOP_EDGE: f64 = 2.0;
+/// How far off the bar the pointer may stray before the bar goes back up, in points.
+const BAR_NEAR: f64 = 24.0;
+/// How long the bar stays once the pointer has left it…
+const BAR_STAYS: Duration = Duration::from_millis(600);
+/// …and when the window has just gone full screen, to show where it is.
+const BAR_ON_ARRIVAL: Duration = Duration::from_secs(2);
+
+/// The tab at the top of a full-screen window while its bar is up: how wide
+/// and tall the part of it that shows is (its rounded top is above the screen too).
+const HANDLE_W: f64 = 44.0;
+const HANDLE_H: f64 = 14.0;
+const HANDLE_ROUND: f64 = 7.0;
+
+/// The bar a full-screen window brings down from the top of the screen, as
+/// Remote Desktop's does: small and in the middle, with Back and More, the
+/// app's name, where the sound plays, leaving full screen, and closing.
+struct Bar {
+    view: Retained<NSVisualEffectView>,
+    title: Retained<NSTextField>,
+}
+
+/// What the full-screen bar and its tab are made of: the title bar's
+/// material over the app's picture, which shows through, blurred; rounded,
+/// in the middle at the top whatever the window's size, and out of sight
+/// until the window is full screen.
+fn top_piece(mtm: MainThreadMarker, size: NSSize, round: f64) -> Retained<NSVisualEffectView> {
+    let piece = NSVisualEffectView::initWithFrame(NSVisualEffectView::alloc(mtm), NSRect::new(NSPoint::new(0.0, 0.0), size));
+    piece.setMaterial(NSVisualEffectMaterial::Titlebar);
+    piece.setBlendingMode(NSVisualEffectBlendingMode::WithinWindow);
+    piece.setState(NSVisualEffectState::Active);
+    piece.setWantsLayer(true);
+    if let Some(layer) = piece.layer() {
+        layer.setCornerRadius(round);
+        layer.setMasksToBounds(true);
+    }
+    piece.setAutoresizingMask(
+        NSAutoresizingMaskOptions::ViewMinXMargin
+            | NSAutoresizingMaskOptions::ViewMaxXMargin
+            | NSAutoresizingMaskOptions::ViewMinYMargin,
+    );
+    piece.setHidden(true);
+    piece
+}
+
+/// The tab: an arrow pointing down, at the top of the screen, where the bar is.
+fn make_handle(mtm: MainThreadMarker, view: &AppView) -> Retained<NSVisualEffectView> {
+    let handle = top_piece(mtm, NSSize::new(HANDLE_W, HANDLE_H + HANDLE_ROUND), HANDLE_ROUND);
+    let target: &AnyObject = view;
+    if let Some(button) = symbol_button(mtm, "chevron.down", "Show the bar", "Show the bar", sel!(showBar:), target) {
+        let small = NSImageSymbolConfiguration::configurationWithPointSize_weight(9.0, unsafe { NSFontWeightSemibold });
+        if let Some(image) = button.image().and_then(|i| i.imageWithSymbolConfiguration(&small)) {
+            button.setImage(Some(&image));
+        }
+        button.setFrame(NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(HANDLE_W, HANDLE_H)));
+        handle.addSubview(&button);
+    }
+    handle
+}
+
+fn make_bar(mtm: MainThreadMarker, view: &AppView, label: &str) -> Bar {
+    let bar = top_piece(mtm, NSSize::new(BAR_W, BAR_H + BAR_ROUND), BAR_ROUND);
+    let target: &AnyObject = view;
+    let buttons = [
+        (4.0, "chevron.backward", "Back", "Back (⌘[)", sel!(goBack:)),
+        (32.0, "line.3.horizontal", "More", "More", sel!(showMore:)),
+        (BAR_W - 88.0, "speaker.wave.2", "Sound", "Where the sound plays", sel!(soundMenu:)),
+        (BAR_W - 60.0, "arrow.down.right.and.arrow.up.left", "Exit full screen", "Exit full screen (Esc)", sel!(switchFullScreen:)),
+        (BAR_W - 32.0, "xmark", "Close", "Close", sel!(closeWindow:)),
+    ];
+    for (x, symbol, name, tip, action) in buttons {
+        if let Some(button) = symbol_button(mtm, symbol, name, tip, action, target) {
+            button.setFrame(NSRect::new(NSPoint::new(x, (BAR_H - 24.0) / 2.0), NSSize::new(28.0, 24.0)));
+            bar.addSubview(&button);
+        }
+    }
+    let title = NSTextField::labelWithString(&NSString::from_str(label), mtm);
+    title.setAlignment(NSTextAlignment::Center);
+    title.setLineBreakMode(NSLineBreakMode::ByTruncatingTail);
+    title.setFont(Some(&NSFont::systemFontOfSize_weight(12.0, unsafe { NSFontWeightMedium })));
+    // In the middle: as far from the bar's ends as the three buttons at its right reach.
+    title.setFrame(NSRect::new(NSPoint::new(92.0, (BAR_H - 16.0) / 2.0), NSSize::new(BAR_W - 184.0, 16.0)));
+    bar.addSubview(&title);
+    Bar { view: bar, title }
 }
 
 /// Android's MotionEvent.BUTTON_* bits.
@@ -543,6 +695,22 @@ struct Ui {
     tracking: RefCell<Option<Retained<NSTrackingArea>>>,
     /// The sound menu as last shown: its items' tags index it.
     sound: RefCell<Vec<sound::Item>>,
+    /// Full screen, from the moment the window starts to go there.
+    full_screen: Cell<bool>,
+    /// Where the window was before it went full screen.
+    windowed_frame: Cell<Option<NSRect>>,
+    /// The bar a full-screen window brings down from the top, and whether it
+    /// is down; and the tab that shows where it is while it is up.
+    bar: RefCell<Option<Bar>>,
+    handle: RefCell<Option<Retained<NSVisualEffectView>>>,
+    bar_down: Cell<bool>,
+    /// The bar is due to go back up; a new `bar_hide` calls that off.
+    bar_leaving: Cell<bool>,
+    bar_hide: Cell<u64>,
+    /// More's menu or the sound menu is open: the bar stays until it closes.
+    menu_open: Cell<bool>,
+    /// Esc took the window out of full screen: its repeats go nowhere either.
+    esc_held: Cell<bool>,
     /// Closing because the phone said the app had gone: the phone is not told.
     gone: Cell<bool>,
     closed: Cell<bool>,
@@ -660,12 +828,18 @@ define_class!(
         #[unsafe(method(mouseMoved:))]
         fn mouse_moved(&self, event: &NSEvent) {
             if self.ivars().buttons.get() == 0 {
-                self.pointer(event);
+                let on_bar = self.track(self.convertPoint_fromView(event.locationInWindow(), None));
+                if !on_bar {
+                    self.pointer(event);
+                }
             }
         }
 
         #[unsafe(method(mouseExited:))]
-        fn mouse_exited(&self, _event: &NSEvent) {
+        fn mouse_exited(&self, event: &NSEvent) {
+            // Out over the top of the screen (into the strip beside a camera
+            // notch, or onto a screen above) is as good as touching it.
+            self.track(self.convertPoint_fromView(event.locationInWindow(), None));
             if self.ivars().buttons.get() == 0 {
                 self.ivars().shared.link.send(wire::json(&json!({"t": "leave"})));
             }
@@ -691,6 +865,23 @@ define_class!(
         #[unsafe(method(keyDown:))]
         fn key_down(&self, event: &NSEvent) {
             let kvk = event.keyCode();
+            let ui = self.ivars();
+            // Esc takes a full-screen window out of full screen, and does not
+            // reach the app; nor do its repeats while it is held.
+            if kvk == mk::ESCAPE {
+                if event.isARepeat() && ui.esc_held.get() {
+                    return;
+                }
+                let m = mods(event);
+                let alone = !(m.shift || m.control || m.option || m.command);
+                ui.esc_held.set(ui.full_screen.get() && alone);
+                if ui.esc_held.get() {
+                    if let Some(w) = self.window() {
+                        w.toggleFullScreen(None);
+                    }
+                    return;
+                }
+            }
             let plain = event.charactersIgnoringModifiers().map(|s| s.to_string()).unwrap_or_default();
             match mk::press(kvk, &plain, mods(event)) {
                 mk::Press::Key(code, meta) => {
@@ -704,6 +895,9 @@ define_class!(
 
         #[unsafe(method(keyUp:))]
         fn key_up(&self, event: &NSEvent) {
+            if event.keyCode() == mk::ESCAPE {
+                self.ivars().esc_held.set(false);
+            }
             let code = self.ivars().keys_down.borrow_mut().remove(&event.keyCode());
             if let Some(code) = code {
                 self.ivars().shared.link.send(wire::key(false, 0, code, mods(event).meta()));
@@ -719,7 +913,7 @@ define_class!(
             self.shortcut(event)
         }
 
-        /// The title bar's Back.
+        /// The title bar's Back, and the full-screen bar's.
         #[unsafe(method(goBack:))]
         fn go_back(&self, _sender: Option<&AnyObject>) {
             let link = &self.ivars().shared.link;
@@ -741,6 +935,37 @@ define_class!(
             if let Some(sound::Item::Choice { choice, enabled: true, .. }) = picked {
                 let shared = self.ivars().shared.clone();
                 shared.link.host().pick_sound(choice, shared.clone());
+            }
+        }
+
+        /// More, in the title bar or the full-screen bar: its menu, under it.
+        #[unsafe(method(showMore:))]
+        fn show_more(&self, sender: Option<&AnyObject>) {
+            if let Some(button) = sender.and_then(|s| s.downcast_ref::<NSView>()) {
+                self.more(button);
+            }
+        }
+
+        /// More's Full screen, and the full-screen bar's way out of it. Not
+        /// `toggleFullScreen:`, which would take the menu bar's ⌃⌘F from the window.
+        #[unsafe(method(switchFullScreen:))]
+        fn switch_full_screen(&self, _sender: Option<&AnyObject>) {
+            if let Some(w) = self.window() {
+                w.toggleFullScreen(None);
+            }
+        }
+
+        /// The full-screen bar's tab, clicked: the bar comes down.
+        #[unsafe(method(showBar:))]
+        fn show_bar(&self, _sender: Option<&AnyObject>) {
+            self.bar_down(true);
+        }
+
+        /// The full-screen bar's ✕, as the title bar's.
+        #[unsafe(method(closeWindow:))]
+        fn close_window(&self, _sender: Option<&AnyObject>) {
+            if let Some(w) = self.window() {
+                w.performClose(None);
             }
         }
     }
@@ -875,6 +1100,56 @@ define_class!(
         fn window_did_end_live_resize(&self, _notification: &NSNotification) {
             self.ivars().shared.ask_size();
         }
+
+        /// macOS's full screen, with the menu bar kept away — and the title bar,
+        /// which would come down with it: the window's own bar comes down instead.
+        #[unsafe(method(window:willUseFullScreenPresentationOptions:))]
+        fn full_screen_options(
+            &self,
+            _window: &NSWindow,
+            _proposed: NSApplicationPresentationOptions,
+        ) -> NSApplicationPresentationOptions {
+            NSApplicationPresentationOptions::FullScreen
+                | NSApplicationPresentationOptions::HideDock
+                | NSApplicationPresentationOptions::HideMenuBar
+        }
+
+        #[unsafe(method(windowWillEnterFullScreen:))]
+        fn window_will_enter_full_screen(&self, _notification: &NSNotification) {
+            let ui = self.ivars();
+            if let Some(w) = self.window() {
+                ui.windowed_frame.set(Some(w.frame()));
+            }
+            ui.full_screen.set(true);
+            ui.shared.full_screen.store(true, Ordering::SeqCst);
+        }
+
+        #[unsafe(method(windowDidEnterFullScreen:))]
+        fn window_did_enter_full_screen(&self, _notification: &NSNotification) {
+            self.place_handle();
+            if let Some(handle) = self.ivars().handle.borrow().as_ref() {
+                handle.setHidden(false);
+            }
+            // Down for a moment, so the person sees where it is.
+            self.bar_down(true);
+            self.bar_up_soon(BAR_ON_ARRIVAL);
+        }
+
+        #[unsafe(method(windowWillExitFullScreen:))]
+        fn window_will_exit_full_screen(&self, _notification: &NSNotification) {
+            self.out_of_full_screen();
+        }
+
+        #[unsafe(method(windowDidExitFullScreen:))]
+        fn window_did_exit_full_screen(&self, _notification: &NSNotification) {
+            self.ivars().windowed_frame.set(None);
+        }
+
+        #[unsafe(method(windowDidFailToEnterFullScreen:))]
+        fn window_did_fail_to_enter_full_screen(&self, _window: &NSWindow) {
+            self.out_of_full_screen();
+            self.ivars().windowed_frame.set(None);
+        }
     }
 );
 
@@ -897,6 +1172,15 @@ impl AppView {
             message: RefCell::new(None),
             tracking: RefCell::new(None),
             sound: RefCell::new(Vec::new()),
+            full_screen: Cell::new(false),
+            windowed_frame: Cell::new(None),
+            bar: RefCell::new(None),
+            handle: RefCell::new(None),
+            bar_down: Cell::new(false),
+            bar_leaving: Cell::new(false),
+            bar_hide: Cell::new(0),
+            menu_open: Cell::new(false),
+            esc_held: Cell::new(false),
             gone: Cell::new(false),
             closed: Cell::new(false),
         });
@@ -950,10 +1234,22 @@ impl AppView {
             Some(v) => v.retain(),
             None => (*self).retain().into_super(),
         };
-        // Its top left at the button's bottom left, whichever way the button counts.
-        let b = anchor.bounds();
-        let y = if anchor.isFlipped() { b.size.height + 4.0 } else { -4.0 };
-        menu.popUpMenuPositioningItem_atLocation_inView(None, NSPoint::new(0.0, y), Some(&anchor));
+        self.pop_up(&menu, &anchor);
+    }
+
+    /// `menu` under `button`: its top left at the button's bottom left,
+    /// whichever way the button counts. The full-screen bar stays while it is
+    /// open, and goes back up after if the pointer has left it meanwhile.
+    fn pop_up(&self, menu: &NSMenu, button: &NSView) {
+        let ui = self.ivars();
+        let b = button.bounds();
+        let y = if button.isFlipped() { b.size.height + 4.0 } else { -4.0 };
+        ui.menu_open.set(true);
+        menu.popUpMenuPositioningItem_atLocation_inView(None, NSPoint::new(0.0, y), Some(button));
+        ui.menu_open.set(false);
+        if let Some(w) = self.window() {
+            self.track(self.convertPoint_fromView(w.mouseLocationOutsideOfEventStream(), None));
+        }
     }
 
     /// The view changed size or scale: the picture follows at once, and the
@@ -965,6 +1261,7 @@ impl AppView {
         let scale = shared.scale();
         *shared.area.lock().unwrap() = ((size.width * scale).round() as u32, (size.height * scale).round() as u32);
         self.lay_out_picture();
+        self.place_handle();
         if !settle {
             return;
         }
@@ -1020,6 +1317,133 @@ impl AppView {
         CATransaction::setDisableActions(true);
         self.ivars().picture.setOpacity(if text.is_some() { 0.15 } else { 1.0 });
         CATransaction::commit();
+    }
+
+    /// More's menu, under the button that opened it: full screen, for now,
+    /// with the Mac's own keys for it beside it.
+    fn more(&self, button: &NSView) {
+        let ui = self.ivars();
+        let mtm = self.mtm();
+        let (title, key, held) = if ui.full_screen.get() {
+            ("Exit full screen", "\u{1b}", NSEventModifierFlags::empty())
+        } else {
+            ("Full screen", "f", NSEventModifierFlags::Control | NSEventModifierFlags::Command)
+        };
+        let item = unsafe {
+            NSMenuItem::initWithTitle_action_keyEquivalent(
+                NSMenuItem::alloc(mtm),
+                &NSString::from_str(title),
+                Some(sel!(switchFullScreen:)),
+                &NSString::from_str(key),
+            )
+        };
+        item.setKeyEquivalentModifierMask(held);
+        let target: &AnyObject = self;
+        unsafe { item.setTarget(Some(target)) };
+        let menu = NSMenu::new(mtm);
+        menu.addItem(&item);
+        self.pop_up(&menu, button);
+    }
+
+    /// The pointer at `p` in a full-screen window: at the top of the screen
+    /// it brings the bar down, and off the bar for a moment it sends it back
+    /// up. True if it is on the bar, which the app then does not see.
+    fn track(&self, p: NSPoint) -> bool {
+        let ui = self.ivars();
+        if !ui.full_screen.get() {
+            return false;
+        }
+        let size = self.bounds().size;
+        let middle = size.width / 2.0;
+        let on_handle = (p.x - middle).abs() < HANDLE_W / 2.0 && p.y >= size.height - HANDLE_H;
+        if on_handle || p.y >= size.height - TOP_EDGE {
+            self.bar_down(true);
+        }
+        if !ui.bar_down.get() {
+            return false;
+        }
+        let left = ((size.width - BAR_W) / 2.0).round();
+        let on = |margin: f64| p.x >= left - margin && p.x < left + BAR_W + margin && p.y >= size.height - BAR_H - margin;
+        if on(BAR_NEAR) {
+            self.keep_bar();
+        } else {
+            self.bar_up_soon(BAR_STAYS);
+        }
+        on(0.0)
+    }
+
+    /// The bar slides down, or back up out of sight.
+    fn bar_down(&self, down: bool) {
+        let ui = self.ivars();
+        self.keep_bar();
+        if ui.bar_down.replace(down) == down {
+            return;
+        }
+        let Some(bar) = ui.bar.borrow().as_ref().map(|b| b.view.clone()) else { return };
+        let size = self.bounds().size;
+        let x = ((size.width - BAR_W) / 2.0).round();
+        let up = NSPoint::new(x, size.height + 2.0);
+        if down {
+            bar.setFrameOrigin(up);
+            bar.setHidden(false);
+        }
+        NSAnimationContext::beginGrouping();
+        NSAnimationContext::currentContext().setDuration(0.15);
+        // Its rounded top above the screen: only its lower corners show.
+        bar.animator().setFrameOrigin(if down { NSPoint::new(x, size.height - BAR_H) } else { up });
+        NSAnimationContext::endGrouping();
+    }
+
+    /// Whatever was to send the bar back up, does not.
+    fn keep_bar(&self) {
+        let ui = self.ivars();
+        ui.bar_hide.set(ui.bar_hide.get() + 1);
+        ui.bar_leaving.set(false);
+    }
+
+    /// The bar goes back up `after` this long, unless that is called off first.
+    fn bar_up_soon(&self, after: Duration) {
+        let ui = self.ivars();
+        if !ui.bar_down.get() || ui.bar_leaving.replace(true) {
+            return;
+        }
+        let (id, hide) = (ui.shared.id, ui.bar_hide.get());
+        let Ok(when) = DispatchTime::try_from(after) else { return };
+        let _ = DispatchQueue::main().after(when, move || {
+            let Some(view) = OPEN.with(|o| o.borrow().get(&id).map(|p| p.view.clone())) else { return };
+            let ui = view.ivars();
+            if ui.bar_hide.get() != hide {
+                return;
+            }
+            ui.bar_leaving.set(false);
+            // Not from under an open menu: the bar is looked at again once it closes.
+            if !ui.menu_open.get() {
+                view.bar_down(false);
+            }
+        });
+    }
+
+    /// The window is leaving full screen, or did not get there: the bar and its tab go at once.
+    fn out_of_full_screen(&self) {
+        let ui = self.ivars();
+        ui.full_screen.set(false);
+        ui.shared.full_screen.store(false, Ordering::SeqCst);
+        self.keep_bar();
+        ui.bar_down.set(false);
+        if let Some(bar) = ui.bar.borrow().as_ref() {
+            bar.view.setHidden(true);
+        }
+        if let Some(handle) = ui.handle.borrow().as_ref() {
+            handle.setHidden(true);
+        }
+    }
+
+    /// The bar's tab, in the middle of the top, its rounded top above it.
+    fn place_handle(&self) {
+        if let Some(handle) = self.ivars().handle.borrow().as_ref() {
+            let size = self.bounds().size;
+            handle.setFrameOrigin(NSPoint::new(((size.width - HANDLE_W) / 2.0).round(), size.height - HANDLE_H));
+        }
     }
 
     /// ⌘ with a key comes here before it is a key down, and the menus'

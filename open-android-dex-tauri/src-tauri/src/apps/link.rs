@@ -54,6 +54,8 @@ pub struct Spec {
     /// Where to open: the frame of the window this one takes over from, in the
     /// platform's own screen coordinates (`Window::frame`). None places it as new.
     pub frame: Option<[f64; 4]>,
+    /// The window it takes over from was full screen: this one goes full screen too.
+    pub full_screen: bool,
     /// When the click that asked for the window came: what its first picture is timed from.
     pub clicked: Instant,
 }

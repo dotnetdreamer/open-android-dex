@@ -151,6 +151,10 @@ half a second.
 - **Drop files on a window** to put them in your phone's Downloads folder, or
   drop an app's APK to install it. A file is never overwritten: a second
   `report.pdf` arrives as `report (2).pdf`
+- **Full screen when you want it.** The ☰ button next to Back has **Full
+  screen** (F11 on Windows). Move the mouse to the top of the screen and a
+  small bar comes down with Back, the way out of full screen, and close.
+  Press Esc to get your window back
 - **Close the window and the app goes back to your phone,** right where you
   left it. Whatever was on your phone's screen stays there
 - **It is light.** Only the app you are looking at gets sent, and an app that is

@@ -318,7 +318,8 @@ pub mod mac {
     const RETURN: u16 = 0x24;
     const TAB: u16 = 0x30;
     const DELETE: u16 = 0x33;
-    const ESCAPE: u16 = 0x35;
+    /// Also what takes a full-screen window out of full screen (mac/mod.rs).
+    pub const ESCAPE: u16 = 0x35;
     const RIGHT_COMMAND: u16 = 0x36;
     const COMMAND: u16 = 0x37;
     const SHIFT: u16 = 0x38;

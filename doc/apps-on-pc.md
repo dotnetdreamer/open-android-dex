@@ -306,8 +306,9 @@ its own: the window's messages, and the picture (never stopped by Windows'
 modal loops while the window is dragged or resized, which a picture drawn
 from the message loop would be).
 
-The title bar is ours — Back, the app's icon, "App · phone", where the sound
-plays, minimise, maximise, close — and Windows keeps the rest of what it gives a window:
+The title bar is ours — Back, More ("Full screen"), the app's icon, "App ·
+phone", where the sound plays, minimise, maximise, close — and Windows keeps
+the rest of what it gives a window:
 `WM_NCCALCSIZE` keeps the side and bottom resize borders, the maximise button
 answers `HTMAXBUTTON` so Windows 11's Snap layouts open on it, and the shadow,
 rounded corners, system menu and Alt+Tab are the system's. Each app's window
@@ -344,9 +345,9 @@ alignment at the right and the bottom; the layer sits in a clip the size of
 the app's part, which cuts the padding off, letterboxed for the moment a
 resize takes to reach the phone, as on Windows.
 
-The title bar is macOS's own, with Back beside the window's buttons (a title
-bar accessory): an Android app needs one, and a Mac keyboard has no key for
-it. ⌘[ is Back as well, as in Safari and Finder, and so is a mouse's side
+The title bar is macOS's own, with Back and More beside the window's buttons
+(a title bar accessory): an Android app needs a Back, and a Mac keyboard has
+no key for it. ⌘[ is Back as well, as in Safari and Finder, and so is a mouse's side
 button. The app's name is the title and the phone's the subtitle; minimised,
 the window is the app's own icon in the Dock. A Mac pins applications to the
 Dock, not windows, so there is no relaunch command: the windows are this
@@ -368,6 +369,43 @@ against the macOS bindings (`cargo check --target aarch64-apple-darwin`, with
 a stand-in C compiler for the build scripts, since `check` never links) and by
 the unit tests of the parts that are pure functions (the key mapping, the
 H.264 framing). It has not run on a Mac yet ("Verified, and not yet").
+
+## Full screen
+
+More (☰), beside Back in the title bar, is the window's own menu; for now it
+holds one choice, Full screen. Full screen, the app's picture is the whole
+screen and there is no title bar: the phone's display takes the screen's size,
+as it takes any window's, and the app lays itself out for it. When the pointer
+touches the top of the screen a small bar comes down in the middle, as Remote
+Desktop's connection bar does — Back and More, the app's name, where the sound
+plays, leaving full screen, closing (and minimising, on Windows). It goes back up 0.6 s after the
+pointer has left it, and comes down for two seconds as the window goes full
+screen, so the person sees that it is there. While it is up, a small tab with
+an arrow pointing down stays at the top, in the middle, where it comes down;
+the pointer on the tab brings it down too. Esc leaves full screen, and while
+it does, neither it nor its repeats reach the app — Esc is Back to most
+Android apps, which is not what someone leaving full screen means.
+
+**On Windows** the window loses its caption and frame and covers its screen —
+the monitor's rectangle, not the work area: the taskbar steps aside for a
+window that covers a screen — with DWM's rounded corners and its animations
+off. A maximised window is restored first and maximised again after, so
+Windows still knows it as the window it was. The bar is drawn the way the
+title bar is, once per change into a texture of its own that is copied into
+the back buffer after the picture, so it cannot come apart from the picture
+either; it slides by copying more of its rows each tick. F11 goes in and out,
+as in Windows' own apps, and More's menu says so.
+
+**On a Mac** it is macOS's own full screen, in a space of its own, whichever
+way it is asked for: More, the green button, ⌃⌘F. The window asks for the menu
+bar to be hidden rather than to come down when the pointer reaches the top
+(`window:willUseFullScreenPresentationOptions:`), and the title bar macOS
+would bring down with it stays away too; the window's own bar, a visual effect
+view over the picture whose rounded top is above the screen, comes down
+instead.
+
+A window that takes over from a full-screen one ("Cable or Wi‑Fi") goes full
+screen as well, from where the old one was before it went full screen.
 
 ## Input
 
@@ -717,7 +755,14 @@ the software encoder), from the app itself:
   é (the marked text, then the dead key on the phone), 你好 (pasted), ⌘A ⌘C
   putting the field's text on the Mac's clipboard, ⌘V putting the Mac's text
   in the field, ⌘[ as Back, ⌘M to the Dock and back; the Apps page's tile
-  pressed (through Accessibility, its own click handler) opening the app.
+  pressed (through Accessibility, its own click handler) opening the app;
+- full screen (Settings, on a 2560 × 1440 screen): More's Full screen and
+  ⌃⌘F, the app laid out for the screen, no menu bar or title bar coming down;
+  the bar down at the top edge and on its tab, back up 0.6 s after the
+  pointer left, down for its first two seconds; its More ("Exit full
+  screen"), its way out, its Back and its ✕ (the app back on the phone); Esc
+  out of full screen and not reaching the app — and, in a window, still
+  reaching it (`KEYCODE_ESCAPE` on the window's display).
 
 On the same emulator, through a test client speaking the wire: clicks, Back,
 the wheel, typing (é É ü ñ à ê ç ß € 你好 😀 Жук, the clipboard given back and
@@ -746,6 +791,9 @@ The sound menu, the clipboard as it is copied, and drops (2026-10-24):
 
 Not yet:
 
+- **Full screen on Windows**: compiled, and its layout's tests run, but not
+  yet run on a Windows computer. Nowhere yet: a window taking over from a
+  full-screen one (it should go full screen too).
 - **On a Mac**: an input method's composition with candidates (Pinyin, say —
   only a dead key's marked text has run), the Dock icon a minimised window
   shows, and an Intel Mac, run.

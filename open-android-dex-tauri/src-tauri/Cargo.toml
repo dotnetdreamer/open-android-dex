@@ -226,6 +226,14 @@ objc2-app-kit = { version = "0.3", default-features = false, features = [
     "NSMenuItem",
     "NSPasteboard",
     "NSPasteboardItem",
+    # …the title bar's More, and the small bar a full-screen window slides
+    # down from the top of the screen (More's menu is NSMenu's, above).
+    "NSAnimation",
+    "NSAnimationContext",
+    "NSFont",
+    "NSFontDescriptor",
+    "NSParagraphStyle",
+    "NSVisualEffectView",
 ] }
 # The picture of a phone app's window on a Mac (apps/mac/video.rs): a layer
 # macOS decodes H.264 into, and the CoreMedia buffers it takes. The same

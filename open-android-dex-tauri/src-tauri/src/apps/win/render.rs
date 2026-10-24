@@ -18,7 +18,10 @@
 //! into a texture of its own; each frame copies that texture on the GPU. A
 //! note under the bar — where the sound went, how a drop goes — is the same:
 //! drawn once for what it says, copied while it lasts. A frame costs the CPU
-//! no text, no brushes and no Direct2D at all.
+//! no text, no brushes and no Direct2D at all. Full screen, the picture has
+//! the whole window, and the small bar that comes down from the top is put
+//! there the same way, as many of its rows as are down, over the little tab
+//! that shows where it is while it is up; a note goes just under it.
 //!
 //! Everything here lives on the window's render thread.
 
@@ -70,7 +73,7 @@ use windows::Win32::Media::MediaFoundation::*;
 use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_INPROC_SERVER};
 use windows::Win32::System::Threading::WaitForSingleObject;
 
-use super::frame::{self, Bar, Hit};
+use super::frame::{self, Bar, Hit, TopBar};
 
 /// What the bar and the empty window say, from the window's state.
 pub struct Look<'a> {
@@ -85,6 +88,10 @@ pub struct Look<'a> {
     pub message: Option<&'a str>,
     /// Said for a while just under the bar: where the sound went, how a drop goes.
     pub note: Option<&'a str>,
+    /// No title bar: the picture is the whole window.
+    pub full_screen: bool,
+    /// How far down the full-screen bar is, 0 to 1.
+    pub top_bar: f32,
 }
 
 /// One decoded picture, held until the next replaces it — the window is
@@ -116,15 +123,19 @@ pub struct Renderer {
     big: IDWriteTextFormat,
     /// A note's: wrapped, two lines at most, and an ellipsis for the rest.
     note_text: IDWriteTextFormat,
+    /// The full-screen bar's name, in its middle.
+    centred: IDWriteTextFormat,
     /// The text formats above are for `scale` (made once per scale, not per frame).
     formats_ready: bool,
     icon: Option<ID2D1Bitmap1>,
     /// The back buffer and its views, for as long as the swap chain keeps its size.
     target: Option<Target>,
-    /// The bar as last drawn.
+    /// The bar as last drawn, the full-screen bar, and its tab.
     bar: Option<BarCache>,
     /// The note under the bar as last drawn.
     note: Option<NoteCache>,
+    top_bar: Option<BarCache>,
+    handle: Option<BarCache>,
     decoder: Option<Decoder>,
     /// The picture through a pixel shader, if this computer's GPU took it.
     shading: Option<Shading>,
@@ -152,6 +163,14 @@ struct Target {
 }
 
 /// The title bar, drawn once for what it shows.
+/// Which of the bars a cached texture is.
+#[derive(Clone, Copy)]
+enum Cached {
+    Title,
+    Top,
+    Handle,
+}
+
 struct BarCache {
     texture: ID3D11Texture2D,
     d2d: ID2D1Bitmap1,
@@ -175,10 +194,10 @@ struct BarKey {
 }
 
 impl BarKey {
-    fn of(width: u32, bar: &Bar, scale: f32, look: &Look) -> BarKey {
+    fn of(width: u32, height: i32, scale: f32, look: &Look) -> BarKey {
         BarKey {
             width,
-            height: bar.h,
+            height,
             scale: scale.to_bits(),
             label: look.label.to_string(),
             device: look.device.to_string(),
@@ -288,6 +307,7 @@ impl Renderer {
             big.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER)?;
             big.SetWordWrapping(windows::Win32::Graphics::DirectWrite::DWRITE_WORD_WRAPPING_WRAP)?;
             let note_text = note_format(&dwrite, 1.0)?;
+            let centred = text_format(&dwrite, w!("Segoe UI"), DWRITE_FONT_WEIGHT_NORMAL, 12.0)?;
 
             let icon = icon_png.and_then(|png| decode_png(&d2d, png).ok());
             let shading = Shading::new(&device)
@@ -311,11 +331,14 @@ impl Renderer {
                 glyphs,
                 big,
                 note_text,
+                centred,
                 formats_ready: false,
                 icon,
                 target: None,
                 bar: None,
                 note: None,
+                top_bar: None,
+                handle: None,
                 decoder: None,
                 shading,
                 said_path: false,
@@ -341,13 +364,15 @@ impl Renderer {
         unsafe {
             self.text = text_format(&self.dwrite, w!("Segoe UI"), DWRITE_FONT_WEIGHT_NORMAL, 12.0 * scale)?;
             self.subtle = text_format(&self.dwrite, w!("Segoe UI"), DWRITE_FONT_WEIGHT_NORMAL, 12.0 * scale)?;
-            for f in [&self.text, &self.subtle] {
+            self.centred = text_format(&self.dwrite, w!("Segoe UI"), DWRITE_FONT_WEIGHT_NORMAL, 12.0 * scale)?;
+            for f in [&self.text, &self.subtle, &self.centred] {
                 f.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER)?;
                 f.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING)?;
                 f.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP)?;
                 let trim = DWRITE_TRIMMING { granularity: DWRITE_TRIMMING_GRANULARITY_CHARACTER, delimiter: 0, delimiterCount: 0 };
                 f.SetTrimming(&trim, None)?;
             }
+            self.centred.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER)?;
             self.glyphs = text_format(&self.dwrite, &family, DWRITE_FONT_WEIGHT_NORMAL, 10.0 * scale)?;
             self.glyphs.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER)?;
             self.glyphs.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER)?;
@@ -460,13 +485,28 @@ impl Renderer {
 
     /// Draw the window: the picture under the bar, letterboxed to it if their
     /// shapes differ for a moment (a resize the phone has not caught up with),
-    /// and the bar over it all.
+    /// and the bar over it all. Full screen, the picture is the whole window,
+    /// and the full-screen bar is over it as far as it has come down.
     pub fn draw(&mut self, look: &Look) -> Result<()> {
         let (w, h) = self.size;
         let bar = frame::bar(w as i32, self.scale);
-        let area = RECT { left: 0, top: bar.h, right: w as i32, bottom: h as i32 };
+        let top = frame::top_bar(w as i32, self.scale);
+        // The full-screen bar's rows that are down: its lowest, as it slides.
+        let down = if look.full_screen {
+            ((look.top_bar.clamp(0.0, 1.0) * top.rect.bottom as f32).round() as u32).min(h)
+        } else {
+            0
+        };
+        let area = RECT { left: 0, top: if look.full_screen { 0 } else { bar.h }, right: w as i32, bottom: h as i32 };
         self.ensure_target()?;
-        self.ensure_bar(&bar, w, look)?;
+        if !look.full_screen {
+            self.ensure_bar(&bar, w, look)?;
+        } else {
+            self.ensure_handle(&top, look)?;
+            if down > 0 {
+                self.ensure_top_bar(&top, look)?;
+            }
+        }
         match look.note {
             Some(text) => self.ensure_note(&bar, w, text, look.dark)?,
             None => self.note = None,
@@ -475,7 +515,7 @@ impl Renderer {
             log::warn!("apps: showing the picture: {e}");
             false
         });
-        let (Some(target), Some(cache)) = (&self.target, &self.bar) else { return Ok(()) };
+        let Some(target) = &self.target else { return Ok(()) };
         unsafe {
             if !drew_picture {
                 self.d2d.SetTarget(&target.d2d);
@@ -486,12 +526,31 @@ impl Renderer {
                 drew?;
                 done?;
             }
-            let rows = D3D11_BOX { left: 0, top: 0, front: 0, right: cache.size.0.min(w), bottom: cache.size.1.min(h), back: 1 };
-            self.context.CopySubresourceRegion(&target.back, 0, 0, 0, 0, &cache.texture, 0, Some(&rows));
+            if !look.full_screen {
+                if let Some(cache) = &self.bar {
+                    let rows = D3D11_BOX { left: 0, top: 0, front: 0, right: cache.size.0.min(w), bottom: cache.size.1.min(h), back: 1 };
+                    self.context.CopySubresourceRegion(&target.back, 0, 0, 0, 0, &cache.texture, 0, Some(&rows));
+                }
+            } else {
+                // The tab, then as much of the bar as is down, over it.
+                if let Some(cache) = &self.handle {
+                    let rows = D3D11_BOX { left: 0, top: 0, front: 0, right: cache.size.0.min(w), bottom: cache.size.1.min(h), back: 1 };
+                    let x = top.handle.left.max(0) as u32;
+                    self.context.CopySubresourceRegion(&target.back, 0, x, 0, 0, &cache.texture, 0, Some(&rows));
+                }
+                if let (true, Some(cache)) = (down > 0, &self.top_bar) {
+                    let down = down.min(cache.size.1);
+                    let rows = D3D11_BOX { left: 0, top: cache.size.1 - down, front: 0, right: cache.size.0.min(w), bottom: cache.size.1, back: 1 };
+                    let x = top.rect.left.max(0) as u32;
+                    self.context.CopySubresourceRegion(&target.back, 0, x, 0, 0, &cache.texture, 0, Some(&rows));
+                }
+            }
+            // The note: under the title bar — full screen, under where the bar comes down.
             if let Some(note) = &self.note {
-                let below = h.saturating_sub(bar.h as u32);
+                let y = if look.full_screen { top.rect.bottom } else { bar.h }.max(0) as u32;
+                let below = h.saturating_sub(y);
                 let rows = D3D11_BOX { left: 0, top: 0, front: 0, right: note.size.0.min(w), bottom: note.size.1.min(below), back: 1 };
-                self.context.CopySubresourceRegion(&target.back, 0, 0, bar.h as u32, 0, &note.texture, 0, Some(&rows));
+                self.context.CopySubresourceRegion(&target.back, 0, 0, y, 0, &note.texture, 0, Some(&rows));
             }
             // Presented at once: the compositor shows it at its next refresh.
             let presented = self.swap.Present(0, DXGI_PRESENT(0)).ok();
@@ -540,12 +599,47 @@ impl Renderer {
 
     /// The bar's texture, drawn again if anything it shows has changed.
     fn ensure_bar(&mut self, bar: &Bar, width: u32, look: &Look) -> Result<()> {
-        let key = BarKey::of(width, bar, self.scale, look);
-        if self.bar.as_ref().is_some_and(|c| c.key.as_ref() == Some(&key)) {
+        let key = BarKey::of(width, bar.h, self.scale, look);
+        self.ensure_drawn(Cached::Title, (width.max(1), bar.h.max(1) as u32), key, |r| r.draw_bar(bar, width, look))
+    }
+
+    /// The full-screen bar's texture, likewise.
+    fn ensure_top_bar(&mut self, top: &TopBar, look: &Look) -> Result<()> {
+        let size = ((top.rect.right - top.rect.left).max(1) as u32, top.rect.bottom.max(1) as u32);
+        let key = BarKey::of(size.0, top.rect.bottom, self.scale, look);
+        self.ensure_drawn(Cached::Top, size, key, |r| r.draw_top_bar(top, look))
+    }
+
+    /// The full-screen bar's tab's texture, likewise.
+    fn ensure_handle(&mut self, top: &TopBar, look: &Look) -> Result<()> {
+        let r = top.handle;
+        let size = ((r.right - r.left).max(1) as u32, r.bottom.max(1) as u32);
+        let key = BarKey::of(size.0, r.bottom, self.scale, look);
+        self.ensure_drawn(Cached::Handle, size, key, |re| re.draw_handle(size, look))
+    }
+
+    fn cache(&mut self, which: Cached) -> &mut Option<BarCache> {
+        match which {
+            Cached::Title => &mut self.bar,
+            Cached::Top => &mut self.top_bar,
+            Cached::Handle => &mut self.handle,
+        }
+    }
+
+    /// One of the bars' textures — the title bar's, the full-screen bar's or
+    /// its tab's — made again only when its size changes, drawn by `draw` again
+    /// only when what it shows (`key`) does.
+    fn ensure_drawn(
+        &mut self,
+        which: Cached,
+        size: (u32, u32),
+        key: BarKey,
+        draw: impl Fn(&Renderer) -> Result<()>,
+    ) -> Result<()> {
+        if self.cache(which).as_ref().is_some_and(|c| c.key.as_ref() == Some(&key)) {
             return Ok(());
         }
-        let size = (width.max(1), bar.h.max(1) as u32);
-        if self.bar.as_ref().is_none_or(|c| c.size != size) {
+        if self.cache(which).as_ref().is_none_or(|c| c.size != size) {
             let desc = D3D11_TEXTURE2D_DESC {
                 Width: size.0,
                 Height: size.1,
@@ -559,26 +653,26 @@ impl Renderer {
                 MiscFlags: 0,
             };
             // The old one goes first: a window dragged wider makes one per step.
-            self.bar = None;
+            *self.cache(which) = None;
             unsafe {
                 let mut texture = None;
                 self.device.CreateTexture2D(&desc, None, Some(&mut texture))?;
                 let texture = texture.unwrap();
                 let d2d = self.d2d_target(&texture)?;
-                self.bar = Some(BarCache { texture, d2d, size, key: None });
+                *self.cache(which) = Some(BarCache { texture, d2d, size, key: None });
             }
         }
-        let Some(cache) = &self.bar else { return Ok(()) };
+        let Some(target) = self.cache(which).as_ref().map(|c| c.d2d.clone()) else { return Ok(()) };
         unsafe {
-            self.d2d.SetTarget(&cache.d2d);
+            self.d2d.SetTarget(&target);
             self.d2d.BeginDraw();
-            let drew = self.draw_bar(bar, width, look);
+            let drew = draw(self);
             let done = self.d2d.EndDraw(None, None);
             self.d2d.SetTarget(None);
             drew?;
             done?;
         }
-        if let Some(cache) = &mut self.bar {
+        if let Some(cache) = self.cache(which) {
             cache.key = Some(key);
         }
         Ok(())
@@ -857,9 +951,14 @@ impl Renderer {
             let ink = self.brush(if look.active { theme.ink } else { theme.ink_inactive })?;
             let dim = self.brush(theme.ink_dim)?;
             // the buttons' backgrounds, under their glyphs
-            for (hit, r) in
-                [(Hit::Back, bar.back), (Hit::Sound, bar.sound), (Hit::Min, bar.min), (Hit::Max, bar.max), (Hit::Close, bar.close)]
-            {
+            for (hit, r) in [
+                (Hit::Back, bar.back),
+                (Hit::More, bar.more),
+                (Hit::Sound, bar.sound),
+                (Hit::Min, bar.min),
+                (Hit::Max, bar.max),
+                (Hit::Close, bar.close),
+            ] {
                 let on = look.hover == hit || look.pressed == hit;
                 if !on {
                     continue;
@@ -880,6 +979,7 @@ impl Renderer {
                 Ok(())
             };
             glyph(Hit::Back, 0xE72B, bar.back)?;
+            glyph(Hit::More, 0xE700, bar.more)?;
             glyph(Hit::Sound, 0xE767, bar.sound)?;
             glyph(Hit::Min, 0xE921, bar.min)?;
             glyph(Hit::Max, if look.maximized { 0xE923 } else { 0xE922 }, bar.max)?;
@@ -892,6 +992,10 @@ impl Renderer {
             // "<app>" and, dimmer, "<phone>": a person with two phones on the cable can tell them apart.
             let name: Vec<u16> = look.label.encode_utf16().collect();
             let right = bar.sound.left - (8.0 * s) as i32;
+            if right <= bar.text_x {
+                // A window at its narrowest has room for its buttons only.
+                return Ok(());
+            }
             let label_rect = rectf(bar.text_x, 0, right, bar.h);
             let layout = self.dwrite.CreateTextLayout(&name, &self.text, (right - bar.text_x).max(0) as f32, bar.h as f32)?;
             let mut metrics = Default::default();
@@ -904,6 +1008,73 @@ impl Renderer {
                     self.d2d.DrawText(&dev, &self.subtle, &rectf(x, 0, right, bar.h), &dim,
                         D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL);
                 }
+            }
+        }
+        Ok(())
+    }
+
+    /// The full-screen bar: Back and More, the app's name in the middle, then
+    /// where the sound plays, minimise, leave full screen and close; with an
+    /// edge along its three
+    /// open sides, so it stands apart from a picture of its own colour.
+    fn draw_top_bar(&self, top: &TopBar, look: &Look) -> Result<()> {
+        let theme = Theme::of(look.dark);
+        let (w, h) = (top.rect.right - top.rect.left, top.rect.bottom);
+        unsafe {
+            self.d2d.FillRectangle(&rectf(0, 0, w, h), &self.brush(theme.bar)?);
+            let ink = self.brush(theme.ink)?;
+            let white = self.brush(0xFFFFFF)?;
+            let buttons: [(Hit, u16, RECT); 6] = [
+                (Hit::Back, 0xE72B, top.back),
+                (Hit::More, 0xE700, top.more),
+                (Hit::Sound, 0xE767, top.sound),
+                (Hit::Min, 0xE921, top.min),
+                (Hit::Windowed, 0xE73F, top.windowed),
+                (Hit::Close, 0xE8BB, top.close),
+            ];
+            for (hit, glyph, r) in buttons {
+                let pressed = look.pressed == hit;
+                let on = pressed || look.hover == hit;
+                if on {
+                    let colour = match (hit, pressed) {
+                        (Hit::Close, true) => 0xF1707A,
+                        (Hit::Close, false) => 0xC42B1C,
+                        (_, true) => theme.pressed,
+                        _ => theme.hover,
+                    };
+                    self.d2d.FillRectangle(&rectf(r.left, r.top, r.right, r.bottom), &self.brush(colour)?);
+                }
+                let b = if hit == Hit::Close && on { &white } else { &ink };
+                self.d2d.DrawText(&[glyph], &self.glyphs, &rectf(r.left, r.top, r.right, r.bottom), b,
+                    D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+            }
+            if top.label.right > top.label.left {
+                let name: Vec<u16> = look.label.encode_utf16().collect();
+                self.d2d.DrawText(&name, &self.centred, &rectf(top.label.left, 0, top.label.right, h), &ink,
+                    D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL);
+            }
+            let edge = self.brush(theme.edge)?;
+            let px = self.scale.round().max(1.0) as i32;
+            for r in [rectf(0, 0, px, h), rectf(w - px, 0, w, h), rectf(0, h - px, w, h)] {
+                self.d2d.FillRectangle(&r, &edge);
+            }
+        }
+        Ok(())
+    }
+
+    /// The full-screen bar's tab: an arrow pointing down, with the bar's edge.
+    fn draw_handle(&self, (w, h): (u32, u32), look: &Look) -> Result<()> {
+        let theme = Theme::of(look.dark);
+        let (w, h) = (w as i32, h as i32);
+        unsafe {
+            self.d2d.FillRectangle(&rectf(0, 0, w, h), &self.brush(theme.bar)?);
+            // ChevronDown, in the bars' own glyphs.
+            self.d2d.DrawText(&[0xE70D], &self.glyphs, &rectf(0, 0, w, h), &self.brush(theme.ink)?,
+                D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+            let edge = self.brush(theme.edge)?;
+            let px = self.scale.round().max(1.0) as i32;
+            for r in [rectf(0, 0, px, h), rectf(w - px, 0, w, h), rectf(0, h - px, w, h)] {
+                self.d2d.FillRectangle(&r, &edge);
             }
         }
         Ok(())
@@ -947,6 +1118,8 @@ impl Renderer {
 /// The window's colours, Windows 11's own caption's: dark or light as the system is.
 struct Theme {
     bar: u32,
+    /// The full-screen bar's edge.
+    edge: u32,
     empty: u32,
     ink: u32,
     ink_inactive: u32,
@@ -960,9 +1133,9 @@ struct Theme {
 impl Theme {
     fn of(dark: bool) -> Theme {
         if dark {
-            Theme { bar: 0x202020, empty: 0x161616, ink: 0xFFFFFF, ink_inactive: 0x9A9A9A, ink_dim: 0x9A9A9A, hover: 0x2D2D2D, pressed: 0x292929, note: 0x2B2B2B }
+            Theme { bar: 0x202020, edge: 0x404040, empty: 0x161616, ink: 0xFFFFFF, ink_inactive: 0x9A9A9A, ink_dim: 0x9A9A9A, hover: 0x2D2D2D, pressed: 0x292929, note: 0x2B2B2B }
         } else {
-            Theme { bar: 0xF3F3F3, empty: 0xFAFAFA, ink: 0x1A1A1A, ink_inactive: 0x8A8A8A, ink_dim: 0x707070, hover: 0xE5E5E5, pressed: 0xCCCCCC, note: 0xE8E8E8 }
+            Theme { bar: 0xF3F3F3, edge: 0xC8C8C8, empty: 0xFAFAFA, ink: 0x1A1A1A, ink_inactive: 0x8A8A8A, ink_dim: 0x707070, hover: 0xE5E5E5, pressed: 0xCCCCCC, note: 0xE8E8E8 }
         }
     }
 }

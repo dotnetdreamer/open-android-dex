@@ -422,14 +422,15 @@ fn open(
     open_new(app, &way, pkg, device, None, clicked, since)
 }
 
-/// `pkg` in a new window, over `way`; at `frame` when it takes over from one.
+/// `pkg` in a new window, over `way`; where `from` is, and as it is (full
+/// screen or not), when it takes over from that window.
 #[cfg(any(windows, target_os = "macos"))]
 fn open_new(
     app: &tauri::AppHandle,
     way: &Way,
     pkg: &str,
     device: String,
-    frame: Option<[f64; 4]>,
+    from: Option<&Arc<native::Window>>,
     clicked: Instant,
     since: &'static str,
 ) -> Result<(), String> {
@@ -497,7 +498,8 @@ fn open_new(
         size: None,
         direct: on_cable(serial),
         via: via(serial),
-        frame,
+        frame: from.and_then(|w| w.frame()),
+        full_screen: from.is_some_and(|w| w.full_screen()),
         clicked,
     };
     open_window(app, serial, phone, pkg, &row.label, spec, since, opening)
@@ -531,7 +533,7 @@ fn take_over(
         via(&way.serial),
         via(&old.serial)
     );
-    let opened = open_new(app, way, &old.pkg, device.to_string(), old.frame(), clicked, since);
+    let opened = open_new(app, way, &old.pkg, device.to_string(), Some(old), clicked, since);
     match &opened {
         Ok(()) if failed => old.close(),
         Ok(()) => {}
@@ -955,6 +957,7 @@ pub fn probe(serial: &str, socket: &str, pkg: &str, label: &str, icon_png: Optio
         direct: on_cable(serial),
         via: via(serial),
         frame: None,
+        full_screen: false,
         clicked: Instant::now(),
     };
     let _window = win::open(spec, host)?;
@@ -1100,6 +1103,7 @@ fn open_linux_window(app: &tauri::AppHandle, serial: &str, xid: i32, title: &str
         direct: on_cable(serial),
         via: via(serial),
         frame: None,
+        full_screen: false,
         clicked: mapped,
     };
     if let Err(e) = open_window(app, serial, &phone, &app_pkg, &label, spec, "Linux mapped it", Opening::new(serial)) {
