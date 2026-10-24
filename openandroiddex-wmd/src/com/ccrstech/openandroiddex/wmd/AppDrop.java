@@ -54,6 +54,34 @@ final class AppDrop {
         this.put = put;
     }
 
+    /**
+     * The server is stopping: the connection goes, and with it the file's
+     * ".part", deleted as any drop cut short deletes it.
+     */
+    void stop() {
+        try {
+            sock.shutdownInput();
+        } catch (IOException ignored) {
+        }
+        try {
+            sock.close();
+        } catch (IOException ignored) {
+        }
+    }
+
+    /**
+     * APKs a server stopped mid-install left waiting for the installer: an
+     * install still runs when its server must end, and nothing after that
+     * runs to tidy it. Ours alone, by their name.
+     */
+    static void sweep() {
+        File[] left = new File(STAGING).listFiles((dir, name) -> name.startsWith("oadx-drop-") && name.endsWith(".apk"));
+        if (left == null) return;
+        for (File f : left) {
+            if (f.delete()) AppServer.log("swept " + f.getName() + ", left by a server stopped mid-install");
+        }
+    }
+
     /** Take the file, say how it went, and close. On the connection's own thread. */
     void run() {
         JSONObject result;

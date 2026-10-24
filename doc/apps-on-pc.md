@@ -644,7 +644,10 @@ show. Each file is a connection of its own to the app server (`put`,
 `AppDrop.java`), through adb as a window's is, so nothing listens on this
 computer; its bytes are streamed as they are read here, written to a `.part`
 renamed once the last is there, and the `.part` goes on any failure — a drop
-cut short leaves nothing behind. The phone says how much has landed as it
+cut short leaves nothing behind. Quitting mid-drop is one of those: the
+server stops each drop as it stops its windows, and waits for its `.part` to
+go. An install it was still waiting on when it had to end leaves its APK in
+`/data/local/tmp`, swept by the next server as it starts. The phone says how much has landed as it
 lands, and that is the progress the window shows under its title bar (a Mac:
 its subtitle): "Sending 2 of 4 to your phone… 34%", then "4 files are in
 Downloads on your phone" for a few seconds. One drop at a time, from every

@@ -95,6 +95,8 @@ public final class AppServer {
     private final List<AppWindow> windows = new CopyOnWriteArrayList<>();
     /** Every window from its first message until it has ended, app handed back: what stopping waits for. */
     private final List<AppWindow> running = new CopyOnWriteArrayList<>();
+    /** Files on their way from the computer: stopping ends them too, and waits for their ".part" to go. */
+    private final List<AppDrop> drops = new CopyOnWriteArrayList<>();
     private final AtomicInteger serials = new AtomicInteger();
     private volatile Wire control;
     /** A window has been asked for: what is left of the warm-up is its to pay. */
@@ -164,6 +166,7 @@ public final class AppServer {
             });
         }
         audio = AppAudio.open(this::audioChanged);
+        AppDrop.sweep();
         server = new LocalServerSocket(socketName);
         Thread accept = new Thread(this::acceptLoop, "apps-accept");
         accept.setDaemon(true);
@@ -431,10 +434,17 @@ public final class AppServer {
                 }
                 break;
             }
-            case "put":
+            case "put": {
                 Thread.currentThread().setName("apps-put");
-                new AppDrop(s, wire, hello).run();
+                AppDrop d = new AppDrop(s, wire, hello);
+                drops.add(d);
+                try {
+                    d.run();
+                } finally {
+                    drops.remove(d);
+                }
                 break;
+            }
             default:
                 closeQuietly(s);
         }
@@ -739,11 +749,16 @@ public final class AppServer {
         }
         List<AppWindow> open = new ArrayList<>(running);
         for (AppWindow w : open) w.closeAll(null);
+        // A file still arriving is cut short as a dropped link cuts it: its
+        // ".part" deleted on its own thread, which ending first would not let run.
+        for (AppDrop d : drops) d.stop();
         // Each window's own thread lets its display go as its socket closes and
         // hands its app back behind the phone's screen: ending first would leave
         // the apps where Android puts a dead display's tasks — on top.
         long until = SystemClock.uptimeMillis() + 3000;
-        while (!running.isEmpty() && SystemClock.uptimeMillis() < until) SystemClock.sleep(20);
+        while ((!running.isEmpty() || !drops.isEmpty()) && SystemClock.uptimeMillis() < until) {
+            SystemClock.sleep(20);
+        }
         System.out.flush();
         System.exit(0);
     }
