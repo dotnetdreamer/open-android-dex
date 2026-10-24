@@ -93,6 +93,8 @@ public final class AppServer {
     /** The phone's sound outputs, for the windows' menus; null where the shell may not ask. */
     private final AppAudio audio;
     private final List<AppWindow> windows = new CopyOnWriteArrayList<>();
+    /** Every window from its first message until it has ended, app handed back: what stopping waits for. */
+    private final List<AppWindow> running = new CopyOnWriteArrayList<>();
     private final AtomicInteger serials = new AtomicInteger();
     private volatile Wire control;
     /** A window has been asked for: what is left of the warm-up is its to pay. */
@@ -216,6 +218,11 @@ public final class AppServer {
     /** This computer's text, for the phone's next paste. */
     void setClipboard(String text) {
         if (clipboard != null) clipboard.set(text);
+    }
+
+    /** The phone's clipboard, which the windows' typing borrows; null where the shell has none. */
+    AppClipboard clipboard() {
+        return clipboard;
     }
 
     /** An output came or went: the computer's menus list what is there. */
@@ -415,7 +422,13 @@ public final class AppServer {
                 windowAsked = true;
                 int serial = serials.incrementAndGet();
                 Thread.currentThread().setName("app-window-" + serial);
-                new AppWindow(this, s, wire, hello, serial).run();
+                AppWindow w = new AppWindow(this, s, wire, hello, serial);
+                running.add(w);
+                try {
+                    w.run();
+                } finally {
+                    running.remove(w);
+                }
                 break;
             }
             case "put":
@@ -724,10 +737,13 @@ public final class AppServer {
             server.close();
         } catch (IOException ignored) {
         }
-        List<AppWindow> open = new ArrayList<>(windows);
+        List<AppWindow> open = new ArrayList<>(running);
         for (AppWindow w : open) w.closeAll(null);
-        // Each window's own thread lets its display go as its socket closes; give them the moment.
-        SystemClock.sleep(300);
+        // Each window's own thread lets its display go as its socket closes and
+        // hands its app back behind the phone's screen: ending first would leave
+        // the apps where Android puts a dead display's tasks — on top.
+        long until = SystemClock.uptimeMillis() + 3000;
+        while (!running.isEmpty() && SystemClock.uptimeMillis() < until) SystemClock.sleep(20);
         System.out.flush();
         System.exit(0);
     }

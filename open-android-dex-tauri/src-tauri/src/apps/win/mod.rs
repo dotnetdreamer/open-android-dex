@@ -42,7 +42,8 @@ use windows::core::{w, PCSTR, PCWSTR, PWSTR};
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_USE_IMMERSIVE_DARK_MODE};
 use windows::Win32::Graphics::Gdi::{
-    ClientToScreen, GetMonitorInfoW, MonitorFromPoint, ScreenToClient, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+    ClientToScreen, GetMonitorInfoW, MonitorFromPoint, MonitorFromRect, ScreenToClient, MONITORINFO,
+    MONITOR_DEFAULTTONEAREST,
 };
 use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED, COINIT_MULTITHREADED};
 use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress, LoadLibraryW};
@@ -105,6 +106,20 @@ impl Window {
     /// A new title: a Linux window's, as its app changes it.
     pub fn set_title(&self, title: &str) {
         self.shared.retitle(title);
+    }
+
+    /// Where it is on the screen, in pixels: what a window taking over from it
+    /// opens at. None while it is minimised, its rectangle then off-screen.
+    pub fn frame(&self) -> Option<[f64; 4]> {
+        let hwnd = self.shared.hwnd();
+        let mut r = RECT::default();
+        unsafe {
+            if IsIconic(hwnd).as_bool() {
+                return None;
+            }
+            GetWindowRect(hwnd, &mut r).ok()?;
+        }
+        Some([r.left as f64, r.top as f64, (r.right - r.left) as f64, (r.bottom - r.top) as f64])
     }
 }
 
@@ -358,6 +373,32 @@ fn geometry(cascade: u32, size: Option<(u32, u32)>) -> Geometry {
     }
 }
 
+/// A window where another was (`Window::frame`, the one it takes over from):
+/// the same rectangle, at the scale of the screen it is on.
+fn geometry_at(frame: [f64; 4]) -> Geometry {
+    unsafe {
+        let r = RECT {
+            left: frame[0] as i32,
+            top: frame[1] as i32,
+            right: (frame[0] + frame[2]) as i32,
+            bottom: (frame[1] + frame[3]) as i32,
+        };
+        let monitor = MonitorFromRect(&r, MONITOR_DEFAULTTONEAREST);
+        let (mut dx, mut dy) = (96u32, 96u32);
+        let _ = GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut dx, &mut dy);
+        let dpi = dx.max(96);
+        // The borders Windows adds around a client, as geometry() reckons them —
+        // here taken off the whole window rather than added to a client.
+        let mut b = RECT { left: 0, top: 0, right: 100, bottom: 100 };
+        let _ = AdjustWindowRectExForDpi(&mut b, WS_OVERLAPPEDWINDOW, false, WS_EX_APPWINDOW, dpi);
+        let side = -b.left;
+        let bottom = b.bottom - 100;
+        let (w, h) = (r.right - r.left, r.bottom - r.top);
+        let client = (((w - 2 * side).max(160) as u32) & !1, ((h - bottom).max(160) as u32) & !1);
+        Geometry { x: r.left, y: r.top, w, h, scale: dpi as f32 / 96.0, client }
+    }
+}
+
 fn dark_mode() -> bool {
     unsafe {
         let mut value = 1u32;
@@ -423,7 +464,10 @@ fn ui_thread(spec: Spec, host: Arc<dyn Host>, opened: Sender<Result<Arc<Window>,
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
     }
     register_class();
-    let geo = geometry(spec.cascade, spec.size);
+    let geo = match spec.frame {
+        Some(frame) => geometry_at(frame),
+        None => geometry(spec.cascade, spec.size),
+    };
     let (link, out_rx) = Link::new(spec.clicked, host);
     let shared = Arc::new(Shared {
         link,
@@ -436,7 +480,8 @@ fn ui_thread(spec: Spec, host: Arc<dyn Host>, opened: Sender<Result<Arc<Window>,
         maximized: AtomicBool::new(false),
         dark: AtomicBool::new(dark_mode()),
         label: Mutex::new(spec.label.clone()),
-        device: spec.device.clone(),
+        // The phone, and how this window reaches it: "Galaxy S25 · USB".
+        device: if spec.device.is_empty() { spec.via.to_string() } else { format!("{} · {}", spec.device, spec.via) },
         message: Mutex::new(Some(format!("Opening on {}…", if spec.device.is_empty() { "your phone" } else { &spec.device }))),
         render: Mutex::new(None),
         linux: spec.linux.is_some(),

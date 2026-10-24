@@ -95,6 +95,15 @@ impl Window {
     pub fn set_title(&self, title: &str) {
         self.shared.named(title);
     }
+
+    /// Where it is (AppKit's frame, in points): what a window taking over from it opens at.
+    pub fn frame(&self) -> Option<[f64; 4]> {
+        let id = self.id;
+        dispatch2::run_on_main(move |_| {
+            OPEN.with(|o| o.borrow().get(&id).map(|p| p.window.frame()))
+                .map(|f| [f.origin.x, f.origin.y, f.size.width, f.size.height])
+        })
+    }
 }
 
 /// The scale of the screen the pointer is on — the one a click just opened something from.
@@ -122,8 +131,8 @@ struct Shared {
     /// When the window last changed size: the phone is asked once it holds still.
     resized_at: Mutex<Instant>,
     stats: Mutex<Stats>,
-    /// The phone's name: the window's subtitle, when no note has its place.
-    device: String,
+    /// The window's subtitle — the phone, and how the window reaches it — when no note has its place.
+    subtitle: String,
     /// Counts the notes, so a note's fading never takes the next one with it.
     note_seq: Arc<AtomicU64>,
 }
@@ -225,8 +234,8 @@ impl Surface for Shared {
     /// and the subtitle is the place it gives a window for a line like this.
     fn note(&self, text: Option<String>, busy: bool) {
         let seq = self.note_seq.fetch_add(1, Ordering::SeqCst) + 1;
-        let (id, device) = (self.id, self.device.clone());
-        let shown = text.unwrap_or_else(|| device.clone());
+        let (id, subtitle) = (self.id, self.subtitle.clone());
+        let shown = text.unwrap_or_else(|| subtitle.clone());
         with_window(id, move |w, _| w.setSubtitle(&NSString::from_str(&shown)));
         if busy {
             return;
@@ -235,7 +244,7 @@ impl Surface for Shared {
         if let Ok(when) = DispatchTime::try_from(Duration::from_millis(NOTE_MS)) {
             let _ = DispatchQueue::main().after(when, move || {
                 if latest.load(Ordering::SeqCst) == seq {
-                    with_window(id, move |w, _| w.setSubtitle(&NSString::from_str(&device)));
+                    with_window(id, move |w, _| w.setSubtitle(&NSString::from_str(&subtitle)));
                 }
             });
         }
@@ -286,14 +295,26 @@ fn screen_under_pointer(mtm: MainThreadMarker) -> Option<Retained<NSScreen>> {
     NSScreen::screens(mtm).iter().find(|s| inside(s.frame())).or_else(|| NSScreen::mainScreen(mtm))
 }
 
+/// The phone, and how this window reaches it: "Galaxy S25 · USB". The
+/// window's subtitle, which a note borrows and gives back.
+fn subtitle(device: &str, via: &str) -> String {
+    if device.is_empty() {
+        via.to_string()
+    } else {
+        format!("{device} · {via}")
+    }
+}
+
 /// What the main thread needs to make the window.
 struct Look {
     id: u64,
     label: String,
     device: String,
+    via: &'static str,
     icon_png: Option<Vec<u8>>,
     cascade: u32,
     size: Option<(u32, u32)>,
+    frame: Option<[f64; 4]>,
 }
 
 /// Open a window for `spec`; it runs until it is closed. The window shows at
@@ -312,16 +333,18 @@ pub fn open(spec: Spec, host: Arc<dyn Host>) -> Result<Arc<Window>, String> {
         asked_close: Mutex::new(None),
         resized_at: Mutex::new(Instant::now()),
         stats: Mutex::new(Stats { since: Instant::now(), frames: 0, ages: Vec::new() }),
-        device: spec.device.clone(),
+        subtitle: subtitle(&spec.device, spec.via),
         note_seq: Arc::new(AtomicU64::new(0)),
     });
     let look = Look {
         id: spec.id,
         label: spec.label.clone(),
         device: spec.device.clone(),
+        via: spec.via,
         icon_png: spec.icon_png.clone(),
         cascade: spec.cascade,
         size: spec.size,
+        frame: spec.frame,
     };
     let (tx, rx) = mpsc::channel::<()>();
     {
@@ -388,9 +411,7 @@ fn make(mtm: MainThreadMarker, look: &Look, shared: &Arc<Shared>) {
     // Held in OPEN, and let go of there: AppKit must not release it as well.
     unsafe { window.setReleasedWhenClosed(false) };
     window.setTitle(&NSString::from_str(&look.label));
-    if !look.device.is_empty() {
-        window.setSubtitle(&NSString::from_str(&look.device));
-    }
+    window.setSubtitle(&NSString::from_str(&subtitle(&look.device, look.via)));
     // Each app its own window, never a tab of another's.
     window.setTabbingMode(NSWindowTabbingMode::Disallowed);
     // Minimised, it is the app's own icon in the Dock.
@@ -407,6 +428,10 @@ fn make(mtm: MainThreadMarker, look: &Look, shared: &Arc<Shared>) {
     let x = visible.origin.x + (visible.size.width - frame.size.width) / 2.0 + step;
     let y = visible.origin.y + (visible.size.height - frame.size.height) / 2.0 - step / 2.0;
     window.setFrameOrigin(NSPoint::new(x, y.max(visible.origin.y)));
+    // Taking over from a window (the app moved to the cable, or back): where it was, as big.
+    if let Some([x, y, w, h]) = look.frame {
+        window.setFrame_display(NSRect::new(NSPoint::new(x, y), NSSize::new(w, h)), false);
+    }
 
     // The content: the app's view, and a line over it until its picture comes.
     let container = NSView::initWithFrame(NSView::alloc(mtm), content);
@@ -414,7 +439,8 @@ fn make(mtm: MainThreadMarker, look: &Look, shared: &Arc<Shared>) {
     let view = AppView::new(mtm, content, shared.clone());
     view.setAutoresizingMask(NSAutoresizingMaskOptions::ViewWidthSizable | NSAutoresizingMaskOptions::ViewHeightSizable);
     container.addSubview(&view);
-    let message = NSTextField::labelWithString(
+    // Wrapping: "Your phone stopped answering…" is wider than a phone-shaped window.
+    let message = NSTextField::wrappingLabelWithString(
         &NSString::from_str(&format!(
             "Opening on {}…",
             if look.device.is_empty() { "your phone" } else { &look.device }
@@ -988,6 +1014,12 @@ impl AppView {
                 None => m.setHidden(true),
             }
         }
+        // A picture that stopped is dimmed under what is said about it: the
+        // line is unreadable over a light app's last frame otherwise.
+        CATransaction::begin();
+        CATransaction::setDisableActions(true);
+        self.ivars().picture.setOpacity(if text.is_some() { 0.15 } else { 1.0 });
+        CATransaction::commit();
     }
 
     /// ⌘ with a key comes here before it is a key down, and the menus'

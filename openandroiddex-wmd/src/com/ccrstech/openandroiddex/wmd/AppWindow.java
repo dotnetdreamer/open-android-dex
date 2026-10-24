@@ -187,7 +187,7 @@ final class AppWindow implements LinuxStreamEncoder.Output, AppVideo.Gate {
         boolean[] trusted = new boolean[1];
         display = server.createDisplay(width, height, dpi, video.sink(), trusted);
         displayId = display.getDisplay().getDisplayId();
-        input = new AppInput(displayId);
+        input = new AppInput(displayId, server.clipboard());
         server.hideIme(displayId);
         long t1 = SystemClock.uptimeMillis();
         // The app first: it takes far longer to draw than the encoder takes to make.
@@ -274,6 +274,10 @@ final class AppWindow implements LinuxStreamEncoder.Output, AppVideo.Gate {
         }
         release();
         if (ours.isEmpty()) return;
+        // The tasks move when WindowManager gets to the display's removal, after
+        // release() has returned: sent back before they land, they land on top
+        // anyway (one close in twelve on the Android 16 emulator).
+        waitUntilOnPhone(ourIds, 2000);
         try {
             Object wct = Wm.newTransaction();
             for (Object token : ours) Wm.reorder(wct, token, false);
@@ -289,6 +293,21 @@ final class AppWindow implements LinuxStreamEncoder.Output, AppVideo.Gate {
             }
         } catch (Throwable t) {
             AppServer.log("window " + serial + ": could not put the phone's screen back (" + t + ")");
+        }
+    }
+
+    /** Until one of {@code ids} is on the phone's own screen, or {@code ms} have passed. */
+    private static void waitUntilOnPhone(java.util.Set<Integer> ids, long ms) {
+        long until = SystemClock.uptimeMillis() + ms;
+        while (SystemClock.uptimeMillis() < until) {
+            try {
+                for (Wm.TaskRec t : Wm.tasksOnDisplay(0)) {
+                    if (ids.contains(t.taskId)) return;
+                }
+            } catch (Throwable t) {
+                return;
+            }
+            SystemClock.sleep(15);
         }
     }
 
