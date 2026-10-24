@@ -96,8 +96,16 @@ daemon's dex pushed to `/data/local/tmp/oadx-apps.dex` by rename, so a running
 server keeps the copy it started with. It is held by the `adb shell` that
 started it and ends when that shell's stdin closes: the app quitting, the
 cable pulled, adbd restarting. Every app on its displays then goes back to the
-phone. On an A13 it is ready 740–780 ms after its process starts (it logs
-how long), and the push and rename before that take about 110 ms.
+phone, behind what it shows. The shell ignores SIGHUP before it becomes the
+server (`trap '' HUP`): adbd hangs up a dropped link's processes, and the
+signal ended the server on the spot, its apps landing on top of the phone's
+screen; ignoring it, the server sees its stdin close, as when the app quits.
+That cannot help where adbd itself restarts on a Samsung phone — init then
+kills everything in adbd's cgroup — so there the apps still land on top, and
+the keeper (below, "Cable or Wi‑Fi") puts them back in their windows if the
+phone is back within 30 s; not yet tried on a Samsung phone. Stopping waits for
+the windows to hand their apps back (up to three seconds), not a fixed 300 ms. On an A13 it is ready 740–780 ms after its process starts
+(it logs how long), and the push and rename before that take about 110 ms.
 
 **Warm-up.** Everything the first window would otherwise pay for is paid while
 nobody waits: the GPU driver (`eglInitialize`), the codec list, one encoder
@@ -141,7 +149,11 @@ A virtual display per window, owned by the shell:
 - Never `DESTROY_CONTENT_ON_REMOVAL`: when the window closes, Android moves
   the app's task to the phone's screen, behind what is there, as Recents keeps
   it. Then the task that was on top of the phone before is put back on top
-  (`handBack`), so closing a window never changes what the phone shows.
+  (`handBack`), so closing a window never changes what the phone shows. The
+  task moves when WindowManager gets to the display's removal, after
+  `release()` has returned, so the server waits for it to land before sending
+  it back: sent back sooner, it landed on top in one close of twelve on the
+  Android 16 emulator, and when the app was killed; in none of 27 since.
 
 **The launch** is in this process, `IActivityTaskManager.startActivity` with
 the display and fullscreen windowing in the ActivityOptions: 39–62 ms. An app
@@ -195,6 +207,38 @@ a wake-up on both ends for nothing.
 Together these took the server's own share of a 10 fps window on an A13 from
 6.8 % of a core to 3.6 %, against scrcpy's server at 3.3–3.45 % for the same
 app at the same size. Everything a window involves is in the table above.
+
+## Cable or Wi‑Fi
+
+A phone attached both ways — wireless debugging on, and the cable in — is one
+phone here: the device list matches the two by `ro.serialno`. Its windows go
+over the cable, which is faster and draws straight into the encoder (above),
+and each window's title bar says which way it went: "Galaxy S25 · USB" or
+"· Wi‑Fi", in the subtitle on a Mac, after the phone's name in the bar on
+Windows.
+
+While an app window is open, a keeper looks every two seconds:
+
+- A window on Wi‑Fi moves onto the cable once the cable has been in for 10 s.
+  A Samsung phone restarts adbd about 5 s after it is plugged in (its MTP
+  switch), ending everything adb started; sooner would move onto a link about
+  to drop.
+- A window whose phone stopped answering, after it had shown its app, opens
+  again — the fastest way there is — if the phone is back within 30 s: an adbd
+  restart, a cable pulled with Wi‑Fi still there. Later, the phone may be in
+  its owner's hand, and its app stays theirs until they open it here again.
+
+Either way the new window opens where the old one was, as big; the old one
+closes once its app has moved to the new window's display, or at once if it
+had stopped answering. Opening an app whose window is on Wi‑Fi while the cable
+is in, or whose phone stopped answering, does the same. A window that loses its
+phone says so itself; the page only reports a window that never showed its app.
+
+On the Android 16 emulator, `emulator-5554` as the cable and `adb connect
+127.0.0.1:5555` as Wi‑Fi, a window asked for over Wi‑Fi opened over the cable;
+`adb -s emulator-5554 reconnect` brought it back over Wi‑Fi 1.4 s after the
+drop, its picture 0.74 s later, and onto the cable 10.5 s after the cable
+returned, its picture 1.5 s later — in the same place each time.
 
 ## The wire
 
@@ -325,12 +369,19 @@ the window's display id, so nothing lands on the phone's own screen. The side
 buttons are Back and Forward. The wheel goes in notches.
 
 A character the computer's layout typed goes as that character, so é on a
-French keyboard is é on the phone whatever layout the phone thinks it has;
-characters it has no key for go as one string, which text fields take whole. A
-key that does something — Enter, the arrows, Backspace — and any key held with
-Ctrl or the Windows key goes as Android's key code with its modifiers, a
-letter by the letter the layout types (Ctrl+A on AZERTY is select all). The
-computer's key repeat is the phone's.
+French keyboard is é on the phone whatever layout the phone thinks it has: as
+the keys that type it on the virtual keyboard, an accented letter as its
+accent's dead key and then the letter (grave, acute, circumflex, tilde,
+diaeresis: é is the acute's key, then E). What no key types — another script,
+an emoji, € — is pasted, a run at a time: the phone's clipboard holds it for the
+paste and is given back what it held a second later, neither change goes up
+here, and the person's own paste gives it back at once. Android takes a string
+as one key event (ACTION_MULTIPLE) from an input method only; from the shell it
+refuses it ("invalid action code 2"), which is how the first version lost every
+such character. A key that does something — Enter, the arrows, Backspace — and
+any key held with Ctrl or the Windows key goes as Android's key code with its
+modifiers, a letter by the letter the layout types (Ctrl+A on AZERTY is select
+all). The computer's key repeat is the phone's.
 
 The clipboard follows the person: what they copied here goes to the phone when
 a window comes to the front and again before a paste, and what the phone
@@ -500,15 +551,41 @@ On the Android 15 emulator: the trusted display's flags (`OWN_FOCUS`
 included), `linux.apps` in-process, and the shell starting
 `LinuxWindowActivity` on a window's display.
 
-On a Mac: nothing has run. It compiles against the macOS bindings for Apple
-silicon, and its pure parts pass their tests.
+On a Mac (Apple silicon, macOS 26.6) with the Android 16 emulator (arm64,
+the software encoder), from the app itself:
+
+- it builds and runs, its tests pass, and it compiles for Intel Macs
+  (`x86_64-apple-darwin`);
+- opening from the command line (`--phone-app`): 2.0–2.6 s after the run
+  started, 0.3–0.7 s into the running app; a second window beside the first;
+  an app finishing closes its window; reopening an app handed back earlier;
+  over the cable and paced, over the emulator's second, network transport;
+- the picture, captured: sharp and filling the window; a resize through the
+  window's frame (the phone's display follows, the app lays itself out again);
+  the title bar's Back; ✕ handing the app back, the phone's screen as it was;
+- the phone's H.264 through the same CoreMedia calls into VideoToolbox, by a
+  separate tool: 390 frames across a resize, none failed;
+- the phone's copies reaching the Mac's clipboard; a dropped link (`adb
+  reconnect device`): the window dims its last picture under a line saying
+  so, the apps go back behind, and opening the app again replaces the window,
+  its sound with it;
+- real input, through the HID tap and AppKit's own text input: a click (the
+  whole press/release sequence on the window's display), a right click as
+  the secondary button, the wheel and the trackpad, typing `abc`, ⌥E then E as
+  é (the marked text, then the dead key on the phone), 你好 (pasted), ⌘A ⌘C
+  putting the field's text on the Mac's clipboard, ⌘V putting the Mac's text
+  in the field, ⌘[ as Back, ⌘M to the Dock and back; the Apps page's tile
+  pressed (through Accessibility, its own click handler) opening the app.
+
+On the same emulator, through a test client speaking the wire: clicks, Back,
+the wheel, typing (é É ü ñ à ê ç ß € 你好 😀 Жук, the clipboard given back and
+nothing sent up), Ctrl+V of the computer's text, resize, the paced stream.
 
 Not yet:
 
-- **The Mac window, run on a Mac**: opening, the picture (the display layer
-  with the phone's stream, a resize's new stream, the crop), input methods,
-  ⌘ shortcuts, the title bar's Back, closing. And a check for Intel Macs
-  (`x86_64-apple-darwin`).
+- **On a Mac**: an input method's composition with candidates (Pinyin, say —
+  only a dead key's marked text has run), the Dock icon a minimised window
+  shows, and an Intel Mac, run.
 - A Linux app end to end on a real phone: the test phones are 32-bit, and the
   emulators cannot install the guest (proot's `apt` fails with ENOSYS on
   x86_64). That includes the refusal while the phone's desktop has the session.

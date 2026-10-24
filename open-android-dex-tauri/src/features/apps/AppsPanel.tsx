@@ -54,6 +54,11 @@ interface PhoneApp {
 interface OpenWindow {
   id: number;
   serial: string;
+  /**
+   * The phone's ro.serialno. A window goes over the cable whenever the phone is
+   * on one, so its serial need not be the one this page lists with.
+   */
+  phone: string;
   pkg: string;
   label: string;
 }
@@ -180,7 +185,11 @@ export function AppsPanel({
     return load.apps.filter((a) => a.label.toLowerCase().includes(q) || a.pkg.toLowerCase().includes(q));
   }, [load, query]);
 
-  const openPkgs = useMemo(() => new Set(open.filter((w) => w.serial === serial).map((w) => w.pkg)), [open, serial]);
+  const phone = device?.hardwareSerial ?? serial;
+  const openPkgs = useMemo(
+    () => new Set(open.filter((w) => w.phone === phone || w.serial === serial).map((w) => w.pkg)),
+    [open, phone, serial],
+  );
 
   if (!device) {
     return (

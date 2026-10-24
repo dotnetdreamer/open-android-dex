@@ -70,6 +70,8 @@ pub struct PhoneApp {
 pub struct OpenWindow {
     pub id: u64,
     pub serial: String,
+    /// The phone's `ro.serialno`: the page's phone may be the same one another way.
+    pub phone: String,
     pub pkg: String,
     pub label: String,
 }
@@ -177,19 +179,107 @@ pub fn on_cable(serial: &str) -> bool {
     !serial.contains(':') && !serial.contains("._adb-tls-connect.")
 }
 
+// ── which way to the phone ──
+
+/// How long the cable must have stayed in before windows move onto it: a
+/// Samsung phone restarts adbd about 5 s after it is plugged in (its MTP
+/// switch), ending everything adb started.
+#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
+const CABLE_SETTLE: Duration = Duration::from_secs(10);
+
+/// How long after its phone stopped answering a window still opens again by
+/// itself — an adbd restart, a cable pulled with Wi-Fi still there. Later, the
+/// phone may be in its owner's hand, and the app is theirs until they open it.
+#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
+const RECONNECT_FOR: Duration = Duration::from_secs(30);
+
+/// What a window's title bar says about how it reaches its phone.
+#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
+fn via(serial: &str) -> &'static str {
+    if on_cable(serial) {
+        "USB"
+    } else {
+        "Wi\u{2011}Fi"
+    }
+}
+
+/// One phone, whichever way it is attached: its `ro.serialno`.
+fn phone_id(d: &crate::adb::DeviceInfo) -> String {
+    d.hardware_serial.clone().unwrap_or_else(|| d.serial.clone())
+}
+
+/// The phone `serial` is a way to. One the list does not have — a pinned
+/// button's, its phone not attached that way now — is read from its name: a
+/// cable's serial is the phone's own, and an mDNS name carries it
+/// ("adb-<serial>-<suffix>._adb-tls-connect._tcp").
+fn phone_of(devices: &[crate::adb::DeviceInfo], serial: &str) -> String {
+    if let Some(d) = devices.iter().find(|d| d.serial == serial) {
+        return phone_id(d);
+    }
+    serial
+        .strip_prefix("adb-")
+        .and_then(|rest| rest.split("._adb-tls-connect.").next())
+        .and_then(|name| name.rsplit_once('-').map(|(serial, _)| serial.to_string()))
+        .unwrap_or_else(|| serial.to_string())
+}
+
+/// The way to open `phone`'s windows over: the cable once it has settled —
+/// faster, and drawn straight into the encoder — else Wi-Fi, else a cable not
+/// settled yet. None when the phone is not there at all.
+fn best_serial(devices: &[crate::adb::DeviceInfo], phone: &str) -> Option<String> {
+    best_serial_by(devices, phone, |serial| crate::adb::attached_for(serial).is_some_and(|t| t >= CABLE_SETTLE))
+}
+
+/// [`best_serial`], `settled` saying whether a cable has been in long enough.
+fn best_serial_by(devices: &[crate::adb::DeviceInfo], phone: &str, settled: impl Fn(&str) -> bool) -> Option<String> {
+    let ready: Vec<&crate::adb::DeviceInfo> =
+        devices.iter().filter(|d| d.state == "device" && phone_id(d) == phone).collect();
+    ready
+        .iter()
+        .find(|d| on_cable(&d.serial) && settled(&d.serial))
+        .or_else(|| ready.iter().find(|d| !on_cable(&d.serial)))
+        .or_else(|| ready.first())
+        .map(|d| d.serial.clone())
+}
+
+/// Which way to reach the phone `serial` names, now.
+struct Way {
+    serial: String,
+    phone: String,
+    /// What the phone is called, for a title bar whose caller did not say.
+    name: String,
+}
+
+fn way_to(app: &tauri::AppHandle, serial: &str) -> Way {
+    let devices = crate::adb::recent_devices(app, Duration::from_secs(3));
+    let phone = phone_of(&devices, serial);
+    let serial = best_serial(&devices, &phone).unwrap_or_else(|| serial.to_string());
+    let name = devices
+        .iter()
+        .find(|d| d.serial == serial)
+        .and_then(|d| d.name.clone().or_else(|| (!d.model.is_empty()).then(|| d.model.clone())))
+        .unwrap_or_default();
+    Way { serial, phone, name }
+}
+
 /// The phone's app server, started now if it is not running — what the Apps
 /// page asks for as soon as it is looked at, so the first click finds it up.
+/// Over the cable when the phone is on one, as its windows will be.
 #[tauri::command(async)]
 pub fn apps_prepare(app: tauri::AppHandle, serial: String) -> Result<host::Hello, String> {
-    Ok(host::ensure(&app, &serial)?.hello.clone())
+    let way = way_to(&app, &serial);
+    Ok(host::ensure(&app, &way.serial)?.hello.clone())
 }
 
 /// The phone's apps, in its own launcher's names, A to Z. Icons this
-/// computer already has come with them; the rest follow as `apps:icon`.
+/// computer already has come with them; the rest follow as `apps:icon`, for
+/// the `serial` the page asked with.
 #[tauri::command(async)]
 pub fn apps_list(app: tauri::AppHandle, serial: String) -> Result<Vec<PhoneApp>, String> {
-    let server = host::ensure(&app, &serial)?;
-    wait_for_opening(&serial, Duration::from_secs(4));
+    let way = way_to(&app, &serial);
+    let server = host::ensure(&app, &way.serial)?;
+    wait_for_opening(&way.serial, Duration::from_secs(4));
+    let phone = way.phone;
     let list = server.apps()?;
     let mut out = Vec::new();
     let mut table = HashMap::new();
@@ -205,7 +295,7 @@ pub fn apps_list(app: tauri::AppHandle, serial: String) -> Result<Vec<PhoneApp>,
             updated: a["updated"].as_u64().unwrap_or(0),
             class: String::new(),
         };
-        let icon = icons::cached(&app, &serial, &pkg, row.updated);
+        let icon = icons::cached(&app, &phone, &pkg, row.updated);
         if icon.is_none() {
             missing.push(pkg.clone());
         }
@@ -235,7 +325,7 @@ pub fn apps_list(app: tauri::AppHandle, serial: String) -> Result<Vec<PhoneApp>,
                     updated: LINUX_ICON_VERSION,
                     class: a["cls"].as_str().unwrap_or("").to_string(),
                 };
-                let icon = icons::cached(&app, &serial, &pkg, LINUX_ICON_VERSION);
+                let icon = icons::cached(&app, &phone, &pkg, LINUX_ICON_VERSION);
                 if icon.is_none() {
                     missing_linux.push(id.clone());
                 }
@@ -253,7 +343,7 @@ pub fn apps_list(app: tauri::AppHandle, serial: String) -> Result<Vec<PhoneApp>,
         Err(e) => log::info!("apps [{serial}] no Linux apps: {e}"),
     }
     out.sort_by_key(|a| a.label.to_lowercase());
-    rows().lock().unwrap().insert(serial.clone(), table.clone());
+    rows().lock().unwrap().insert(phone.clone(), table.clone());
     if !missing.is_empty() || !missing_linux.is_empty() {
         let (app, serial) = (app.clone(), serial.clone());
         std::thread::spawn(move || {
@@ -261,7 +351,7 @@ pub fn apps_list(app: tauri::AppHandle, serial: String) -> Result<Vec<PhoneApp>,
             let n = missing.len() + missing_linux.len();
             let mut got = |pkg: String, png: Vec<u8>| {
                 let updated = table.get(&pkg).map(|r| r.updated).unwrap_or(0);
-                icons::store(&app, &serial, &pkg, updated, &png);
+                icons::store(&app, &phone, &pkg, updated, &png);
                 let _ = app.emit(
                     "apps:icon",
                     serde_json::json!({"serial": serial, "pkg": pkg, "icon": icons::data_url(&png)}),
@@ -298,16 +388,48 @@ fn open(
     if let Some(id) = pkg.strip_prefix("linux:") {
         return open_linux(app, serial, id);
     }
-    if let Some(w) = windows().lock().unwrap().values().find(|w| w.serial == serial && w.pkg == pkg) {
-        w.focus();
-        return Ok(());
+    let way = way_to(app, serial);
+    let device = if device.is_empty() { way.name.clone() } else { device };
+    // The app's window on this phone, whichever way it was opened.
+    let phones: HashMap<u64, String> = kept().lock().unwrap().iter().map(|(id, k)| (*id, k.phone.clone())).collect();
+    let existing = windows()
+        .lock()
+        .unwrap()
+        .values()
+        .find(|w| w.pkg == pkg && w.linux.is_none() && phones.get(&w.id) == Some(&way.phone))
+        .cloned();
+    if let Some(w) = existing {
+        let healthy = kept().lock().unwrap().get(&w.id).is_some_and(|k| k.failed.is_none());
+        if healthy && w.serial == way.serial {
+            w.focus();
+            return Ok(());
+        }
+        // Its phone stopped answering, or it is on Wi-Fi with the cable in now:
+        // a window the way there is now, where that one is.
+        return take_over(app, &w, &way, &device, clicked, since);
     }
+    open_new(app, &way, pkg, device, None, clicked, since)
+}
+
+/// `pkg` in a new window, over `way`; at `frame` when it takes over from one.
+#[cfg(any(windows, target_os = "macos"))]
+fn open_new(
+    app: &tauri::AppHandle,
+    way: &Way,
+    pkg: &str,
+    device: String,
+    frame: Option<[f64; 4]>,
+    clicked: Instant,
+    since: &'static str,
+) -> Result<(), String> {
+    let serial = way.serial.as_str();
+    let phone = way.phone.as_str();
     let opening = Opening::new(serial);
     let server = host::ensure_for_window(app, serial)?;
-    let known = rows().lock().unwrap().get(serial).and_then(|t| t.get(pkg).cloned());
+    let known = rows().lock().unwrap().get(phone).and_then(|t| t.get(pkg).cloned());
     let (row, mut icon) = match known {
         Some(r) => {
-            let icon = icons::cached(app, serial, pkg, r.updated);
+            let icon = icons::cached(app, phone, pkg, r.updated);
             (r, icon)
         }
         // Opened before the page listed anything (a pinned taskbar button, at
@@ -321,7 +443,7 @@ fn open(
                     log::info!("apps [{serial2}] listing after an app opened at start: {e}");
                 }
             });
-            let (updated, icon) = match icons::newest(app, serial, pkg) {
+            let (updated, icon) = match icons::newest(app, phone, pkg) {
                 Some((updated, png)) => (updated, Some(png)),
                 None => (0, None),
             };
@@ -331,7 +453,7 @@ fn open(
     if icon.is_none() {
         let _ = server.icons(&[pkg.to_string()], icons::PX, |_, png| icon = Some(png));
         if let Some(png) = &icon {
-            icons::store(app, serial, pkg, row.updated, png);
+            icons::store(app, phone, pkg, row.updated, png);
         }
     }
     #[cfg(windows)]
@@ -340,7 +462,7 @@ fn open(
             .ok()
             .map(|exe| format!("\"{}\" --phone-app \"{serial}\" \"{pkg}\"", exe.display())),
         icon.as_ref()
-            .and_then(|png| icons::ico_file(app, serial, pkg, row.updated, png))
+            .and_then(|png| icons::ico_file(app, phone, pkg, row.updated, png))
             .map(|p| format!("{},0", p.display())),
     );
     // A Mac pins an app, not a window: there is no relaunch to give.
@@ -363,17 +485,125 @@ fn open(
         linux: None,
         size: None,
         direct: on_cable(serial),
+        via: via(serial),
+        frame,
         clicked,
     };
-    open_window(app, serial, pkg, &row.label, spec, since, opening)
+    open_window(app, serial, phone, pkg, &row.label, spec, since, opening)
+}
+
+/// Open `old`'s app again over `way`, where `old` is. A live `old` closes by
+/// itself once its app has moved onto the new window's display; one that had
+/// failed is closed here.
+#[cfg(any(windows, target_os = "macos"))]
+fn take_over(
+    app: &tauri::AppHandle,
+    old: &Arc<native::Window>,
+    way: &Way,
+    device: &str,
+    clicked: Instant,
+    since: &'static str,
+) -> Result<(), String> {
+    let failed = {
+        let mut kept = kept().lock().unwrap();
+        let Some(k) = kept.get_mut(&old.id) else { return Ok(()) };
+        if k.replaced {
+            return Ok(());
+        }
+        k.replaced = true;
+        k.failed.is_some()
+    };
+    log::info!(
+        "apps [{}] {}: opening again over {}, after {since} (was over {})",
+        way.serial,
+        old.pkg,
+        via(&way.serial),
+        via(&old.serial)
+    );
+    let opened = open_new(app, way, &old.pkg, device.to_string(), old.frame(), clicked, since);
+    match &opened {
+        Ok(()) if failed => old.close(),
+        Ok(()) => {}
+        Err(_) => {
+            if let Some(k) = kept().lock().unwrap().get_mut(&old.id) {
+                k.replaced = false;
+            }
+        }
+    }
+    opened
+}
+
+/// What the keeper (`keep`) knows of each window.
+#[derive(Clone)]
+#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
+struct Kept {
+    /// The phone it shows, whichever way that is attached.
+    phone: String,
+    /// What its title bar calls the phone.
+    device: String,
+    /// It has shown its app.
+    live: bool,
+    /// When its phone stopped answering, or its app could not be shown.
+    failed: Option<Instant>,
+    /// A window is opening to take over from it.
+    replaced: bool,
+}
+
+#[cfg(any(windows, target_os = "macos"))]
+fn kept() -> &'static Mutex<HashMap<u64, Kept>> {
+    static K: OnceLock<Mutex<HashMap<u64, Kept>>> = OnceLock::new();
+    K.get_or_init(Default::default)
+}
+
+/// Every two seconds while an Android app's window is open: one on Wi-Fi
+/// moves onto the cable once the cable has settled, and one whose phone
+/// stopped answering opens again — the fastest way there is — if the phone is
+/// back within RECONNECT_FOR. Each takes the old window's place.
+#[cfg(any(windows, target_os = "macos"))]
+fn keep(app: tauri::AppHandle) {
+    loop {
+        std::thread::sleep(Duration::from_secs(2));
+        let open: Vec<(Arc<native::Window>, Kept)> = {
+            let kept = kept().lock().unwrap().clone();
+            windows()
+                .lock()
+                .unwrap()
+                .values()
+                .filter(|w| w.linux.is_none())
+                .filter_map(|w| kept.get(&w.id).map(|k| (w.clone(), k.clone())))
+                .collect()
+        };
+        if open.is_empty() {
+            continue;
+        }
+        // A fresh look: it is also what says how long the cable has been in.
+        let Ok(devices) = crate::adb::adb_list_devices(app.clone()) else { continue };
+        for (w, k) in open {
+            if k.replaced {
+                continue;
+            }
+            let Some(best) = best_serial(&devices, &k.phone) else { continue };
+            let since = match k.failed {
+                Some(at) if k.live && at.elapsed() < RECONNECT_FOR => "its phone came back",
+                None if on_cable(&best) && !on_cable(&w.serial) => "the cable went in",
+                _ => continue,
+            };
+            let way = Way { serial: best, phone: k.phone.clone(), name: k.device.clone() };
+            if let Err(e) = take_over(&app, &w, &way, &k.device, Instant::now(), since) {
+                log::warn!("apps [{}] {}: could not open again over {}: {e}", way.serial, w.pkg, via(&way.serial));
+            }
+        }
+    }
 }
 
 /// A window for `spec`, kept in the list until it closes, with the app's sound following it here
 /// once it shows.
 #[cfg(any(windows, target_os = "macos"))]
+#[allow(clippy::too_many_arguments)]
 fn open_window(
     app: &tauri::AppHandle,
     serial: &str,
+    phone: &str,
     pkg: &str,
     label: &str,
     spec: link::Spec,
@@ -381,15 +611,21 @@ fn open_window(
     mut opening: Opening,
 ) -> Result<(), String> {
     let id = spec.id;
+    let device = spec.device.clone();
     let events = {
         let (app, serial, pkg, label) = (app.clone(), serial.to_string(), pkg.to_string(), label.to_string());
         let settled = std::sync::atomic::AtomicBool::new(false);
+        let live = std::sync::atomic::AtomicBool::new(false);
         Box::new(move |e: link::Event| {
             if !settled.swap(true, Ordering::SeqCst) {
                 opening_changed(&serial, false);
             }
             match e {
                 link::Event::Live(after) => {
+                    live.store(true, Ordering::SeqCst);
+                    if let Some(k) = kept().lock().unwrap().get_mut(&id) {
+                        k.live = true;
+                    }
                     log::info!("apps [{serial}] {pkg}: on screen {}ms after {since}", after.as_millis());
                     let _ = app.emit("apps:live", serde_json::json!({"serial": serial, "pkg": pkg, "ms": after.as_millis() as u64}));
                     // The app's sound comes here with it, as the desktop's does —
@@ -399,12 +635,21 @@ fn open_window(
                 }
                 link::Event::Failed(message) => {
                     log::warn!("apps [{serial}] {pkg}: {message}");
-                    let _ = app.emit(
-                        "apps:problem",
-                        serde_json::json!({"serial": serial, "pkg": pkg, "label": label, "message": message}),
-                    );
+                    if let Some(k) = kept().lock().unwrap().get_mut(&id) {
+                        k.failed = Some(Instant::now());
+                    }
+                    // A window that was showing its app says so itself, and the
+                    // keeper opens it again if the phone is back: the page only
+                    // hears of one that never got its app.
+                    if !live.load(Ordering::SeqCst) {
+                        let _ = app.emit(
+                            "apps:problem",
+                            serde_json::json!({"serial": serial, "pkg": pkg, "label": label, "message": message}),
+                        );
+                    }
                 }
                 link::Event::Closed => {
+                    kept().lock().unwrap().remove(&id);
                     let last = {
                         let mut all = windows().lock().unwrap();
                         all.remove(&id);
@@ -431,11 +676,26 @@ fn open_window(
             Some(text)
         }) as Box<dyn Fn() -> Option<String> + Send + Sync>
     };
-    let window = native::open(spec, events, clip)?;
+    kept().lock().unwrap().insert(
+        id,
+        Kept { phone: phone.to_string(), device, live: false, failed: None, replaced: false },
+    );
+    let window = match native::open(spec, events, clip) {
+        Ok(w) => w,
+        Err(e) => {
+            kept().lock().unwrap().remove(&id);
+            return Err(e);
+        }
+    };
     // The window says when it is no longer opening: its first event.
     opening.armed = false;
     windows().lock().unwrap().insert(id, window);
     emit_windows(app);
+    static KEEPER: std::sync::Once = std::sync::Once::new();
+    let app = app.clone();
+    KEEPER.call_once(move || {
+        let _ = std::thread::Builder::new().name("apps-keeper".into()).spawn(move || keep(app));
+    });
     Ok(())
 }
 
@@ -455,10 +715,11 @@ fn open(
     if pkg.starts_with("linux:") {
         return Err("Linux apps open in windows of their own on Windows and Mac. Here, open Linux's desktop from the Linux tab.".into());
     }
-    let row = rows().lock().unwrap().get(serial).and_then(|t| t.get(pkg).cloned());
+    let way = way_to(app, serial);
+    let row = rows().lock().unwrap().get(&way.phone).and_then(|t| t.get(pkg).cloned());
     let label = row.map(|r| r.label).unwrap_or_else(|| pkg.to_string());
     let options: crate::scrcpy::MirrorOptions = serde_json::from_value(serde_json::json!({
-        "serial": serial,
+        "serial": way.serial,
         "appPackage": pkg,
         "newDisplay": "412x915/160",
         "vdNoDecorations": true,
@@ -472,11 +733,18 @@ fn open(
 
 #[cfg(any(windows, target_os = "macos"))]
 fn open_windows() -> Vec<OpenWindow> {
+    let phones: HashMap<u64, String> = kept().lock().unwrap().iter().map(|(id, k)| (*id, k.phone.clone())).collect();
     windows()
         .lock()
         .unwrap()
         .values()
-        .map(|w| OpenWindow { id: w.id, serial: w.serial.clone(), pkg: w.pkg.clone(), label: w.label.clone() })
+        .map(|w| OpenWindow {
+            id: w.id,
+            serial: w.serial.clone(),
+            phone: phones.get(&w.id).cloned().unwrap_or_else(|| w.serial.clone()),
+            pkg: w.pkg.clone(),
+            label: w.label.clone(),
+        })
         .collect()
 }
 
@@ -603,6 +871,8 @@ pub fn probe(serial: &str, socket: &str, pkg: &str, label: &str, icon_png: Optio
         linux: None,
         size: None,
         direct: on_cable(serial),
+        via: via(serial),
+        frame: None,
         clicked: Instant::now(),
     };
     let events = Box::new(move |e: link::Event| match e {
@@ -624,6 +894,9 @@ pub fn probe(serial: &str, socket: &str, pkg: &str, label: &str, icon_png: Optio
 /// have, which is what its X screen starts at.
 #[cfg(any(windows, target_os = "macos"))]
 fn open_linux(app: &tauri::AppHandle, serial: &str, id: &str) -> Result<(), String> {
+    // Its windows come from the server that runs it: over the cable when there is one.
+    let serial = way_to(app, serial).serial;
+    let serial = serial.as_str();
     let server = host::ensure(app, serial)?;
     let scale = native::screen_scale();
     let (w, h) = ((1024.0 * scale) as u32, (720.0 * scale) as u32);
@@ -669,10 +942,17 @@ fn open_linux_window(app: &tauri::AppHandle, serial: &str, xid: i32, title: &str
         return;
     }
     let Some(server) = host::running(serial) else { return };
+    let devices = crate::adb::recent_devices(app, Duration::from_secs(3));
+    let phone = phone_of(&devices, serial);
+    let device = devices
+        .iter()
+        .find(|d| d.serial == serial)
+        .and_then(|d| d.name.clone().or_else(|| (!d.model.is_empty()).then(|| d.model.clone())))
+        .unwrap_or_default();
     // Its app, by window class: the icon on the window and its taskbar button.
     let class = v["cls"].as_str().unwrap_or("").to_lowercase();
     let instance = v["instance"].as_str().unwrap_or("").to_lowercase();
-    let found = rows().lock().unwrap().get(serial).and_then(|t| {
+    let found = rows().lock().unwrap().get(&phone).and_then(|t| {
         t.iter()
             .filter(|(pkg, _)| pkg.starts_with("linux:"))
             .find(|(pkg, r)| {
@@ -686,7 +966,7 @@ fn open_linux_window(app: &tauri::AppHandle, serial: &str, xid: i32, title: &str
         Some((pkg, r)) => (pkg.clone(), r.label.clone()),
         None => (format!("linux:{}", if instance.is_empty() { "app" } else { &instance }), "Linux".to_string()),
     };
-    let icon = icons::cached(app, serial, &app_pkg, LINUX_ICON_VERSION);
+    let icon = icons::cached(app, &phone, &app_pkg, LINUX_ICON_VERSION);
     let label = if title.is_empty() { app_label.clone() } else { title.to_string() };
     let w = v["w"].as_u64().unwrap_or(0) as u32;
     let h = v["h"].as_u64().unwrap_or(0) as u32;
@@ -699,7 +979,7 @@ fn open_linux_window(app: &tauri::AppHandle, serial: &str, xid: i32, title: &str
         pkg: app_pkg.clone(),
         activity: None,
         label: label.clone(),
-        device: String::new(),
+        device,
         icon_png: icon,
         relaunch: None,
         relaunch_icon: None,
@@ -707,9 +987,70 @@ fn open_linux_window(app: &tauri::AppHandle, serial: &str, xid: i32, title: &str
         linux: Some(xid),
         size: (w > 0 && h > 0).then_some((w, h)),
         direct: on_cable(serial),
+        via: via(serial),
+        frame: None,
         clicked: mapped,
     };
-    if let Err(e) = open_window(app, serial, &app_pkg, &label, spec, "Linux mapped it", Opening::new(serial)) {
+    if let Err(e) = open_window(app, serial, &phone, &app_pkg, &label, spec, "Linux mapped it", Opening::new(serial)) {
         log::warn!("apps [{serial}] Linux window 0x{xid:x}: {e}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::adb::DeviceInfo;
+
+    fn device(serial: &str, state: &str, hardware: &str) -> DeviceInfo {
+        DeviceInfo {
+            serial: serial.into(),
+            state: state.into(),
+            model: "SM-S938B".into(),
+            product: String::new(),
+            connection: if on_cable(serial) { "usb" } else { "wifi" }.into(),
+            brand: None,
+            android_version: None,
+            hardware_serial: Some(hardware.into()),
+            name: None,
+        }
+    }
+
+    #[test]
+    fn a_phone_is_known_whichever_way_it_is_attached() {
+        let list = [device("192.168.1.20:5555", "device", "R5CT30ABC")];
+        assert_eq!(phone_of(&list, "192.168.1.20:5555"), "R5CT30ABC");
+        // Not in the list: a cable's serial is the phone's own, an mDNS name carries it.
+        assert_eq!(phone_of(&list, "R5CT30ABC"), "R5CT30ABC");
+        assert_eq!(phone_of(&[], "adb-R5CT30ABC-vWgJpq._adb-tls-connect._tcp"), "R5CT30ABC");
+        assert_eq!(phone_of(&[], "adb-R5CT30ABC-vWgJpq (2)._adb-tls-connect._tcp"), "R5CT30ABC");
+        assert_eq!(phone_of(&[], "10.0.0.7:41233"), "10.0.0.7:41233");
+    }
+
+    #[test]
+    fn the_cable_is_taken_once_it_has_settled() {
+        let both = [
+            device("192.168.1.20:5555", "device", "R5CT30ABC"),
+            device("R5CT30ABC", "device", "R5CT30ABC"),
+            // Another phone, on the cable: not this one's way.
+            device("ZY22OTHER", "device", "ZY22OTHER"),
+        ];
+        assert_eq!(best_serial_by(&both, "R5CT30ABC", |_| true).as_deref(), Some("R5CT30ABC"));
+        // Just plugged in: Wi-Fi until the cable has stayed in.
+        assert_eq!(best_serial_by(&both, "R5CT30ABC", |_| false).as_deref(), Some("192.168.1.20:5555"));
+        // A cable that has not settled is still better than nothing.
+        let cable = [device("R5CT30ABC", "device", "R5CT30ABC")];
+        assert_eq!(best_serial_by(&cable, "R5CT30ABC", |_| false).as_deref(), Some("R5CT30ABC"));
+        // Not ready (unauthorized, offline), or not there: no way.
+        let asking = [device("R5CT30ABC", "unauthorized", "R5CT30ABC")];
+        assert_eq!(best_serial_by(&asking, "R5CT30ABC", |_| true), None);
+        assert_eq!(best_serial_by(&both, "NOTHERE", |_| true), None);
+    }
+
+    #[test]
+    fn the_title_bar_says_how() {
+        assert_eq!(via("R5CT30ABC"), "USB");
+        assert_eq!(via("emulator-5554"), "USB");
+        assert_eq!(via("192.168.1.20:5555"), "Wi\u{2011}Fi");
+        assert_eq!(via("adb-R5CT30ABC-vWgJpq._adb-tls-connect._tcp"), "Wi\u{2011}Fi");
     }
 }

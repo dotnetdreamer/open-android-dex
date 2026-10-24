@@ -48,6 +48,11 @@ pub struct Spec {
     pub size: Option<(u32, u32)>,
     /// The phone is on a cable: its display can draw straight into the encoder, unpaced.
     pub direct: bool,
+    /// How the window reaches its phone, said in its title bar: "USB" or "Wi‑Fi".
+    pub via: &'static str,
+    /// Where to open: the frame of the window this one takes over from, in the
+    /// platform's own screen coordinates (`Window::frame`). None places it as new.
+    pub frame: Option<[f64; 4]>,
     /// When the click that asked for the window came: what its first picture is timed from.
     pub clicked: Instant,
 }
@@ -444,7 +449,8 @@ fn read_loop(
         }
     }
     if !link.closing() {
-        surface.say(Some("Your phone stopped answering. Close this window and open the app again.".into()));
+        // Opening the app again replaces this window (apps::open): no need to close it first.
+        surface.say(Some("Your phone stopped answering. Open the app again to bring it back.".into()));
         link.event(Event::Failed("the phone stopped answering".into()));
     }
 }

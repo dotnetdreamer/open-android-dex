@@ -86,6 +86,15 @@ impl Window {
     pub fn set_title(&self, title: &str) {
         self.shared.named(title);
     }
+
+    /// Where it is (AppKit's frame, in points): what a window taking over from it opens at.
+    pub fn frame(&self) -> Option<[f64; 4]> {
+        let id = self.id;
+        dispatch2::run_on_main(move |_| {
+            OPEN.with(|o| o.borrow().get(&id).map(|p| p.window.frame()))
+                .map(|f| [f.origin.x, f.origin.y, f.size.width, f.size.height])
+        })
+    }
 }
 
 /// The scale of the screen the pointer is on — the one a click just opened something from.
@@ -258,9 +267,11 @@ struct Look {
     id: u64,
     label: String,
     device: String,
+    via: &'static str,
     icon_png: Option<Vec<u8>>,
     cascade: u32,
     size: Option<(u32, u32)>,
+    frame: Option<[f64; 4]>,
 }
 
 /// Open a window for `spec`; it runs until it is closed. The window shows at
@@ -288,9 +299,11 @@ pub fn open(
         id: spec.id,
         label: spec.label.clone(),
         device: spec.device.clone(),
+        via: spec.via,
         icon_png: spec.icon_png.clone(),
         cascade: spec.cascade,
         size: spec.size,
+        frame: spec.frame,
     };
     let (tx, rx) = mpsc::channel::<()>();
     {
@@ -357,9 +370,9 @@ fn make(mtm: MainThreadMarker, look: &Look, shared: &Arc<Shared>) {
     // Held in OPEN, and let go of there: AppKit must not release it as well.
     unsafe { window.setReleasedWhenClosed(false) };
     window.setTitle(&NSString::from_str(&look.label));
-    if !look.device.is_empty() {
-        window.setSubtitle(&NSString::from_str(&look.device));
-    }
+    // The phone, and how this window reaches it: "Galaxy S25 · USB".
+    let subtitle = if look.device.is_empty() { look.via.to_string() } else { format!("{} · {}", look.device, look.via) };
+    window.setSubtitle(&NSString::from_str(&subtitle));
     // Each app its own window, never a tab of another's.
     window.setTabbingMode(NSWindowTabbingMode::Disallowed);
     // Minimised, it is the app's own icon in the Dock.
@@ -376,6 +389,10 @@ fn make(mtm: MainThreadMarker, look: &Look, shared: &Arc<Shared>) {
     let x = visible.origin.x + (visible.size.width - frame.size.width) / 2.0 + step;
     let y = visible.origin.y + (visible.size.height - frame.size.height) / 2.0 - step / 2.0;
     window.setFrameOrigin(NSPoint::new(x, y.max(visible.origin.y)));
+    // Taking over from a window (the app moved to the cable, or back): where it was, as big.
+    if let Some([x, y, w, h]) = look.frame {
+        window.setFrame_display(NSRect::new(NSPoint::new(x, y), NSSize::new(w, h)), false);
+    }
 
     // The content: the app's view, and a line over it until its picture comes.
     let container = NSView::initWithFrame(NSView::alloc(mtm), content);
@@ -383,7 +400,8 @@ fn make(mtm: MainThreadMarker, look: &Look, shared: &Arc<Shared>) {
     let view = AppView::new(mtm, content, shared.clone());
     view.setAutoresizingMask(NSAutoresizingMaskOptions::ViewWidthSizable | NSAutoresizingMaskOptions::ViewHeightSizable);
     container.addSubview(&view);
-    let message = NSTextField::labelWithString(
+    // Wrapping: "Your phone stopped answering…" is wider than a phone-shaped window.
+    let message = NSTextField::wrappingLabelWithString(
         &NSString::from_str(&format!(
             "Opening on {}…",
             if look.device.is_empty() { "your phone" } else { &look.device }
@@ -845,6 +863,12 @@ impl AppView {
                 None => m.setHidden(true),
             }
         }
+        // A picture that stopped is dimmed under what is said about it: the
+        // line is unreadable over a light app's last frame otherwise.
+        CATransaction::begin();
+        CATransaction::setDisableActions(true);
+        self.ivars().picture.setOpacity(if text.is_some() { 0.15 } else { 1.0 });
+        CATransaction::commit();
     }
 
     /// ⌘ with a key comes here before it is a key down, and the menus'

@@ -640,7 +640,48 @@ pub fn adb_list_devices(app: tauri::AppHandle) -> Result<Vec<DeviceInfo>, String
         log::info!("devices: {summary}");
         *last = Some(summary);
     }
+    note_attached(&devices);
+    *LAST_LIST.lock().unwrap() = Some((Instant::now(), devices.clone()));
     Ok(devices)
+}
+
+/// The last list, and when it was made: what a window opening reads, rather
+/// than wait on `adb devices` again (the UI asks every 2.5 s).
+static LAST_LIST: std::sync::Mutex<Option<(Instant, Vec<DeviceInfo>)>> = std::sync::Mutex::new(None);
+
+/// The device list, at most `fresh` old.
+pub fn recent_devices(app: &tauri::AppHandle, fresh: Duration) -> Vec<DeviceInfo> {
+    if let Some((at, list)) = LAST_LIST.lock().unwrap().as_ref() {
+        if at.elapsed() <= fresh {
+            return list.clone();
+        }
+    }
+    adb_list_devices(app.clone()).unwrap_or_default()
+}
+
+/// Since when each serial has been ready ("device") without a break: how long
+/// a cable has been in. One already there when this app first looked counts as
+/// in for long — nothing says otherwise.
+fn attached_since() -> &'static std::sync::Mutex<HashMap<String, Instant>> {
+    static SINCE: std::sync::OnceLock<std::sync::Mutex<HashMap<String, Instant>>> = std::sync::OnceLock::new();
+    SINCE.get_or_init(Default::default)
+}
+
+fn note_attached(devices: &[DeviceInfo]) {
+    static LOOKED: AtomicBool = AtomicBool::new(false);
+    let first = !LOOKED.swap(true, Ordering::SeqCst);
+    let now = Instant::now();
+    let long_ago = now.checked_sub(Duration::from_secs(3600)).unwrap_or(now);
+    let mut since = attached_since().lock().unwrap();
+    since.retain(|serial, _| devices.iter().any(|d| d.serial == *serial && d.state == "device"));
+    for d in devices.iter().filter(|d| d.state == "device") {
+        since.entry(d.serial.clone()).or_insert(if first { long_ago } else { now });
+    }
+}
+
+/// How long `serial` has been ready without a break, if it is.
+pub fn attached_for(serial: &str) -> Option<Duration> {
+    attached_since().lock().unwrap().get(serial).map(|t| t.elapsed())
 }
 
 #[derive(Debug, Clone, Serialize)]

@@ -1928,13 +1928,17 @@ pub fn apps_audio(app: &AppHandle, serial: &str, open: bool) {
     {
         let mut list = APP_WINDOWS.lock().unwrap();
         let had = list.iter().any(|s| s == serial);
-        if had == open {
-            return;
-        }
         if open {
-            list.push(serial.to_string());
-        } else {
+            // Listed already is not the same as playing: a window that comes up
+            // after the link dropped finds the companion gone with it, while the
+            // dead windows keep the phone listed. Reconciling brings it back.
+            if !had {
+                list.push(serial.to_string());
+            }
+        } else if had {
             list.retain(|s| s != serial);
+        } else {
+            return;
         }
     }
     reconcile_audio_session_bg(app, serial);
