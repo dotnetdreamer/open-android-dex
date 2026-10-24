@@ -509,6 +509,14 @@ bash openandroiddex-docker/qemu/build.sh    # libqemu.so
 gh workflow run desktop.yml -f bump=patch      # or -f version=0.4.0, or -f dry_run=true
 ```
 
+**Testing a branch on Windows.** Tick "Windows portable only" (or pass the flag)
+for a quick build of just the portable zip, downloadable from the run's page for
+two weeks — no installer, no macOS or Linux, no version bump, no release:
+
+```bash
+gh workflow run desktop.yml --ref <branch> -f windows_portable_only=true
+```
+
 **Where things live**
 
 | Path | What it is |
