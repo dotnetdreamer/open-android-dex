@@ -10,6 +10,13 @@
 //!   picture to the window as it comes;
 //! - the writer (a slow link can make a write wait; the window never does);
 //! - the clock (a ping a few times a minute: what says how old a frame is).
+//!
+//! A window's connection is not the window. When the way to the phone it took
+//! goes — the cable pulled, Wi-Fi dropping — the window keeps its last picture,
+//! and the app around it makes the connection again another way
+//! ([`reconnect`]): to the same window on the phone, if its server is still up,
+//! or the app opened in it again on a new one. Each connection has threads of
+//! its own, and those of a connection that was replaced end quietly.
 
 use std::collections::HashMap;
 use std::io::Write;
@@ -17,7 +24,7 @@ use std::net::TcpStream;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -51,11 +58,6 @@ pub struct Spec {
     pub direct: bool,
     /// How the window reaches its phone, said in its title bar: "USB" or "Wi‑Fi".
     pub via: &'static str,
-    /// Where to open: the frame of the window this one takes over from, in the
-    /// platform's own screen coordinates (`Window::frame`). None places it as new.
-    pub frame: Option<[f64; 4]>,
-    /// The window it takes over from was full screen: this one goes full screen too.
-    pub full_screen: bool,
     /// When the click that asked for the window came: what its first picture is timed from.
     pub clicked: Instant,
 }
@@ -66,9 +68,55 @@ pub enum Event {
     Live(Duration),
     /// The app could not be shown, and why — said in the window, and to the app.
     Failed(String),
+    /// The window's connection went while it showed its app: the way to the
+    /// phone it took has gone. The window keeps its last picture meanwhile.
+    Lost,
+    /// A picture again, on a connection made again, this long after the last went.
+    Back(Duration),
     /// The window is gone.
     Closed,
 }
+
+/// How a window reaches its phone: the adb serial its connection goes by,
+/// the phone's app server there, and what the title bar says of it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Route {
+    pub serial: String,
+    pub socket: String,
+    /// On a cable: the phone's display draws straight into the encoder, unpaced.
+    pub direct: bool,
+    /// "USB" or "Wi‑Fi".
+    pub via: &'static str,
+}
+
+/// Why a connection made again did not take.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Refused {
+    /// The phone's server has no such window: it is not the server the window
+    /// had. The app can be opened in the window again.
+    Unknown,
+    /// The window ended on the phone while this computer was away — its app
+    /// was opened on the phone, or this computer came too late. The app is the
+    /// phone's: the window goes.
+    Gone,
+    /// The way there failed, or the app could not be opened.
+    Failed(String),
+}
+
+/// What a window's title bar says of its phone: the way first — what
+/// changes, and what a narrow window must not cut off — then the phone's
+/// name: "Wi‑Fi · Galaxy S25".
+pub fn way_line(phone: &str, via: &str) -> String {
+    if phone.is_empty() {
+        via.to_string()
+    } else {
+        format!("{via} · {phone}")
+    }
+}
+
+/// How long a connection made again waits for the phone's first word: the
+/// app opening again on a slow phone, its display and its launch.
+const ANSWER_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// The phone app's display: its size in pixels and its density.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -122,6 +170,8 @@ pub trait Surface: Send + Sync {
     fn named(&self, name: &str);
     /// A line to show in the window while it has no picture, or none.
     fn say(&self, text: Option<String>);
+    /// How the window reaches its phone now, for its title bar: "USB" or "Wi‑Fi".
+    fn way(&self, via: &str);
     /// A short note in the window — where the sound went, how far a dropped
     /// file is: in a strip under the title bar on Windows, the window's
     /// subtitle on a Mac. A `busy` one stays until the next replaces it; any
@@ -150,6 +200,23 @@ pub trait Host: Send + Sync {
 /// One window's link: what both its sides and its threads share.
 pub struct Link {
     out: Mutex<Option<Sender<Vec<u8>>>>,
+    /// What this window is called to the phone's server, so that a connection
+    /// made again finds the same window there.
+    key: String,
+    /// The way the window's connection takes now.
+    route: Mutex<Route>,
+    /// Which connection is the window's: the threads of one replaced end quietly.
+    generation: AtomicU64,
+    /// What the window opened, to open it again on a new server.
+    opened: Mutex<Option<NetSpec>>,
+    /// The window, for a connection made again from outside it.
+    surface: Mutex<Option<Weak<dyn Surface>>>,
+    /// When the connection went, until a picture comes again; `lost` says so without the lock.
+    lost_at: Mutex<Option<Instant>>,
+    lost: AtomicBool,
+    /// Connections being made again now: one that ends meanwhile may only be
+    /// the one the phone let go of for the new.
+    switching: AtomicU64,
     /// The display size last asked of the phone.
     asked: Mutex<DisplaySize>,
     closing: AtomicBool,
@@ -167,8 +234,18 @@ impl Link {
     /// A link, and the other end of what it sends: for [`start`].
     pub fn new(clicked: Instant, host: Arc<dyn Host>) -> (Arc<Link>, Receiver<Vec<u8>>) {
         let (tx, rx) = mpsc::channel::<Vec<u8>>();
+        let mut b = [0u8; 12];
+        crate::wireless::fill_random(&mut b);
         let link = Link {
             out: Mutex::new(Some(tx)),
+            key: b.iter().map(|x| format!("{x:02x}")).collect(),
+            route: Mutex::new(Route { serial: String::new(), socket: String::new(), direct: false, via: "" }),
+            generation: AtomicU64::new(0),
+            opened: Mutex::new(None),
+            surface: Mutex::new(None),
+            lost_at: Mutex::new(None),
+            lost: AtomicBool::new(false),
+            switching: AtomicU64::new(0),
             asked: Mutex::new(DisplaySize { w: 0, h: 0, dpi: 0 }),
             closing: AtomicBool::new(false),
             live: AtomicBool::new(false),
@@ -197,6 +274,18 @@ impl Link {
 
     pub fn closing(&self) -> bool {
         self.closing.load(Ordering::SeqCst)
+    }
+
+    /// The way the window reaches its phone now.
+    pub fn route(&self) -> Route {
+        self.route.lock().unwrap().clone()
+    }
+
+    /// Its connection went, and no picture has come on another yet: what a
+    /// window that only reports its first picture (Windows') checks each one for.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub fn is_lost(&self) -> bool {
+        self.lost.load(Ordering::SeqCst)
     }
 
     /// The window is going. The phone is told what becomes of the app, unless
@@ -247,10 +336,16 @@ impl Link {
         }
     }
 
-    /// The first picture is on screen: said once, timed from the click.
+    /// A picture is on screen: the first is said once, timed from the click;
+    /// the first after the connection went, timed from its going.
     pub fn shown(&self) {
         if !self.live.swap(true, Ordering::SeqCst) {
             self.host.event(Event::Live(self.clicked.elapsed()));
+        }
+        if self.lost.swap(false, Ordering::SeqCst) {
+            if let Some(at) = self.lost_at.lock().unwrap().take() {
+                self.host.event(Event::Back(at.elapsed()));
+            }
         }
     }
 
@@ -276,6 +371,7 @@ impl Link {
 }
 
 /// Where the link goes, and what it opens there.
+#[derive(Clone)]
 pub struct NetSpec {
     pub serial: String,
     pub socket: String,
@@ -283,35 +379,23 @@ pub struct NetSpec {
     pub activity: Option<String>,
     pub linux: Option<i32>,
     pub direct: bool,
+    /// "USB" or "Wi‑Fi": how the window reaches the phone, for its title bar.
+    pub via: &'static str,
 }
 
 /// Connect to the phone and open the app, on the link's own threads.
 pub fn start(link: Arc<Link>, surface: Arc<dyn Surface>, net: NetSpec, out: Receiver<Vec<u8>>) {
+    *link.route.lock().unwrap() =
+        Route { serial: net.serial.clone(), socket: net.socket.clone(), direct: net.direct, via: net.via };
+    *link.opened.lock().unwrap() = Some(net.clone());
+    *link.surface.lock().unwrap() = Some(Arc::downgrade(&surface));
     let _ = thread::Builder::new()
         .name(format!("app-socket-{}", net.pkg))
         .spawn(move || run(link, surface, net, out));
 }
 
-fn run(link: Arc<Link>, surface: Arc<dyn Surface>, net: NetSpec, out_rx: Receiver<Vec<u8>>) {
-    let stream = match adbsock::connect(&net.serial, &net.socket) {
-        Ok(s) => s,
-        Err(e) => {
-            log::warn!("apps: {}: cannot reach the phone: {e}", net.pkg);
-            surface.say(Some("Couldn't reach your phone. Is it still connected?".into()));
-            link.event(Event::Failed(e));
-            return;
-        }
-    };
-    // The writer: everything the window sends, in order, on its own thread.
-    let mut writer = match stream.try_clone() {
-        Ok(s) => s,
-        Err(e) => {
-            link.event(Event::Failed(e.to_string()));
-            return;
-        }
-    };
-    let want = surface.wanted();
-    *link.asked.lock().unwrap() = want;
+/// What opens the app in a window on the phone — this one's, by its key.
+fn open_message(net: &NetSpec, want: DisplaySize, direct: bool, key: &str) -> Value {
     let mut open = json!({
         "t": "open",
         "pkg": net.pkg,
@@ -321,24 +405,162 @@ fn run(link: Arc<Link>, surface: Arc<dyn Surface>, net: NetSpec, out_rx: Receive
         "dpi": want.dpi,
         "fps": 60,
         "onClose": "phone",
-        "direct": net.direct,
+        "direct": direct,
+        "key": key,
     });
     if let Some(xid) = net.linux {
         open["linux"] = json!(xid);
     }
-    if writer.write_all(&wire::json(&open)).is_err() {
+    open
+}
+
+fn run(link: Arc<Link>, surface: Arc<dyn Surface>, net: NetSpec, out_rx: Receiver<Vec<u8>>) {
+    let mut stream = match adbsock::connect(&net.serial, &net.socket) {
+        Ok(s) => s,
+        Err(e) => {
+            log::warn!("apps: {}: cannot reach the phone: {e}", net.pkg);
+            surface.say(Some("Couldn't reach your phone. Is it still connected?".into()));
+            link.event(Event::Failed(e));
+            return;
+        }
+    };
+    let want = surface.wanted();
+    *link.asked.lock().unwrap() = want;
+    if stream.write_all(&wire::json(&open_message(&net, want, net.direct, &link.key))).is_err() {
         surface.say(Some("Couldn't reach your phone. Is it still connected?".into()));
+        link.event(Event::Failed("the phone did not take the window".into()));
         return;
     }
+    serve(link, surface, stream, out_rx, 0, None);
+}
+
+/// Make the window's connection again, over `route`: to the same window on
+/// the phone (its server still up), or — `reopen` — the app opened in it
+/// again, on a new server. Waits for the phone's first word, so the caller
+/// knows which it got; on success the window's picture follows on threads of
+/// this connection's own, and the title bar says the new way.
+pub fn reconnect(link: &Arc<Link>, route: Route, reopen: bool) -> Result<(), Refused> {
+    link.switching.fetch_add(1, Ordering::SeqCst);
+    let made = connect_again(link, route, reopen);
+    link.switching.fetch_sub(1, Ordering::SeqCst);
+    made
+}
+
+fn connect_again(link: &Arc<Link>, route: Route, reopen: bool) -> Result<(), Refused> {
+    let surface = link
+        .surface
+        .lock()
+        .unwrap()
+        .as_ref()
+        .and_then(Weak::upgrade)
+        .ok_or_else(|| Refused::Failed("the window has closed".into()))?;
+    let net = link.opened.lock().unwrap().clone().ok_or_else(|| Refused::Failed("the window has not opened yet".into()))?;
+    if link.closing() {
+        return Err(Refused::Failed("the window is closing".into()));
+    }
+    let mut stream = adbsock::connect(&route.serial, &route.socket).map_err(Refused::Failed)?;
+    let want = surface.wanted();
+    let ask = if reopen {
+        open_message(&net, want, route.direct, &link.key)
+    } else {
+        json!({"t": "attach", "key": link.key, "w": want.w, "h": want.h, "dpi": want.dpi, "direct": route.direct})
+    };
+    stream.write_all(&wire::json(&ask)).map_err(|e| Refused::Failed(format!("the phone: {e}")))?;
+    let _ = stream.set_read_timeout(Some(ANSWER_TIMEOUT));
+    let first = match wire::read(&mut stream) {
+        Ok(Some(m)) => m,
+        Ok(None) => return Err(Refused::Failed("the phone closed the connection".into())),
+        Err(e) => return Err(Refused::Failed(format!("the phone did not answer: {e}"))),
+    };
+    let _ = stream.set_read_timeout(None);
+    answer_of(&first)?;
+    // The window's connection is this one now; the last one's writer ends with
+    // its channel. A window closing meanwhile closes this one too.
+    let (generation, rx) = {
+        let mut out = link.out.lock().unwrap();
+        if link.closing() {
+            return Err(Refused::Failed("the window is closing".into()));
+        }
+        *link.asked.lock().unwrap() = want;
+        *link.route.lock().unwrap() = route.clone();
+        // The new way's own round trip, not the last one's.
+        link.best_rtt_us.store(u64::MAX, Ordering::SeqCst);
+        let generation = link.generation.fetch_add(1, Ordering::SeqCst) + 1;
+        let (tx, rx) = mpsc::channel::<Vec<u8>>();
+        *out = Some(tx);
+        (generation, rx)
+    };
+    surface.way(route.via);
+    let (link, name) = (link.clone(), format!("app-socket-{}", net.pkg));
+    thread::Builder::new()
+        .name(name)
+        .spawn(move || serve(link, surface, stream, rx, generation, Some(first)))
+        .map(|_| ())
+        .map_err(|e| Refused::Failed(e.to_string()))
+}
+
+/// What the phone's first word on a connection made again says: it took the
+/// window ("attached", or the display an app opened on), or why not.
+fn answer_of(first: &wire::Msg) -> Result<(), Refused> {
+    if first.kind != wire::JSON {
+        return Ok(());
+    }
+    let v: Value = serde_json::from_slice(&first.data).unwrap_or(Value::Null);
+    if v["t"] != "state" {
+        return Ok(());
+    }
+    Err(match v["state"].as_str() {
+        Some("closed") => Refused::Gone,
+        Some("unknown") => Refused::Unknown,
+        _ => Refused::Failed(v["message"].as_str().unwrap_or("the app could not be opened").to_string()),
+    })
+}
+
+/// Hand the window's app back to the phone, over `route`, for a window closed
+/// while its connection was gone: the phone's server still has it waiting.
+pub fn hand_back(link: &Link, route: &Route) {
+    let Ok(mut stream) = adbsock::connect(&route.serial, &route.socket) else { return };
+    let want = link.asked();
+    let ask = json!({"t": "attach", "key": link.key, "w": want.w, "h": want.h, "dpi": want.dpi, "direct": route.direct});
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+    if stream.write_all(&wire::json(&ask)).is_err() {
+        return;
+    }
+    if let Ok(Some(first)) = wire::read(&mut stream) {
+        if answer_of(&first).is_ok() {
+            let _ = stream.write_all(&wire::json(&json!({"t": "close", "app": "phone"})));
+            let _ = stream.flush();
+        }
+    }
+}
+
+/// One of the window's connections: what the window sends, in order, on a
+/// writer of its own; the phone's clock; and what the phone says, on this
+/// thread. `first` is a word of the phone's read already.
+fn serve(
+    link: Arc<Link>,
+    surface: Arc<dyn Surface>,
+    stream: TcpStream,
+    out_rx: Receiver<Vec<u8>>,
+    generation: u64,
+    first: Option<wire::Msg>,
+) {
+    let mut writer = match stream.try_clone() {
+        Ok(s) => s,
+        Err(e) => {
+            link.event(Event::Failed(e.to_string()));
+            return;
+        }
+    };
     let ack_tx = link.out.lock().unwrap().clone();
     let w_stream = stream.try_clone().ok();
-    let _ = thread::Builder::new().name(format!("app-out-{}", net.pkg)).spawn(move || {
+    let _ = thread::Builder::new().name("app-out".into()).spawn(move || {
         while let Ok(bytes) = out_rx.recv() {
             if writer.write_all(&bytes).is_err() {
                 break;
             }
         }
-        // The window closed: the socket goes, and with it the phone's display.
+        // The window closed, or this connection was replaced: the socket goes.
         let _ = writer.flush();
         if let Some(s) = w_stream {
             let _ = s.shutdown(std::net::Shutdown::Both);
@@ -347,11 +569,12 @@ fn run(link: Arc<Link>, surface: Arc<dyn Surface>, net: NetSpec, out_rx: Receive
     // The phone's clock, a few times a minute: each answer says what it read,
     // and the one that came back quickest says it with the least doubt.
     let pings: Arc<Mutex<HashMap<u64, i64>>> = Arc::new(Mutex::new(HashMap::new()));
+    let done = Arc::new(AtomicBool::new(false));
     {
-        let (link, pings) = (link.clone(), pings.clone());
+        let (link, pings, done) = (link.clone(), pings.clone(), done.clone());
         let _ = thread::Builder::new().name("app-clock".into()).spawn(move || {
             let mut n = 0u64;
-            while !link.closing() && link.out.lock().unwrap().is_some() {
+            while !link.closing() && !done.load(Ordering::SeqCst) && link.generation.load(Ordering::SeqCst) == generation {
                 n += 1;
                 pings.lock().unwrap().insert(n, now_us());
                 link.send(wire::json(&json!({"t": "ping", "n": n})));
@@ -359,7 +582,8 @@ fn run(link: Arc<Link>, surface: Arc<dyn Surface>, net: NetSpec, out_rx: Receive
             }
         });
     }
-    read_loop(&link, surface.as_ref(), stream, ack_tx, pings);
+    read_loop(&link, surface.as_ref(), stream, ack_tx, pings, generation, first);
+    done.store(true, Ordering::SeqCst);
 }
 
 fn read_loop(
@@ -368,6 +592,8 @@ fn read_loop(
     mut stream: TcpStream,
     ack: Option<Sender<Vec<u8>>>,
     pings: Arc<Mutex<HashMap<u64, i64>>>,
+    generation: u64,
+    mut first: Option<wire::Msg>,
 ) {
     let ack_bytes = wire::ack();
     // Whether the phone paces its frames by these acks; a stream drawn straight
@@ -376,9 +602,12 @@ fn read_loop(
     let mut paced = true;
     let mut said_stats = Instant::now();
     loop {
-        let m = match wire::read(&mut stream) {
-            Ok(Some(m)) => m,
-            Ok(None) | Err(_) => break,
+        let m = match first.take() {
+            Some(m) => m,
+            None => match wire::read(&mut stream) {
+                Ok(Some(m)) => m,
+                Ok(None) | Err(_) => break,
+            },
         };
         match m.kind {
             wire::VIDEO => {
@@ -470,8 +699,24 @@ fn read_loop(
             _ => {}
         }
     }
-    if !link.closing() {
-        // Opening the app again replaces this window (apps::open): no need to close it first.
+    // The phone lets go of a connection as another takes the window: until
+    // that one is made, this end may only be that.
+    let until = Instant::now() + ANSWER_TIMEOUT;
+    while link.switching.load(Ordering::SeqCst) > 0 && Instant::now() < until {
+        thread::sleep(Duration::from_millis(20));
+    }
+    if link.closing() || link.generation.load(Ordering::SeqCst) != generation {
+        // Closed, or another connection has the window now.
+        return;
+    }
+    if link.is_live() {
+        // The way to the phone this connection took has gone. The window keeps
+        // its last picture; the app around it makes the connection again.
+        link.lost_at.lock().unwrap().get_or_insert_with(Instant::now);
+        link.lost.store(true, Ordering::SeqCst);
+        log::info!("apps: {}: the connection over {} went", surface.label(), link.route().via);
+        link.event(Event::Lost);
+    } else {
         surface.say(Some("Your phone stopped answering. Open the app again to bring it back.".into()));
         link.event(Event::Failed("the phone stopped answering".into()));
     }
@@ -517,6 +762,45 @@ mod tests {
         l.ask_size(want);
         l.ask_size(want);
         assert_eq!(rx.try_iter().count(), 1);
+    }
+
+    #[test]
+    fn the_phones_first_word_says_whether_it_took_the_window() {
+        let word = |v: Value| wire::Msg { kind: wire::JSON, data: v.to_string().into_bytes() };
+        assert_eq!(answer_of(&word(json!({"t": "attached", "display": 7}))), Ok(()));
+        assert_eq!(answer_of(&word(json!({"t": "display", "id": 7}))), Ok(()));
+        assert_eq!(answer_of(&word(json!({"t": "state", "state": "closed"}))), Err(Refused::Gone));
+        assert_eq!(answer_of(&word(json!({"t": "state", "state": "unknown"}))), Err(Refused::Unknown));
+        assert_eq!(
+            answer_of(&word(json!({"t": "state", "state": "failed", "message": "no"}))),
+            Err(Refused::Failed("no".into()))
+        );
+        // A picture first is a window taken back too.
+        assert_eq!(answer_of(&wire::Msg { kind: wire::VIDEO, data: vec![0; 9] }), Ok(()));
+    }
+
+    #[test]
+    fn a_window_asks_for_its_app_by_its_key() {
+        let net = NetSpec {
+            serial: "s".into(),
+            socket: "k".into(),
+            pkg: "com.android.settings".into(),
+            activity: None,
+            linux: None,
+            direct: true,
+            via: "USB",
+        };
+        let open = open_message(&net, DisplaySize { w: 400, h: 800, dpi: 320 }, false, "abc");
+        assert_eq!((open["t"].as_str(), open["key"].as_str(), open["direct"].as_bool()), (Some("open"), Some("abc"), Some(false)));
+        assert!(open.get("linux").is_none());
+        // Two windows are never the same window to the phone.
+        assert_ne!(link().key, link().key);
+    }
+
+    #[test]
+    fn the_way_comes_before_the_phones_name() {
+        assert_eq!(way_line("Galaxy S25 Ultra", "Wi\u{2011}Fi"), "Wi\u{2011}Fi · Galaxy S25 Ultra");
+        assert_eq!(way_line("", "USB"), "USB");
     }
 
     #[test]

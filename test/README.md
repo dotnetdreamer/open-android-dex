@@ -96,5 +96,24 @@ and icons found through links that name guest paths, and through links proot
 wrote with this side's. The window manager against a real Xvnc needs a guest
 and is recorded in the design record.
 
-Everything else needs a device. `doc/web-viewer.md`, `doc/remote-access.md`
-and `doc/usb-desktop.md` list what is still unverified there.
+The phone apps' windows (`doc/apps-on-pc.md`) keep their app when their
+connection goes — the cable pulled with Wi‑Fi still there — and the phone's
+half of that is checked on a phone or an emulator, with the Android SDK and
+nothing of the app's running:
+
+```sh
+node test/apps-reconnect-test.mjs [serial]
+```
+
+It pushes the window daemon's dex (build it first: `openandroiddex-wmd/build.sh`,
+or `npm run apk`) and runs the app server as the app does, then speaks the
+window wire to it over adb: a window that waits for its computer and takes a
+new connection, a second connection taking it from the first, a window closed
+after it came back handing its app back, an app opened on the phone while its
+window was away making that window "closed" to a computer that comes back, an
+unknown window, the server stopping 30 s after its shell went with nobody
+back, and "stop" ending it at once. It opens the phone's Settings in windows
+of its own, and every one goes back to the phone by the end.
+
+Everything else needs a device. `doc/web-viewer.md`, `doc/remote-access.md`,
+`doc/usb-desktop.md` and `doc/apps-on-pc.md` list what is still unverified there.

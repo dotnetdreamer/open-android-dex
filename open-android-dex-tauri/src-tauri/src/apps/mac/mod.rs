@@ -36,7 +36,7 @@ mod video;
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -62,7 +62,7 @@ use objc2_quartz_core::{CALayer, CATransaction};
 use serde_json::json;
 
 use super::keys::{self, mac as mk};
-use super::link::{self, DisplaySize, Event, Host, Link, NetSpec, Spec, Surface};
+use super::link::{self, DisplaySize, Event, Host, Link, NetSpec, Refused, Route, Spec, Surface};
 use super::sound;
 use super::wire;
 use video::{Fed, Feed};
@@ -73,7 +73,6 @@ const NOTE_MS: u64 = 4500;
 /// A window, from outside: what the app holds, from any thread.
 pub struct Window {
     pub id: u64,
-    pub serial: String,
     pub pkg: String,
     pub label: String,
     pub linux: Option<i32>,
@@ -107,21 +106,34 @@ impl Window {
         self.shared.named(title);
     }
 
-    /// Where it is (AppKit's frame, in points): what a window taking over from
-    /// it opens at — where it was before it went full screen, if it is.
-    pub fn frame(&self) -> Option<[f64; 4]> {
-        let id = self.id;
-        dispatch2::run_on_main(move |_| {
-            OPEN.with(|o| {
-                o.borrow().get(&id).map(|p| p.view.ivars().windowed_frame.get().unwrap_or_else(|| p.window.frame()))
-            })
-            .map(|f| [f.origin.x, f.origin.y, f.size.width, f.size.height])
-        })
+    /// The adb serial its connection goes by now.
+    pub fn serial(&self) -> String {
+        self.shared.link.route().serial
     }
 
-    /// Whether it is full screen: a window taking over from it is too.
-    pub fn full_screen(&self) -> bool {
-        self.shared.full_screen.load(Ordering::SeqCst)
+    /// The way it reaches its phone now: the serial, the server, USB or Wi‑Fi.
+    pub fn route(&self) -> Route {
+        self.shared.link.route()
+    }
+
+    /// Its connection made again over `route` (link::reconnect).
+    pub fn reconnect(&self, route: Route, reopen: bool) -> Result<(), Refused> {
+        link::reconnect(&self.shared.link, route, reopen)
+    }
+
+    /// Its app handed back to the phone over `route`, for a window closed while its connection was gone.
+    pub fn hand_back(&self, route: &Route) {
+        link::hand_back(&self.shared.link, route);
+    }
+
+    /// A short note in its subtitle (Surface::note).
+    pub fn note(&self, text: Option<String>, busy: bool) {
+        self.shared.note(text, busy);
+    }
+
+    /// A line over its picture, which is dimmed under it; None takes it away.
+    pub fn say(&self, text: Option<String>) {
+        Surface::say(&*self.shared, text);
     }
 }
 
@@ -149,11 +161,13 @@ struct Shared {
     asked_close: Mutex<Option<Instant>>,
     /// When the window last changed size: the phone is asked once it holds still.
     resized_at: Mutex<Instant>,
-    /// Full screen, or going there: for the app, from any thread.
-    full_screen: AtomicBool,
     stats: Mutex<Stats>,
-    /// The window's subtitle — the phone, and how the window reaches it — when no note has its place.
-    subtitle: String,
+    /// The phone's name, which the subtitle begins with.
+    device: String,
+    /// The window's subtitle — the phone, and how the window reaches it — when
+    /// no note has its place. Read when a note goes, so a note never puts back
+    /// a way the window has left.
+    subtitle: Arc<Mutex<String>>,
     /// Counts the notes, so a note's fading never takes the next one with it.
     note_seq: Arc<AtomicU64>,
 }
@@ -262,7 +276,7 @@ impl Surface for Shared {
     fn note(&self, text: Option<String>, busy: bool) {
         let seq = self.note_seq.fetch_add(1, Ordering::SeqCst) + 1;
         let (id, subtitle) = (self.id, self.subtitle.clone());
-        let shown = text.unwrap_or_else(|| subtitle.clone());
+        let shown = text.unwrap_or_else(|| subtitle.lock().unwrap().clone());
         with_window(id, move |w, _| w.setSubtitle(&NSString::from_str(&shown)));
         if busy {
             return;
@@ -271,10 +285,18 @@ impl Surface for Shared {
         if let Ok(when) = DispatchTime::try_from(Duration::from_millis(NOTE_MS)) {
             let _ = DispatchQueue::main().after(when, move || {
                 if latest.load(Ordering::SeqCst) == seq {
-                    with_window(id, move |w, _| w.setSubtitle(&NSString::from_str(&subtitle)));
+                    let text = subtitle.lock().unwrap().clone();
+                    with_window(id, move |w, _| w.setSubtitle(&NSString::from_str(&text)));
                 }
             });
         }
+    }
+
+    /// A new way to the phone: "Wi‑Fi · Galaxy S25". A note up now gives back this one when it goes.
+    fn way(&self, via: &str) {
+        let text = link::way_line(&self.device, via);
+        *self.subtitle.lock().unwrap() = text.clone();
+        with_window(self.id, move |w, _| w.setSubtitle(&NSString::from_str(&text)));
     }
 
     fn gone(&self) {
@@ -322,16 +344,6 @@ fn screen_under_pointer(mtm: MainThreadMarker) -> Option<Retained<NSScreen>> {
     NSScreen::screens(mtm).iter().find(|s| inside(s.frame())).or_else(|| NSScreen::mainScreen(mtm))
 }
 
-/// The phone, and how this window reaches it: "Galaxy S25 · USB". The
-/// window's subtitle, which a note borrows and gives back.
-fn subtitle(device: &str, via: &str) -> String {
-    if device.is_empty() {
-        via.to_string()
-    } else {
-        format!("{device} · {via}")
-    }
-}
-
 /// What the main thread needs to make the window.
 struct Look {
     id: u64,
@@ -341,8 +353,6 @@ struct Look {
     icon_png: Option<Vec<u8>>,
     cascade: u32,
     size: Option<(u32, u32)>,
-    frame: Option<[f64; 4]>,
-    full_screen: bool,
 }
 
 /// Open a window for `spec`; it runs until it is closed. The window shows at
@@ -360,9 +370,9 @@ pub fn open(spec: Spec, host: Arc<dyn Host>) -> Result<Arc<Window>, String> {
         linux: spec.linux.is_some(),
         asked_close: Mutex::new(None),
         resized_at: Mutex::new(Instant::now()),
-        full_screen: AtomicBool::new(false),
         stats: Mutex::new(Stats { since: Instant::now(), frames: 0, ages: Vec::new() }),
-        subtitle: subtitle(&spec.device, spec.via),
+        device: spec.device.clone(),
+        subtitle: Arc::new(Mutex::new(link::way_line(&spec.device, spec.via))),
         note_seq: Arc::new(AtomicU64::new(0)),
     });
     let look = Look {
@@ -373,8 +383,6 @@ pub fn open(spec: Spec, host: Arc<dyn Host>) -> Result<Arc<Window>, String> {
         icon_png: spec.icon_png.clone(),
         cascade: spec.cascade,
         size: spec.size,
-        frame: spec.frame,
-        full_screen: spec.full_screen,
     };
     let (tx, rx) = mpsc::channel::<()>();
     {
@@ -393,11 +401,11 @@ pub fn open(spec: Spec, host: Arc<dyn Host>) -> Result<Arc<Window>, String> {
         activity: spec.activity.clone(),
         linux: spec.linux,
         direct: spec.direct,
+        via: spec.via,
     };
     link::start(shared.link.clone(), shared.clone(), net, out_rx);
     Ok(Arc::new(Window {
         id: spec.id,
-        serial: spec.serial,
         pkg: spec.pkg,
         label: spec.label,
         linux: spec.linux,
@@ -441,7 +449,7 @@ fn make(mtm: MainThreadMarker, look: &Look, shared: &Arc<Shared>) {
     // Held in OPEN, and let go of there: AppKit must not release it as well.
     unsafe { window.setReleasedWhenClosed(false) };
     window.setTitle(&NSString::from_str(&look.label));
-    window.setSubtitle(&NSString::from_str(&subtitle(&look.device, look.via)));
+    window.setSubtitle(&NSString::from_str(&link::way_line(&look.device, look.via)));
     // Each app its own window, never a tab of another's.
     window.setTabbingMode(NSWindowTabbingMode::Disallowed);
     // Minimised, it is the app's own icon in the Dock.
@@ -458,10 +466,6 @@ fn make(mtm: MainThreadMarker, look: &Look, shared: &Arc<Shared>) {
     let x = visible.origin.x + (visible.size.width - frame.size.width) / 2.0 + step;
     let y = visible.origin.y + (visible.size.height - frame.size.height) / 2.0 - step / 2.0;
     window.setFrameOrigin(NSPoint::new(x, y.max(visible.origin.y)));
-    // Taking over from a window (the app moved to the cable, or back): where it was, as big.
-    if let Some([x, y, w, h]) = look.frame {
-        window.setFrame_display(NSRect::new(NSPoint::new(x, y), NSSize::new(w, h)), false);
-    }
 
     // The content: the app's view, and a line over it until its picture comes.
     let container = NSView::initWithFrame(NSView::alloc(mtm), content);
@@ -507,10 +511,6 @@ fn make(mtm: MainThreadMarker, look: &Look, shared: &Arc<Shared>) {
     window.makeKeyAndOrderFront(None);
     activate(mtm);
     OPEN.with(|o| o.borrow_mut().insert(look.id, Parts { window, view }));
-    // Taking over from a full-screen window: full screen as well, once it is on the screen.
-    if look.full_screen {
-        with_window(look.id, |w, _| w.toggleFullScreen(None));
-    }
 }
 
 /// A borderless button showing one of the system's symbols, which `target` answers.
@@ -697,8 +697,6 @@ struct Ui {
     sound: RefCell<Vec<sound::Item>>,
     /// Full screen, from the moment the window starts to go there.
     full_screen: Cell<bool>,
-    /// Where the window was before it went full screen.
-    windowed_frame: Cell<Option<NSRect>>,
     /// The bar a full-screen window brings down from the top, and whether it
     /// is down; and the tab that shows where it is while it is up.
     bar: RefCell<Option<Bar>>,
@@ -1116,12 +1114,7 @@ define_class!(
 
         #[unsafe(method(windowWillEnterFullScreen:))]
         fn window_will_enter_full_screen(&self, _notification: &NSNotification) {
-            let ui = self.ivars();
-            if let Some(w) = self.window() {
-                ui.windowed_frame.set(Some(w.frame()));
-            }
-            ui.full_screen.set(true);
-            ui.shared.full_screen.store(true, Ordering::SeqCst);
+            self.ivars().full_screen.set(true);
         }
 
         #[unsafe(method(windowDidEnterFullScreen:))]
@@ -1140,15 +1133,9 @@ define_class!(
             self.out_of_full_screen();
         }
 
-        #[unsafe(method(windowDidExitFullScreen:))]
-        fn window_did_exit_full_screen(&self, _notification: &NSNotification) {
-            self.ivars().windowed_frame.set(None);
-        }
-
         #[unsafe(method(windowDidFailToEnterFullScreen:))]
         fn window_did_fail_to_enter_full_screen(&self, _window: &NSWindow) {
             self.out_of_full_screen();
-            self.ivars().windowed_frame.set(None);
         }
     }
 );
@@ -1173,7 +1160,6 @@ impl AppView {
             tracking: RefCell::new(None),
             sound: RefCell::new(Vec::new()),
             full_screen: Cell::new(false),
-            windowed_frame: Cell::new(None),
             bar: RefCell::new(None),
             handle: RefCell::new(None),
             bar_down: Cell::new(false),
@@ -1427,7 +1413,6 @@ impl AppView {
     fn out_of_full_screen(&self) {
         let ui = self.ivars();
         ui.full_screen.set(false);
-        ui.shared.full_screen.store(false, Ordering::SeqCst);
         self.keep_bar();
         ui.bar_down.set(false);
         if let Some(bar) = ui.bar.borrow().as_ref() {

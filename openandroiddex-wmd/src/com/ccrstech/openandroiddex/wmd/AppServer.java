@@ -45,8 +45,13 @@ import java.util.concurrent.atomic.AtomicInteger;
  * socket takes a mouse and a keyboard into any app on the phone.
  *
  * <p>Usage: {@code app_process / com.ccrstech.openandroiddex.wmd.AppServer socket-name}.
- * Exits when its stdin closes — the computer's adb shell went away — and every
- * app goes back to the phone's own screen as it does.
+ * It stops when the computer says so — "stop" on its stdin, or on the control
+ * connection — and every app goes back to the phone's own screen as it does.
+ * The computer's adb shell closing is not the computer gone: the cable may
+ * have been pulled with Wi-Fi still there. So the server is held by that
+ * shell, by a control connection, or by any window's connection, and stops
+ * only when none of them has held it for {@link AppWindow#AWAY_MS} — long
+ * enough for the computer to come back another way to the same windows.
  */
 public final class AppServer {
 
@@ -82,6 +87,8 @@ public final class AppServer {
 
     private static volatile boolean stopping;
     private static boolean trustedRefused;
+    /** The computer's adb shell is still there: its stdin has not closed. */
+    private static volatile boolean shellHeld = true;
 
     private final String socketName;
     private LocalServerSocket server;
@@ -97,6 +104,18 @@ public final class AppServer {
     private final List<AppWindow> running = new CopyOnWriteArrayList<>();
     /** Files on their way from the computer: stopping ends them too, and waits for their ".part" to go. */
     private final List<AppDrop> drops = new CopyOnWriteArrayList<>();
+    /**
+     * The keys of windows that ended while their computer was away — their app
+     * opened on the phone, or the computer late — so a computer that comes back
+     * for one is told it has gone, rather than opening it again.
+     */
+    private final java.util.Set<String> endedAway = java.util.Collections.newSetFromMap(
+            new java.util.LinkedHashMap<String, Boolean>() {
+                @Override
+                protected boolean removeEldestEntry(java.util.Map.Entry<String, Boolean> eldest) {
+                    return size() > 64;
+                }
+            });
     private final AtomicInteger serials = new AtomicInteger();
     private volatile Wire control;
     /** A window has been asked for: what is left of the warm-up is its to pay. */
@@ -115,9 +134,11 @@ public final class AppServer {
             // MediaCodec and the framework's managers make Handlers, which need a looper.
             Looper.prepareMainLooper();
             AppServer s = new AppServer(args[0]);
+            instance = s;
             s.keepAwake();
             s.watchTasks();
             s.watchStdin();
+            s.watchLease();
             say("apps ready on @" + args[0] + " (Android " + Build.VERSION.RELEASE + ", API " + Build.VERSION.SDK_INT + ")");
             log("ready " + sinceStart() + " ms after the process started; the clipboard and its Context took "
                     + s.clipboardMs + " ms");
@@ -421,6 +442,9 @@ public final class AppServer {
             case "control":
                 control(s, wire);
                 break;
+            case "attach":
+                attach(s, wire, hello);
+                break;
             case "open": {
                 windowAsked = true;
                 int serial = serials.incrementAndGet();
@@ -450,8 +474,40 @@ public final class AppServer {
         }
     }
 
+    /**
+     * A window again, on a new connection: the computer came back to it — over
+     * another way to the phone, or the same one back. The window takes the
+     * connection over and this thread leaves it to the window's own; a window
+     * the server does not have is said to be closed, if it ended while the
+     * computer was away, or unknown — a computer can open its app again then.
+     */
+    private void attach(LocalSocket s, Wire wire, JSONObject req) {
+        String key = req.optString("key");
+        AppWindow w = null;
+        for (AppWindow r : running) {
+            if (!key.isEmpty() && key.equals(r.key)) {
+                w = r;
+                break;
+            }
+        }
+        try {
+            if (w != null && w.attach(s, wire, req)) return;
+            boolean ended = w != null || endedAway.contains(key);
+            wire.json(new JSONObject().put("t", "state").put("state", ended ? "closed" : "unknown"));
+        } catch (Exception e) {
+            if (!stopping) log("a window coming back: " + e);
+        }
+        closeQuietly(s);
+    }
+
+    /** The window with {@code key} ended while its computer was away. */
+    void endedAway(String key) {
+        if (!key.isEmpty()) endedAway.add(key);
+    }
+
     /** The phone as a whole: its apps, their icons, the clipboard, its sound, the clock. */
     private void control(LocalSocket s, Wire wire) {
+        if (!shellHeld) log("the computer is back, over another way to the phone");
         control = wire;
         try {
             JSONObject hello = new JSONObject();
@@ -514,6 +570,10 @@ public final class AppServer {
                     case "ping":
                         wire.json(new JSONObject().put("t", "pong").put("n", j.opt("n"))
                                 .put("at", System.nanoTime() / 1000));
+                        break;
+                    case "stop":
+                        // The computer is going, and says so: no waiting for it to come back.
+                        shutdown("the computer asked");
                         break;
                     case "linuxApps": {
                         JSONObject r;
@@ -716,17 +776,56 @@ public final class AppServer {
         t.start();
     }
 
+    /**
+     * The computer's adb shell: "stop" on it is the computer going, now; its
+     * end alone may be only the way it came by gone (the cable pulled), and
+     * the lease decides.
+     */
     private void watchStdin() {
         Thread t = new Thread(() -> {
             try {
-                byte[] buf = new byte[64];
-                while (System.in.read(buf) >= 0) {
-                    // nothing is sent this way; only its end means anything
+                java.io.BufferedReader in = new java.io.BufferedReader(
+                        new java.io.InputStreamReader(System.in, StandardCharsets.UTF_8));
+                String line;
+                while ((line = in.readLine()) != null) {
+                    if ("stop".equals(line.trim())) {
+                        shutdown("the computer asked");
+                        return;
+                    }
                 }
             } catch (IOException ignored) {
             }
-            shutdown("the computer's adb shell closed");
+            shellHeld = false;
+            if (!stopping) log("the computer's adb shell closed; waiting for the computer to come back another way");
         }, "apps-stdin");
+        t.setDaemon(true);
+        t.start();
+    }
+
+    /**
+     * What keeps the server: the computer's adb shell, its control connection,
+     * or a window's. With none of them for {@link AppWindow#AWAY_MS} — the
+     * computer gone, not just one way to the phone — it stops, and every app
+     * goes back to the phone.
+     */
+    private void watchLease() {
+        Thread t = new Thread(() -> {
+            long lostAt = 0;
+            while (!stopping) {
+                boolean held = shellHeld || control != null;
+                for (AppWindow w : running) held |= w.held();
+                long now = SystemClock.uptimeMillis();
+                if (held) {
+                    lostAt = 0;
+                } else if (lostAt == 0) {
+                    lostAt = now;
+                } else if (now - lostAt >= AppWindow.AWAY_MS) {
+                    shutdown("the computer did not come back");
+                    return;
+                }
+                SystemClock.sleep(500);
+            }
+        }, "apps-lease");
         t.setDaemon(true);
         t.start();
     }
@@ -765,10 +864,25 @@ public final class AppServer {
 
     // ── saying so ──
 
-    /** A line the computer reads. */
+    /** The server, for its log once the computer's shell has gone. */
+    private static volatile AppServer instance;
+
+    /**
+     * A line the computer reads — on the adb shell that started the server,
+     * or once that has gone (the cable pulled), on the control connection.
+     */
     static void say(String line) {
         System.out.println("INFO: " + line);
         System.out.flush();
+        AppServer s = instance;
+        Wire c = s == null ? null : s.control;
+        if (!shellHeld && c != null) {
+            try {
+                c.json(new JSONObject().put("t", "log").put("line", "INFO: " + line));
+            } catch (Exception ignored) {
+                // the computer's end went too
+            }
+        }
     }
 
     /** A line for the computer's log. */

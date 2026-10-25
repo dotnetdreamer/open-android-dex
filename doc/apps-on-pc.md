@@ -95,18 +95,21 @@ manager and a codec list. Here they are paid once.
 One per phone, started as soon as the Apps page is first looked at (so its JVM
 is up before anyone clicks), under `app_process` as the shell, from the window
 daemon's dex pushed to `/data/local/tmp/oadx-apps.dex` by rename, so a running
-server keeps the copy it started with. It is held by the `adb shell` that
-started it and ends when that shell's stdin closes: the app quitting, the
-cable pulled, adbd restarting. Every app on its displays then goes back to the
-phone, behind what it shows. The shell ignores SIGHUP before it becomes the
-server (`trap '' HUP`): adbd hangs up a dropped link's processes, and the
-signal ended the server on the spot, its apps landing on top of the phone's
-screen; ignoring it, the server sees its stdin close, as when the app quits.
-That cannot help where adbd itself restarts on a Samsung phone — init then
-kills everything in adbd's cgroup — so there the apps still land on top, and
-the keeper (below, "Cable or Wi‑Fi") puts them back in their windows if the
-phone is back within 30 s; not yet tried on a Samsung phone. Stopping waits for
-the windows to hand their apps back (up to three seconds), not a fixed 300 ms. On an A13 it is ready 740–780 ms after its process starts
+server keeps the copy it started with. It stops when this app says so —
+"stop" on the `adb shell`'s stdin, or on its control connection, as the app
+quits — and every app on its displays goes back to the phone, behind what it
+shows. That shell closing is not the app gone: the cable may have been pulled
+with Wi‑Fi still there. So the server is held by its shell, by a control
+connection or by any window's, and stops only when none of them has held it for
+30 s (`AppWindow.AWAY_MS`) — this app crashing, or the phone gone for good. The
+shell ignores SIGHUP before it becomes the server (`trap '' HUP`): adbd hangs
+up a dropped link's processes, which ended the server on the spot. Nothing
+helps where adbd itself restarts on a Samsung phone — init then kills
+everything in adbd's cgroup — and there the apps land on top of the phone's
+screen until their windows open them again ("Cable or Wi‑Fi"). Stopping waits
+for the windows to hand their apps back (up to three seconds), not a fixed 300
+ms. Once its shell has gone, the server's log comes over the control
+connection instead. On an A13 it is ready 740–780 ms after its process starts
 (it logs how long), and the push and rename before that take about 110 ms.
 
 **Warm-up.** Everything the first window would otherwise pay for is paid while
@@ -215,32 +218,78 @@ app at the same size. Everything a window involves is in the table above.
 A phone attached both ways — wireless debugging on, and the cable in — is one
 phone here: the device list matches the two by `ro.serialno`. Its windows go
 over the cable, which is faster and draws straight into the encoder (above),
-and each window's title bar says which way it went: "Galaxy S25 · USB" or
-"· Wi‑Fi", in the subtitle on a Mac, after the phone's name in the bar on
-Windows.
+and each window's title bar says which way it goes: "USB · Galaxy S25" or
+"Wi‑Fi · …", in the subtitle on a Mac, after the app's name in the bar on
+Windows — the way first, so that a narrow window cuts off the phone's name
+rather than it. When the way changes, so does that, in the same window.
 
-While an app window is open, a keeper looks every two seconds:
+**A window is not its connection.** When the way a window's connection took
+goes — the cable pulled, Wi‑Fi dropping — the window keeps its place, its size,
+full screen, and its last picture, says "Reconnecting to Galaxy S25…" under its
+title, and the connection is made again the fastest way there is now. Nothing
+is closed and nothing opens: the window was never replaced by another.
 
-- A window on Wi‑Fi moves onto the cable once the cable has been in for 10 s.
-  A Samsung phone restarts adbd about 5 s after it is plugged in (its MTP
-  switch), ending everything adb started; sooner would move onto a link about
-  to drop.
-- A window whose phone stopped answering, after it had shown its app, opens
-  again — the fastest way there is — if the phone is back within 30 s: an adbd
-  restart, a cable pulled with Wi‑Fi still there. Later, the phone may be in
-  its owner's hand, and its app stays theirs until they open it here again.
+- **The same window on the phone.** A window whose connection goes without
+  closing it keeps its app on its display for 30 s (`AWAY_MS`), encoding nothing
+  for nobody, and a new connection asks for it by its key (`attach`): the same
+  display, the same app, its picture again from a key frame — the one on the
+  display goes at once — paced or straight into the encoder as the new way
+  wants. The server's own control connection is made again the same way, so
+  the clipboard and the sound menu carry on.
+- **Opened again in the same window.** Where the server has gone — a Samsung
+  phone's adbd, restarting as the cable goes, takes it with it — a new one is
+  started the way there is, and the app opened in the window again; its task
+  moves back from the phone's screen, where Android put it when the old
+  server's display went.
+- **Opened on the phone meanwhile**, the app is its owner's: the phone's server
+  says the window closed, and it goes, here too. Asked for again on the Apps
+  page, it is opened in the window again.
+- **Nowhere to go.** A window with no way to its phone says "Waiting for Galaxy
+  S25 — plug it back in, or keep it on the same Wi‑Fi" and keeps looking (the
+  keeper, every 0.7 s while a window waits). This app also makes the phone's
+  Wi‑Fi link again itself, every 5 s, if it remembers how (a phone set up for
+  Wi‑Fi here, by `ro.serialno`, by its mDNS name where it pairs): after a
+  Samsung phone's adbd restarted, nothing else does. After 30 s — 60 s while the
+  phone is there but not usable yet, a cable settling — the window says "Your
+  phone stopped answering. Open the app again to bring it back"; the phone's
+  server has handed the app back by then. Opening it again brings it back in
+  the same window.
 
-Either way the new window opens where the old one was, as big; the old one
-closes once its app has moved to the new window's display, or at once if it
-had stopped answering. Opening an app whose window is on Wi‑Fi while the cable
-is in, or whose phone stopped answering, does the same. A window that loses its
-phone says so itself; the page only reports a window that never showed its app.
+A window on Wi‑Fi moves onto the cable once the cable has been in for 10 s. A
+Samsung phone restarts adbd about 5 s after it is plugged in (its MTP switch),
+ending everything adb started, so no server is started over a cable that has
+not settled; one already running is only reached that way, at once. A move is
+a thread of its own, so one slow phone holds up no other window.
 
-On the Android 16 emulator, `emulator-5554` as the cable and `adb connect
-127.0.0.1:5555` as Wi‑Fi, a window asked for over Wi‑Fi opened over the cable;
-`adb -s emulator-5554 reconnect` brought it back over Wi‑Fi 1.4 s after the
-drop, its picture 0.74 s later, and onto the cable 10.5 s after the cable
-returned, its picture 1.5 s later — in the same place each time.
+Over mobile data there is no way for an Android app's window: a window is a
+display that only the shell may make, and the shell comes with debugging —
+the cable, or Wireless debugging, which the phone keeps only on Wi‑Fi. (The
+phone's Linux desktop goes on over mobile data, through the tunnel; its
+picture is the launcher's, not the shell's.)
+
+Measured on the Android 16 emulator, `emulator-5554` as the cable and `adb
+connect 127.0.0.1:5555` as Wi‑Fi, Settings in a window:
+
+- the cable pulled (`adb -s emulator-5554 reconnect`): the same window over
+  Wi‑Fi, its picture back 114–197 ms after the cable went (629 ms on a first
+  run); back onto the cable 10.2 s after it returned, the same window;
+- the server killed (`kill -9`, a Samsung adbd restart's effect) with the cable
+  settled: a new server in 0.94 s, the app opened in the same window again,
+  its picture back 1.56 s after;
+- the cable pulled, then 3 s later the server killed and Wi‑Fi gone for 3 s,
+  the cable back unsettled: no server started over it; the app opened again
+  over Wi‑Fi when that came back (picture 4.65 s after the loss, most of it
+  the 3 s without Wi‑Fi), onto the cable once it had settled;
+- with no Wi‑Fi at all, the cable dropped and back at once: the same server,
+  orphaned, reached over the unsettled cable — picture back 253 ms after.
+
+The phone's half, off the app, through a test client speaking the wire
+(`test/apps-reconnect-test.mjs`, 17 checks): a window waits and takes a new connection, a second one takes it from
+the first, which is shut; a window closed after it came back hands its app
+back; an app opened on the phone while away makes the window "closed" to a
+computer that comes back, an unknown key "unknown"; with its shell gone and no
+connection the server stops after 30 s and hands its app back, and "stop" ends
+it at once.
 
 ## The wire
 
@@ -261,15 +310,20 @@ bytes:
 | `0x23` | computer → phone | UTF-8 — characters typed |
 
 A window's JSON: `open` (package or Linux window, size, dpi, fps, `direct`,
-what closing does), `resize`, `focus`/`blur`/`leave`, `clip`, `keyframe`,
-`bitrate`, `close`, `ping` one way; `video` (the encoder, its size, the part
-of it that is the display, `paced`), `display` (the app's name), `state`
-(`closed`, `failed`), `stats` once a second, `pong` the other. The control
+what closing does, and the window's `key`), `resize`, `focus`/`blur`/`leave`,
+`clip`, `keyframe`, `bitrate`, `close`, `ping` one way; `video` (the encoder,
+its size, the part of it that is the display, `paced`), `display` (the app's
+name), `state` (`closed`, `failed`), `stats` once a second, `pong` the other.
+A window's connection made again starts with `attach` (its key, size, dpi,
+`direct`) instead of `open`, answered by `attached` — then `display` and
+`video` as for an open — or by `state`: `closed` (it ended while the computer
+was away), `unknown` (another server: open it again). The control
 connection's: `apps`, `icons`, `linuxApps`, `linuxIcons`, `linuxRun` (answered
 by `linuxRan`), `clip` both ways; `audio` — the computer asking, and the phone
 saying where its sound can go, after its hello, as outputs come and go, and
 after a pin; `audioRoute` (answered by `audioRouted`) and `audioMode`, the
-computer's.
+computer's; `stop`, the computer's, and `log`, the phone's once its shell has
+gone.
 
 A dropped file's connection is the one exception to the framing: its first
 message is `put` (the name, the size, the folder it goes in, whether it is an
@@ -404,8 +458,8 @@ would bring down with it stays away too; the window's own bar, a visual effect
 view over the picture whose rounded top is above the screen, comes down
 instead.
 
-A window that takes over from a full-screen one ("Cable or Wi‑Fi") goes full
-screen as well, from where the old one was before it went full screen.
+A full-screen window whose way to the phone changes stays full screen: it is
+the same window ("Cable or Wi‑Fi").
 
 ## Input
 
@@ -791,6 +845,12 @@ The sound menu, the clipboard as it is copied, and drops (2026-10-24):
 
 Not yet:
 
+- **A cable pulled from a Samsung phone**, the case this was made for: the
+  emulator's transports neither restart adbd nor drop Wi‑Fi on their own. Its
+  steps were each shown there ("Cable or Wi‑Fi"), not the phone's timing.
+- **A window's way changing, on Windows** (and the new note and title on a
+  Mac's screen, with the screen locked through the test): compiled and
+  type-checked, not yet run.
 - **Full screen on Windows**: compiled, and its layout's tests run, but not
   yet run on a Windows computer. Nowhere yet: a window taking over from a
   full-screen one (it should go full screen too).

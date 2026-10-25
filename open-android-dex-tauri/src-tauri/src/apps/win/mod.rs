@@ -72,7 +72,7 @@ use windows::Win32::UI::Shell::{DragAcceptFiles, DragFinish, DragQueryFileW, HDR
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 use super::keys::{self, Mods, Press};
-use super::link::{self, DisplaySize, Event, Host, Link, NetSpec, Spec, Surface};
+use super::link::{self, DisplaySize, Event, Host, Link, NetSpec, Refused, Route, Spec, Surface};
 use super::sound;
 use super::wire;
 use frame::Hit;
@@ -80,7 +80,6 @@ use frame::Hit;
 /// A window, from outside.
 pub struct Window {
     pub id: u64,
-    pub serial: String,
     pub pkg: String,
     pub label: String,
     pub linux: Option<i32>,
@@ -118,29 +117,34 @@ impl Window {
         self.shared.retitle(title);
     }
 
-    /// Where it is on the screen, in pixels: what a window taking over from it
-    /// opens at — where it was before it went full screen, if it is. None
-    /// while it is minimised, its rectangle then off-screen.
-    pub fn frame(&self) -> Option<[f64; 4]> {
-        let hwnd = self.shared.hwnd();
-        let windowed = self.shared.windowed.lock().unwrap().as_ref().map(|w| w.rect);
-        let r = match windowed {
-            Some(r) => r,
-            None => unsafe {
-                if IsIconic(hwnd).as_bool() {
-                    return None;
-                }
-                let mut r = RECT::default();
-                GetWindowRect(hwnd, &mut r).ok()?;
-                r
-            },
-        };
-        Some([r.left as f64, r.top as f64, (r.right - r.left) as f64, (r.bottom - r.top) as f64])
+    /// The adb serial its connection goes by now.
+    pub fn serial(&self) -> String {
+        self.shared.link.route().serial
     }
 
-    /// Whether it is full screen: a window taking over from it is too.
-    pub fn full_screen(&self) -> bool {
-        self.shared.full_screen.load(Ordering::SeqCst)
+    /// The way it reaches its phone now: the serial, the server, USB or Wi‑Fi.
+    pub fn route(&self) -> Route {
+        self.shared.link.route()
+    }
+
+    /// Its connection made again over `route` (link::reconnect).
+    pub fn reconnect(&self, route: Route, reopen: bool) -> Result<(), Refused> {
+        link::reconnect(&self.shared.link, route, reopen)
+    }
+
+    /// Its app handed back to the phone over `route`, for a window closed while its connection was gone.
+    pub fn hand_back(&self, route: &Route) {
+        link::hand_back(&self.shared.link, route);
+    }
+
+    /// A short note in the strip under its title bar (Surface::note).
+    pub fn note(&self, text: Option<String>, busy: bool) {
+        Surface::note(&*self.shared, text, busy);
+    }
+
+    /// A line in the middle of the window while it has no picture; None takes it away.
+    pub fn say(&self, text: Option<String>) {
+        Shared::say(&self.shared, text);
     }
 }
 
@@ -170,7 +174,9 @@ struct Shared {
     dark: AtomicBool,
     /// The app's name: what it opened with, then the phone's own word for it.
     label: Mutex<String>,
-    device: String,
+    /// The phone's name, and the title bar's "USB · Galaxy S25" made of it and the way there now.
+    phone_name: String,
+    device: Mutex<String>,
     message: Mutex<Option<String>>,
     render: Mutex<Option<Sender<RenderMsg>>>,
     /// A Linux window: its ✕ asks the app, and the window goes when the X window does.
@@ -308,6 +314,12 @@ impl Surface for Shared {
         Shared::say(self, text);
     }
 
+    /// A new way to the phone: "Wi‑Fi · Galaxy S25" in the title bar.
+    fn way(&self, via: &str) {
+        *self.device.lock().unwrap() = link::way_line(&self.phone_name, via);
+        self.repaint();
+    }
+
     fn note(&self, text: Option<String>, busy: bool) {
         let seq = self.note_seq.fetch_add(1, Ordering::SeqCst) + 1;
         *self.note.lock().unwrap() = text;
@@ -339,8 +351,6 @@ const WM_MOUSELEAVE: u32 = 0x02A3;
 const WM_APP_GONE: u32 = WM_APP + 1;
 /// A note was put up (wparam: busy, lparam: its number): the window times its fading.
 const WM_APP_NOTE: u32 = WM_APP + 2;
-/// Full screen, as the window it takes over from was.
-const WM_APP_FULL_SCREEN: u32 = WM_APP + 3;
 const RESIZE_TIMER: usize = 1;
 const NOTE_TIMER: usize = 2;
 /// How long a resize must hold before the phone is asked for it: the phone
@@ -438,32 +448,6 @@ fn geometry(cascade: u32, size: Option<(u32, u32)>) -> Geometry {
     }
 }
 
-/// A window where another was (`Window::frame`, the one it takes over from):
-/// the same rectangle, at the scale of the screen it is on.
-fn geometry_at(frame: [f64; 4]) -> Geometry {
-    unsafe {
-        let r = RECT {
-            left: frame[0] as i32,
-            top: frame[1] as i32,
-            right: (frame[0] + frame[2]) as i32,
-            bottom: (frame[1] + frame[3]) as i32,
-        };
-        let monitor = MonitorFromRect(&r, MONITOR_DEFAULTTONEAREST);
-        let (mut dx, mut dy) = (96u32, 96u32);
-        let _ = GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut dx, &mut dy);
-        let dpi = dx.max(96);
-        // The borders Windows adds around a client, as geometry() reckons them —
-        // here taken off the whole window rather than added to a client.
-        let mut b = RECT { left: 0, top: 0, right: 100, bottom: 100 };
-        let _ = AdjustWindowRectExForDpi(&mut b, WS_OVERLAPPEDWINDOW, false, WS_EX_APPWINDOW, dpi);
-        let side = -b.left;
-        let bottom = b.bottom - 100;
-        let (w, h) = (r.right - r.left, r.bottom - r.top);
-        let client = (((w - 2 * side).max(160) as u32) & !1, ((h - bottom).max(160) as u32) & !1);
-        Geometry { x: r.left, y: r.top, w, h, scale: dpi as f32 / 96.0, client }
-    }
-}
-
 fn dark_mode() -> bool {
     unsafe {
         let mut value = 1u32;
@@ -529,10 +513,7 @@ fn ui_thread(spec: Spec, host: Arc<dyn Host>, opened: Sender<Result<Arc<Window>,
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
     }
     register_class();
-    let geo = match spec.frame {
-        Some(frame) => geometry_at(frame),
-        None => geometry(spec.cascade, spec.size),
-    };
+    let geo = geometry(spec.cascade, spec.size);
     let (link, out_rx) = Link::new(spec.clicked, host);
     let shared = Arc::new(Shared {
         link,
@@ -545,8 +526,9 @@ fn ui_thread(spec: Spec, host: Arc<dyn Host>, opened: Sender<Result<Arc<Window>,
         maximized: AtomicBool::new(false),
         dark: AtomicBool::new(dark_mode()),
         label: Mutex::new(spec.label.clone()),
-        // The phone, and how this window reaches it: "Galaxy S25 · USB".
-        device: if spec.device.is_empty() { spec.via.to_string() } else { format!("{} · {}", spec.device, spec.via) },
+        // How this window reaches the phone, and the phone: "USB · Galaxy S25".
+        phone_name: spec.device.clone(),
+        device: Mutex::new(link::way_line(&spec.device, spec.via)),
         message: Mutex::new(Some(format!("Opening on {}…", if spec.device.is_empty() { "your phone" } else { &spec.device }))),
         render: Mutex::new(None),
         linux: spec.linux.is_some(),
@@ -643,19 +625,16 @@ fn ui_thread(spec: Spec, host: Arc<dyn Host>, opened: Sender<Result<Arc<Window>,
         activity: spec.activity.clone(),
         linux: spec.linux,
         direct: spec.direct,
+        via: spec.via,
     };
     link::start(shared.link.clone(), shared.clone(), net, out_rx);
 
     unsafe {
         let _ = ShowWindow(hwnd, SW_SHOWNORMAL);
         let _ = SetForegroundWindow(hwnd);
-        if spec.full_screen {
-            let _ = PostMessageW(Some(hwnd), WM_APP_FULL_SCREEN, WPARAM(0), LPARAM(0));
-        }
     }
     let window = Arc::new(Window {
         id: spec.id,
-        serial: spec.serial.clone(),
         pkg: spec.pkg.clone(),
         label: spec.label.clone(),
         linux: spec.linux,
@@ -1741,10 +1720,6 @@ impl Ui {
                     self.close(hwnd, false);
                     LRESULT(0)
                 }
-                WM_APP_FULL_SCREEN => {
-                    self.enter_full_screen(hwnd);
-                    LRESULT(0)
-                }
                 _ => DefWindowProcW(hwnd, msg, wp, lp),
             }
         }
@@ -1823,9 +1798,10 @@ fn render_thread(shared: Arc<Shared>, rx: Receiver<RenderMsg>, icon: Option<Vec<
             let message = shared.message.lock().unwrap().clone();
             let label = shared.label.lock().unwrap().clone();
             let note = shared.note.lock().unwrap().clone();
+            let device = shared.device.lock().unwrap().clone();
             let look = render::Look {
                 label: &label,
-                device: &shared.device,
+                device: &device,
                 active: shared.active.load(Ordering::SeqCst),
                 maximized: shared.maximized.load(Ordering::SeqCst),
                 hover: Hit::from_code(shared.hover.load(Ordering::SeqCst)),
@@ -1843,8 +1819,9 @@ fn render_thread(shared: Arc<Shared>, rx: Receiver<RenderMsg>, icon: Option<Vec<
             dirty = false;
             if let Some(pts) = unshown_pts.take() {
                 if drawn.is_ok() && r.has_picture() {
-                    // Presented: the first one is the window's "on screen", timed from the click.
-                    if !shared.link.is_live() {
+                    // Presented: the first one is the window's "on screen", timed from
+                    // the click; the first after its connection went, its return.
+                    if !shared.link.is_live() || shared.link.is_lost() {
                         shared.message.lock().unwrap().take();
                         shared.link.shown();
                     }

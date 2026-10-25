@@ -31,6 +31,14 @@ import java.util.List;
  * unless the window asked for the app to be closed with it. When the app itself
  * goes (its last activity finished), the window is told, and closes.
  *
+ * <p>A connection that goes without the window closing — the cable pulled, a
+ * Wi-Fi link that dropped — is not the window's end. The app stays on its
+ * display and the window waits {@link #AWAY_MS} for the computer to come back,
+ * by another way to the phone or the same one, and ask for it by its key
+ * ({@link #attach}): the same display and the same app, its picture again from
+ * a key frame. Only if the computer does not, or the app is opened on the
+ * phone meanwhile, does the window end as it would have, the app handed back.
+ *
  * <p>The pace, the bitrate's rule and their numbers are the desktop stream's
  * (doc/apps-on-pc.md, "The pace"; LinuxStream's before it): the newest
  * frame goes into the encoder once the encoder holds fewer than two and the link
@@ -73,13 +81,27 @@ final class AppWindow implements LinuxStreamEncoder.Output, AppVideo.Gate {
     private static final long GONE_AFTER_MS = 900;
     /** A launch that has put nothing on the display after this long went somewhere else. */
     private static final long NEVER_CAME_MS = 12_000;
+    /**
+     * How long a window whose connection went keeps its app on its display for
+     * the computer to come back to: a Samsung phone's adbd is back about 3 s
+     * after the cable goes, Wi-Fi debugging a few seconds after that. Longer,
+     * and the phone may be in its owner's hand: the app is theirs again.
+     */
+    static final long AWAY_MS = 30_000;
 
     private final AppServer server;
-    private final LocalSocket sock;
-    private final Wire wire;
+    /** The computer's connection now; another replaces it when the computer comes back another way. */
+    private volatile LocalSocket sock;
+    private volatile Wire wire;
     private final JSONObject open;
     private final int serial;
+    /** What the computer calls this window, to come back to it on a new connection; empty, it cannot. */
+    final String key;
     volatile boolean closing;
+    /** The connection went without the window closing: it waits for the computer to come back. */
+    private volatile boolean away;
+    /** It ended while away: its app opened on the phone, or the computer did not come back in time. */
+    volatile boolean endedAway;
 
     private AppVideo video;
     private VirtualDisplay display;
@@ -92,6 +114,8 @@ final class AppWindow implements LinuxStreamEncoder.Output, AppVideo.Gate {
     private volatile int width;
     private volatile int height;
     private volatile int dpi;
+    /** Whether the phone made the display trusted: said again to a computer that comes back. */
+    private boolean trusted;
     /** What the window wants done with the app when it closes: "phone" hands it back, "close" ends it. */
     private volatile String onClose = "phone";
     /** On a cable: the display draws straight into the encoder (AppVideo#direct). */
@@ -145,14 +169,30 @@ final class AppWindow implements LinuxStreamEncoder.Output, AppVideo.Gate {
         this.wire = wire;
         this.open = open;
         this.serial = serial;
+        this.key = open.optString("key", "");
     }
 
     // ── the window's life ──
 
+    /**
+     * The window, on the thread of the connection that opened it: its display
+     * and app, then the computer's input on each connection it has in turn,
+     * until it closes — or a connection goes and the computer does not come back.
+     */
     void run() {
         try {
             begin();
-            inputLoop();
+            while (true) {
+                Wire w = wire;
+                try {
+                    inputLoop(w);
+                } catch (IOException e) {
+                    // the connection went: as its end, below
+                }
+                if (closing) break;
+                if (wire != w) continue; // another connection has it already
+                if (!waitForComputer(w)) break;
+            }
         } catch (Exception e) {
             if (!closing) {
                 AppServer.log("window " + serial + " (" + pkg + "): " + e);
@@ -161,6 +201,120 @@ final class AppWindow implements LinuxStreamEncoder.Output, AppVideo.Gate {
         } finally {
             end();
         }
+    }
+
+    /**
+     * The connection {@code gone} went without the window closing. The app
+     * stays on its display, nothing is encoded for nobody, and the window
+     * waits for the computer to come back on a new connection. False if it
+     * does not in {@link #AWAY_MS}, or the window ends meanwhile.
+     */
+    private boolean waitForComputer(Wire gone) {
+        // A computer that gave no key cannot ask for the window again.
+        if (key.isEmpty()) return false;
+        synchronized (pace) {
+            inFlight = 0;
+            sent = acked = 0;
+            sentAt.clear();
+            linkBlockedSince = 0;
+        }
+        long until;
+        synchronized (this) {
+            if (wire != gone || closing) return !closing;
+            away = true;
+            until = SystemClock.uptimeMillis() + AWAY_MS;
+        }
+        if (input != null) input.releaseAll();
+        AppServer.log("window " + serial + " (" + pkg + "): the computer's connection went; the app stays on its display for "
+                + AWAY_MS / 1000 + " s, for the computer to come back");
+        synchronized (this) {
+            while (wire == gone && !closing) {
+                long left = until - SystemClock.uptimeMillis();
+                if (left <= 0) break;
+                try {
+                    wait(left);
+                } catch (InterruptedException e) {
+                    break;
+                }
+            }
+            if (wire != gone && !closing) return true;
+            if (!closing) {
+                endedAway = true;
+                AppServer.log("window " + serial + " (" + pkg + "): the computer did not come back");
+            }
+        }
+        return false;
+    }
+
+    /**
+     * The computer again, on {@code s} — over another way to the phone, or the
+     * same one back: this window's display and app, its picture from a key
+     * frame on (the one already on the display goes at once). The connection
+     * it replaces, if it is somehow still open, is closed. The link's numbers
+     * are found again: a cable and Wi-Fi carry differently. False if the window
+     * is ending.
+     */
+    boolean attach(LocalSocket s, Wire w, JSONObject req) throws Exception {
+        LocalSocket old;
+        synchronized (this) {
+            if (closing || endedAway) return false;
+            old = sock;
+            sock = s;
+            wire = w;
+            away = false;
+            notifyAll();
+        }
+        // Said on the new connection before the old one closes: the computer
+        // knows the window moved before it sees its last connection end.
+        w.json(new JSONObject().put("t", "attached").put("display", displayId));
+        if (old != s) {
+            // Shut, not only closed: a close does not wake the window's own
+            // thread, blocked reading it, and that thread reads the new one next.
+            shutdownQuietly(old);
+            closeQuietly(old);
+        }
+        inputAt = SystemClock.uptimeMillis();
+        // The next key goes to this window: the computer's keyboard is this window's again.
+        wantsKeys = true;
+        synchronized (pace) {
+            inFlight = 0;
+            sent = acked = 0;
+            sentAt.clear();
+            rttCount = 0;
+            rttMedianNs = -1;
+            minRttNs = Long.MAX_VALUE;
+            linkBlockedSince = 0;
+            linkWaitMs = 0;
+            ackStallLogged = false;
+            keptUp = 0;
+        }
+        sayDisplay();
+        int nw = even(clamp(req.optInt("w", width), MIN_W, MAX_W));
+        int nh = even(clamp(req.optInt("h", height), MIN_H, MAX_H));
+        int nd = clamp(req.optInt("dpi", dpi), 72, 960);
+        boolean wantDirect = req.optBoolean("direct", direct);
+        synchronized (this) {
+            // On a cable the display draws straight into the encoder; over Wi-Fi through the texture, paced.
+            AppVideo old2 = null;
+            if (wantDirect != direct) {
+                old2 = video;
+                video = AppVideo.open(String.valueOf(serial), nw, nh, wantDirect);
+                direct = wantDirect;
+                if (!direct) display.setSurface(video.sink());
+            } else if (nw != width || nh != height) {
+                video.resize(nw, nh);
+            }
+            if (nw != width || nh != height || nd != dpi) display.resize(nw, nh, nd);
+            width = nw;
+            height = nh;
+            dpi = nd;
+            bitrate = ceiling = clamp(req.optInt("bitrate", defaultBitrate(nw, nh)), MIN_BITRATE, MAX_BITRATE);
+            newEncoder();
+            if (old2 != null) old2.close();
+        }
+        AppServer.log("window " + serial + " (" + pkg + "): the computer is back, " + (direct ? "on a cable" : "paced")
+                + ", " + width + "x" + height);
+        return true;
     }
 
     private void begin() throws Exception {
@@ -184,8 +338,9 @@ final class AppWindow implements LinuxStreamEncoder.Output, AppVideo.Gate {
 
         long t0 = SystemClock.uptimeMillis();
         video = AppVideo.open(String.valueOf(serial), width, height, direct);
-        boolean[] trusted = new boolean[1];
-        display = server.createDisplay(width, height, dpi, video.sink(), trusted);
+        boolean[] madeTrusted = new boolean[1];
+        display = server.createDisplay(width, height, dpi, video.sink(), madeTrusted);
+        trusted = madeTrusted[0];
         displayId = display.getDisplay().getDisplayId();
         input = new AppInput(displayId, server.clipboard());
         server.hideIme(displayId);
@@ -193,19 +348,28 @@ final class AppWindow implements LinuxStreamEncoder.Output, AppVideo.Gate {
         // The app first: it takes far longer to draw than the encoder takes to make.
         String how = xid != 0 ? AppTasks.startLinuxWindow(xid, displayId) : AppTasks.start(component, displayId);
         long t2 = SystemClock.uptimeMillis();
-        JSONObject d = new JSONObject();
-        d.put("t", "display").put("id", displayId).put("w", width).put("h", height).put("dpi", dpi)
-                .put("trusted", trusted[0]);
-        if (xid == 0) d.put("label", server.catalog().label(pkg));
-        wire.json(d);
+        sayDisplay();
         newEncoder();
         long t3 = SystemClock.uptimeMillis();
         AppServer.log("window " + serial + ": " + (xid != 0 ? pkg : component.flattenToShortString()) + " on display " + displayId
-                + " (" + width + "x" + height + "/" + dpi + (trusted[0] ? ", trusted" : ", untrusted")
+                + " (" + width + "x" + height + "/" + dpi + (trusted ? ", trusted" : ", untrusted")
                 + (direct ? ", straight into the encoder" : ", paced")
                 + "): display " + (t1 - t0) + " ms, launch " + (t2 - t1) + " ms by " + how
                 + ", encoder " + (t3 - t2) + " ms");
         server.watch(this);
+    }
+
+    /** The window's display, and the app's name, to the computer. */
+    private void sayDisplay() throws IOException {
+        JSONObject d = new JSONObject();
+        try {
+            d.put("t", "display").put("id", displayId).put("w", width).put("h", height).put("dpi", dpi)
+                    .put("trusted", trusted);
+            if (xid == 0) d.put("label", server.catalog().label(pkg));
+        } catch (org.json.JSONException e) {
+            throw new IOException(e);
+        }
+        wire.json(d);
     }
 
     private void end() {
@@ -235,6 +399,7 @@ final class AppWindow implements LinuxStreamEncoder.Output, AppVideo.Gate {
             }
         }
         if (video != null) video.close();
+        if (endedAway) server.endedAway(key);
         AppServer.log("window " + serial + " (" + pkg + ") closed"
                 + (xid != 0 ? ", its app asked to close it" : "close".equals(onClose) ? ", the app with it" : ", the app back on the phone"));
     }
@@ -397,7 +562,10 @@ final class AppWindow implements LinuxStreamEncoder.Output, AppVideo.Gate {
             if (emptySince == 0) {
                 emptySince = now;
             } else if (now - emptySince >= GONE_AFTER_MS) {
-                AppServer.log("window " + serial + ": " + pkg + " closed itself");
+                // While away, the app leaving is its owner opening it on the phone:
+                // a computer that comes back must not take it from their hand.
+                if (away) endedAway = true;
+                AppServer.log("window " + serial + ": " + pkg + (away ? " was opened on the phone while the computer was away" : " closed itself"));
                 state("closed", null);
                 closeAll(null);
                 return false;
@@ -415,13 +583,19 @@ final class AppWindow implements LinuxStreamEncoder.Output, AppVideo.Gate {
         return displayId;
     }
 
+    /** A connection of the computer's is this window's now: it holds the server. */
+    boolean held() {
+        return !away && !closing;
+    }
+
     // ── the pace: which frames go into the encoder (GL thread) ──
 
     @Override
     public long mayDraw() {
         long now = SystemClock.uptimeMillis();
         synchronized (pace) {
-            if (closing) return PACE_MAX_MS;
+            // Nobody to send a frame to: none is drawn until the computer is back.
+            if (closing || away) return PACE_MAX_MS;
             // Not faster than the window asked for: a display that composes at
             // 90 or 120 Hz would otherwise cost the link half as much again.
             long gap = 1000L / fps - 2;
@@ -464,8 +638,27 @@ final class AppWindow implements LinuxStreamEncoder.Output, AppVideo.Gate {
     @Override
     public void packet(byte[] data, int len, long ptsUs, int flags) throws IOException {
         long outUs = System.nanoTime() / 1000;
-        ByteBuffer.wrap(head).put((byte) flags).putLong(ptsUs);
-        wire.send(Wire.VIDEO, head, 9, data, len);
+        Wire w = wire;
+        boolean gone = away;
+        if (!gone) {
+            ByteBuffer.wrap(head).put((byte) flags).putLong(ptsUs);
+            try {
+                w.send(Wire.VIDEO, head, 9, data, len);
+            } catch (IOException e) {
+                // The connection went: the window's own thread finds it gone and
+                // waits for the computer to come back. Not the encoder's end.
+                gone = true;
+                if (w == wire) shutdownQuietly(sock);
+            }
+        }
+        if (gone) {
+            if (!direct) {
+                synchronized (pace) {
+                    if (inFlight > 0) inFlight--;
+                }
+            }
+            return;
+        }
         if ((flags & LinuxStreamEncoder.FLAG_CONFIG) != 0) return;
         if (!direct) {
             synchronized (pace) {
@@ -561,9 +754,10 @@ final class AppWindow implements LinuxStreamEncoder.Output, AppVideo.Gate {
 
     // ── the window's input ──
 
-    private void inputLoop() throws IOException {
+    /** The computer's input on {@code from}, until it ends or the window closes. */
+    private void inputLoop(Wire from) throws IOException {
         while (!closing) {
-            Wire.Msg m = wire.read();
+            Wire.Msg m = from.read();
             if (m == null) return;
             byte[] d = m.data;
             // Someone using the window, not the window's own bookkeeping: an ack,
@@ -729,12 +923,29 @@ final class AppWindow implements LinuxStreamEncoder.Output, AppVideo.Gate {
         if (closing) return;
         closing = true;
         if (why != null) AppServer.log("window " + serial + ": " + why);
+        LocalSocket s = sock;
+        shutdownQuietly(s);
+        closeQuietly(s);
+        synchronized (this) {
+            notifyAll();
+        }
+    }
+
+    /** Both ways: a thread reading it wakes, and the other end sees it end. */
+    private static void shutdownQuietly(LocalSocket s) {
         try {
-            sock.shutdownInput();
+            s.shutdownInput();
         } catch (IOException ignored) {
         }
         try {
-            sock.close();
+            s.shutdownOutput();
+        } catch (IOException ignored) {
+        }
+    }
+
+    private static void closeQuietly(LocalSocket s) {
+        try {
+            s.close();
         } catch (IOException ignored) {
         }
     }

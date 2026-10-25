@@ -157,6 +157,11 @@ half a second.
   Press Esc to get your window back
 - **Close the window and the app goes back to your phone,** right where you
   left it. Whatever was on your phone's screen stays there
+- **Unplug and carry on.** If your phone is on Wi‑Fi here too, pulling the
+  cable doesn't close anything: each window keeps going over Wi‑Fi, and moves
+  back to the cable when you plug it in again. The title bar says which one
+  it's using. With no way back at all, the window waits half a minute for
+  your phone before giving the app back to it
 - **It is light.** Only the app you are looking at gets sent, and an app that is
   sitting still costs next to nothing. Your phone does not have to run a
   desktop at all

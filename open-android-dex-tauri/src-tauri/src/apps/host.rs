@@ -2,10 +2,13 @@
 //! one connection that is the phone's as a whole (doc/apps-on-pc.md).
 //!
 //! One server per phone, started once — the window daemon's dex under
-//! `app_process` as the shell, `AppServer` — and held by the `adb shell` that
-//! started it: the server ends when that shell's stdin closes, so this app
-//! ending ends it, and every app on its displays goes back to the phone. It is
-//! started as soon as the Apps page is looked at, so the JVM it is (over a
+//! `app_process` as the shell, `AppServer` — and told to stop when this app
+//! is done with it, every app on its displays going back to the phone. The
+//! adb shell that started it closing is not that: the cable may have been
+//! pulled with Wi-Fi still there, and the server waits for this computer to
+//! come back another way — its control connection made again over Wi-Fi
+//! ([`ensure`] adopts it), its windows taken back by their keys (link.rs). It
+//! is started as soon as the Apps page is looked at, so the JVM it is (over a
 //! second to start on a Galaxy A13) is up before anyone clicks; opening an app
 //! after that costs a display, a launch and an encoder.
 //!
@@ -13,11 +16,11 @@
 //! clipboard, where the phone's sound plays and the phone's clock. Requests
 //! on it are one at a time.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpStream;
 use std::process::{Child, ChildStdin, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
@@ -68,14 +71,21 @@ enum Answer {
 pub struct Server {
     pub socket: String,
     pub hello: Hello,
+    /// Every adb serial this computer has reached it by: what [`running`] finds it by.
+    ways: Mutex<HashSet<String>>,
     child: Mutex<Option<Child>>,
-    /// Held: the server lives exactly as long as this does.
+    /// Its adb shell's stdin: "stop" on it is this computer done with the server.
     stdin: Mutex<Option<ChildStdin>>,
     control: Mutex<TcpStream>,
     answers: Mutex<Receiver<Answer>>,
+    /// What a control connection made again hands the answers it reads to.
+    answer_tx: Mutex<Sender<Answer>>,
     /// One request at a time on the control connection.
     asking: Mutex<()>,
+    /// Its control connection is up.
     alive: Arc<AtomicBool>,
+    /// Which control connection is the server's: the reader of one replaced ends quietly.
+    control_gen: Arc<AtomicU64>,
     /// The phone's text last handed over either way, so neither side gets its own back.
     pub clip_last: Arc<Mutex<String>>,
     /// What the phone last said of its sound outputs: it says so as they come and go.
@@ -85,6 +95,47 @@ pub struct Server {
 impl Server {
     pub fn alive(&self) -> bool {
         self.alive.load(Ordering::SeqCst)
+    }
+
+    /// The server is reached by `serial` too: a window's connection goes that way.
+    pub fn reached_by(&self, serial: &str) {
+        self.ways.lock().unwrap().insert(serial.to_string());
+    }
+
+    fn reaches(&self, serial: &str) -> bool {
+        self.ways.lock().unwrap().contains(serial)
+    }
+
+    /// The control connection made again, over `serial`: the server outlived
+    /// the way its last one took (the cable pulled) and waits for this computer.
+    fn reconnect_control(&self, app: &tauri::AppHandle, serial: &str) -> Result<(), String> {
+        let mut control = adbsock::connect(serial, &self.socket)?;
+        control
+            .write_all(&wire::json(&json!({"t": "control"})))
+            .map_err(|e| format!("the phone's app server: {e}"))?;
+        let _ = control.set_read_timeout(Some(Duration::from_secs(5)));
+        match wire::read(&mut control) {
+            Ok(Some(m)) if m.kind == wire::JSON => {}
+            _ => return Err("the phone's app server did not say hello".into()),
+        }
+        let _ = control.set_read_timeout(None);
+        let reader = control.try_clone().map_err(|e| e.to_string())?;
+        let generation = self.control_gen.fetch_add(1, Ordering::SeqCst) + 1;
+        *self.control.lock().unwrap() = control;
+        self.reached_by(serial);
+        self.alive.store(true, Ordering::SeqCst);
+        spawn_control_reader(
+            app.clone(),
+            serial.to_string(),
+            reader,
+            self.answer_tx.lock().unwrap().clone(),
+            self.alive.clone(),
+            self.control_gen.clone(),
+            generation,
+            self.clip_last.clone(),
+            self.sound.clone(),
+        );
+        Ok(())
     }
 
     /// This computer's clipboard for the phone's next paste, on the phone's own
@@ -232,9 +283,14 @@ impl Server {
     }
 
     fn stop(&self) {
+        // Said both ways it may still be heard: its stdin, and the control
+        // connection — which is the one left after the cable that started it went.
+        let _ = self.send(&json!({"t": "stop"}));
         self.alive.store(false, Ordering::SeqCst);
-        // Closing its stdin is what ends it; the kill is for an adb that hangs.
-        self.stdin.lock().unwrap().take();
+        if let Some(mut stdin) = self.stdin.lock().unwrap().take() {
+            let _ = stdin.write_all(b"stop\n");
+            let _ = stdin.flush();
+        }
         if let Some(mut c) = self.child.lock().unwrap().take() {
             thread::spawn(move || {
                 let until = Instant::now() + Duration::from_secs(2);
@@ -252,6 +308,7 @@ impl Server {
     }
 }
 
+/// Each phone's server, by the phone.
 fn servers() -> &'static Mutex<HashMap<String, Arc<Server>>> {
     static S: OnceLock<Mutex<HashMap<String, Arc<Server>>>> = OnceLock::new();
     S.get_or_init(Default::default)
@@ -263,42 +320,61 @@ fn starting() -> &'static Mutex<()> {
     S.get_or_init(Default::default)
 }
 
-/// The phone's server, started if it is not running — and, started now,
-/// warmed up for the windows to come.
-pub fn ensure(app: &tauri::AppHandle, serial: &str) -> Result<Arc<Server>, String> {
-    ensure_with(app, serial, true)
+/// `phone`'s server, reached over `serial`: the one running — adopted over
+/// `serial` if it lost its control connection with the way that took (the
+/// cable pulled) — else one started now, and warmed up for the windows to come.
+pub fn ensure(app: &tauri::AppHandle, serial: &str, phone: &str) -> Result<Arc<Server>, String> {
+    ensure_with(app, serial, phone, true)
 }
 
-/// The phone's server for a window that is waiting now: started without the
-/// warm-up if it is not running, since the window pays for that itself.
-pub fn ensure_for_window(app: &tauri::AppHandle, serial: &str) -> Result<Arc<Server>, String> {
-    ensure_with(app, serial, false)
+/// [`ensure`] for a window that is waiting now: a server started for it
+/// skips the warm-up, since the window pays for that itself.
+pub fn ensure_for_window(app: &tauri::AppHandle, serial: &str, phone: &str) -> Result<Arc<Server>, String> {
+    ensure_with(app, serial, phone, false)
 }
 
-fn ensure_with(app: &tauri::AppHandle, serial: &str, warm: bool) -> Result<Arc<Server>, String> {
-    if let Some(s) = running(serial) {
+fn ensure_with(app: &tauri::AppHandle, serial: &str, phone: &str, warm: bool) -> Result<Arc<Server>, String> {
+    if let Some(s) = adopt(app, serial, phone) {
         return Ok(s);
     }
     let _one = starting().lock().unwrap();
-    if let Some(s) = running(serial) {
+    // Started for another window meanwhile.
+    if let Some(s) = servers().lock().unwrap().get(phone).filter(|s| s.alive()).cloned() {
+        s.reached_by(serial);
         return Ok(s);
     }
     let s = Arc::new(start(app, serial, warm)?);
-    servers().lock().unwrap().insert(serial.to_string(), s.clone());
+    servers().lock().unwrap().insert(phone.to_string(), s.clone());
     Ok(s)
 }
 
-/// The phone's server if it is up.
-pub fn running(serial: &str) -> Option<Arc<Server>> {
-    let mut map = servers().lock().unwrap();
-    match map.get(serial) {
-        Some(s) if s.alive() => Some(s.clone()),
-        Some(_) => {
-            map.remove(serial);
+/// `phone`'s server reached over `serial`, if there is one to reach: up, or
+/// only without its control connection since the way that took went (the
+/// cable pulled) — the same server, which keeps every window it has. Never
+/// one started anew.
+pub fn adopt(app: &tauri::AppHandle, serial: &str, phone: &str) -> Option<Arc<Server>> {
+    let _one = starting().lock().unwrap();
+    let s = servers().lock().unwrap().get(phone).cloned()?;
+    if s.alive() {
+        s.reached_by(serial);
+        return Some(s);
+    }
+    match s.reconnect_control(app, serial) {
+        Ok(()) => {
+            log::info!("apps [{serial}] the phone's app server is reached this way now");
+            Some(s)
+        }
+        Err(e) => {
+            log::info!("apps [{serial}] the phone's app server has gone ({e})");
+            servers().lock().unwrap().remove(phone);
             None
         }
-        None => None,
     }
+}
+
+/// The server that `serial` reaches, if it is up.
+pub fn running(serial: &str) -> Option<Arc<Server>> {
+    servers().lock().unwrap().values().find(|s| s.alive() && s.reaches(serial)).cloned()
 }
 
 /// Every phone's server stops: this app is exiting.
@@ -330,8 +406,9 @@ fn start(app: &tauri::AppHandle, serial: &str, warm: bool) -> Result<Server, Str
     // SIGHUP ignored: when the link drops (the cable pulled, adbd restarting)
     // adbd hangs the server up, which would end it on the spot and leave its
     // apps on top of the phone's screen. Ignoring it, the server sees its
-    // stdin close instead and stops as it does when this app quits, every app
-    // handed back behind what the phone shows.
+    // stdin close instead, and waits for this computer to come back another
+    // way; only if it does not are the apps handed back behind what the phone
+    // shows.
     cmd.args([
         "-s",
         serial,
@@ -373,9 +450,11 @@ fn start(app: &tauri::AppHandle, serial: &str, warm: bool) -> Result<Server, Str
                         }
                     }
                 }
-                alive.store(false, Ordering::SeqCst);
-                log::info!("apps [{serial}] the phone's app server has ended");
+                // The way this shell took has gone — the server's own end, or only the
+                // cable's: its control connection says which.
+                log::info!("apps [{serial}] the adb shell that started the phone's app server has ended");
                 if let Some(tx) = ready.take() {
+                    alive.store(false, Ordering::SeqCst);
                     let _ = tx.send(Err("the phone's app server ended before it was ready".into()));
                 }
             })
@@ -423,13 +502,16 @@ fn start(app: &tauri::AppHandle, serial: &str, warm: bool) -> Result<Server, Str
     let (answer_tx, answer_rx) = mpsc::channel::<Answer>();
     let clip_last = Arc::new(Mutex::new(String::new()));
     let sound = Arc::new(Mutex::new(None));
+    let control_gen = Arc::new(AtomicU64::new(0));
     let reader = control.try_clone().map_err(|e| e.to_string())?;
     spawn_control_reader(
         app.clone(),
         serial.to_string(),
         reader,
-        answer_tx,
+        answer_tx.clone(),
         alive.clone(),
+        control_gen.clone(),
+        0,
         clip_last.clone(),
         sound.clone(),
     );
@@ -445,12 +527,15 @@ fn start(app: &tauri::AppHandle, serial: &str, warm: bool) -> Result<Server, Str
     Ok(Server {
         socket,
         hello,
+        ways: Mutex::new(HashSet::from([serial.to_string()])),
         child: Mutex::new(Some(child)),
         stdin: Mutex::new(stdin),
         control: Mutex::new(control),
         answers: Mutex::new(answer_rx),
+        answer_tx: Mutex::new(answer_tx),
         asking: Mutex::new(()),
         alive,
+        control_gen,
         clip_last,
         sound,
     })
@@ -458,12 +543,17 @@ fn start(app: &tauri::AppHandle, serial: &str, warm: bool) -> Result<Server, Str
 
 /// What the phone sends on its own: answers go to whoever asked, the
 /// clipboard straight to this computer's, word of its sound to the menus.
+/// The server is no longer reached once this ends, unless a control
+/// connection made again (generation after `generation`) has it.
+#[allow(clippy::too_many_arguments)]
 fn spawn_control_reader(
     app: tauri::AppHandle,
     serial: String,
     mut stream: TcpStream,
     answers: Sender<Answer>,
     alive: Arc<AtomicBool>,
+    control_gen: Arc<AtomicU64>,
+    generation: u64,
     clip_last: Arc<Mutex<String>>,
     sound: Arc<Mutex<Option<PhoneSound>>>,
 ) {
@@ -497,6 +587,8 @@ fn spawn_control_reader(
                             let _ = answers.send(Answer::Routed(v));
                         }
                         Some("linux") => super::linux_event(&app, &serial, &v),
+                        // The server's own log, once the shell it printed to has gone with its cable.
+                        Some("log") => log::info!("apps [{serial}] {}", v["line"].as_str().unwrap_or("")),
                         Some("clip") => {
                             let text = v["text"].as_str().unwrap_or("").to_string();
                             if text.is_empty() {
@@ -530,7 +622,9 @@ fn spawn_control_reader(
                 _ => {}
             }
         }
-        alive.store(false, Ordering::SeqCst);
-        log::info!("apps [{serial}] the control connection closed");
+        if control_gen.load(Ordering::SeqCst) == generation {
+            alive.store(false, Ordering::SeqCst);
+            log::info!("apps [{serial}] the control connection closed");
+        }
     });
 }

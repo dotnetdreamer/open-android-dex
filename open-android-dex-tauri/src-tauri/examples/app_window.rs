@@ -9,7 +9,7 @@
 
 #[cfg(windows)]
 fn main() {
-    use std::io::{BufRead, BufReader};
+    use std::io::{BufRead, BufReader, Write};
     use std::process::{Command, Stdio};
 
     struct Log;
@@ -67,9 +67,13 @@ fn main() {
     rx.recv_timeout(std::time::Duration::from_secs(15)).expect("the phone's app server did not start");
     let r = open_android_dex_tauri_lib::app_window_probe(serial, &socket, pkg, &label, None);
     eprintln!("window closed: {r:?}");
-    drop(child.stdin.take());
+    // Said, not just hung up on: a server whose shell only closes waits for its computer to come back.
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(b"stop\n");
+    }
     std::thread::sleep(std::time::Duration::from_millis(800));
     let _ = child.kill();
+    let _ = child.wait();
 }
 
 #[cfg(not(windows))]

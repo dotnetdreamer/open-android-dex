@@ -1105,12 +1105,24 @@ pub fn wireless_reconnect_known(
     app: tauri::AppHandle,
     only: Option<String>,
 ) -> Result<Vec<String>, String> {
-    let known: Vec<KnownDevice> = load(&app)
-        .into_iter()
-        .filter(|d| only.as_deref().is_none_or(|a| a == d.address))
-        .collect();
+    Ok(reconnect_where(&app, |d| only.as_deref().is_none_or(|a| a == d.address)))
+}
+
+/// `phone`'s Wi-Fi link made again (its `ro.serialno`), if this computer
+/// remembers how to reach it — what an app window waiting for its phone asks
+/// for: after a Samsung phone's adbd restarted as the cable went, nothing
+/// else brings its wireless transport back, and a pairing's port may have
+/// moved. The serials it is attached as now.
+pub fn reconnect_phone(app: &tauri::AppHandle, phone: &str) -> Vec<String> {
+    reconnect_where(app, |d| d.hardware_serial.as_deref() == Some(phone))
+}
+
+/// The remembered phones `keep` says, connected again: [`wireless_reconnect_known`].
+fn reconnect_where(app: &tauri::AppHandle, keep: impl Fn(&KnownDevice) -> bool) -> Vec<String> {
+    let app = app.clone();
+    let known: Vec<KnownDevice> = load(&app).into_iter().filter(|d| keep(d)).collect();
     if known.is_empty() {
-        return Ok(Vec::new());
+        return Vec::new();
     }
     log::info!("wireless: trying {} remembered phone(s)", known.len());
 
@@ -1162,7 +1174,7 @@ pub fn wireless_reconnect_known(
     }
 
     already.extend(handles.into_iter().filter_map(|h| h.join().ok().flatten()));
-    Ok(already)
+    already
 }
 
 /// Drop a wireless transport. The phone keeps listening; this end just stops
