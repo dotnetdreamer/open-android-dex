@@ -1510,6 +1510,15 @@ pub fn restore_phone(app: &tauri::AppHandle, serial: &str) {
          pm revoke {LAUNCHER_PACKAGE} android.permission.WRITE_SECURE_SETTINGS; "
     ));
 
+    // 3a. the touchpad notification's permission, Android 13 and later — but only
+    //     when it was ours to give (grant_post_notifications). A runtime permission's
+    //     revoke may end the app's processes; step 5 force-stops them anyway.
+    if post_notifications_grant_is_ours(app, serial) {
+        script.push_str(&format!(
+            "pm revoke {LAUNCHER_PACKAGE} android.permission.POST_NOTIFICATIONS; "
+        ));
+    }
+
     // 3b. the battery-optimisation exemption, for the same reason: the user
     //     never asked for it, and unlike the app-ops the doze whitelist
     //     SURVIVES A REBOOT — left behind, it would keep a package the phone
@@ -2082,6 +2091,7 @@ pub fn adb_start_launcher(
         Ok(_) => log::info!("WRITE_SECURE_SETTINGS granted — the launcher can undo the session if the cable is pulled"),
         Err(e) => log::warn!("WRITE_SECURE_SETTINGS not granted ({e}) — a pulled cable leaves the undo to the window daemon"),
     }
+    grant_post_notifications(&app, &serial);
     // Shared-folder permission, for the Linux feature's /sdcard/LinuxOnDeX.
     //
     // MediaProvider gates TOP-LEVEL names on shared storage, so the launcher
@@ -2555,6 +2565,82 @@ fn enable_notification_listener(app: &tauri::AppHandle, serial: &str) {
              offer the phone's own screen for it instead"
         );
     }
+}
+
+/// Let the launcher post notifications of its own, from Android 13 — above all the
+/// one that offers the phone's screen as the desktop's touchpad (TouchpadNotice in
+/// the launcher), which is how anyone finds out the phone can be one.
+///
+/// A runtime permission, which the user normally gives on the phone. A DeX session
+/// asks the phone nothing — every other grant here is given over adb — so this one is
+/// given the same way, and [`restore_phone`] takes it back only when it was this app
+/// that gave it, by the record notification access keeps ([`remember_grant`]).
+///
+/// An answer the user has already given stands, either way. Granted is theirs to
+/// keep. Refused — USER_SET or USER_FIXED on a permission that is not granted — is
+/// theirs too: the shell could override it, which is the one thing this must not do.
+/// Without the grant the notification is simply not shown, and quick settings on the
+/// desktop still opens the touchpad.
+///
+/// Below Android 13 there is no such runtime permission, its line is missing from
+/// the package dump, and nothing happens.
+fn grant_post_notifications(app: &tauri::AppHandle, serial: &str) {
+    const PERMISSION: &str = "android.permission.POST_NOTIFICATIONS";
+    // The colon is what picks out a permission STATE line ("…: granted=false,
+    // flags=[…]"); the "requested permissions:" list names it bare. The first is user
+    // 0's, which is the user a session runs for.
+    let state = run_adb_quiet(
+        app,
+        &[
+            "-s",
+            serial,
+            "shell",
+            // `|| true`: no line is the normal answer below Android 13, not a failure
+            // worth a warning on every connect.
+            &format!("dumpsys package {LAUNCHER_PACKAGE} | grep -m1 '{PERMISSION}:' || true"),
+        ],
+    )
+    .unwrap_or_default();
+    let state = state.trim();
+    if state.is_empty() {
+        return;
+    }
+    if state.contains("granted=true") {
+        remember_grant(app, serial, POST_NOTIFICATIONS_GRANT_KEY, false);
+        log::info!("notifications were already allowed for the launcher on {serial} — leaving them alone");
+        return;
+    }
+    if state.contains("USER_SET") || state.contains("USER_FIXED") {
+        log::info!(
+            "the launcher's notifications were turned off on {serial} by its owner — \
+             left off, so the touchpad is offered from the desktop's quick settings only"
+        );
+        return;
+    }
+    match run_adb(
+        app,
+        &["-s", serial, "shell", &format!("pm grant {LAUNCHER_PACKAGE} {PERMISSION}")],
+    ) {
+        Ok(_) => {
+            remember_grant(app, serial, POST_NOTIFICATIONS_GRANT_KEY, true);
+            log::info!("POST_NOTIFICATIONS granted — the phone can offer itself as the desktop's touchpad");
+        }
+        Err(e) => log::warn!(
+            "POST_NOTIFICATIONS not granted ({e}) — the touchpad is offered from the \
+             desktop's quick settings only"
+        ),
+    }
+}
+
+/// Key in the per-serial restore map: "1" when THIS app allowed the launcher's
+/// notifications — see [`grant_post_notifications`].
+const POST_NOTIFICATIONS_GRANT_KEY: &str = "post_notifications_granted_by_us";
+
+fn post_notifications_grant_is_ours(app: &tauri::AppHandle, serial: &str) -> bool {
+    load_restore_map(app)
+        .get(&restore_key(app, serial))
+        .and_then(|saved| saved.get(POST_NOTIFICATIONS_GRANT_KEY))
+        .is_some_and(|v| v == "1")
 }
 
 /// Key in the per-serial restore map: "1" when THIS app turned notification

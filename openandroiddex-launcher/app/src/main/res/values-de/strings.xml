@@ -268,6 +268,19 @@
     <string name="lx_pad_no_service">Der Zeiger kann erst klicken, wenn Open Android DeX in den Bedienungshilfen aktiviert ist.</string>
     <string name="lx_pad_failed">Das Touchpad konnte nicht geöffnet werden.</string>
 
+    <string name="tp_channel">Touchpad</string>
+    <string name="tp_notice_title">Telefon als Touchpad nutzen</string>
+    <string name="tp_notice_text">Tippen, um von diesem Bildschirm aus auf dem Desktop zu zeigen, zu klicken und zu scrollen</string>
+    <string name="tp_hints">Ein Finger bewegt den Zeiger · Tippen zum Klicken\nMit zwei Fingern tippen oder einen Finger stillhalten für einen Rechtsklick\nDoppelt tippen und ziehen zum Ziehen · Zwei Finger zum Scrollen\nDrei Finger wischen oder tippen für deine Gesten</string>
+    <string name="tp_close">Touchpad schließen</string>
+    <string name="tp_options">Touchpad-Optionen</string>
+    <string name="tp_waiting">Warte auf den Desktop…</string>
+    <string name="tp_no_desktop">Kein Computer zeigt gerade den Desktop an, also hat das Touchpad nichts zu bewegen.</string>
+    <string name="st_phonepad">Telefon als Touchpad</string>
+    <string name="st_phonepad_sub">Eine Benachrichtigung auf deinem Telefon macht seinen Bildschirm zum Touchpad für diesen Desktop</string>
+    <string name="st_phonepad_note">Öffne es über diese Benachrichtigung oder über „Touchpad“ in den Schnelleinstellungen. Ein Finger zeigt und klickt, zwei scrollen, drei lösen die Gesten unten aus.</string>
+    <string name="st_gestures_both">Diese Gesten gelten auf dem Touchpad deines Laptops genauso wie auf dem deines Telefons.</string>
+
     <!-- Phone: who owns the Home button -->
     <string name="lx_home_title">Home hierher zurückholen?</string>
     <string name="lx_home_body">Home und die Wischgeste nach oben führen zum Launcher des Telefons — eine App zu verlassen verlässt also den Desktop. Mach Open Android DeX zur Home-App, dann kommen beide hierher zurück. Zurück tut das schon.</string>

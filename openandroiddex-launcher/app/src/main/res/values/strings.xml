@@ -179,10 +179,14 @@
     <string name="st_cursor_render_note">Held means the pointer stays inside the desktop window: a phone-drawn cursor is a relative mouse, and it only moves while the pointer is held. Press Alt (or Super) to hand the mouse back to the computer.</string>
     <string name="st_touchpad">Touchpad gestures</string>
     <string name="st_touchpad_sub">Use three fingers on your laptop\'s touchpad to drive the desktop</string>
-    <string name="st_touchpad_none">No touchpad was found on the connected computer, so nothing here does anything yet. A mouse wheel and right-click already work without it.</string>
+    <string name="st_touchpad_none">No touchpad was found on the connected computer, so this switch does nothing yet. A mouse wheel and right-click already work without it, and your phone\'s touchpad uses the gestures below.</string>
     <string name="st_touchpad_permission">The desktop app cannot read your trackpad until you allow it: System Settings → Privacy &amp; Security → Accessibility.</string>
     <string name="st_touchpad_takeover">While the desktop is open, your computer\'s own three-finger gestures are switched off so they do not fire alongside these, and switched back on when it closes. Four-finger gestures are left alone. On Windows, if the computer still switches apps behind the desktop, sign out of Windows once.</string>
     <string name="st_touchpad_live">Changes here apply to your next swipe — this section needs no restart.</string>
+    <string name="st_phonepad">Phone as a touchpad</string>
+    <string name="st_phonepad_sub">A notification on your phone turns its screen into a touchpad for this desktop</string>
+    <string name="st_phonepad_note">Open it from that notification, or from Touchpad in quick settings. One finger points and clicks, two scroll, and three run the gestures below.</string>
+    <string name="st_gestures_both">These gestures are the same on your laptop\'s touchpad and on your phone\'s.</string>
     <string name="st_gesture_3up">Swipe up with three fingers</string>
     <string name="st_gesture_3down">Swipe down with three fingers</string>
     <string name="st_gesture_3left">Swipe left with three fingers</string>
@@ -398,6 +402,16 @@
     <string name="lx_pad_no_overlay">The touchpad needs permission to draw over other apps.</string>
     <string name="lx_pad_no_service">The pointer cannot click until Open Android DeX is turned on in Accessibility.</string>
     <string name="lx_pad_failed">The touchpad could not be opened.</string>
+
+    <!-- The phone's screen as the desktop's touchpad, while a computer shows the desktop -->
+    <string name="tp_channel">Touchpad</string>
+    <string name="tp_notice_title">Use your phone as a touchpad</string>
+    <string name="tp_notice_text">Tap to point, click and scroll on your desktop from this screen</string>
+    <string name="tp_hints">Slide one finger to move · Tap to click\nTap with two fingers, or hold one still, to right-click\nDouble-tap and slide to drag · Two fingers scroll\nThree fingers swipe or tap for your gestures</string>
+    <string name="tp_close">Close the touchpad</string>
+    <string name="tp_options">Touchpad options</string>
+    <string name="tp_waiting">Waiting for the desktop…</string>
+    <string name="tp_no_desktop">No computer is showing the desktop, so there is nothing for the touchpad to move.</string>
 
     <!-- Phone: who owns the Home button -->
     <string name="lx_home_title">Bring Home back here?</string>

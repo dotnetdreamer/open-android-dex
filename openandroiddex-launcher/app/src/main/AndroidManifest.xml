@@ -411,6 +411,26 @@
             android:resizeableActivity="true"
             android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|navigation|uiMode" />
 
+        <!-- What the touchpad's notification opens (TouchpadNotice): it puts the phone's
+             own screen up as the desktop's touchpad — an overlay window, see Touchpad and
+             doc/phone-touchpad.md — and finishes before it draws. A trampoline because a
+             notification that opens an activity is one the shade closes itself for.
+
+             It owns a task, is out of Recents and draws nothing — the task-shaped hole
+             LinuxAppActivity and WebConsentActivity are, under an affinity of its own for
+             the reason SettingsActivity spells out. -->
+        <activity
+            android:name=".TouchpadActivity"
+            android:exported="false"
+            android:label="@string/lx_pad_title"
+            android:launchMode="singleTask"
+            android:taskAffinity="com.ccrstech.openandroiddex.launcher.touchpad"
+            android:theme="@style/Theme.OpenAndroidDeX.Detour"
+            android:excludeFromRecents="true"
+            android:autoRemoveFromRecents="true"
+            android:resizeableActivity="true"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|density|keyboard|keyboardHidden|navigation|uiMode|locale|layoutDirection|fontScale" />
+
         <!-- Trampoline for the widget flow's two system detours (the bind
              confirmation, the provider's configure screen). It exists only to
              own a TASK: an activity started FOR A RESULT lands in the CALLER's

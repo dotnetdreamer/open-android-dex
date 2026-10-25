@@ -106,6 +106,12 @@ at your monitor's size, sitting next to your other windows.
   and Decline**, so you never have to go and find the handset
 - **Volume and what's playing** in the quick settings panel. Sliders for media
   and ringer, and play, pause and skip for whatever the phone is playing
+- **Your phone as a touchpad.** While the desktop is open, a notification on the
+  phone turns its screen into a touchpad for it: slide a finger to move the
+  pointer, tap to click, two fingers to scroll or right-click, and three-finger
+  swipes for the gestures you have chosen — show what is open, clear to the
+  desktop, step through your windows. It is under Touchpad in quick settings
+  too
 - **Proper windows.** Every app gets a title bar with close, minimise, maximise
   and snap left or right. Drag them where you want. Resize them from a corner.
   Put two apps side by side and get something done
@@ -280,7 +286,7 @@ and no restart.
   French, German and Portuguese, or just follow whatever your phone is set to
 - **Mouse pointers.** Pick a shape, a colour, an outline and a size
 - **Trackpad gestures.** Five three finger gestures, and you choose what each
-  one does
+  one does — on your laptop's touchpad and on your phone's
 - **Picture quality.** Resolution, frame rate, sharpness and sound, so you can
   trade smoothness for battery life on an older phone
 - **Text size, window behaviour and clipboard sharing**, among others

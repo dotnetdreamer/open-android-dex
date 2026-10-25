@@ -137,6 +137,68 @@ final class Wm {
     }
 
     /**
+     * Every running task on every display, with its id, display, token and what it shows —
+     * and nothing else filled in.
+     *
+     * For the callers that must work on Android 11 too. The root-task calls above are
+     * Android 12's; {@code getTasks} answers on every release and has carried each task's
+     * token since Android 11 (read on a Redmi 9A, Android 11, and a Galaxy A13, Android 12).
+     * Its parameters are what moved: (int) on 11, (int, boolean, boolean) on 12, and later
+     * releases append a display to filter by. So it is bound by its name and its leading
+     * int, with every filter left at "everything": false for a boolean, -1 for any further
+     * int (INVALID_DISPLAY, which is "any display" to the one that takes it).
+     */
+    static List<TaskRec> runningTasks() {
+        Object atm = atm();
+        for (java.lang.reflect.Method m : atm.getClass().getMethods()) {
+            if (!m.getName().equals("getTasks")) continue;
+            Class<?>[] p = m.getParameterTypes();
+            if (p.length == 0 || p[0] != int.class) continue;
+            Object[] args = new Object[p.length];
+            args[0] = RUNNING_TASKS_MAX;
+            boolean bound = true;
+            for (int i = 1; i < p.length && bound; i++) {
+                if (p[i] == boolean.class) {
+                    args[i] = false;
+                } else if (p[i] == int.class) {
+                    args[i] = -1;
+                } else {
+                    bound = false;
+                }
+            }
+            if (!bound) continue;
+            List<?> infos;
+            try {
+                infos = (List<?>) m.invoke(atm, args);
+            } catch (Throwable t) {
+                Throwable cause = t.getCause() != null ? t.getCause() : t;
+                throw new Refl.WmError("getTasks: " + cause);
+            }
+            List<TaskRec> out = new ArrayList<>();
+            if (infos == null) return out;
+            for (Object info : infos) {
+                TaskRec t = new TaskRec();
+                t.info = info;
+                t.taskId = (Integer) Refl.field(info, "taskId");
+                t.displayId = (Integer) Refl.field(info, "displayId");
+                t.token = Refl.field(info, "token");
+                ComponentName top = (ComponentName) Refl.field(info, "topActivity");
+                if (top == null) top = (ComponentName) Refl.field(info, "baseActivity");
+                if (top != null) {
+                    t.pkg = top.getPackageName();
+                    t.activity = top.getClassName();
+                }
+                out.add(t);
+            }
+            return out;
+        }
+        throw new Refl.WmError("no getTasks this daemon can call");
+    }
+
+    /** Enough for every task a phone has running; the list comes most recently used first. */
+    private static final int RUNNING_TASKS_MAX = 100;
+
+    /**
      * The display the desktop is on, or -1.
      *
      * Preference order matters. Hosting {@code pkg} (the launcher) is the strongest

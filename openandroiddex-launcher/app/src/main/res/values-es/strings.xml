@@ -268,6 +268,19 @@
     <string name="lx_pad_no_service">El puntero no puede hacer clic hasta que actives Open Android DeX en Accesibilidad.</string>
     <string name="lx_pad_failed">No se pudo abrir el panel táctil.</string>
 
+    <string name="tp_channel">Panel táctil</string>
+    <string name="tp_notice_title">Usa tu teléfono como panel táctil</string>
+    <string name="tp_notice_text">Toca para señalar, hacer clic y desplazarte por el escritorio desde esta pantalla</string>
+    <string name="tp_hints">Desliza un dedo para mover · Toca para hacer clic\nToca con dos dedos, o mantén uno quieto, para el clic derecho\nToca dos veces y desliza para arrastrar · Dos dedos para desplazar\nTres dedos: desliza o toca para tus gestos</string>
+    <string name="tp_close">Cerrar el panel táctil</string>
+    <string name="tp_options">Opciones del panel táctil</string>
+    <string name="tp_waiting">Esperando al escritorio…</string>
+    <string name="tp_no_desktop">Ningún ordenador está mostrando el escritorio, así que el panel táctil no tiene nada que mover.</string>
+    <string name="st_phonepad">El teléfono como panel táctil</string>
+    <string name="st_phonepad_sub">Una notificación en tu teléfono convierte su pantalla en un panel táctil para este escritorio</string>
+    <string name="st_phonepad_note">Ábrelo desde esa notificación o desde Panel táctil en los ajustes rápidos. Un dedo señala y hace clic, dos desplazan y tres ejecutan los gestos de abajo.</string>
+    <string name="st_gestures_both">Estos gestos son los mismos en el panel táctil de tu portátil y en el de tu teléfono.</string>
+
     <!-- Phone: who owns the Home button -->
     <string name="lx_home_title">¿Que Inicio vuelva aquí?</string>
     <string name="lx_home_body">Inicio y el gesto de deslizar hacia arriba van al launcher del teléfono, así que salir de una app sale del escritorio. Haz que Open Android DeX sea la app de inicio y volverán aquí. Atrás ya lo hace.</string>

@@ -268,6 +268,19 @@
     <string name="lx_pad_no_service">O ponteiro não consegue clicar até que o Open Android DeX seja ativado na Acessibilidade.</string>
     <string name="lx_pad_failed">Não foi possível abrir o touchpad.</string>
 
+    <string name="tp_channel">Touchpad</string>
+    <string name="tp_notice_title">Use o telefone como touchpad</string>
+    <string name="tp_notice_text">Toque para apontar, clicar e rolar no desktop a partir desta tela</string>
+    <string name="tp_hints">Deslize um dedo para mover · Toque para clicar\nToque com dois dedos, ou segure um parado, para o clique direito\nToque duas vezes e deslize para arrastar · Dois dedos para rolar\nTrês dedos: deslize ou toque para os seus gestos</string>
+    <string name="tp_close">Fechar o touchpad</string>
+    <string name="tp_options">Opções do touchpad</string>
+    <string name="tp_waiting">Aguardando o desktop…</string>
+    <string name="tp_no_desktop">Nenhum computador está mostrando o desktop, então o touchpad não tem o que mover.</string>
+    <string name="st_phonepad">Telefone como touchpad</string>
+    <string name="st_phonepad_sub">Uma notificação no telefone transforma a tela dele em um touchpad para este desktop</string>
+    <string name="st_phonepad_note">Abra pela notificação ou por Touchpad nas configurações rápidas. Um dedo aponta e clica, dois rolam, e três executam os gestos abaixo.</string>
+    <string name="st_gestures_both">Estes gestos são os mesmos no touchpad do seu notebook e no do seu telefone.</string>
+
     <!-- Phone: who owns the Home button -->
     <string name="lx_home_title">Trazer o Início de volta para cá?</string>
     <string name="lx_home_body">O Início e o gesto de deslizar para cima vão para o launcher do telefone, então sair de um app sai da área de trabalho. Torne o Open Android DeX o app de início e os dois voltam para cá. O Voltar já faz isso.</string>

@@ -254,7 +254,11 @@ pub enum Action {
     MaximizeWindow,
     Home,
     Back,
+    /// The tray's quick settings. The wire value predates the notification
+    /// centre, which is why it is not called that.
     Notifications,
+    /// The phone's notifications, in the tray's notification centre.
+    NotificationCentre,
 }
 
 impl Action {
@@ -270,6 +274,7 @@ impl Action {
             "home" => Action::Home,
             "back" => Action::Back,
             "notifications" => Action::Notifications,
+            "notifcentre" => Action::NotificationCentre,
             _ => return None,
         })
     }
@@ -432,6 +437,7 @@ impl Sink {
             Action::Drawer => self.tell_launcher("drawer"),
             Action::ShowDesktop => self.tell_launcher("showdesktop"),
             Action::Notifications => self.tell_launcher("notifications"),
+            Action::NotificationCentre => self.tell_launcher("notifcentre"),
             Action::NextWindow => self.cycle_window(display, true),
             Action::PrevWindow => self.cycle_window(display, false),
             Action::MaximizeWindow => self.toggle_maximize(display),
@@ -867,6 +873,9 @@ mod tests {
             "home",
             "back",
             "notifications",
+            // Offered by the launcher's Settings (GESTURE_VALUES) long before this
+            // side knew it, which made picking it do the default instead.
+            "notifcentre",
         ];
         for name in names {
             assert!(Action::parse(name).is_some(), "{name} did not parse");
