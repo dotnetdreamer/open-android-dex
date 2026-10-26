@@ -310,11 +310,7 @@ fn way_to(app: &tauri::AppHandle, serial: &str) -> Way {
 #[tauri::command(async)]
 pub fn apps_prepare(app: tauri::AppHandle, serial: String) -> Result<host::Hello, String> {
     let way = way_to(&app, &serial);
-    let server = host::ensure(&app, &way.serial, &way.phone)?;
-    // Started earlier for the phone's notifications alone, it skipped the
-    // warm-up; the first window is likely now. Once only, on the phone.
-    server.warm();
-    Ok(server.hello.clone())
+    Ok(host::ensure(&app, &way.serial, &way.phone)?.hello.clone())
 }
 
 /// The phone's apps, in its own launcher's names, A to Z. Icons this
@@ -325,6 +321,10 @@ pub fn apps_list(app: tauri::AppHandle, serial: String) -> Result<Vec<PhoneApp>,
     let way = way_to(&app, &serial);
     let server = host::ensure(&app, &way.serial, &way.phone)?;
     wait_for_opening(&way.serial, Duration::from_secs(4));
+    // The page is looked at: the first window is likely now. A server started
+    // earlier for the phone's notifications alone skipped the warm-up, and
+    // this is where it is asked for — once only, on the phone.
+    server.warm();
     let phone = way.phone;
     let list = server.apps()?;
     let mut out = Vec::new();
@@ -508,7 +508,8 @@ pub(crate) fn window_key(_phone: &str, _pkg: &str) -> Option<String> {
 }
 
 /// The phone app whose window is the one in front, if one is: its phone and
-/// its package. A notification of that app is not shown — the person is looking at it.
+/// its package. A notification of that app does not pop up over it — the
+/// person is looking at it — and goes quietly into the notification center.
 #[cfg(any(windows, target_os = "macos"))]
 pub(crate) fn front_app() -> Option<(String, String)> {
     let front = windows().lock().unwrap().values().find(|w| w.is_front()).cloned()?;

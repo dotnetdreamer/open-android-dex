@@ -147,7 +147,9 @@ category, made the first time it is seen. A banner is shown while this app is
 in front too (`willPresentNotification`): its windows are the phone's apps.
 The center needs the app bundle — `tauri dev` runs a bare binary, and the
 panel says notifications come from the installed app — and asks once whether
-this app may notify, the first time a phone listens.
+this app may notify, the first time a phone listens. While that question is
+on screen, unanswered, the center says "denied" (macOS 26): the panel says
+macOS is asking, not that notifications are off in System Settings.
 
 **With "Show what they say" off**, a toast says only which app has something:
 "Messages — New message", a call "Phone — Incoming call". No sender, no
@@ -239,10 +241,16 @@ phone is where they live, and closing a toast to get it out of the way is not
 A notification that is news is still not shown here when:
 
 - its app is turned off on the panel, or in Windows' own settings;
-- **its app's window here is the one in front** — the person is looking at
-  it, as a chat app does not notify about the conversation on screen;
 - **the phone's desktop is the window in front** — it shows its own, in its
   corner and its bell (a call too: its banner).
+
+And while **its app's window here is the one in front**, it does not pop up
+over what the person is reading: it goes quietly into the notification
+center (on a Mac, passive; on Windows, without its pop-up). Not dropped: a
+chat app says nothing of the conversation on its screen — Messages, on the
+emulator, posted nothing for a text into the one open, and had it read — so
+what it does post then is another conversation's, which dropping it here
+would leave the person never told of.
 
 ## In sync
 
@@ -401,8 +409,10 @@ The Rust: 181 unit tests (16 of them this feature's: the toasts, both kinds
 of call, colours, privacy, the keeper's timing, the settings); clippy with no
 warning in these files; the Mac half type-checked and linted against the
 macOS bindings (`cargo clippy --all-targets --target aarch64-apple-darwin`,
-with a stand-in C compiler — checked, never built or linked); the page's
-TypeScript (`tsc --noEmit`).
+with a stand-in C compiler); the page's TypeScript (`tsc --noEmit`). Since
+then built, linked and run on a Mac (below): 176 tests there — the
+Windows-only ones are not built — 19 of them this feature's; clippy's 18
+warnings all on lines older than this feature.
 
 In the app on Windows 11 (build 26200), with the Android 12 emulator, the
 A13 and the Redmi attached, each toast read back from Windows' own history
@@ -427,18 +437,54 @@ the shell where UI Automation from an unelevated process cannot reach it,
 and nothing here may move the real mouse. What a click asks of the phone is
 the wire's, and the phone's half of every one of them is checked above.
 
+On a Mac (macOS 26.6) with the Android 16 emulator, 2026-10-26: the debug
+app bundle (`tauri build --debug --bundles app`), each notification read
+back from macOS's own store of them (usernoted's database), and each of its
+buttons pressed through Notification Center's accessibility actions. The
+first run's question, and the phone listening again 2.5 s after Allow; the
+introduction; an SMS as "555-0111", "Messages · <phone>", its text, its
+sender's picture, Reply, Mark as read and "Turn off for Messages"; a reply
+typed there, in the phone's sent messages; Mark as read, the text read; a
+click with the phone's desktop running, the conversation open on the
+desktop's display; the desktop in front holding one back; with the app's own
+window in front, one from another conversation put in Notification Center
+quietly (passive), Messages having posted nothing for a text into the
+conversation open in it; a ringing call putting its app on the panel's list,
+and with that switched off, the next call not coming up here; a click with
+no desktop, a window of its own at that conversation (another
+left unread), and a second click opening the next in the same window; "Show
+what they say" off, both redrawn as "Messages — New message" with the app's
+icon, quietly (passive), 25 ms after the switch, their pictures gone from
+this app's folders and from macOS's; a call answered and one declined (the
+call log's answered, declined); "Turn off for Messages", and its Undo; Send a
+test; the switch off and on again (16 ms to listening); the connection
+dropped and made again, asked again at once; "Clear them on my phone too"
+with one closed; the Apps page's badge; a photo, as a JPEG; and quitting —
+nothing left in Notification Center, the pictures' folders gone, no app
+server on the phone. A development run (the bare binary) showed the panel's
+"Notifications come from the installed app" and started no server for them.
+How soon, with both ends on the Mac's clock — the phone's own `cmd
+notification post`, sent over adb, and macOS's time for the notification —
+it was there 190–205 ms after that command returned (250–290 ms after it
+started), and up to 3 s while the phone's desktop was starting alongside.
+Banners on screen were not seen: the screen was shared over TeamViewer, with
+macOS's "Do Not Disturb while sharing" on, which would hold them back — not
+isolated.
+
 Not yet:
 
 - **A real click on a real toast**, and the reply text Windows hands back with
   it (`ToastActivatedEventArgs.UserInput`): needs a person. The in-process
   Activated event is what other unpackaged apps rely on while they run.
-- **A Mac**, at all: `notifications/macos.rs` is type-checked against the
-  macOS bindings, never built for a Mac or run on one — the banner put up
-  late, after its categories, included.
+- **A Mac's banners on screen**, and its buttons and reply box used by hand:
+  on the Mac run the screen was shared, with Do Not Disturb while sharing
+  on, and no banner came up, so each notification was used where it waited
+  in Notification Center, through its accessibility actions. Nor the first
+  run's question as it is now ("macOS is asking"): this Mac had answered it.
 - The phone's desktop in front holding toasts back, and a click opening on
-  the desktop: no desktop session was run. Opening on the desktop, and on
-  the phone's own screen, still fires the intent straight, which 12–15 block
-  while the app is nowhere on screen.
+  the desktop: on Android 16 only (the Mac run). Opening on the desktop, and
+  on the phone's own screen, still fires the intent straight, which 12–15
+  block while the app is nowhere on screen.
 - Android 14: no image here; it is given the way 12, 13 and 15 open.
 - A call on a real phone, and a dialer from before CallStyle other than
   AOSP's (Samsung's, MIUI's: their buttons go as they are, whatever their

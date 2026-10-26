@@ -200,10 +200,11 @@ and icon, just like an app installed there.
   opens there instead
 - **Calls ring here too**, with Answer and Decline
 - **Read it on your phone and it goes from your computer as well**
-- **It knows when to stay quiet.** Nothing for the app whose window you are
-  using, nothing your phone would have kept quiet itself (Do Not Disturb, an
-  app you set to silent), and nothing while the phone's desktop is in front,
-  which shows its own
+- **It knows when to stay quiet.** No pop-up for the app whose window you
+  are using (it waits quietly in the notification center), nothing your
+  phone would have kept quiet itself (Do Not Disturb, an app you set to
+  silent), and nothing while the phone's desktop is in front, which shows
+  its own
 - **The bell at the top of the window** turns it on and off. It is also where
   you choose whether notifications say what they say or only which app has
   something, whether calls ring here, and which apps come through: each has

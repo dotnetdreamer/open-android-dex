@@ -12,8 +12,9 @@
 //! What counts as news is the phone's own decision (AppNotifications.java on
 //! the phone). What is shown of it is this computer's: the switch, each app's
 //! own switch, whether a toast says what the notification says, and two rules
-//! of tact — nothing for the app whose window here is the one in front, and
-//! nothing while the phone's own desktop is in front, which shows its own.
+//! of tact — no banner for the app whose window here is the one in front (its
+//! toast goes quietly into the notification center), and nothing while the
+//! phone's own desktop is in front, which shows its own.
 //!
 //! - this file: what to show and when, what the person chose
 //!   (notifications.json), the keeper — which has every attached phone's app
@@ -713,7 +714,7 @@ fn posted(app: &AppHandle, serial: &str, phone: &str, v: &Value) {
     if !alert {
         // Not news: the toast already up, if there is one, says what the notification says now.
         if up && settings.content {
-            show_item(app, serial, phone, &item, v, false);
+            show_item(app, serial, phone, &item, v, Show::Update);
         }
         return;
     }
@@ -721,7 +722,16 @@ fn posted(app: &AppHandle, serial: &str, phone: &str, v: &Value) {
         log::debug!("notifications [{phone}] {} not shown: {why}", item.pkg);
         return;
     }
-    if show_item(app, serial, phone, &item, v, true) {
+    // Its app's window here is the one in front: no banner over what the
+    // person is reading — but kept. An app says nothing of the conversation on
+    // its screen (Messages posts none), so what it posts now is another's.
+    let how = if apps::front_app().is_some_and(|(p, pkg)| p == phone && pkg == item.pkg) {
+        log::debug!("notifications [{phone}] {} quietly: its app's window is the one in front", item.pkg);
+        Show::Quietly
+    } else {
+        Show::Alert
+    };
+    if show_item(app, serial, phone, &item, v, how) {
         arrived(app, &item);
     }
 }
@@ -741,9 +751,6 @@ fn withheld(app: &AppHandle, phone: &str, item: &Item, settings: &Settings) -> O
     }
     if !native::allowed(&item.pkg) {
         return Some("its app is turned off in the system's settings");
-    }
-    if apps::front_app().is_some_and(|(p, pkg)| p == phone && pkg == item.pkg) {
-        return Some("its app's window is the one in front");
     }
     if desktop_in_front(app, phone) {
         return Some("the phone's desktop is in front, and shows its own");
@@ -781,7 +788,16 @@ fn removed(app: &AppHandle, phone: &str, key: &str) {
 /// whose own banner has it.
 fn call(app: &AppHandle, serial: &str, phone: &str, c: &Value) {
     let item = Item::from(c);
-    if item.key.is_empty() || !rings(&state().settings, &item.pkg) {
+    if item.key.is_empty() {
+        return;
+    }
+    // Its app on the panel's list, with a switch of its own — turned off
+    // there, a dialer rings here no more — and not only once it posts a missed call.
+    if note_app(&mut state().settings, &item, phone, true) {
+        save(app);
+        let _ = app.emit("notifications:apps", ());
+    }
+    if !rings(&state().settings, &item.pkg) {
         return;
     }
     if desktop_in_front(app, phone) {
@@ -923,18 +939,31 @@ fn done(phone: &str, v: &Value) {
 
 // ── the toasts ──
 
+/// How a phone app's notification goes up.
+#[derive(Clone, Copy, PartialEq)]
+enum Show {
+    /// News: it pops up.
+    Alert,
+    /// News, while its app's window here is the one in front: into the
+    /// notification center without popping up.
+    Quietly,
+    /// Not news: the toast already up says what the notification says now, quietly.
+    Update,
+}
+
 /// A phone app's notification, up: a new toast, or the one already up for it,
 /// changed — made as it goes up, and only if it is wanted then: notifications
 /// on, its app not turned off, and for a change, its toast still up. True if it went up.
-fn show_item(app: &AppHandle, serial: &str, phone: &str, item: &Item, v: &Value, popup: bool) -> bool {
+fn show_item(app: &AppHandle, serial: &str, phone: &str, item: &Item, v: &Value, how: Show) -> bool {
     let id = toast::id_for(phone, &item.key);
     // Whose it is, with its app's icon — fetched from the phone the first time,
     // which can take a while: before what is up is held, never while.
     let from = from_phone(app, serial, phone, item);
     let name = phone_name(phone);
+    let popup = how == Show::Alert;
     put_up(|settings| {
         let before = state().shown.get(&id).map(|s| s.avatar.clone());
-        if !settings.on || muted(settings, &item.pkg) || (!popup && before.is_none()) {
+        if !settings.on || muted(settings, &item.pkg) || (how == Show::Update && before.is_none()) {
             return None;
         }
         let (avatar, picture) = if settings.content {

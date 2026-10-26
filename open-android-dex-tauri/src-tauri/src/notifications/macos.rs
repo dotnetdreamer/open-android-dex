@@ -20,7 +20,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use block2::RcBlock;
@@ -54,6 +54,10 @@ static CLICKED: OnceLock<fn(Click)> = OnceLock::new();
 static SPOOL: OnceLock<PathBuf> = OnceLock::new();
 /// What the center allows, as it last said: its answers come on a queue of its own.
 static STATUS: Mutex<(&'static str, String)> = Mutex::new(("ready", String::new()));
+/// macOS's question — may this app notify? — is on screen, unanswered. Until
+/// it is answered the center says "denied" (seen on macOS 26), and the panel
+/// would send the person to System Settings over a question they are being asked.
+static ASKING: AtomicBool = AtomicBool::new(false);
 
 /// One set of buttons a phone app's notifications use, as a category.
 #[derive(Clone, PartialEq)]
@@ -158,15 +162,7 @@ fn refresh() {
     let Some(center) = center() else { return };
     let block = RcBlock::new(|settings: std::ptr::NonNull<UNNotificationSettings>| {
         let settings = unsafe { settings.as_ref() };
-        let now = match settings.authorizationStatus() {
-            UNAuthorizationStatus::NotDetermined => {
-                ("ask", "macOS will ask once whether Open Android DeX may show notifications.".to_string())
-            }
-            UNAuthorizationStatus::Denied => {
-                ("off", "Notifications are turned off for Open Android DeX in System Settings.".to_string())
-            }
-            _ => ("ready", String::new()),
-        };
+        let now = status_of(settings.authorizationStatus(), ASKING.load(Ordering::SeqCst));
         let changed = {
             let mut status = STATUS.lock().unwrap();
             let changed = *status != now;
@@ -178,6 +174,24 @@ fn refresh() {
         }
     });
     center.getNotificationSettingsWithCompletionHandler(&block);
+}
+
+/// What the center's answer means here: `asking` while its question is on screen.
+fn status_of(status: UNAuthorizationStatus, asking: bool) -> (&'static str, String) {
+    match status {
+        UNAuthorizationStatus::NotDetermined => {
+            ("ask", "macOS will ask once whether Open Android DeX may show notifications.".to_string())
+        }
+        UNAuthorizationStatus::Denied if asking => (
+            "ask",
+            "macOS is asking whether Open Android DeX may show notifications. Answer it at the top right of the screen."
+                .to_string(),
+        ),
+        UNAuthorizationStatus::Denied => {
+            ("off", "Notifications are turned off for Open Android DeX in System Settings.".to_string())
+        }
+        _ => ("ready", String::new()),
+    }
 }
 
 pub fn system() -> (&'static str, String) {
@@ -202,7 +216,12 @@ pub fn shows_any() -> bool {
 /// the system's to keep; after a no, only System Settings changes it.
 pub fn ask(_app: &AppHandle) {
     let Some(center) = center() else { return };
+    // One question at a time: the one on screen answers for every asker.
+    if ASKING.swap(true, Ordering::SeqCst) {
+        return;
+    }
     let block = RcBlock::new(|granted: Bool, _error: *mut NSError| {
+        ASKING.store(false, Ordering::SeqCst);
         log::info!("notifications: macOS says this app {} show notifications", if granted.as_bool() { "may" } else { "may not" });
         refresh();
     });
@@ -402,4 +421,21 @@ fn hash(s: &str) -> String {
     let mut h = DefaultHasher::new();
     s.hash(&mut h);
     format!("{:08x}", h.finish() as u32)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_question_on_screen_is_not_a_no() {
+        // macOS says "denied" while its question is unanswered: the panel says
+        // it is asking, rather than sending the person to System Settings.
+        assert_eq!(status_of(UNAuthorizationStatus::Denied, true).0, "ask");
+        assert!(status_of(UNAuthorizationStatus::Denied, true).1.contains("is asking"));
+        assert_eq!(status_of(UNAuthorizationStatus::Denied, false).0, "off");
+        assert_eq!(status_of(UNAuthorizationStatus::NotDetermined, false).0, "ask");
+        assert_eq!(status_of(UNAuthorizationStatus::Authorized, true).0, "ready");
+        assert_eq!(status_of(UNAuthorizationStatus::Provisional, false).0, "ready");
+    }
 }
