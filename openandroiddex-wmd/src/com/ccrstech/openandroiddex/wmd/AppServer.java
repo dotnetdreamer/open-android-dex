@@ -43,7 +43,9 @@ import java.util.concurrent.atomic.AtomicInteger;
  * <p>The socket is abstract and named afresh by the computer for every run, and
  * each connection's peer is put to the kernel (SO_PEERCRED): the shell, which
  * adbd is, and root. Not the launcher, whose uid is also the Linux guest's: this
- * socket takes a mouse and a keyboard into any app on the phone.
+ * socket takes a mouse and a keyboard into any app on the phone. The launcher's
+ * touchpad, for the computer's windows, has a loopback port of its own while the
+ * computer asks for it, and a token ({@link AppPad}).
  *
  * <p>Usage: {@code app_process / com.ccrstech.openandroiddex.wmd.AppServer socket-name}.
  * It stops when the computer says so — "stop" on its stdin, or on the control
@@ -143,6 +145,18 @@ public final class AppServer {
     private final java.util.concurrent.ExecutorService notifying =
             java.util.concurrent.Executors.newSingleThreadExecutor(r -> {
                 Thread t = new Thread(r, "apps-notify");
+                t.setDaemon(true);
+                return t;
+            });
+    /** The phone's screen as the touchpad of its windows on the computer, while the computer asks for it. */
+    private final AppPad pad = new AppPad(this::toComputer);
+    /**
+     * The pad asked for and let go, one at a time and off the control
+     * connection's thread: both fork `cmd` and may wake the launcher's process.
+     */
+    private final java.util.concurrent.ExecutorService padding =
+            java.util.concurrent.Executors.newSingleThreadExecutor(r -> {
+                Thread t = new Thread(r, "apps-pad-ask");
                 t.setDaemon(true);
                 return t;
             });
@@ -631,6 +645,26 @@ public final class AppServer {
                     case "notifTest":
                         notifying.execute(() -> notificationAsked(j));
                         break;
+                    case "padOn": {
+                        boolean open = j.optBoolean("open");
+                        padding.execute(() -> {
+                            JSONObject r;
+                            try {
+                                r = pad.arm(open);
+                            } catch (Exception e) {
+                                r = new JSONObject();
+                                try {
+                                    r.put("t", "padOn").put("open", open).put("ok", false).put("message", String.valueOf(e));
+                                } catch (Exception ignored) {
+                                }
+                            }
+                            toComputer(r);
+                        });
+                        break;
+                    }
+                    case "padOff":
+                        padding.execute(() -> pad.disarm("the computer asked"));
+                        break;
                     case "linuxApps": {
                         JSONObject r;
                         try {
@@ -1025,6 +1059,8 @@ public final class AppServer {
         }
         AppNotifications listening = notifications;
         if (listening != null) listening.stop();
+        // The pad and its offer go from the phone, and the overlay app-op back if it was given for them.
+        if (pad.armed()) pad.disarm("the server is stopping");
         List<AppWindow> open = new ArrayList<>(running);
         for (AppWindow w : open) w.closeAll(null);
         // A file still arriving is cut short as a dropped link cuts it: its

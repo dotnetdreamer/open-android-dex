@@ -276,6 +276,9 @@
     <string name="tp_options">Opções do touchpad</string>
     <string name="tp_waiting">Aguardando o desktop…</string>
     <string name="tp_no_desktop">Nenhum computador está mostrando o desktop, então o touchpad não tem o que mover.</string>
+    <string name="tp_waiting_computer">Aguardando o computador…</string>
+    <string name="tp_notice_text_computer">Toque para apontar, clicar e rolar nos apps do telefone no computador</string>
+    <string name="tp_hidden">O touchpad fica oculto enquanto as Definições ou um ecrã semelhante estiverem abertos. Volta quando fecharem.</string>
     <string name="st_phonepad">Telefone como touchpad</string>
     <string name="st_phonepad_sub">Uma notificação no telefone transforma a tela dele em um touchpad para este desktop</string>
     <string name="st_phonepad_note">Abra pela notificação ou por Touchpad nas configurações rápidas. Um dedo aponta e clica, dois rolam, e três executam os gestos abaixo.</string>

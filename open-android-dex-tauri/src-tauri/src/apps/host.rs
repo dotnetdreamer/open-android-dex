@@ -228,6 +228,18 @@ impl Server {
         self.send(&json!({"t": "notifTest", "title": title, "text": text}))
     }
 
+    /// The phone's screen as the touchpad of its windows here (apps/pad.rs):
+    /// offered on the phone, or with `open`, up on it now. The phone answers
+    /// `padOn` — how it went — and then sends what the fingers do (`pad`).
+    pub fn pad_on(&self, open: bool) -> Result<(), String> {
+        self.send(&json!({"t": "padOn", "open": open}))
+    }
+
+    /// The pad no longer offered: down on the phone, and its port closed.
+    pub fn pad_off(&self) -> Result<(), String> {
+        self.send(&json!({"t": "padOff"}))
+    }
+
     /// This computer's clipboard for the phone's next paste, on the phone's own
     /// connection, unless it is what either side last handed over. True if it went.
     pub fn give_clipboard(&self, text: &str) -> bool {
@@ -757,6 +769,7 @@ fn spawn_control_reader(
                         Some("notifs") | Some("notif") | Some("notifDone") => {
                             crate::notifications::phone_said(&serial, &phone, &v);
                         }
+                        Some("pad") | Some("padOn") => super::pad::said(&serial, &phone, &v),
                         // The server's own log, once the shell it printed to has gone with its cable.
                         Some("log") => log::info!("apps [{serial}] {}", v["line"].as_str().unwrap_or("")),
                         Some("clip") => {

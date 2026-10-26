@@ -1,6 +1,11 @@
 package com.ccrstech.openandroiddex.wmd;
 
 import android.graphics.Rect;
+import android.os.IBinder;
+import android.os.SystemClock;
+import android.view.InputDevice;
+import android.view.InputEvent;
+import android.view.MotionEvent;
 
 import java.util.List;
 
@@ -31,6 +36,7 @@ public final class Probe {
                 case "stack":   stack(args); break;
                 case "sig":     sig(args); break;
                 case "strip":   strip(args); break;
+                case "fingers": fingers(args); break;
                 default: usage();
             }
         } catch (Throwable t) {
@@ -47,6 +53,7 @@ public final class Probe {
         System.out.println("  decors <displayId> [on|off]             read / set system decorations");
         System.out.println("  focusable <displayId> <taskId> <0|1>");
         System.out.println("  stack <displayId> <lowTaskId> <highTaskId>   one WCT, low then high to top");
+        System.out.println("  fingers <n> <x1> <y1> <x2> <y2> <ms> [gap]   n fingers slid together on the phone's screen");
     }
 
     // ── caps ───────────────────────────────────────────────────────────────
@@ -298,6 +305,71 @@ public final class Probe {
     }
 
     // ── util ───────────────────────────────────────────────────────────────
+
+    // ── fingers ─────────────────────────────────────────────────────────────
+
+    /**
+     * {@code n} fingers on the phone's own screen, {@code gap} px apart side by side, slid
+     * together from (x1, y1) to (x2, y2) over {@code ms} — what `input` cannot do, having
+     * one finger, and what the phone's touchpad's two-finger scroll and three-finger
+     * gestures are checked with (test/pad-test.mjs). Injected as the shell, which holds
+     * INJECT_EVENTS, a step every 10 ms.
+     */
+    private static void fingers(String[] args) {
+        int n = Math.max(1, Math.min(5, intArg(args, 1)));
+        float x1 = intArg(args, 2), y1 = intArg(args, 3), x2 = intArg(args, 4), y2 = intArg(args, 5);
+        int ms = Math.max(50, intArg(args, 6));
+        float gap = args.length > 7 ? intArg(args, 7) : 160;
+        IBinder b = (IBinder) Refl.callStatic(Refl.cls("android.os.ServiceManager"),
+                "getService", new Class<?>[]{String.class}, "input");
+        Object im = Refl.callStatic(Refl.cls("android.hardware.input.IInputManager$Stub"),
+                "asInterface", new Class<?>[]{IBinder.class}, b);
+        MotionEvent.PointerProperties[] props = new MotionEvent.PointerProperties[n];
+        for (int i = 0; i < n; i++) {
+            props[i] = new MotionEvent.PointerProperties();
+            props[i].id = i;
+            props[i].toolType = MotionEvent.TOOL_TYPE_FINGER;
+        }
+        long down = SystemClock.uptimeMillis();
+        // Down one at a time, as a hand puts them down.
+        for (int k = 1; k <= n; k++) {
+            int action = k == 1 ? MotionEvent.ACTION_DOWN
+                    : MotionEvent.ACTION_POINTER_DOWN | ((k - 1) << MotionEvent.ACTION_POINTER_INDEX_SHIFT);
+            touch(im, down, action, k, props, x1, y1, gap);
+        }
+        int steps = Math.max(1, ms / 10);
+        for (int s = 1; s <= steps; s++) {
+            sleep(10);
+            float t = s / (float) steps;
+            touch(im, down, MotionEvent.ACTION_MOVE, n, props, x1 + (x2 - x1) * t, y1 + (y2 - y1) * t, gap);
+        }
+        for (int k = n; k >= 1; k--) {
+            int action = k == 1 ? MotionEvent.ACTION_UP
+                    : MotionEvent.ACTION_POINTER_UP | ((k - 1) << MotionEvent.ACTION_POINTER_INDEX_SHIFT);
+            touch(im, down, action, k, props, x2, y2, gap);
+        }
+        System.out.println("OK " + n + " fingers");
+    }
+
+    /** The first {@code count} fingers at (x, y), side by side: one touchscreen event, on display 0. */
+    private static void touch(Object im, long down, int action, int count, MotionEvent.PointerProperties[] props,
+                              float x, float y, float gap) {
+        MotionEvent.PointerCoords[] at = new MotionEvent.PointerCoords[count];
+        MotionEvent.PointerProperties[] which = new MotionEvent.PointerProperties[count];
+        for (int i = 0; i < count; i++) {
+            at[i] = new MotionEvent.PointerCoords();
+            at[i].x = x + (i - (props.length - 1) / 2f) * gap;
+            at[i].y = y;
+            at[i].pressure = 1f;
+            at[i].size = 1f;
+            which[i] = props[i];
+        }
+        MotionEvent e = MotionEvent.obtain(down, SystemClock.uptimeMillis(), action, count, which, at,
+                0, 0, 1f, 1f, 0, 0, InputDevice.SOURCE_TOUCHSCREEN, 0);
+        Refl.callSig(e, "setDisplayId", new Class<?>[]{int.class}, 0);
+        Refl.callSig(im, "injectInputEvent", new Class<?>[]{InputEvent.class, int.class}, e, 2);
+        e.recycle();
+    }
 
     private static int intArg(String[] args, int i) {
         if (args.length <= i) throw new IllegalArgumentException("missing arg " + i);

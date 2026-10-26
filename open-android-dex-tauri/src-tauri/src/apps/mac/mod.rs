@@ -18,8 +18,8 @@
 //! At the bar's other end, a speaker: where the phone's sound plays
 //! (sound.rs), as a menu. A Mac pins apps to the Dock, not windows, so the
 //! windows are this app's, listed under its Dock icon and in its Window menu.
-//! Files dropped on one from Finder go to the phone (drops.rs), and the
-//! window's subtitle says how it went.
+//! Files dropped on one from Finder go to the phone (drops.rs), and a note
+//! in a strip under the title bar says how it went, as on Windows.
 //!
 //! Full screen is macOS's own, in a space of its own — whichever way it is
 //! asked for: More, the green button, ⌃⌘F — but with the menu bar kept away,
@@ -67,8 +67,11 @@ use super::sound;
 use super::wire;
 use video::{Fed, Feed};
 
-/// How long a note stays as the window's subtitle once nothing is happening any more.
+/// How long a note stays under the title bar once nothing is happening any more.
 const NOTE_MS: u64 = 4500;
+/// A note's room in its strip: above and below its lines, and at their sides.
+const NOTE_PAD_Y: f64 = 6.0;
+const NOTE_PAD_X: f64 = 12.0;
 
 /// A window, from outside: what the app holds, from any thread.
 pub struct Window {
@@ -94,6 +97,11 @@ impl Window {
     /// Close it, as its ✕ does: the app goes back to the phone.
     pub fn close(&self) {
         with_window(self.id, |w, _| w.performClose(None));
+    }
+
+    /// Zoomed if it is not, back if it is: a gesture on the phone's touchpad.
+    pub fn toggle_maximized(&self) {
+        with_window(self.id, |w, _| w.zoom(None));
     }
 
     /// The phone says what it shows is gone (a Linux window closed): the window goes too.
@@ -136,7 +144,7 @@ impl Window {
         link::hand_back(&self.shared.link, route);
     }
 
-    /// A short note in its subtitle (Surface::note).
+    /// A short note in the strip under its title bar (Surface::note).
     pub fn note(&self, text: Option<String>, busy: bool) {
         self.shared.note(text, busy);
     }
@@ -174,10 +182,6 @@ struct Shared {
     stats: Mutex<Stats>,
     /// The phone's name, which the subtitle begins with.
     device: String,
-    /// The window's subtitle — the phone, and how the window reaches it — when
-    /// no note has its place. Read when a note goes, so a note never puts back
-    /// a way the window has left.
-    subtitle: Arc<Mutex<String>>,
     /// Counts the notes, so a note's fading never takes the next one with it.
     note_seq: Arc<AtomicU64>,
     /// The key window: the one in front, what the keyboard types into. A
@@ -284,13 +288,12 @@ impl Surface for Shared {
         with_window(self.id, move |_, v| v.say(text.as_deref()));
     }
 
-    /// The subtitle, where the phone's name is: a Mac's title bar is its own,
-    /// and the subtitle is the place it gives a window for a line like this.
+    /// In a strip of its own under the title bar, as on Windows: the subtitle
+    /// has room for a word or two in a window the shape of a phone.
     fn note(&self, text: Option<String>, busy: bool) {
         let seq = self.note_seq.fetch_add(1, Ordering::SeqCst) + 1;
-        let (id, subtitle) = (self.id, self.subtitle.clone());
-        let shown = text.unwrap_or_else(|| subtitle.lock().unwrap().clone());
-        with_window(id, move |w, _| w.setSubtitle(&NSString::from_str(&shown)));
+        let id = self.id;
+        with_window(id, move |_, v| v.show_note(text.as_deref()));
         if busy {
             return;
         }
@@ -298,17 +301,15 @@ impl Surface for Shared {
         if let Ok(when) = DispatchTime::try_from(Duration::from_millis(NOTE_MS)) {
             let _ = DispatchQueue::main().after(when, move || {
                 if latest.load(Ordering::SeqCst) == seq {
-                    let text = subtitle.lock().unwrap().clone();
-                    with_window(id, move |w, _| w.setSubtitle(&NSString::from_str(&text)));
+                    with_window(id, |_, v| v.show_note(None));
                 }
             });
         }
     }
 
-    /// A new way to the phone: "Wi‑Fi · Galaxy S25". A note up now gives back this one when it goes.
+    /// A new way to the phone, in the subtitle: "Wi‑Fi · Galaxy S25".
     fn way(&self, via: &str) {
         let text = link::way_line(&self.device, via);
-        *self.subtitle.lock().unwrap() = text.clone();
         with_window(self.id, move |w, _| w.setSubtitle(&NSString::from_str(&text)));
     }
 
@@ -357,6 +358,158 @@ fn screen_under_pointer(mtm: MainThreadMarker) -> Option<Retained<NSScreen>> {
     NSScreen::screens(mtm).iter().find(|s| inside(s.frame())).or_else(|| NSScreen::mainScreen(mtm))
 }
 
+// ── the phone's touchpad (apps/pad.rs) ──
+
+/// Where the phone's touchpad is among the phone's windows here. Main thread only.
+#[derive(Default)]
+struct Pad {
+    /// The window whose picture the pointer is over, if it is one of these.
+    over: Option<u64>,
+    /// The window a held button went down in: a drag stays with it wherever the pointer goes.
+    held_in: Option<u64>,
+    buttons: u8,
+}
+
+thread_local! {
+    static PAD: RefCell<Pad> = RefCell::new(Pad::default());
+}
+
+/// What the phone's touchpad did: this Mac's pointer moved, and the phone's
+/// window whose picture is under it hovered, pressed, dragged or scrolled —
+/// those windows only, each as its own picture takes the mouse. The pointer is
+/// warped, which takes no permission and makes no event: nothing else on this
+/// Mac hears the pad.
+pub fn pad(input: super::pad::Input) {
+    DispatchQueue::main().exec_async(move || {
+        let Some(mtm) = MainThreadMarker::new() else { return };
+        PAD.with(|p| pad_main(&mut p.borrow_mut(), input, mtm));
+    });
+}
+
+fn pad_main(pad: &mut Pad, input: super::pad::Input, mtm: MainThreadMarker) {
+    use super::pad::Input;
+    let at = NSEvent::mouseLocation();
+    match input {
+        Input::Move { dx, dy } => {
+            // A screen counts upwards; the pad, as the phone does, downwards.
+            let to = on_a_screen(NSPoint::new(at.x + dx, at.y - dy), at, mtm);
+            warp(to, mtm);
+            if pad.buttons != 0 {
+                let held = pad.buttons;
+                if let Some((w, v)) = pad.held_in.and_then(parts) {
+                    v.pad_pointer(view_point(&w, &v, to), held);
+                }
+                return;
+            }
+            let under = picture_at(to, mtm);
+            let now = under.as_ref().map(|(id, _, _)| *id);
+            if pad.over != now {
+                if let Some((_, v)) = pad.over.and_then(parts) {
+                    v.pad_leave();
+                }
+                pad.over = now;
+            }
+            if let Some((_, w, v)) = under {
+                v.pad_pointer(view_point(&w, &v, to), 0);
+            }
+        }
+        Input::Buttons(b) => {
+            if pad.buttons == 0 && b != 0 {
+                // A press lands only on one of these windows' pictures: anywhere else, nothing.
+                let Some((id, w, _)) = picture_at(at, mtm) else { return };
+                pad.held_in = Some(id);
+                if !w.isKeyWindow() {
+                    w.makeKeyAndOrderFront(None);
+                    activate(mtm);
+                }
+            }
+            pad.buttons = b;
+            if let Some((w, v)) = pad.held_in.and_then(parts) {
+                v.pad_pointer(view_point(&w, &v, at), b);
+            }
+            if b == 0 {
+                pad.held_in = None;
+            }
+        }
+        Input::Wheel { h, v: notches } => {
+            if let Some((_, w, v)) = picture_at(at, mtm) {
+                v.pad_scroll(view_point(&w, &v, at), h, notches);
+            }
+        }
+        Input::Back => {
+            let id = picture_at(at, mtm).map(|(id, _, _)| id).or(pad.held_in).or_else(key_window);
+            if let Some((_, v)) = id.and_then(parts) {
+                v.pad_back();
+            }
+        }
+        Input::Gone => {
+            if pad.buttons != 0 {
+                if let Some((w, v)) = pad.held_in.and_then(parts) {
+                    v.pad_pointer(view_point(&w, &v, at), 0);
+                }
+            }
+            if let Some((_, v)) = pad.over.and_then(parts) {
+                v.pad_leave();
+            }
+            *pad = Pad::default();
+        }
+    }
+}
+
+/// Window `id`'s window and view, if it is open. Main thread.
+fn parts(id: u64) -> Option<(Retained<NSWindow>, Retained<AppView>)> {
+    OPEN.with(|o| o.borrow().get(&id).map(|p| (p.window.clone(), p.view.clone())))
+}
+
+/// The phone's window whose picture is the frontmost thing on screen at `p`, if one is.
+fn picture_at(p: NSPoint, mtm: MainThreadMarker) -> Option<(u64, Retained<NSWindow>, Retained<AppView>)> {
+    let number = NSWindow::windowNumberAtPoint_belowWindowWithWindowNumber(p, 0, mtm);
+    let (id, w, v) = OPEN.with(|o| {
+        o.borrow()
+            .iter()
+            .find(|(_, x)| x.window.windowNumber() == number)
+            .map(|(id, x)| (*id, x.window.clone(), x.view.clone()))
+    })?;
+    v.on_picture(view_point(&w, &v, p)).then_some((id, w, v))
+}
+
+/// The key window, if it is one of the phone's.
+fn key_window() -> Option<u64> {
+    OPEN.with(|o| o.borrow().iter().find(|(_, x)| x.window.isKeyWindow()).map(|(id, _)| *id))
+}
+
+/// A point on screen, in a window's view.
+fn view_point(w: &NSWindow, v: &AppView, p: NSPoint) -> NSPoint {
+    v.convertPoint_fromView(w.convertPointFromScreen(p), None)
+}
+
+/// `p`, if a screen has it; else as near as the screen `from` is on lets it be.
+/// A screen counts up from its bottom, its top row at its top edge.
+fn on_a_screen(p: NSPoint, from: NSPoint, mtm: MainThreadMarker) -> NSPoint {
+    let has = |r: NSRect, q: NSPoint| {
+        q.x >= r.origin.x && q.x < r.origin.x + r.size.width && q.y > r.origin.y && q.y <= r.origin.y + r.size.height
+    };
+    let screens = NSScreen::screens(mtm);
+    if screens.iter().any(|s| has(s.frame(), p)) {
+        return p;
+    }
+    let Some(home) = screens.iter().find(|s| has(s.frame(), from)).or_else(|| NSScreen::mainScreen(mtm)) else {
+        return from;
+    };
+    let r = home.frame();
+    NSPoint::new(
+        p.x.clamp(r.origin.x, r.origin.x + r.size.width - 1.0),
+        p.y.clamp(r.origin.y + 1.0, r.origin.y + r.size.height),
+    )
+}
+
+/// The pointer to `p`, in AppKit's screen points.
+fn warp(p: NSPoint, mtm: MainThreadMarker) {
+    // CoreGraphics counts down from the top of the main screen; AppKit up from its bottom.
+    let top = NSScreen::screens(mtm).firstObject().map_or(0.0, |s| s.frame().size.height);
+    let _ = objc2_core_graphics::CGWarpMouseCursorPosition(NSPoint::new(p.x, top - p.y));
+}
+
 /// What the main thread needs to make the window.
 struct Look {
     id: u64,
@@ -385,7 +538,6 @@ pub fn open(spec: Spec, host: Arc<dyn Host>) -> Result<Arc<Window>, String> {
         resized_at: Mutex::new(Instant::now()),
         stats: Mutex::new(Stats { since: Instant::now(), frames: 0, ages: Vec::new() }),
         device: spec.device.clone(),
-        subtitle: Arc::new(Mutex::new(link::way_line(&spec.device, spec.via))),
         note_seq: Arc::new(AtomicU64::new(0)),
         front: AtomicBool::new(false),
     });
@@ -506,6 +658,10 @@ fn make(mtm: MainThreadMarker, look: &Look, shared: &Arc<Shared>) {
     );
     container.addSubview(&message);
     *view.ivars().message.borrow_mut() = Some(message);
+    // Over the top of the picture, out of sight until there is a note.
+    let note = make_note(mtm, w);
+    container.addSubview(&note.view);
+    *view.ivars().note.borrow_mut() = Some(note);
     // Over everything, out of sight until the window is full screen: the
     // bar's tab, and the bar over it.
     let handle = make_handle(mtm, &view);
@@ -680,6 +836,36 @@ fn make_bar(mtm: MainThreadMarker, view: &AppView, label: &str) -> Bar {
     Bar { view: bar, title }
 }
 
+/// A note's strip, just under the title bar — full screen, under where the
+/// bar comes down — over the top of the picture: a line, or two for a longer
+/// note, the second cut short if it must, as Windows draws it (render.rs).
+struct NoteStrip {
+    view: Retained<NSVisualEffectView>,
+    text: Retained<NSTextField>,
+}
+
+fn make_note(mtm: MainThreadMarker, width: f64) -> NoteStrip {
+    let view = NSVisualEffectView::initWithFrame(
+        NSVisualEffectView::alloc(mtm),
+        NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(width, 2.0 * NOTE_PAD_Y)),
+    );
+    view.setMaterial(NSVisualEffectMaterial::Titlebar);
+    view.setBlendingMode(NSVisualEffectBlendingMode::WithinWindow);
+    view.setState(NSVisualEffectState::Active);
+    view.setAutoresizingMask(NSAutoresizingMaskOptions::ViewWidthSizable | NSAutoresizingMaskOptions::ViewMinYMargin);
+    view.setHidden(true);
+    let text = NSTextField::wrappingLabelWithString(&NSString::from_str(""), mtm);
+    text.setFont(Some(&NSFont::systemFontOfSize(12.0)));
+    text.setTextColor(Some(&NSColor::labelColor()));
+    text.setAlignment(NSTextAlignment::Center);
+    text.setMaximumNumberOfLines(2);
+    if let Some(cell) = text.cell() {
+        cell.setTruncatesLastVisibleLine(true);
+    }
+    view.addSubview(&text);
+    NoteStrip { view, text }
+}
+
 /// Android's MotionEvent.BUTTON_* bits.
 const BUTTON_PRIMARY: u8 = 1;
 const BUTTON_SECONDARY: u8 = 2;
@@ -707,6 +893,8 @@ struct Ui {
     clip: Retained<CALayer>,
     picture: Retained<objc2_av_foundation::AVSampleBufferDisplayLayer>,
     message: RefCell<Option<Retained<NSTextField>>>,
+    /// The note under the title bar, while there is one.
+    note: RefCell<Option<NoteStrip>>,
     tracking: RefCell<Option<Retained<NSTrackingArea>>>,
     /// The sound menu as last shown: its items' tags index it.
     sound: RefCell<Vec<sound::Item>>,
@@ -959,6 +1147,14 @@ define_class!(
             }
         }
 
+        /// More's "Use phone as touchpad": the phone's screen up as the touchpad
+        /// of its windows here (apps/pad.rs). A note under the title bar says how it went.
+        #[unsafe(method(usePhoneTouchpad:))]
+        fn use_phone_touchpad(&self, _sender: Option<&AnyObject>) {
+            let shared = self.ivars().shared.clone();
+            shared.link.host().touchpad(shared.clone());
+        }
+
         /// More's Full screen, and the full-screen bar's way out of it. Not
         /// `toggleFullScreen:`, which would take the menu bar's ⌃⌘F from the window.
         #[unsafe(method(switchFullScreen:))]
@@ -1137,6 +1333,7 @@ define_class!(
         #[unsafe(method(windowDidEnterFullScreen:))]
         fn window_did_enter_full_screen(&self, _notification: &NSNotification) {
             self.place_handle();
+            self.place_note();
             if let Some(handle) = self.ivars().handle.borrow().as_ref() {
                 handle.setHidden(false);
             }
@@ -1174,6 +1371,7 @@ impl AppView {
             clip,
             picture,
             message: RefCell::new(None),
+            note: RefCell::new(None),
             tracking: RefCell::new(None),
             sound: RefCell::new(Vec::new()),
             full_screen: Cell::new(false),
@@ -1199,7 +1397,7 @@ impl AppView {
 
     /// The sound menu, under the button that asked for it: where the phone's
     /// sound plays. Picking from it is the app's to carry out, off the main
-    /// thread; the window's subtitle says how it went.
+    /// thread; a note under the title bar says how it went.
     fn show_sound_menu(&self, anchor: Option<&NSView>) {
         let mtm = self.mtm();
         let items = self.ivars().shared.link.host().sound_menu();
@@ -1265,6 +1463,7 @@ impl AppView {
         *shared.area.lock().unwrap() = ((size.width * scale).round() as u32, (size.height * scale).round() as u32);
         self.lay_out_picture();
         self.place_handle();
+        self.place_note();
         if !settle {
             return;
         }
@@ -1343,8 +1542,19 @@ impl AppView {
         item.setKeyEquivalentModifierMask(held);
         let target: &AnyObject = self;
         unsafe { item.setTarget(Some(target)) };
+        // The phone's own screen as the touchpad of its windows here (apps/pad.rs).
+        let pad = unsafe {
+            NSMenuItem::initWithTitle_action_keyEquivalent(
+                NSMenuItem::alloc(mtm),
+                ns_string!("Use phone as touchpad"),
+                Some(sel!(usePhoneTouchpad:)),
+                ns_string!(""),
+            )
+        };
+        unsafe { pad.setTarget(Some(target)) };
         let menu = NSMenu::new(mtm);
         menu.addItem(&item);
+        menu.addItem(&pad);
         self.pop_up(&menu, button);
     }
 
@@ -1438,6 +1648,43 @@ impl AppView {
         if let Some(handle) = ui.handle.borrow().as_ref() {
             handle.setHidden(true);
         }
+        self.place_note();
+    }
+
+    /// A note under the title bar, or none.
+    fn show_note(&self, text: Option<&str>) {
+        let ui = self.ivars();
+        let shown = {
+            let note = ui.note.borrow();
+            let Some(note) = note.as_ref() else { return };
+            if let Some(t) = text {
+                note.text.setStringValue(&NSString::from_str(t));
+            }
+            note.view.setHidden(text.is_none());
+            text.is_some()
+        };
+        if shown {
+            self.place_note();
+        }
+    }
+
+    /// The note's strip at the top, as tall as its lines — full screen, below
+    /// where the bar comes down.
+    fn place_note(&self) {
+        let ui = self.ivars();
+        let note = ui.note.borrow();
+        let Some(note) = note.as_ref() else { return };
+        if note.view.isHidden() {
+            return;
+        }
+        let size = self.bounds().size;
+        let w = (size.width - 2.0 * NOTE_PAD_X).max(40.0);
+        note.text.setPreferredMaxLayoutWidth(w);
+        let h = note.text.fittingSize().height.ceil();
+        let strip_h = h + 2.0 * NOTE_PAD_Y;
+        let below = if ui.full_screen.get() { BAR_H + 8.0 } else { 0.0 };
+        note.view.setFrame(NSRect::new(NSPoint::new(0.0, size.height - below - strip_h), NSSize::new(size.width, strip_h)));
+        note.text.setFrame(NSRect::new(NSPoint::new(NOTE_PAD_X, NOTE_PAD_Y), NSSize::new(w, h)));
     }
 
     /// The bar's tab, in the middle of the top, its rounded top above it.
@@ -1513,13 +1760,54 @@ impl AppView {
 
     /// Where an event is, on the phone's display.
     fn on_display(&self, event: &NSEvent) -> (u16, u16) {
-        let p = self.convertPoint_fromView(event.locationInWindow(), None);
+        self.at_display(self.convertPoint_fromView(event.locationInWindow(), None))
+    }
+
+    /// A point in the view, on the phone's display.
+    fn at_display(&self, p: NSPoint) -> (u16, u16) {
         let size = self.bounds().size;
         let shared = &self.ivars().shared;
         let s = shared.scale();
         // A view counts from the bottom; the phone from the top.
         let area = *shared.area.lock().unwrap();
         shared.link.to_display(p.x * s, (size.height - p.y) * s, area)
+    }
+
+    /// The phone's touchpad's pointer at `p`, in the view, with `buttons` held (apps/pad.rs).
+    fn pad_pointer(&self, p: NSPoint, buttons: u8) {
+        let ui = self.ivars();
+        if buttons != 0 && ui.buttons.get() == 0 {
+            ui.caret.set(p);
+        }
+        ui.buttons.set(buttons);
+        let (x, y) = self.at_display(p);
+        ui.shared.link.send(wire::pointer(buttons, x, y, 0));
+    }
+
+    /// The phone's touchpad's wheel, at `p`.
+    fn pad_scroll(&self, p: NSPoint, h: f64, v: f64) {
+        let (x, y) = self.at_display(p);
+        self.ivars().shared.link.send(wire::scroll(x, y, h as f32, v as f32, 0));
+    }
+
+    /// The phone's touchpad's pointer has left the picture.
+    fn pad_leave(&self) {
+        if self.ivars().buttons.get() == 0 {
+            self.ivars().shared.link.send(wire::json(&json!({"t": "leave"})));
+        }
+    }
+
+    /// The phone's touchpad's Back.
+    fn pad_back(&self) {
+        let link = &self.ivars().shared.link;
+        link.send(wire::key(true, 0, keys::code::BACK, 0));
+        link.send(wire::key(false, 0, keys::code::BACK, 0));
+    }
+
+    /// Whether `p`, in the view, is on the picture.
+    fn on_picture(&self, p: NSPoint) -> bool {
+        let b = self.bounds();
+        p.x >= 0.0 && p.y >= 0.0 && p.x < b.size.width && p.y < b.size.height
     }
 
     fn pointer(&self, event: &NSEvent) {

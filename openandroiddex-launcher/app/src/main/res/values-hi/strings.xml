@@ -276,6 +276,9 @@
     <string name="tp_options">टचपैड के विकल्प</string>
     <string name="tp_waiting">डेस्कटॉप का इंतज़ार हो रहा है…</string>
     <string name="tp_no_desktop">कोई कंप्यूटर डेस्कटॉप नहीं दिखा रहा, इसलिए टचपैड के पास हिलाने को कुछ नहीं है।</string>
+    <string name="tp_waiting_computer">कंप्यूटर का इंतज़ार हो रहा है…</string>
+    <string name="tp_notice_text_computer">कंप्यूटर पर अपने फ़ोन के ऐप में पॉइंट, क्लिक और स्क्रॉल करने के लिए टैप करें</string>
+    <string name="tp_hidden">सेटिंग्स या उस जैसी कोई स्क्रीन खुली रहने तक टचपैड छिपा रहता है। उसके बंद होते ही यह वापस आ जाता है।</string>
     <string name="st_phonepad">टचपैड के रूप में फ़ोन</string>
     <string name="st_phonepad_sub">आपके फ़ोन पर एक सूचना उसकी स्क्रीन को इस डेस्कटॉप का टचपैड बना देती है</string>
     <string name="st_phonepad_note">इसे उसी सूचना से खोलें, या क्विक सेटिंग्स में टचपैड से। एक उंगली पॉइंट और क्लिक करती है, दो स्क्रॉल करती हैं, और तीन नीचे दिए गए जेस्चर चलाती हैं।</string>

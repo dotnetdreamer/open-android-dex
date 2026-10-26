@@ -186,6 +186,10 @@ objc2-core-graphics = { version = "0.3", default-features = false, features = [
     # Which screen the desktop's window is on (embed/macos.rs window_scale).
     "CGWindow",
     "CGGeometry",
+    # The phone's touchpad moving this Mac's pointer over the phone's windows
+    # (apps/mac, pad): a warp, which takes no permission and posts no event.
+    "CGRemoteOperation",
+    "CGError",
 ] }
 objc2-app-kit = { version = "0.3", default-features = false, features = [
     "std",

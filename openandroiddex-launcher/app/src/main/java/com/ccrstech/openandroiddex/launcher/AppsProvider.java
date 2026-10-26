@@ -48,6 +48,13 @@ import java.util.concurrent.TimeUnit;
  * <li>{@code media.mode} {@code {mode, pick?}} — where the computer's app
  *     windows sent the sound ("computer", "both", or "phone" and the output
  *     picked), recorded as the desktop's own choice so its flyout agrees.</li>
+ * <li>{@code pad.offer} {@code {port, token}} — the phone's screen offered as the
+ *     touchpad of the computer's windows (Touchpad, HostPointer): where the app
+ *     server takes the pad, and the notification that opens it, where this app may
+ *     post one ({@code offered}). {@code pad.open}, the same and the pad up now —
+ *     a window's menu on the computer asked. {@code pad.close} — no longer offered:
+ *     the pad and the notification down; says whether a desktop is up
+ *     ({@code desktop}), which the overlay permission is still needed for.</li>
  * </ul>
  *
  * <p>{@code linux.apps} also says how far the setup is ({@code phase},
@@ -160,6 +167,37 @@ public class AppsProvider extends ContentProvider {
                     }
                     DexMedia.adoptFromComputer(ctx, in.optString("mode"), pick);
                     out.put("ok", true);
+                    break;
+                }
+                case "pad.offer":
+                case "pad.open": {
+                    int port = in.optInt("port", -1);
+                    String key = in.optString("token");
+                    if (port <= 0 || port > 65535 || key.isEmpty()) {
+                        out.put("ok", false).put("message", "no port or token for the pad");
+                        break;
+                    }
+                    if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.R) {
+                        out.put("ok", false).put("message", "the phone's touchpad needs Android 11");
+                        break;
+                    }
+                    boolean open = "pad.open".equals(method);
+                    boolean[] done = new boolean[2];
+                    onMain(() -> {
+                        Touchpad.offeredByComputer(port, key);
+                        done[1] = TouchpadNotice.showForComputer(ctx);
+                        done[0] = !open || Touchpad.openForComputer(ctx);
+                    });
+                    out.put("ok", done[0]).put("offered", done[1]);
+                    if (!done[0]) out.put("message", "the touchpad could not be opened on the phone");
+                    break;
+                }
+                case "pad.close": {
+                    onMain(() -> {
+                        Touchpad.computerGone();
+                        TouchpadNotice.hideForComputer(ctx);
+                    });
+                    out.put("ok", true).put("desktop", LauncherActivity.desktopShell() != null);
                     break;
                 }
                 default:

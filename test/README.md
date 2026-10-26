@@ -149,6 +149,30 @@ dropped by an adb server of another version, and everything it posts is gone
 from the phone when it ends; run it on an AVD started with `-read-only` to
 leave the AVD's texts and call log as they were.
 
+The phone's screen as the touchpad of its apps' windows on the computer
+(`doc/phone-touchpad.md`, §10) has its phone's half checked the same way:
+
+```sh
+node test/pad-test.mjs [serial]
+```
+
+It needs this build's launcher on the phone (a desktop session installs it).
+It runs the app server from the dex, asks for the pad on the control wire and
+touches the pad the launcher puts up, for real, reading what reaches the
+computer: offered, with the launcher let draw over other apps; a connection to
+the pad's port from anything but the launcher refused; with one finger
+(`input`) a slide as moves, a tap as a click, a held finger as a right click,
+◁ as Back; with two and three (the dex's `Probe fingers`, as the shell) a
+scroll in notches, a right click, the next and previous window, Back, and the
+desktop's own gestures reaching nothing; Settings in a window of its own
+keeping the pad off the phone's screen, as Android does every app's overlay,
+and the pad saying so and then that it is back (Android 15 and later) — with
+its toast on the phone where the launcher may post notifications, Android
+dropping it otherwise — but not the shade pulled over it, nor the screen
+going dark and lit again; an app put in front on the phone's screen, and ✕,
+each putting the pad away; and withdrawn, the app-op as it was. It puts the
+launcher's app-op back to what it found.
+
 Everything else needs a device. `doc/web-viewer.md`, `doc/remote-access.md`,
 `doc/usb-desktop.md`, `doc/apps-on-pc.md` and `doc/phone-notifications.md`
 list what is still unverified there.

@@ -176,9 +176,8 @@ pub trait Surface: Send + Sync {
     /// How the window reaches its phone now, for its title bar: "USB" or "Wi‑Fi".
     fn way(&self, via: &str);
     /// A short note in the window — where the sound went, how far a dropped
-    /// file is: in a strip under the title bar on Windows, the window's
-    /// subtitle on a Mac. A `busy` one stays until the next replaces it; any
-    /// other goes after a few seconds. None takes it away.
+    /// file is — in a strip under the title bar. A `busy` one stays until the
+    /// next replaces it; any other goes after a few seconds. None takes it away.
     fn note(&self, text: Option<String>, busy: bool);
     /// The phone says the app has gone: the window goes, telling the phone nothing.
     fn gone(&self);
@@ -198,6 +197,9 @@ pub trait Host: Send + Sync {
     fn pick_sound(&self, choice: sound::Choice, window: Arc<dyn Surface>);
     /// Files dropped on the window, for the phone; `window` hears how they go.
     fn dropped(&self, paths: Vec<PathBuf>, window: Arc<dyn Surface>);
+    /// More's "Use phone as touchpad": the phone's screen up as the touchpad
+    /// of its windows here (apps/pad.rs); `window` hears how it went.
+    fn touchpad(&self, window: Arc<dyn Surface>);
 }
 
 /// One window's link: what both its sides and its threads share.
@@ -753,6 +755,7 @@ mod tests {
         }
         fn pick_sound(&self, _choice: sound::Choice, _window: Arc<dyn Surface>) {}
         fn dropped(&self, _paths: Vec<PathBuf>, _window: Arc<dyn Surface>) {}
+        fn touchpad(&self, _window: Arc<dyn Surface>) {}
     }
 
     fn link() -> Arc<Link> {

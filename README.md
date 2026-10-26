@@ -161,6 +161,13 @@ half a second.
   screen** (F11 on Windows). Move the mouse to the top of the screen and a
   small bar comes down with Back, the way out of full screen, and close.
   Press Esc to get your window back
+- **Your phone as the touchpad.** ☰ → **Use phone as touchpad** turns your
+  phone's screen into a touchpad for these windows: slide a finger to move
+  your computer's pointer, tap to click, hold or tap with two fingers to
+  right-click, two fingers to scroll, ◁ for Back. It works in your phone's
+  windows only — it never clicks anything else on your computer. If your
+  phone already lets Open Android DeX show notifications, it is in its
+  notification shade too while a window is open
 - **Close the window and the app goes back to your phone,** right where you
   left it. Whatever was on your phone's screen stays there
 - **Unplug and carry on.** If your phone is on Wi‑Fi here too, pulling the

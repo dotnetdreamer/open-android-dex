@@ -276,6 +276,9 @@
     <string name="tp_options">خيارات لوحة اللمس</string>
     <string name="tp_waiting">في انتظار سطح المكتب…</string>
     <string name="tp_no_desktop">لا يعرض أي كمبيوتر سطح المكتب الآن، فلا شيء تحرّكه لوحة اللمس.</string>
+    <string name="tp_waiting_computer">في انتظار الكمبيوتر…</string>
+    <string name="tp_notice_text_computer">انقر لتشير وتنقر وتمرّر في تطبيقات هاتفك على الكمبيوتر</string>
+    <string name="tp_hidden">تُخفى لوحة اللمس ما دامت الإعدادات أو شاشة مشابهة مفتوحة، وتعود عند إغلاقها.</string>
     <string name="st_phonepad">الهاتف كلوحة لمس</string>
     <string name="st_phonepad_sub">إشعار على هاتفك يحوّل شاشته إلى لوحة لمس لسطح المكتب هذا</string>
     <string name="st_phonepad_note">افتحها من ذلك الإشعار، أو من «لوحة اللمس» في الإعدادات السريعة. إصبع واحد يشير وينقر، وإصبعان للتمرير، وثلاثة تنفّذ الإيماءات أدناه.</string>

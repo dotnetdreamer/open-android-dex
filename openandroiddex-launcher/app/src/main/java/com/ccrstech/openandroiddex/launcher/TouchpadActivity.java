@@ -32,7 +32,10 @@ public final class TouchpadActivity extends Activity {
         super.onCreate(savedInstanceState);
         LauncherActivity shell = LauncherActivity.desktopShell();
         int desktop = shell == null ? -1 : shell.displayId();
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R || desktop <= Display.DEFAULT_DISPLAY) {
+        if (desktop < 0 && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && Touchpad.computerOffers()) {
+            // No desktop: the computer's own windows of the phone's apps, as its server offers.
+            Touchpad.openForComputer(this);
+        } else if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R || desktop <= Display.DEFAULT_DISPLAY) {
             // A notification that outlived its desktop — or the desktop drawn on the
             // phone's own screen, which has the dock's strip instead (DexPointer).
             DexLog.step("touchpad", "no desktop on a display of its own — nothing to be the touchpad of");

@@ -53,7 +53,7 @@ use windows::Win32::Graphics::Dwm::{
 };
 use windows::Win32::Graphics::Gdi::{
     ClientToScreen, GetMonitorInfoW, MonitorFromPoint, MonitorFromRect, MonitorFromWindow, ScreenToClient, MONITORINFO,
-    MONITOR_DEFAULTTONEAREST,
+    MONITOR_DEFAULTTONEAREST, MONITOR_DEFAULTTONULL,
 };
 use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED, COINIT_MULTITHREADED};
 use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress, LoadLibraryW};
@@ -63,9 +63,11 @@ use windows::Win32::UI::HiDpi::{
 };
 use windows::Win32::UI::Input::Ime::{ImmGetCompositionStringW, ImmGetContext, ImmReleaseContext, GCS_RESULTSTR};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetKeyState, MapVirtualKeyW, ReleaseCapture, SetCapture, TrackMouseEvent, MAPVK_VK_TO_CHAR, TME_LEAVE,
-    TME_NONCLIENT, TRACKMOUSEEVENT, VK_CAPITAL, VK_CONTROL, VK_ESCAPE, VK_F11, VK_F4, VK_LWIN, VK_MENU, VK_NUMLOCK,
-    VK_RMENU, VK_RWIN, VK_SHIFT, VK_SPACE,
+    GetKeyState, MapVirtualKeyW, ReleaseCapture, SendInput, SetCapture, TrackMouseEvent, INPUT, INPUT_0, INPUT_MOUSE,
+    MAPVK_VK_TO_CHAR, MOUSEEVENTF_HWHEEL, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN,
+    MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_WHEEL, MOUSEINPUT, MOUSE_EVENT_FLAGS,
+    TME_LEAVE, TME_NONCLIENT, TRACKMOUSEEVENT, VK_CAPITAL, VK_CONTROL, VK_ESCAPE, VK_F11, VK_F4, VK_LWIN, VK_MENU,
+    VK_NUMLOCK, VK_RMENU, VK_RWIN, VK_SHIFT, VK_SPACE,
 };
 use windows::Win32::UI::Shell::PropertiesSystem::{IPropertyStore, SHGetPropertyStoreForWindow};
 use windows::Win32::UI::Shell::{DragAcceptFiles, DragFinish, DragQueryFileW, HDROP};
@@ -102,6 +104,14 @@ impl Window {
     pub fn close(&self) {
         unsafe {
             let _ = PostMessageW(Some(self.shared.hwnd()), WM_CLOSE, WPARAM(0), LPARAM(0));
+        }
+    }
+
+    /// Maximised if it is not, back if it is: a gesture on the phone's touchpad.
+    pub fn toggle_maximized(&self) {
+        let hwnd = self.shared.hwnd();
+        unsafe {
+            let _ = ShowWindowAsync(hwnd, if IsZoomed(hwnd).as_bool() { SW_RESTORE } else { SW_MAXIMIZE });
         }
     }
 
@@ -167,6 +177,148 @@ pub fn screen_scale() -> f32 {
         let (mut dx, mut dy) = (96u32, 96u32);
         let _ = GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut dx, &mut dy);
         dx.max(96) as f32 / 96.0
+    }
+}
+
+// ── the phone's touchpad (apps/pad.rs) ──
+
+/// What the phone's touchpad holds down here, and what its moves still owe.
+#[derive(Default)]
+struct Pad {
+    /// The buttons the pad holds, as MotionEvent.BUTTON_* bits.
+    buttons: u8,
+    /// Those of them pressed here — over one of the phone's windows: only these are let go.
+    sent: u8,
+    /// The part of a pixel rounding has left over, so a slow finger still moves.
+    rest: (f64, f64),
+}
+
+fn pad_state() -> &'static Mutex<Pad> {
+    static P: std::sync::OnceLock<Mutex<Pad>> = std::sync::OnceLock::new();
+    P.get_or_init(Default::default)
+}
+
+/// What the phone's touchpad did: this computer's pointer moved, and the
+/// phone's window under it pressed, dragged or scrolled. A press and the wheel
+/// go in as a real mouse's would (SendInput), so a window's title bar, its
+/// capture and its hover all work as they do for the mouse — and only over one
+/// of the phone's windows, so nothing else on this computer is ever clicked
+/// from the phone. A drag that started there is let go wherever it ends.
+pub fn pad(input: super::pad::Input) {
+    use super::pad::Input;
+    let mut pad = pad_state().lock().unwrap();
+    let mut at = POINT::default();
+    unsafe {
+        let _ = GetCursorPos(&mut at);
+    }
+    match input {
+        Input::Move { dx, dy } => {
+            // The pad's points, at the scale of the screen the pointer is on.
+            let scale = screen_scale() as f64;
+            let (fx, fy) = (dx * scale + pad.rest.0, dy * scale + pad.rest.1);
+            let (ix, iy) = (fx.round(), fy.round());
+            pad.rest = (fx - ix, fy - iy);
+            let to = on_a_monitor(POINT { x: at.x + ix as i32, y: at.y + iy as i32 }, at);
+            unsafe {
+                let _ = SetCursorPos(to.x, to.y);
+            }
+        }
+        Input::Buttons(b) => {
+            let (pressed, released) = (b & !pad.buttons, pad.buttons & !b);
+            pad.buttons = b;
+            let up = released & pad.sent;
+            if up != 0 {
+                send_buttons(up, false);
+                pad.sent &= !up;
+            }
+            if pressed != 0 && phone_window_at(at).is_some() {
+                send_buttons(pressed, true);
+                pad.sent |= pressed;
+            }
+        }
+        Input::Wheel { h, v } => {
+            if phone_window_at(at).is_some() {
+                if v != 0.0 {
+                    send_wheel(MOUSEEVENTF_WHEEL, v);
+                }
+                if h != 0.0 {
+                    send_wheel(MOUSEEVENTF_HWHEEL, h);
+                }
+            }
+        }
+        Input::Back => {
+            let w = phone_window_at(at).or_else(|| phone_window(unsafe { GetForegroundWindow() }));
+            if let Some(w) = w {
+                w.shared.send(wire::key(true, 0, keys::code::BACK, 0));
+                w.shared.send(wire::key(false, 0, keys::code::BACK, 0));
+            }
+        }
+        Input::Gone => {
+            if pad.sent != 0 {
+                send_buttons(pad.sent, false);
+            }
+            *pad = Pad::default();
+        }
+    }
+}
+
+/// The phone's window that is the top-level window at `at` on screen, if one is.
+fn phone_window_at(at: POINT) -> Option<Arc<Window>> {
+    phone_window(unsafe { GetAncestor(WindowFromPoint(at), GA_ROOT) })
+}
+
+/// The phone's window `hwnd` is, if it is one.
+fn phone_window(hwnd: HWND) -> Option<Arc<Window>> {
+    if hwnd.0.is_null() {
+        return None;
+    }
+    super::windows().lock().unwrap().values().find(|w| w.shared.hwnd() == hwnd).cloned()
+}
+
+/// `p` if a monitor has it; else as near as the monitor `from` is on lets it be.
+fn on_a_monitor(p: POINT, from: POINT) -> POINT {
+    unsafe {
+        if !MonitorFromPoint(p, MONITOR_DEFAULTTONULL).is_invalid() {
+            return p;
+        }
+        let mut info = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
+        if !GetMonitorInfoW(MonitorFromPoint(from, MONITOR_DEFAULTTONEAREST), &mut info).as_bool() {
+            return from;
+        }
+        let r = info.rcMonitor;
+        POINT { x: p.x.clamp(r.left, r.right - 1), y: p.y.clamp(r.top, r.bottom - 1) }
+    }
+}
+
+/// `bits` (MotionEvent.BUTTON_*) pressed, or let go, where the pointer is.
+fn send_buttons(bits: u8, down: bool) {
+    let flags = [
+        (1u8, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP),
+        (2, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP),
+        (4, MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP),
+    ];
+    let inputs: Vec<INPUT> = flags
+        .iter()
+        .filter(|(bit, _, _)| bits & bit != 0)
+        .map(|(_, d, u)| mouse_input(if down { *d } else { *u }, 0))
+        .collect();
+    unsafe {
+        let _ = SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
+    }
+}
+
+/// The wheel turned `notches`, where the pointer is: up or right positive, as Windows has them.
+fn send_wheel(flag: MOUSE_EVENT_FLAGS, notches: f64) {
+    let data = (notches * WHEEL_DELTA as f64).round() as i32 as u32;
+    unsafe {
+        let _ = SendInput(&[mouse_input(flag, data)], std::mem::size_of::<INPUT>() as i32);
+    }
+}
+
+fn mouse_input(flags: MOUSE_EVENT_FLAGS, data: u32) -> INPUT {
+    INPUT {
+        r#type: INPUT_MOUSE,
+        Anonymous: INPUT_0 { mi: MOUSEINPUT { dx: 0, dy: 0, mouseData: data, dwFlags: flags, time: 0, dwExtraInfo: 0 } },
     }
 }
 
@@ -385,6 +537,8 @@ const BAR_STAYS_MS: u32 = 600;
 const BAR_ON_ARRIVAL_MS: u32 = 2000;
 /// More's menu.
 const MENU_FULL_SCREEN: usize = 1;
+/// More's "Use phone as touchpad" (apps/pad.rs).
+const MENU_TOUCHPAD: usize = 2;
 
 /// Open a window for `spec`; it runs until it is closed. The window shows
 /// at once, with the app's icon and name, and the picture follows.
@@ -1170,7 +1324,8 @@ impl Ui {
         }
     }
 
-    /// More's menu, under its button: full screen, for now, with its key beside it.
+    /// More's menu, under its button: full screen, with its key beside it, and
+    /// the phone's own screen as the touchpad of its windows here.
     fn more_menu(&mut self, hwnd: HWND) {
         let full = self.full_screen();
         let button = self.button_rect(Hit::More);
@@ -1178,6 +1333,7 @@ impl Ui {
             let Ok(menu) = CreatePopupMenu() else { return };
             let text = if full { w!("Exit full screen\tEsc") } else { w!("Full screen\tF11") };
             let _ = AppendMenuW(menu, MF_STRING, MENU_FULL_SCREEN, text);
+            let _ = AppendMenuW(menu, MF_STRING, MENU_TOUCHPAD, w!("Use phone as touchpad"));
             dark_menus(hwnd, self.shared.dark.load(Ordering::SeqCst));
             // Under the button, and never over it.
             let mut corners = [POINT { x: button.left, y: button.top }, POINT { x: button.right, y: button.bottom }];
@@ -1198,6 +1354,9 @@ impl Ui {
             if chosen.0 as usize == MENU_FULL_SCREEN {
                 self.toggle_full_screen(hwnd);
             } else {
+                if chosen.0 as usize == MENU_TOUCHPAD {
+                    self.shared.link.host().touchpad(self.shared.clone());
+                }
                 self.after_menu(hwnd);
             }
         }

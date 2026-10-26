@@ -1,5 +1,6 @@
 package com.ccrstech.openandroiddex.launcher;
 
+import android.app.KeyguardManager;
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
@@ -19,6 +20,7 @@ import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.PowerManager;
+import android.os.SystemClock;
 import android.util.TypedValue;
 import android.view.Display;
 import android.view.Gravity;
@@ -33,9 +35,11 @@ import android.widget.LinearLayout;
 import android.widget.SeekBar;
 import android.widget.TextView;
 import android.widget.Toast;
+import android.window.TrustedPresentationThresholds;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.function.Consumer;
 
 /**
  * The phone's own screen as the touchpad of the desktop a computer is showing — what the
@@ -43,6 +47,12 @@ import java.util.List;
  * {@link TouchpadNotice}'s notification (through {@link TouchpadActivity}) and by
  * Touchpad in the desktop's quick settings. {@link TouchpadGestures} says what the
  * fingers mean, and {@link DesktopPointer} is where that lands. See doc/phone-touchpad.md.
+ *
+ * <p><b>Or of the computer's own windows of the phone's apps</b>, with no desktop on the
+ * phone at all ({@link #openForComputer}): offered by the computer's app server through
+ * {@link AppsProvider}, opened from the same notification or from a window's menu on the
+ * computer. Then {@link HostPointer} is where the fingers land — the computer's own
+ * pointer, over those windows — and the desktop's own Home and Recents are not here.
  *
  * <p><b>A window over the phone's screen, not an activity, because of focus.</b> Below
  * Android 14 only the topmost display has a focused window, and touching a focusable
@@ -67,7 +77,9 @@ import java.util.List;
  * daemon's TOP) and gets out of the way as soon as that changes, and goes on the phone's
  * Home and Recents keys as well, which change nothing in front when the phone was showing
  * its home screen already. The phone's own Back goes to the app underneath, which is
- * still the phone's foreground app; ✕ is the pad's.
+ * still the phone's foreground app; ✕ is the pad's. And Android keeps every app's overlay
+ * off the screen while Settings, or a screen like it, shows anywhere — the pad says so,
+ * and comes back by itself ({@link #watchShown}).
  *
  * <p>Android 11 and later: a window context, and the daemon's ways of finding tasks there.
  */
@@ -86,6 +98,18 @@ final class Touchpad implements TouchpadGestures.Listener {
      * and the phone's display takes the top again as it goes.
      */
     private static final long FOCUS_AGAIN_MS = 700L;
+    /** A showing or a hiding of the pad's window shorter than this is not taken as one. */
+    private static final int SHOWN_STABLE_MS = 300;
+    /**
+     * No word from Android that the pad's window is on the screen this long after it
+     * opened: it is not — something was keeping it off already.
+     */
+    private static final long SHOWN_WITHIN_MS = 2500L;
+    /**
+     * Off the screen this long, the phone awake and unlocked the whole time, before the
+     * pad says it is kept off: a phone just woken or unlocked has it back a moment later.
+     */
+    private static final long OFF_FOR_MS = 1500L;
 
     /** Not the shell's palette: a full-screen white touchpad would be a torch in the hand. */
     private static final int PAD_BG = 0xFF0B0E14;
@@ -100,18 +124,59 @@ final class Touchpad implements TouchpadGestures.Listener {
     private static Touchpad current;
 
     /**
+     * Where the computer's app server takes a pad for its windows of the phone's apps —
+     * its loopback port and this run's token — while it offers one; -1 and null otherwise.
+     */
+    private static int computerPort = -1;
+    private static String computerToken;
+
+    /**
      * Open the pad on the phone's screen for the desktop on {@code desktopDisplay}, or
      * leave it up if it already is. False, having said why, if it cannot be shown.
      */
     static boolean open(Context ctx, int desktopDisplay) {
         if (current != null) {
-            if (current.desktop == desktopDisplay) return true;
+            if (current.host == null && current.desktop == desktopDisplay) return true;
             current.close();
         }
-        Touchpad pad = new Touchpad(ctx.getApplicationContext(), desktopDisplay);
+        Touchpad pad = new Touchpad(ctx.getApplicationContext(), desktopDisplay, -1, null);
         if (!pad.attach()) return false;
         current = pad;
         return true;
+    }
+
+    /** The computer offers the pad for its windows, through its server at {@code port}. */
+    static void offeredByComputer(int port, String token) {
+        computerPort = port;
+        computerToken = token;
+    }
+
+    /** Whether the computer offers the pad for its windows now. */
+    static boolean computerOffers() {
+        return computerPort > 0 && computerToken != null;
+    }
+
+    /**
+     * Open the pad for the computer's windows of the phone's apps, as it offers it — or
+     * leave it up if it already is. False if the computer offers none, or it cannot be shown.
+     */
+    static boolean openForComputer(Context ctx) {
+        if (!computerOffers()) return false;
+        if (current != null) {
+            if (current.host != null && current.host.sameAs(computerPort, computerToken)) return true;
+            current.close();
+        }
+        Touchpad pad = new Touchpad(ctx.getApplicationContext(), -1, computerPort, computerToken);
+        if (!pad.attach()) return false;
+        current = pad;
+        return true;
+    }
+
+    /** The computer no longer offers the pad: down if it is the computer's, and forgotten. */
+    static void computerGone() {
+        computerPort = -1;
+        computerToken = null;
+        if (current != null && current.host != null) current.close();
     }
 
     /** The desktop has gone, or something else needs the pad down: close it if it is up. */
@@ -121,6 +186,11 @@ final class Touchpad implements TouchpadGestures.Listener {
 
     private final Context app;
     private final int desktop;
+    /** The computer's server's port and token, for a pad of its windows; -1 and null for the desktop's. */
+    private final int hostPort;
+    private final String hostToken;
+    /** The pointer, when it is the computer's; null for the desktop's. */
+    private HostPointer host;
     private final Handler main = new Handler(Looper.getMainLooper());
     /** For what is not the pointer: the window lists a gesture walks, and the watch. */
     private final WmClient actions = new WmClient();
@@ -128,7 +198,7 @@ final class Touchpad implements TouchpadGestures.Listener {
     private WindowManager windows;
     private WindowManager.LayoutParams lp;
     private View root;
-    private DesktopPointer pointer;
+    private PadTarget pointer;
     private TouchpadGestures gestures;
     private PadSurface surface;
     private TextView status;
@@ -138,6 +208,18 @@ final class Touchpad implements TouchpadGestures.Listener {
     private boolean closed;
     /** The task in front of the phone's display when the pad came up; -2 until seen. */
     private int front = -2;
+    /**
+     * Whether Android has the pad's window on the phone's screen, as its listener last
+     * said; null until it says. Android 15 and later: see {@link #watchShown}.
+     */
+    private Boolean presented;
+    /** That listener, while it is registered. */
+    private Consumer<Boolean> shown;
+    private long openedAt;
+    /** Since when it has been off the screen with the phone awake and unlocked; 0 while not. */
+    private long offSince;
+    /** Kept off the screen by Android, and said so. */
+    private boolean hidden;
 
     /** The window ring, touched on the actions thread only. See {@link #cycleWindows}. */
     private final List<Integer> ring = new ArrayList<>();
@@ -162,10 +244,12 @@ final class Touchpad implements TouchpadGestures.Listener {
         @Override
         public void run() {
             if (closed) return;
+            checkShown();
             PowerManager power = app.getSystemService(PowerManager.class);
             if (power == null || power.isInteractive()) {
                 actions.post(() -> {
-                    String[] top = actions.top(Display.DEFAULT_DISPLAY);
+                    // For the computer's windows there is no window daemon: its server says.
+                    String[] top = host != null ? host.top() : actions.top(Display.DEFAULT_DISPLAY);
                     if (top != null) main.post(() -> onFront(top));
                 });
             }
@@ -224,9 +308,11 @@ final class Touchpad implements TouchpadGestures.Listener {
         }
     };
 
-    private Touchpad(Context app, int desktop) {
+    private Touchpad(Context app, int desktop, int hostPort, String hostToken) {
         this.app = app;
         this.desktop = desktop;
+        this.hostPort = hostPort;
+        this.hostToken = hostToken;
     }
 
     // ── up and down ──
@@ -247,7 +333,12 @@ final class Touchpad implements TouchpadGestures.Listener {
         windows = window.getSystemService(WindowManager.class);
         ui = DexLocale.wrap(window);
         density = ui.getResources().getDisplayMetrics().density;
-        pointer = new DesktopPointer(app, desktop);
+        if (hostPort > 0) {
+            host = new HostPointer(app, hostPort, hostToken);
+            pointer = host;
+        } else {
+            pointer = new DesktopPointer(app, desktop);
+        }
         gestures = new TouchpadGestures(this, density);
         gestures.setNatural(DexPrefs.getBool(app, DexPrefs.KEY_PAD_NATURAL,
                 DexPrefs.DEF_PAD_NATURAL));
@@ -289,7 +380,10 @@ final class Touchpad implements TouchpadGestures.Listener {
         main.postDelayed(sleepy, AWAKE_MS);
         main.post(statusTick);
         main.post(watch);
-        DexLog.step("touchpad", "open on the phone for the desktop on display " + desktop);
+        openedAt = SystemClock.uptimeMillis();
+        if (Build.VERSION.SDK_INT >= 35) root.post(this::watchShown);
+        DexLog.step("touchpad", host != null ? "open on the phone for the computer's windows"
+                : "open on the phone for the desktop on display " + desktop);
         return true;
     }
 
@@ -314,6 +408,12 @@ final class Touchpad implements TouchpadGestures.Listener {
         try {
             app.unregisterReceiver(keys);
         } catch (RuntimeException ignored) {
+        }
+        if (Build.VERSION.SDK_INT >= 35 && shown != null) {
+            try {
+                windows.unregisterTrustedPresentationListener(shown);
+            } catch (RuntimeException ignored) {
+            }
         }
         pointer.release();
         actions.shutdown();
@@ -359,6 +459,64 @@ final class Touchpad implements TouchpadGestures.Listener {
             windows.updateViewLayout(root, lp);
         } catch (RuntimeException ignored) {
         }
+    }
+
+    // ── on the screen, or kept off it ──
+
+    /**
+     * Android keeps every app's overlay — the pad's window too — off the screen while
+     * something that asks it to is showing anywhere: Settings, the package installer, a
+     * permission prompt; on the phone, on the desktop, or in a window of the computer's.
+     * Nothing tells the overlay, and the phone's touches go through to whatever is under
+     * it. Android 15's trusted-presentation listener says whether the window really is on
+     * the screen, so the pad can say why it went. It comes back by itself.
+     */
+    @android.annotation.TargetApi(35)
+    private void watchShown() {
+        if (closed) return;
+        Consumer<Boolean> l = on -> {
+            presented = on;
+            checkShown();
+        };
+        try {
+            windows.registerTrustedPresentationListener(root.getWindowToken(),
+                    new TrustedPresentationThresholds(0.5f, 0.05f, SHOWN_STABLE_MS),
+                    app.getMainExecutor(), l);
+            shown = l;
+        } catch (RuntimeException e) {
+            DexLog.warn("touchpad", "cannot tell whether the pad is on the screen", e);
+        }
+    }
+
+    /**
+     * Kept off the screen while the phone is awake and unlocked: the phone says why, and
+     * the computer's windows say it too. Asleep or locked, the pad is off the screen for
+     * reasons that need no saying, and nothing changes. Called on each of the listener's
+     * changes and on each look at the front of the phone's display.
+     */
+    private void checkShown() {
+        if (closed || shown == null) return;
+        PowerManager power = app.getSystemService(PowerManager.class);
+        KeyguardManager lock = app.getSystemService(KeyguardManager.class);
+        if ((power != null && !power.isInteractive()) || (lock != null && lock.isKeyguardLocked())) {
+            offSince = 0;
+            return;
+        }
+        long now = SystemClock.uptimeMillis();
+        boolean off = presented != null ? !presented : now - openedAt > SHOWN_WITHIN_MS;
+        if (!off) {
+            offSince = 0;
+        } else if (offSince == 0) {
+            offSince = now;
+        }
+        // Once said, kept off until it is on the screen again; before, only once it has been off a while.
+        if (!hidden) off = off && now - offSince >= OFF_FOR_MS;
+        if (off == hidden) return;
+        hidden = off;
+        DexLog.step("touchpad", off ? "Android is keeping the pad off the screen: Settings, or a screen like it, is showing"
+                : "the pad is on the screen again");
+        if (off) Toast.makeText(app, ui.getString(R.string.tp_hidden), Toast.LENGTH_LONG).show();
+        if (host != null) host.hidden(off);
     }
 
     // ── what the fingers did ──
@@ -438,6 +596,24 @@ final class Touchpad implements TouchpadGestures.Listener {
      * computer's, as the taskbar's own is.
      */
     private void act(String action) {
+        if (host != null) {
+            // The computer's windows: Back to the one the pointer is with, and the window
+            // actions the computer carries out over them. The rest are the desktop's own
+            // panels, and there is no desktop on the phone.
+            switch (action) {
+                case "back":
+                    pointer.key(KeyEvent.KEYCODE_BACK);
+                    break;
+                case "nextwindow":
+                case "prevwindow":
+                case "maximize":
+                    host.act(action);
+                    break;
+                default:
+                    break;
+            }
+            return;
+        }
         switch (action) {
             case "openapps":
             case "drawer":
@@ -575,7 +751,7 @@ final class Touchpad implements TouchpadGestures.Listener {
                 Gravity.CENTER));
 
         status = new TextView(ui);
-        status.setText(ui.getString(R.string.tp_waiting));
+        status.setText(ui.getString(host != null ? R.string.tp_waiting_computer : R.string.tp_waiting));
         status.setTextColor(theme.accent);
         status.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
         status.setGravity(Gravity.CENTER);
@@ -602,10 +778,13 @@ final class Touchpad implements TouchpadGestures.Listener {
         nav.setPadding(0, dp(8), 0, 0);
         nav.addView(navButton("◁", ui.getString(R.string.lx_back),
                 v -> pointer.key(KeyEvent.KEYCODE_BACK)), navParams());
-        nav.addView(navButton("○", ui.getString(R.string.lx_home),
-                v -> act("home")), navParams());
-        nav.addView(navButton("▢", ui.getString(R.string.lx_recent_apps),
-                v -> act("openapps")), navParams());
+        if (host == null) {
+            // Home and Recents are the desktop's; the computer's windows have Back alone.
+            nav.addView(navButton("○", ui.getString(R.string.lx_home),
+                    v -> act("home")), navParams());
+            nav.addView(navButton("▢", ui.getString(R.string.lx_recent_apps),
+                    v -> act("openapps")), navParams());
+        }
         panel.addView(nav, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 

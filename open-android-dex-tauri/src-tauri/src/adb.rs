@@ -1886,6 +1886,37 @@ fn bundled_apk_sha256(apk: &std::path::Path) -> Option<String> {
     Some(hex)
 }
 
+/// This build's launcher on the phone, for something of its own the computer's
+/// windows of the phone's apps ask for — the phone's screen as their touchpad
+/// (apps/pad.rs) — where no desktop has put it there. Installed only if the
+/// phone's is not this build, and never while its Linux is running: an install
+/// stops the package, and that Linux with it.
+pub(crate) fn ensure_launcher(app: &tauri::AppHandle, serial: &str) -> Result<(), String> {
+    let apk = bin_dir(app)?.join("openandroiddex-launcher.apk");
+    if !apk.exists() {
+        return Err("This copy of Open Android DeX has no phone app to install.".into());
+    }
+    let (this_build, linux_running) = installed_launcher(app, serial, &apk);
+    if this_build {
+        return Ok(());
+    }
+    if linux_running {
+        return Err("Close Linux on your phone first: setting up the touchpad would end it.".into());
+    }
+    log::info!("installing {} for the phone's touchpad", apk.display());
+    let (done, asked) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false)));
+    watch_for_install_prompt(app, serial, done.clone(), asked.clone());
+    let installed = install_launcher(app, serial, &apk.to_string_lossy());
+    done.store(true, Ordering::SeqCst);
+    installed.map_err(|e| {
+        if asked.load(Ordering::SeqCst) {
+            "Your phone is asking about installing Open Android DeX. Answer it on the phone, then try again.".into()
+        } else {
+            e
+        }
+    })
+}
+
 /// What the phone has of the launcher: whether its installed APK is this very
 /// build, and whether its Linux is running. One round trip; any doubt answers
 /// no, which is the plain install.

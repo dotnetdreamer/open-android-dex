@@ -276,6 +276,9 @@
     <string name="tp_options">Opciones del panel táctil</string>
     <string name="tp_waiting">Esperando al escritorio…</string>
     <string name="tp_no_desktop">Ningún ordenador está mostrando el escritorio, así que el panel táctil no tiene nada que mover.</string>
+    <string name="tp_waiting_computer">Esperando al ordenador…</string>
+    <string name="tp_notice_text_computer">Toca para señalar, hacer clic y desplazarte en las aplicaciones de tu teléfono en el ordenador</string>
+    <string name="tp_hidden">El panel táctil se oculta mientras Ajustes u otra pantalla parecida esté abierta. Vuelve cuando se cierre.</string>
     <string name="st_phonepad">El teléfono como panel táctil</string>
     <string name="st_phonepad_sub">Una notificación en tu teléfono convierte su pantalla en un panel táctil para este escritorio</string>
     <string name="st_phonepad_note">Ábrelo desde esa notificación o desde Panel táctil en los ajustes rápidos. Un dedo señala y hace clic, dos desplazan y tres ejecutan los gestos de abajo.</string>

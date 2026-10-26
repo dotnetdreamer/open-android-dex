@@ -42,7 +42,7 @@ import java.util.ArrayDeque;
  * rule {@link WebInput} drags by. A press, a release and a key are never folded away, so a
  * quick tap is still a click and a drag still starts where the button went down.
  */
-final class DesktopPointer {
+final class DesktopPointer implements PadTarget {
 
     private static final int MOVE = 0;
     private static final int WHEEL = 1;
@@ -138,18 +138,21 @@ final class DesktopPointer {
     }
 
     /** Whether the daemon took the last thing it was sent. */
-    boolean answering() {
+    @Override
+    public boolean answering() {
         return answering;
     }
 
-    void readSpeed() {
+    @Override
+    public void readSpeed() {
         speed = DexPrefs.getInt(ctx, DexPrefs.KEY_PAD_SPEED, DexPrefs.DEF_PAD_SPEED);
     }
 
     // ── showing ──
 
     /** The pad is in front: the arrow appears, and what is under it learns it is hovered. */
-    void show() {
+    @Override
+    public void show() {
         shown = true;
         addArrow();
         Op hover = new Op(MOVE);
@@ -175,14 +178,16 @@ final class DesktopPointer {
     }
 
     /** The pad is closing for good. What is still in the outbox goes first. */
-    void release() {
+    @Override
+    public void release() {
         hide();
         Choreographer.getInstance().removeFrameCallback(placeOnFrame);
         wm.shutdown();
     }
 
     /** The display changed size or density: stay on it, and at its scale. */
-    void displayChanged() {
+    @Override
+    public void displayChanged() {
         int dpi = densityDpi;
         readDisplay();
         clampToDisplay();
@@ -194,7 +199,8 @@ final class DesktopPointer {
     }
 
     /** A pointer setting changed in Settings: draw the arrow again. */
-    void restyle() {
+    @Override
+    public void restyle() {
         if (arrow == null && daemonArrow == null) return;
         removeArrow();
         addArrow();
@@ -207,7 +213,8 @@ final class DesktopPointer {
      * The pointer goes that far in the desktop's dp, times the pad's speed curve — dp on
      * both sides, so a desktop drawn at twice the scale is not twice as slow to cross.
      */
-    void moveBy(float dxDp, float dyDp, float speedDpPerMs) {
+    @Override
+    public void moveBy(float dxDp, float dyDp, float speedDpPerMs) {
         float g = DexPointer.gain(speed, speedDpPerMs) * densityDpi / 160f;
         x = clamp(x + dxDp * g, 0, width - 1);
         y = clamp(y + dyDp * g, 0, height - 1);
@@ -220,7 +227,8 @@ final class DesktopPointer {
     }
 
     /** Hold exactly these MotionEvent.BUTTON_* down where the pointer is; 0 lets go. */
-    void press(int next) {
+    @Override
+    public void press(int next) {
         if (next == buttons) return;
         buttons = next;
         Op op = new Op(MOVE);
@@ -232,13 +240,15 @@ final class DesktopPointer {
     }
 
     /** One click of {@code button} where the pointer is. */
-    void click(int button) {
+    @Override
+    public void click(int button) {
         press(buttons | button);
         press(buttons & ~button);
     }
 
     /** The wheel, in notches: up and right are positive. */
-    void scroll(float h, float v) {
+    @Override
+    public void scroll(float h, float v) {
         Op op = new Op(WHEEL);
         op.x = Math.round(x);
         op.y = Math.round(y);
@@ -248,7 +258,8 @@ final class DesktopPointer {
     }
 
     /** One key, pressed and let go, for whatever on the desktop has the keyboard. */
-    void key(int code) {
+    @Override
+    public void key(int code) {
         Op op = new Op(KEY);
         op.code = code;
         queue(op);
@@ -259,7 +270,8 @@ final class DesktopPointer {
      * notification shade down is enough to. Sent as each touch begins, so the computer's
      * keyboard keeps typing where it was; the daemon does nothing when it need not.
      */
-    void focusDesktop() {
+    @Override
+    public void focusDesktop() {
         queue(new Op(FOCUS));
     }
 

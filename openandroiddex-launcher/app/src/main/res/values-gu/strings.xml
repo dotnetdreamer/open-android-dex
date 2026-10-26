@@ -276,6 +276,9 @@
     <string name="tp_options">ટચપૅડના વિકલ્પો</string>
     <string name="tp_waiting">ડેસ્કટોપની રાહ જોવાઈ રહી છે…</string>
     <string name="tp_no_desktop">કોઈ કમ્પ્યુટર ડેસ્કટોપ બતાવતું નથી, તેથી ટચપૅડ પાસે ખસેડવા જેવું કંઈ નથી.</string>
+    <string name="tp_waiting_computer">કમ્પ્યુટરની રાહ જોવાઈ રહી છે…</string>
+    <string name="tp_notice_text_computer">કમ્પ્યુટર પર તમારા ફોનની ઍપમાં પોઇન્ટ, ક્લિક અને સ્ક્રોલ કરવા ટૅપ કરો</string>
+    <string name="tp_hidden">સેટિંગ્સ કે તેના જેવી સ્ક્રીન ખુલ્લી હોય ત્યાં સુધી ટચપૅડ છુપાયેલું રહે છે. તે બંધ થતાં ટચપૅડ પાછું આવે છે.</string>
     <string name="st_phonepad">ટચપૅડ તરીકે ફોન</string>
     <string name="st_phonepad_sub">તમારા ફોન પરનું નોટિફિકેશન તેની સ્ક્રીનને આ ડેસ્કટોપનું ટચપૅડ બનાવી દે છે</string>
     <string name="st_phonepad_note">તેને એ નોટિફિકેશનથી, અથવા ઝડપી સેટિંગ્સમાં ટચપૅડથી ખોલો. એક આંગળી પોઇન્ટ અને ક્લિક કરે છે, બે સ્ક્રોલ કરે છે, અને ત્રણ નીચેના જેસ્ચર ચલાવે છે.</string>

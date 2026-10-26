@@ -38,6 +38,7 @@ arbitrary until you know what was measured, or what the platform refuses.
 | Where the sound plays | `apps/sound.rs`, `AppAudio.java`, `Audio.java`, launcher `AppsProvider.java` (`media.mode`) | the title bar's menu: this computer, both, or one of the phone's own outputs |
 | Dropped files | `apps/drops.rs`, `AppDrop.java` | a file dropped on a window: into the phone's Download folder, an APK installed |
 | The phone's notifications | `notifications/`, `AppNotifications.java` | as this computer's own; a window opened at one (doc/phone-notifications.md) |
+| The phone as their touchpad | `apps/pad.rs`, `AppPad.java`, launcher `Touchpad.java`, `HostPointer.java` | the phone's screen moving this computer's pointer over these windows (doc/phone-touchpad.md, §10) |
 | Probe | `src-tauri/examples/app_window.rs` | one window, without the rest of the app (Windows) |
 
 Windows and Mac have windows of this app's own. On a Linux computer a click
@@ -331,8 +332,9 @@ by `linuxRan`), `clip` both ways; `audio` — the computer asking, and the phone
 saying where its sound can go, after its hello, as outputs come and go, and
 after a pin; `audioRoute` (answered by `audioRouted`) and `audioMode`, the
 computer's; `stop` and `warm`, the computer's, and `log`, the phone's once its
-shell has gone; and the phone's notifications — `notifs`, `notif`, `notifOpen`
-and the rest, in doc/phone-notifications.md, "The wire".
+shell has gone; the phone's notifications — `notifs`, `notif`, `notifOpen`
+and the rest, in doc/phone-notifications.md, "The wire"; and the phone as these
+windows' touchpad — `padOn`, `padOff` and `pad`, in doc/phone-touchpad.md, §10.
 
 A dropped file's connection is the one exception to the framing: its first
 message is `put` (the name, the size, the folder it goes in, whether it is an
@@ -724,9 +726,11 @@ choice made on the desktop is), and told to the launcher (`AppsProvider`'s
 they open. A launcher too old for the method keeps its own record of the
 choice; that is all it costs.
 
-How a pick went is said for a few seconds under the title bar (a Mac: the
-window's subtitle) — "Sound: Computer only" — and the reason it failed, if it
-did, goes to the log.
+How a pick went is said for a few seconds in a strip under the title bar —
+"Sound: Computer only" — and the reason it failed, if it did, goes to the log.
+On a Mac that strip is the window's own, as on Windows: the subtitle, where it
+used to go, has room for a word or two in a window the shape of a phone, and
+none at all in full screen.
 
 ## Dropping files
 
@@ -749,8 +753,8 @@ cut short leaves nothing behind. Quitting mid-drop is one of those: the
 server stops each drop as it stops its windows, and waits for its `.part` to
 go. An install it was still waiting on when it had to end leaves its APK in
 `/data/local/tmp`, swept by the next server as it starts. The phone says how much has landed as it
-lands, and that is the progress the window shows under its title bar (a Mac:
-its subtitle): "Sending 2 of 4 to your phone… 34%", then "4 files are in
+lands, and that is the progress the window shows under its title bar:
+"Sending 2 of 4 to your phone… 34%", then "4 files are in
 Downloads on your phone" for a few seconds. One drop at a time, from every
 window: a second waits for the first rather than sharing the link with it.
 
@@ -868,7 +872,7 @@ Not yet:
   shows, and an Intel Mac, run.
 - **The Mac's speaker, drop and clipboard**, which came after that run: the
   menu under its title-bar button, a drop from Finder (a file reference made
-  a path), the subtitle's notes, the pasteboard watched.
+  a path), the notes under the title bar, the pasteboard watched.
 - **A pin on a phone that allows one**: the outputs listed, earbuds picked and
   the sound back from them — no phone here lets the shell route audio.
 - **The launcher told** (`media.mode`): both phones here run a launcher from

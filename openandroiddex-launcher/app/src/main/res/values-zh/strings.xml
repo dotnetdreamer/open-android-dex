@@ -276,6 +276,9 @@
     <string name="tp_options">触控板选项</string>
     <string name="tp_waiting">正在等待桌面…</string>
     <string name="tp_no_desktop">没有电脑在显示桌面，触控板无可操作的对象。</string>
+    <string name="tp_waiting_computer">正在等待电脑…</string>
+    <string name="tp_notice_text_computer">点按即可在电脑上对手机应用进行指向、点击和滚动</string>
+    <string name="tp_hidden">“设置”或类似界面打开时，触控板会被隐藏；关闭后会重新出现。</string>
     <string name="st_phonepad">手机用作触控板</string>
     <string name="st_phonepad_sub">手机上的一条通知可将其屏幕变为此桌面的触控板</string>
     <string name="st_phonepad_note">可从该通知或快捷设置中的“触控板”打开。单指指向和点击，双指滚动，三指执行下方的手势。</string>

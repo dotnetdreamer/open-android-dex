@@ -26,14 +26,20 @@ import android.content.Intent;
  * <p>From Android 13 it needs POST_NOTIFICATIONS, which the computer grants for the
  * session (adb.rs, grant_post_notifications) and takes back at the end. Without it the
  * notification is simply not shown, and quick settings on the desktop still opens the pad.
+ *
+ * <p>The same line offers the pad for the computer's own windows of the phone's apps, with
+ * no desktop at all ({@link #showForComputer}), while the computer's app server asks for
+ * it through {@link AppsProvider} — taken down as it stops asking.
  */
 final class TouchpadNotice {
 
     private static final String CHANNEL = "touchpad";
     /** Unique among this app's: Linux's is 0x1D, Docker's 0x2D, the Web viewer's 0x1E. */
     private static final int NOTIF_ID = 0x7A;
+    /** {@link #shownFor} while it is up for the computer's windows of the phone's apps. */
+    private static final int FOR_COMPUTER = -2;
 
-    /** The desktop display it was put up for, or -1 while it is down. Main thread. */
+    /** The desktop display it was put up for, {@link #FOR_COMPUTER}, or -1 while it is down. Main thread. */
     private static int shownFor = -1;
 
     private TouchpadNotice() {
@@ -46,6 +52,34 @@ final class TouchpadNotice {
      */
     static void show(Context ctx, int desktopDisplay) {
         if (shownFor == desktopDisplay) return;
+        post(ctx, desktopDisplay, R.string.tp_notice_text);
+    }
+
+    /**
+     * Up, for the computer's windows of the phone's apps, while it offers the pad
+     * ({@link Touchpad#offeredByComputer}) — where this app may already post one: the
+     * computer does not grant it that (revoking it would end this app's processes, the
+     * phone's Linux with them), and the pad is in each window's menu there anyway. Not
+     * over a desktop's own. True if it is up.
+     */
+    static boolean showForComputer(Context ctx) {
+        if (shownFor >= 0) return false;
+        if (shownFor == FOR_COMPUTER) return true;
+        NotificationManager nm = ctx.getSystemService(NotificationManager.class);
+        if (nm == null || !nm.areNotificationsEnabled()) {
+            DexLog.step("touchpad", "this app may not post notifications — the computer offers the pad in its windows' menu");
+            return false;
+        }
+        post(ctx, FOR_COMPUTER, R.string.tp_notice_text_computer);
+        return shownFor == FOR_COMPUTER;
+    }
+
+    /** Down, if it is up for the computer's windows. */
+    static void hideForComputer(Context ctx) {
+        if (shownFor == FOR_COMPUTER) hide(ctx);
+    }
+
+    private static void post(Context ctx, int forDisplay, int text) {
         try {
             NotificationManager nm = ctx.getSystemService(NotificationManager.class);
             if (nm == null) return;
@@ -65,7 +99,7 @@ final class TouchpadNotice {
                     .setSmallIcon(R.drawable.ic_touchpad)
                     .setColor(DexTheme.of(ctx).accent)
                     .setContentTitle(ctx.getString(R.string.tp_notice_title))
-                    .setContentText(ctx.getString(R.string.tp_notice_text))
+                    .setContentText(ctx.getString(text))
                     .setContentIntent(open)
                     .setOngoing(true)
                     .setShowWhen(false)
@@ -74,8 +108,9 @@ final class TouchpadNotice {
                     .setCategory(Notification.CATEGORY_STATUS)
                     .build();
             nm.notify(NOTIF_ID, n);
-            shownFor = desktopDisplay;
-            DexLog.step("touchpad", "notification up for the desktop on display " + desktopDisplay);
+            shownFor = forDisplay;
+            DexLog.step("touchpad", forDisplay == FOR_COMPUTER ? "notification up for the computer's windows"
+                    : "notification up for the desktop on display " + forDisplay);
         } catch (Exception e) {
             DexLog.warn("touchpad", "could not put the notification up", e);
         }

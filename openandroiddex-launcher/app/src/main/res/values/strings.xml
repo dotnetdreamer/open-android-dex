@@ -412,6 +412,9 @@
     <string name="tp_options">Touchpad options</string>
     <string name="tp_waiting">Waiting for the desktop…</string>
     <string name="tp_no_desktop">No computer is showing the desktop, so there is nothing for the touchpad to move.</string>
+    <string name="tp_waiting_computer">Waiting for the computer…</string>
+    <string name="tp_notice_text_computer">Tap to point, click and scroll in your phone’s apps on the computer</string>
+    <string name="tp_hidden">The touchpad is hidden while Settings or a similar screen is open. It comes back when that closes.</string>
 
     <!-- Phone: who owns the Home button -->
     <string name="lx_home_title">Bring Home back here?</string>

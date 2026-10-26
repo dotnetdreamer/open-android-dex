@@ -35,6 +35,8 @@ mod link;
 #[cfg(target_os = "macos")]
 mod mac;
 #[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
+mod pad;
+#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
 mod sound;
 #[cfg(windows)]
 mod win;
@@ -995,6 +997,11 @@ impl WindowHost {
     fn serial(&self) -> String {
         self.route().map(|r| r.serial).unwrap_or_else(|| self.opened_over.clone())
     }
+
+    /// The phone it shows, whichever way that is attached.
+    fn phone(&self) -> Option<String> {
+        kept().lock().unwrap().get(&self.id).map(|k| k.phone.clone())
+    }
 }
 
 #[cfg(any(windows, target_os = "macos"))]
@@ -1021,6 +1028,10 @@ impl link::Host for WindowHost {
                 // once its picture has: the sound's own server is a second
                 // JVM starting on the phone, which slowed the window it came with.
                 crate::scrcpy::apps_audio(app, &serial, true);
+                // And the phone's screen is offered as its touchpad.
+                if let Some(phone) = self.phone() {
+                    pad::showing(&serial, &phone);
+                }
             }
             link::Event::Failed(message) => {
                 log::warn!("apps [{serial}] {pkg}: {message}");
@@ -1064,6 +1075,10 @@ impl link::Host for WindowHost {
                 }
                 // The sound follows the window to the way it takes now.
                 crate::scrcpy::apps_audio(app, &serial, true);
+                // So does the touchpad, on a server that may be a new one.
+                if let Some(phone) = self.phone() {
+                    pad::showing(&serial, &phone);
+                }
             }
             link::Event::Closed => {
                 let was = kept().lock().unwrap().remove(&self.id);
@@ -1075,6 +1090,12 @@ impl link::Host for WindowHost {
                 };
                 if last {
                     crate::scrcpy::apps_audio(app, &serial, false);
+                }
+                // The phone's last window here: its screen is no longer offered as a touchpad.
+                if let Some(k) = &was {
+                    if !kept().lock().unwrap().values().any(|o| o.phone == k.phone) {
+                        pad::closed(&k.phone);
+                    }
                 }
                 // Closed while its connection was gone: its app waits for this
                 // computer on the phone's server, and goes back to the phone
@@ -1118,6 +1139,52 @@ impl link::Host for WindowHost {
     fn dropped(&self, paths: Vec<PathBuf>, window: Arc<dyn link::Surface>) {
         let Some(route) = self.route() else { return };
         drops::send(route.serial, route.socket, paths, window);
+    }
+
+    fn touchpad(&self, window: Arc<dyn link::Surface>) {
+        let Some(phone) = self.phone() else { return };
+        pad::open_now(&self.app, &self.serial(), &phone, window);
+    }
+}
+
+/// A three-finger gesture on the phone's touchpad, carried out over the
+/// phone's windows here (apps/pad.rs): the next or the previous of them in
+/// front, in the order they opened, or the one in front maximised or put back.
+#[cfg(any(windows, target_os = "macos"))]
+fn window_act(a: pad::Act) {
+    let mut all: Vec<Arc<native::Window>> = windows().lock().unwrap().values().cloned().collect();
+    all.sort_by_key(|w| w.id);
+    let n = all.len();
+    let front = all.iter().position(|w| w.is_front());
+    match a {
+        pad::Act::Maximize => {
+            if let Some(i) = front {
+                all[i].toggle_maximized();
+            }
+        }
+        pad::Act::Next | pad::Act::Previous if n > 0 => {
+            let at = match front {
+                Some(i) if a == pad::Act::Next => (i + 1) % n,
+                Some(i) => (i + n - 1) % n,
+                None => 0,
+            };
+            all[at].focus();
+        }
+        _ => {}
+    }
+}
+
+/// A note in every window of `phone` here — the touchpad kept off its screen,
+/// and back (apps/pad.rs).
+#[cfg(any(windows, target_os = "macos"))]
+fn note_phone(phone: &str, text: Option<String>, busy: bool) {
+    let ids: Vec<u64> = kept().lock().unwrap().iter().filter(|(_, k)| k.phone == phone).map(|(id, _)| *id).collect();
+    let all: Vec<Arc<native::Window>> = {
+        let open = windows().lock().unwrap();
+        ids.iter().filter_map(|id| open.get(id).cloned()).collect()
+    };
+    for w in all {
+        note(&w, text.clone(), busy);
     }
 }
 
@@ -1369,6 +1436,10 @@ impl link::Host for ProbeHost {
 
     fn dropped(&self, paths: Vec<PathBuf>, window: Arc<dyn link::Surface>) {
         drops::send(self.serial.clone(), self.socket.clone(), paths, window);
+    }
+
+    fn touchpad(&self, window: Arc<dyn link::Surface>) {
+        window.note(Some("The phone's touchpad needs the app around the window".into()), false);
     }
 }
 

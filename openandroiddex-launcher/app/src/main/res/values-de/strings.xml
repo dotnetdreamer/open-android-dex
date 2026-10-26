@@ -276,6 +276,9 @@
     <string name="tp_options">Touchpad-Optionen</string>
     <string name="tp_waiting">Warte auf den Desktop…</string>
     <string name="tp_no_desktop">Kein Computer zeigt gerade den Desktop an, also hat das Touchpad nichts zu bewegen.</string>
+    <string name="tp_waiting_computer">Warte auf den Computer…</string>
+    <string name="tp_notice_text_computer">Tippen, um in den Apps Ihres Telefons auf dem Computer zu zeigen, zu klicken und zu scrollen</string>
+    <string name="tp_hidden">Das Touchpad ist ausgeblendet, solange „Einstellungen“ oder ein ähnlicher Bildschirm geöffnet ist. Danach erscheint es wieder.</string>
     <string name="st_phonepad">Telefon als Touchpad</string>
     <string name="st_phonepad_sub">Eine Benachrichtigung auf deinem Telefon macht seinen Bildschirm zum Touchpad für diesen Desktop</string>
     <string name="st_phonepad_note">Öffne es über diese Benachrichtigung oder über „Touchpad“ in den Schnelleinstellungen. Ein Finger zeigt und klickt, zwei scrollen, drei lösen die Gesten unten aus.</string>
