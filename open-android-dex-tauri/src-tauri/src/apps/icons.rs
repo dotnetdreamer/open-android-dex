@@ -31,14 +31,24 @@ pub fn cached(app: &tauri::AppHandle, serial: &str, pkg: &str, updated: u64) -> 
 /// The newest icon this computer has for `pkg`, with the update it is from:
 /// for opening an app before the phone has said how recent its icon is.
 pub fn newest(app: &tauri::AppHandle, serial: &str, pkg: &str) -> Option<(u64, Vec<u8>)> {
+    let updated = newest_update(app, serial, pkg)?;
+    Some((updated, cached(app, serial, pkg, updated)?))
+}
+
+/// The file of the newest icon this computer has for `pkg`: what one of its
+/// notifications is drawn with on Windows, which reads the icon from a file.
+pub fn newest_file(app: &tauri::AppHandle, serial: &str, pkg: &str) -> Option<PathBuf> {
+    file(app, serial, pkg, newest_update(app, serial, pkg)?)
+}
+
+fn newest_update(app: &tauri::AppHandle, serial: &str, pkg: &str) -> Option<u64> {
     let name = file(app, serial, pkg, 0)?.file_name()?.to_string_lossy().into_owned();
     let stem = name.strip_suffix("0.png")?.to_string();
-    let updated = std::fs::read_dir(dir(app, serial)?)
+    std::fs::read_dir(dir(app, serial)?)
         .ok()?
         .filter_map(|e| e.ok()?.file_name().into_string().ok())
         .filter_map(|n| n.strip_prefix(&stem)?.strip_suffix(".png")?.parse::<u64>().ok())
-        .max()?;
-    Some((updated, cached(app, serial, pkg, updated)?))
+        .max()
 }
 
 pub fn store(app: &tauri::AppHandle, serial: &str, pkg: &str, updated: u64, png: &[u8]) {

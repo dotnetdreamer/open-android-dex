@@ -122,6 +122,16 @@ impl Window {
         self.shared.link.route().serial
     }
 
+    /// What the phone's server calls it: a notification of its app opens in it by this.
+    pub fn key(&self) -> String {
+        self.shared.link.key().to_string()
+    }
+
+    /// It is the window the person is using: the one Windows has in front.
+    pub fn is_front(&self) -> bool {
+        unsafe { GetForegroundWindow() == self.shared.hwnd() }
+    }
+
     /// The way it reaches its phone now: the serial, the server, USB or Wi‑Fi.
     pub fn route(&self) -> Route {
         self.shared.link.route()
@@ -626,6 +636,7 @@ fn ui_thread(spec: Spec, host: Arc<dyn Host>, opened: Sender<Result<Arc<Window>,
         linux: spec.linux,
         direct: spec.direct,
         via: spec.via,
+        notif: spec.notif.clone(),
     };
     link::start(shared.link.clone(), shared.clone(), net, out_rx);
 

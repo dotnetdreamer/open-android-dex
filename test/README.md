@@ -115,5 +115,40 @@ unknown window, the server stopping 30 s after its shell went with nobody
 back, and "stop" ending it at once. It opens the phone's Settings in windows
 of its own, and every one goes back to the phone by the end.
 
+The phone's notifications on the computer (`doc/phone-notifications.md`) have
+their phone's half checked the same way:
+
+```sh
+node test/notifications-test.mjs [serial]
+```
+
+It runs the app server from the dex as the app does and speaks its control
+wire: notifications turned on (a snapshot, nothing already there as news, and
+the calls ringing), asked again while on (everything again), the shell's own
+`cmd notification post` as an app posting — news once, the same words again
+nothing, new words at once an update and a moment later news again — a
+conversation as its last messages, a sender's picture, a dismissal both ways,
+a button on a notification that has gone refused and said, the test
+notification, the listener stopping when the connection that asked goes
+(hello first on the next, nothing it has not asked for, everything once it
+does) and when another connection takes its place (the one replaced refused),
+and notifications turned off. On an emulator it also texts its Messages app
+(`emu sms send`) and rings its phone (`emu gsm call`), and reads what each
+did back from the phone itself rather than from what the server says: a
+window opened at a notification by its own intent shows Messages on the
+window's display and not the phone's, and Messages has that conversation
+read and another one not; a click with the window open, the same in that
+window; a reply sent is in the phone's sent messages, to the one who wrote;
+"Mark as read" leaves the text read; and a call answered from the computer
+puts the phone in the call and goes in its call log as answered, one
+declined goes in as declined, one the caller ends as missed — by CallStyle's
+own answer and decline, or, on a dialer from before it (AOSP's, on the
+Android 12 image), by its own buttons, chosen by their words. It uses the
+app's own adb when there is one, so a phone a running app shares is not
+dropped by an adb server of another version, and everything it posts is gone
+from the phone when it ends; run it on an AVD started with `-read-only` to
+leave the AVD's texts and call log as they were.
+
 Everything else needs a device. `doc/web-viewer.md`, `doc/remote-access.md`,
-`doc/usb-desktop.md` and `doc/apps-on-pc.md` list what is still unverified there.
+`doc/usb-desktop.md`, `doc/apps-on-pc.md` and `doc/phone-notifications.md`
+list what is still unverified there.

@@ -9,6 +9,7 @@ import { AppsPanel, opensAppsOnConnect } from "./features/apps/AppsPanel";
 import { DesktopPage, type Method } from "./features/desktop/DesktopPage";
 import { deviceName, type AdbState, type LaunchMode, type Phase, type Progress } from "./features/desktop/model";
 import { useSessions } from "./features/mirror/useSessions";
+import { NotificationsBell } from "./features/notifications/NotificationsBell";
 import { RemotePanel } from "./features/remote/RemotePanel";
 import { WirelessPanel } from "./features/wireless/WirelessPanel";
 import { Icon } from "./ui/Icon";
@@ -763,7 +764,13 @@ export default function App() {
 
   return (
     <div className="app-backdrop flex h-screen flex-col">
-      <TitleBar tab={tab} onTab={setTab} menu={helpMenu} desktopBusy={phase.kind === "launching" || switching} />
+      <TitleBar
+        tab={tab}
+        onTab={setTab}
+        menu={helpMenu}
+        notifications={<NotificationsBell />}
+        desktopBusy={phase.kind === "launching" || switching}
+      />
       <main className="relative min-h-0 flex-1 overflow-y-auto">
         <div key={tab} className="fade-in min-h-full">
           {tab === "desktop" ? (

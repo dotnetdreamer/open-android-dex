@@ -84,6 +84,13 @@ windows-sys = { version = "0.60", features = [
 # identity set through the shell's property store. COM throughout, which
 # windows-sys does not do. The version is the one wry already brings in.
 windows = { version = "0.62", features = [
+    # The phone's notifications as this computer's own (src/notifications):
+    # a toast is an XML document handed to the toast notifier, and what the
+    # person typed into its reply box comes back as a value set.
+    "Data_Xml_Dom",
+    "Foundation",
+    "Foundation_Collections",
+    "UI_Notifications",
     "Win32_Foundation",
     "Win32_Graphics_Direct2D",
     "Win32_Graphics_Direct2D_Common",
@@ -163,6 +170,8 @@ objc2-foundation = { version = "0.3", default-features = false, features = [
     "NSString",
     # A file dropped on one of them, as Finder hands it over.
     "NSURL",
+    # Whether this run is the app bundle, which the notification center needs.
+    "NSBundle",
 ] }
 # Quartz Event Services, for the trackpad tap. Already in the tree via
 # objc2-app-kit, so this adds resolution rather than compilation — and unlike
@@ -262,3 +271,25 @@ objc2-quartz-core = { version = "0.3", default-features = false, features = [
 ] }
 # The main thread's queue, which AppKit's work for those windows goes through.
 dispatch2 = "0.3"
+# The phone's notifications as this Mac's own (src/notifications/macos.rs):
+# the notification center, its categories of buttons and reply box, and the
+# delegate that hears a click. Already in the tree (UIKit's bindings bring
+# it), so this adds compilation for the Mac, not a new family. Its completion
+# handlers are blocks.
+objc2-user-notifications = { version = "0.3", default-features = false, features = [
+    "std",
+    "block2",
+    "bitflags",
+    "UNNotification",
+    "UNNotificationAction",
+    "UNNotificationAttachment",
+    "UNNotificationCategory",
+    "UNNotificationContent",
+    "UNNotificationRequest",
+    "UNNotificationResponse",
+    "UNNotificationSettings",
+    "UNNotificationSound",
+    "UNNotificationTrigger",
+    "UNUserNotificationCenter",
+] }
+block2 = "0.6"

@@ -37,6 +37,7 @@ arbitrary until you know what was measured, or what the platform refuses.
 | Sound | `scrcpy.rs` (the audio companion) | the phone's sound here while any of its apps has a window |
 | Where the sound plays | `apps/sound.rs`, `AppAudio.java`, `Audio.java`, launcher `AppsProvider.java` (`media.mode`) | the title bar's menu: this computer, both, or one of the phone's own outputs |
 | Dropped files | `apps/drops.rs`, `AppDrop.java` | a file dropped on a window: into the phone's Download folder, an APK installed |
+| The phone's notifications | `notifications/`, `AppNotifications.java` | as this computer's own; a window opened at one (doc/phone-notifications.md) |
 | Probe | `src-tauri/examples/app_window.rs` | one window, without the rest of the app (Windows) |
 
 Windows and Mac have windows of this app's own. On a Linux computer a click
@@ -93,12 +94,18 @@ manager and a codec list. Here they are paid once.
 ## The phone's server
 
 One per phone, started as soon as the Apps page is first looked at (so its JVM
-is up before anyone clicks), under `app_process` as the shell, from the window
+is up before anyone clicks) — or, while the phone's notifications come to this
+computer, as soon as the phone is attached, without the warm-up below, which
+the Apps page then asks for (`warm`; doc/phone-notifications.md) — under
+`app_process` as the shell, from the window
 daemon's dex pushed to `/data/local/tmp/oadx-apps.dex` by rename, so a running
 server keeps the copy it started with. It stops when this app says so —
 "stop" on the `adb shell`'s stdin, or on its control connection, as the app
-quits — and every app on its displays goes back to the phone, behind what it
-shows. That shell closing is not the app gone: the cable may have been pulled
+quits (after which none starts, not even one the notifications' keeper was
+starting as it did), or as notifications are turned off if they were all it ran for — and
+every app on its displays goes back to the phone, behind what it shows. What
+the phone copies comes to this computer's clipboard once the Apps page or a
+window has used the server, not while it runs for notifications alone. That shell closing is not the app gone: the cable may have been pulled
 with Wi‑Fi still there. So the server is held by its shell, by a control
 connection or by any window's, and stops only when none of them has held it for
 30 s (`AppWindow.AWAY_MS`) — this app crashing, or the phone gone for good. The
@@ -310,7 +317,8 @@ bytes:
 | `0x23` | computer → phone | UTF-8 — characters typed |
 
 A window's JSON: `open` (package or Linux window, size, dpi, fps, `direct`,
-what closing does, and the window's `key`), `resize`, `focus`/`blur`/`leave`,
+what closing does, the window's `key`, and the notification it opens at,
+`notif`), `resize`, `focus`/`blur`/`leave`,
 `clip`, `keyframe`, `bitrate`, `close`, `ping` one way; `video` (the encoder,
 its size, the part of it that is the display, `paced`), `display` (the app's
 name), `state` (`closed`, `failed`), `stats` once a second, `pong` the other.
@@ -322,8 +330,9 @@ connection's: `apps`, `icons`, `linuxApps`, `linuxIcons`, `linuxRun` (answered
 by `linuxRan`), `clip` both ways; `audio` — the computer asking, and the phone
 saying where its sound can go, after its hello, as outputs come and go, and
 after a pin; `audioRoute` (answered by `audioRouted`) and `audioMode`, the
-computer's; `stop`, the computer's, and `log`, the phone's once its shell has
-gone.
+computer's; `stop` and `warm`, the computer's, and `log`, the phone's once its
+shell has gone; and the phone's notifications — `notifs`, `notif`, `notifOpen`
+and the rest, in doc/phone-notifications.md, "The wire".
 
 A dropped file's connection is the one exception to the framing: its first
 message is `put` (the name, the size, the folder it goes in, whether it is an

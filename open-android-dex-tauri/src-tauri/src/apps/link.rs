@@ -60,6 +60,9 @@ pub struct Spec {
     pub via: &'static str,
     /// When the click that asked for the window came: what its first picture is timed from.
     pub clicked: Instant,
+    /// The phone's notification it was opened from (its key): the app opens at
+    /// what that is about — the conversation — rather than at its front screen.
+    pub notif: Option<String>,
 }
 
 /// What a window says about itself to the app.
@@ -263,6 +266,12 @@ impl Link {
         }
     }
 
+    /// What the phone's server calls this window: how a notification of its
+    /// app is opened in it, as well as how a new connection finds it.
+    pub fn key(&self) -> &str {
+        &self.key
+    }
+
     pub fn event(&self, e: Event) {
         self.host.event(e);
     }
@@ -381,13 +390,16 @@ pub struct NetSpec {
     pub direct: bool,
     /// "USB" or "Wi‑Fi": how the window reaches the phone, for its title bar.
     pub via: &'static str,
+    /// The notification the window was opened from, for its first opening only.
+    pub notif: Option<String>,
 }
 
 /// Connect to the phone and open the app, on the link's own threads.
 pub fn start(link: Arc<Link>, surface: Arc<dyn Surface>, net: NetSpec, out: Receiver<Vec<u8>>) {
     *link.route.lock().unwrap() =
         Route { serial: net.serial.clone(), socket: net.socket.clone(), direct: net.direct, via: net.via };
-    *link.opened.lock().unwrap() = Some(net.clone());
+    // Opened again on a new server, the app opens as it is: its notification was the first opening's.
+    *link.opened.lock().unwrap() = Some(NetSpec { notif: None, ..net.clone() });
     *link.surface.lock().unwrap() = Some(Arc::downgrade(&surface));
     let _ = thread::Builder::new()
         .name(format!("app-socket-{}", net.pkg))
@@ -410,6 +422,9 @@ fn open_message(net: &NetSpec, want: DisplaySize, direct: bool, key: &str) -> Va
     });
     if let Some(xid) = net.linux {
         open["linux"] = json!(xid);
+    }
+    if let Some(key) = &net.notif {
+        open["notif"] = json!(key);
     }
     open
 }
@@ -789,12 +804,30 @@ mod tests {
             linux: None,
             direct: true,
             via: "USB",
+            notif: None,
         };
         let open = open_message(&net, DisplaySize { w: 400, h: 800, dpi: 320 }, false, "abc");
         assert_eq!((open["t"].as_str(), open["key"].as_str(), open["direct"].as_bool()), (Some("open"), Some("abc"), Some(false)));
         assert!(open.get("linux").is_none());
+        assert!(open.get("notif").is_none());
         // Two windows are never the same window to the phone.
         assert_ne!(link().key, link().key);
+    }
+
+    #[test]
+    fn a_window_opened_from_a_notification_opens_at_it() {
+        let net = NetSpec {
+            serial: "s".into(),
+            socket: "k".into(),
+            pkg: "com.google.android.apps.messaging".into(),
+            activity: None,
+            linux: None,
+            direct: true,
+            via: "USB",
+            notif: Some("0|com.google.android.apps.messaging|2|tag|10145".into()),
+        };
+        let open = open_message(&net, DisplaySize { w: 400, h: 800, dpi: 320 }, true, "abc");
+        assert_eq!(open["notif"].as_str(), Some("0|com.google.android.apps.messaging|2|tag|10145"));
     }
 
     #[test]

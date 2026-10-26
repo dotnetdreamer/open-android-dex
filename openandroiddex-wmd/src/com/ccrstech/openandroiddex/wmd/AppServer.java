@@ -36,8 +36,9 @@ import java.util.concurrent.atomic.AtomicInteger;
  * is a connection of its own ({@link AppWindow}), each with its own display and
  * encoder, so one app's key frame never waits behind another's; one more
  * connection carries what belongs to the phone as a whole — the list of apps and
- * their icons, the clipboard, where its sound plays ({@link AppAudio}). A file
- * dropped on a window comes on a connection of its own too ({@link AppDrop}).
+ * their icons, the clipboard, where its sound plays ({@link AppAudio}), its
+ * notifications while the computer wants them ({@link AppNotifications}). A
+ * file dropped on a window comes on a connection of its own too ({@link AppDrop}).
  *
  * <p>The socket is abstract and named afresh by the computer for every run, and
  * each connection's peer is put to the kernel (SO_PEERCRED): the shell, which
@@ -120,6 +121,31 @@ public final class AppServer {
     private volatile Wire control;
     /** A window has been asked for: what is left of the warm-up is its to pay. */
     private volatile boolean windowAsked;
+    /** The warm-up has run, or is running: at start, or when the Apps page asked for it later. */
+    private final java.util.concurrent.atomic.AtomicBoolean warmed = new java.util.concurrent.atomic.AtomicBoolean();
+    /**
+     * The phone's notifications, while the control connection that asked for
+     * them is up ({@link #notifyingFor}); null otherwise.
+     */
+    private volatile AppNotifications notifications;
+    /**
+     * The control connection the phone's notifications are for. They stop when
+     * it goes or another takes its place: a computer back on a new connection
+     * asks again if it still wants them — and one that turned them off while
+     * it was away, never reaching the phone to say so, is not read for.
+     */
+    private Wire notifyingFor;
+    /**
+     * What the computer's notifications ask of the phone, one at a time and off
+     * the control connection's thread: a slow phone firing an intent, or posting
+     * a test, must not hold up the clipboard or a list of apps behind it.
+     */
+    private final java.util.concurrent.ExecutorService notifying =
+            java.util.concurrent.Executors.newSingleThreadExecutor(r -> {
+                Thread t = new Thread(r, "apps-notify");
+                t.setDaemon(true);
+                return t;
+            });
 
     public static void main(String[] args) {
         try {
@@ -129,7 +155,9 @@ public final class AppServer {
             }
             // Started for a window that is already waiting (a pinned taskbar
             // button): the window pays the warm-up's costs itself, and the two
-            // side by side would only slow it.
+            // side by side would only slow it. Started for the phone's
+            // notifications alone, it would sit beside a desktop that may be
+            // starting: the Apps page asks for it when it is looked at ("warm").
             boolean warm = !(args.length > 1 && "--no-warm-up".equals(args[1]));
             // MediaCodec and the framework's managers make Handlers, which need a looper.
             Looper.prepareMainLooper();
@@ -143,7 +171,7 @@ public final class AppServer {
             log("ready " + sinceStart() + " ms after the process started; the clipboard and its Context took "
                     + s.clipboardMs + " ms");
             if (warm) s.warmUp();
-            else log("no warm-up: started for a window that is waiting");
+            else log("no warm-up: started for a window that is waiting, or for the phone's notifications alone");
             Looper.loop();
         } catch (Throwable t) {
             System.out.println("ERROR: the app server could not start: " + t);
@@ -200,8 +228,14 @@ public final class AppServer {
      * milliseconds on a Galaxy A13), the codec list, one encoder made and let
      * go, the display and package managers. Measured on that phone, the first
      * window's display and encoder took 534 and 404 ms cold.
+     *
+     * <p>Once. A server the computer started only for the phone's
+     * notifications is started without it (on a slow phone it would sit beside
+     * a desktop that is starting); the Apps page asks for it ({@code warm})
+     * when it is looked at.
      */
     private void warmUp() {
+        if (warmed.getAndSet(true)) return;
         Thread t = new Thread(() -> {
             long t0 = SystemClock.uptimeMillis();
             try {
@@ -508,7 +542,6 @@ public final class AppServer {
     /** The phone as a whole: its apps, their icons, the clipboard, its sound, the clock. */
     private void control(LocalSocket s, Wire wire) {
         if (!shellHeld) log("the computer is back, over another way to the phone");
-        control = wire;
         try {
             JSONObject hello = new JSONObject();
             hello.put("t", "hello").put("v", 1).put("sdk", Build.VERSION.SDK_INT).put("release", Build.VERSION.RELEASE)
@@ -519,6 +552,15 @@ public final class AppServer {
             wire.json(hello);
             // Where the sound can go, before anyone opens a window's menu to ask.
             sendAudio(wire);
+            synchronized (this) {
+                // The notifications a connection before this one asked for stop
+                // first: this one asks for its own, and none of theirs reaches it.
+                stopNotifying(null, "a new control connection; the computer asks again if it wants them");
+                // Only now the phone's own word goes this way: the computer takes the
+                // first message on a connection for the hello, and a notification
+                // written ahead of it would be taken for one, and lost.
+                control = wire;
+            }
             while (!stopping) {
                 Wire.Msg m = wire.read();
                 if (m == null) break;
@@ -574,6 +616,20 @@ public final class AppServer {
                     case "stop":
                         // The computer is going, and says so: no waiting for it to come back.
                         shutdown("the computer asked");
+                        break;
+                    case "warm":
+                        warmUp();
+                        break;
+                    case "notifs":
+                        wire.json(notifications(j.optBoolean("on"), wire));
+                        break;
+                    case "notifOpen":
+                    case "notifAction":
+                    case "notifReply":
+                    case "notifDismiss":
+                    case "notifCall":
+                    case "notifTest":
+                        notifying.execute(() -> notificationAsked(j));
                         break;
                     case "linuxApps": {
                         JSONObject r;
@@ -634,7 +690,128 @@ public final class AppServer {
             if (!stopping) log("control: " + e);
         } finally {
             if (control == wire) control = null;
+            stopNotifying(wire, "the connection that asked for them has gone");
             closeQuietly(s);
+        }
+    }
+
+    // ── the phone's notifications ──
+
+    /** The phone's notifications, while the connection that asked for them is up; null otherwise. */
+    AppNotifications notifications() {
+        return notifications;
+    }
+
+    /**
+     * The computer turned its notifications on or off, on {@code wire}: the
+     * listener with it, for that connection. A phone that will not have the
+     * shell listen says why, and the computer shows that rather than
+     * notifications that never come.
+     */
+    private synchronized JSONObject notifications(boolean on, Wire wire) throws org.json.JSONException {
+        JSONObject r = new JSONObject().put("t", "notifs").put("on", on);
+        if (on && wire != control) {
+            // A connection another has taken the place of: nothing it asked for would reach it.
+            return r.put("ok", false).put("message", "not the computer's connection now");
+        }
+        if (on && notifications == null) {
+            try {
+                notifications = AppNotifications.start(this, this::toComputer);
+                notifyingFor = wire;
+                log("notifications: listening for the computer");
+            } catch (Throwable t) {
+                log("notifications: the phone will not let the shell listen (" + t + ")");
+                return r.put("ok", false).put("message", t.getMessage() != null ? t.getMessage() : t.toString());
+            }
+        } else if (on) {
+            // Asked again while listening — an answer that went missing: everything again.
+            notifications.resync();
+        } else {
+            stopNotifying(null, "they are off on the computer");
+        }
+        return r.put("ok", true);
+    }
+
+    /**
+     * No longer listening, if the notifications were for {@code wire} — or
+     * whoever they were for, with null.
+     */
+    private synchronized void stopNotifying(Wire wire, String why) {
+        AppNotifications n = notifications;
+        if (n == null || (wire != null && notifyingFor != wire)) return;
+        notifications = null;
+        notifyingFor = null;
+        n.stop();
+        log("notifications: no longer listening (" + why + ")");
+    }
+
+    /** What one of the computer's notifications asked for, and how it went: {@code notifDone}. */
+    private void notificationAsked(JSONObject j) {
+        String t = j.optString("t");
+        String key = j.optString("key");
+        AppNotifications n = notifications;
+        String failed;
+        if (n == null) {
+            failed = "notifications are off";
+        } else {
+            // A display of the computer's: a window's, by its key, or the one asked for (a desktop's).
+            int display = j.has("window") ? displayOf(j.optString("window")) : j.optInt("display", -1);
+            boolean freeform = j.optBoolean("freeform");
+            try {
+                switch (t) {
+                    case "notifOpen":
+                        failed = n.open(key, display, freeform);
+                        break;
+                    case "notifAction":
+                        failed = n.action(key, j.optInt("i", -1), j.optString("label"), display, freeform);
+                        break;
+                    case "notifReply":
+                        failed = n.reply(key, j.optInt("i", -1), j.optString("label"), j.optString("text"));
+                        break;
+                    case "notifDismiss":
+                        failed = n.dismiss(key);
+                        break;
+                    case "notifCall":
+                        failed = n.call(key, j.optBoolean("answer"), j.optInt("i", -1), j.optString("label"));
+                        break;
+                    default:
+                        failed = n.test(j.optString("title"), j.optString("text"));
+                }
+            } catch (Throwable e) {
+                // Whatever went wrong, the computer hears that it did: a reply must not look sent.
+                failed = String.valueOf(e);
+            }
+        }
+        if (failed != null) log("notifications: " + t + " " + key + ": " + failed);
+        try {
+            JSONObject done = new JSONObject().put("t", "notifDone").put("what", t).put("key", key).put("ok", failed == null);
+            if (failed != null) done.put("message", failed);
+            toComputer(done);
+        } catch (org.json.JSONException ignored) {
+        }
+    }
+
+    /**
+     * The display of the window the computer calls {@code key}, for an intent
+     * to be fired onto; -1 if there is none — or if its display is untrusted
+     * (Android 12), which takes no activity an app's own intent asks onto it:
+     * fired with no display, the intent joins the app's task, in that window.
+     */
+    private int displayOf(String key) {
+        for (AppWindow w : running) {
+            if (!key.isEmpty() && key.equals(w.key)) return w.trusted() ? w.displayId : -1;
+        }
+        return -1;
+    }
+
+    /** One message to the computer, on whichever control connection it has now. */
+    private void toComputer(JSONObject j) {
+        Wire c = control;
+        if (c == null) return;
+        try {
+            c.json(j);
+        } catch (Exception ignored) {
+            // the computer's end went; what it missed comes again when it is back (resync)
         }
     }
 
@@ -846,6 +1023,8 @@ public final class AppServer {
             server.close();
         } catch (IOException ignored) {
         }
+        AppNotifications listening = notifications;
+        if (listening != null) listening.stop();
         List<AppWindow> open = new ArrayList<>(running);
         for (AppWindow w : open) w.closeAll(null);
         // A file still arriving is cut short as a dropped link cuts it: its

@@ -150,11 +150,12 @@ export function AppsPanel({
     };
   }, [say]);
 
-  // Typing anywhere on the page searches.
+  // Typing anywhere on the page searches — not while another field has the keys (the bell's own search).
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.ctrlKey || e.metaKey || e.altKey || e.key.length !== 1) return;
-      if (document.activeElement === search.current) return;
+      const typing = document.activeElement;
+      if (typing === search.current || typing instanceof HTMLInputElement || typing instanceof HTMLTextAreaElement) return;
       search.current?.focus();
     };
     window.addEventListener("keydown", onKey);
@@ -190,6 +191,22 @@ export function AppsPanel({
     () => new Set(open.filter((w) => w.phone === phone || w.serial === serial).map((w) => w.pkg)),
     [open, phone, serial],
   );
+
+  // How many notifications each app has on the phone, while they come to this
+  // computer (the title bar's bell): a badge on its icon, as a launcher shows it.
+  const [counts, setCounts] = useState<Record<string, number>>({});
+  useEffect(() => {
+    if (!phone) return;
+    invoke<Record<string, number>>("notifications_counts", { phone })
+      .then(setCounts)
+      .catch(() => {});
+    const un = listen<{ phone: string; counts: Record<string, number> }>("notifications:counts", ({ payload }) => {
+      if (payload.phone === phone) setCounts(payload.counts);
+    });
+    return () => {
+      un.then((f) => f());
+    };
+  }, [phone]);
 
   if (!device) {
     return (
@@ -245,7 +262,10 @@ export function AppsPanel({
               role="listitem"
               className="app-tile"
               onClick={() => launch(a)}
-              title={a.kind === "linux" ? `${a.label} (Linux)` : a.label}
+              title={
+                (a.kind === "linux" ? `${a.label} (Linux)` : a.label) +
+                (counts[a.pkg] ? ` · ${counts[a.pkg]} notification${counts[a.pkg] === 1 ? "" : "s"}` : "")
+              }
               data-open={openPkgs.has(a.pkg) || undefined}
             >
               <span className="app-icon">
@@ -253,6 +273,11 @@ export function AppsPanel({
                 {a.kind === "linux" && (
                   <span className="app-badge" title="Linux app">
                     <Icon name="terminal" size={10} strokeWidth={2.2} />
+                  </span>
+                )}
+                {counts[a.pkg] > 0 && (
+                  <span className="app-count" aria-hidden="true">
+                    {counts[a.pkg] > 9 ? "9+" : counts[a.pkg]}
                   </span>
                 )}
                 {opening === a.pkg && <span className="spinner app-icon-spinner" aria-hidden="true" />}

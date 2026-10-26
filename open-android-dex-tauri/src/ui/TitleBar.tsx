@@ -20,11 +20,14 @@ export function TitleBar({
   tab,
   onTab,
   menu,
+  notifications,
   desktopBusy,
 }: {
   tab: Tab;
   onTab: (t: Tab) => void;
   menu: ReactNode;
+  /** The phone's notifications' bell, beside the help menu: on every tab, since they are. */
+  notifications?: ReactNode;
   /** A desktop is being set up: said on its tab, for someone looking at the other one. */
   desktopBusy?: boolean;
 }) {
@@ -47,6 +50,7 @@ export function TitleBar({
         ]}
       />
       <div className={`flex flex-1 items-center justify-end gap-1 ${IS_MAC ? "pr-2.5" : ""}`}>
+        {notifications}
         {menu}
         {!IS_MAC && (
           <div className="ml-1 flex self-stretch">

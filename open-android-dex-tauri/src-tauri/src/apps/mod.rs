@@ -28,8 +28,8 @@ mod clipboard;
 mod drops;
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod h264;
-mod host;
-mod icons;
+pub(crate) mod host;
+pub(crate) mod icons;
 mod keys;
 mod link;
 #[cfg(target_os = "macos")]
@@ -45,6 +45,10 @@ mod wire;
 use mac as native;
 #[cfg(windows)]
 use win as native;
+
+/// A phone app's identity on Windows: its windows' taskbar button, and its notifications here.
+#[cfg(windows)]
+pub(crate) use win::app_user_model_id;
 
 use std::collections::HashMap;
 #[cfg(any(windows, target_os = "macos"))]
@@ -195,8 +199,7 @@ pub fn on_cable(serial: &str) -> bool {
 /// How long the cable must have stayed in before windows move onto it: a
 /// Samsung phone restarts adbd about 5 s after it is plugged in (its MTP
 /// switch), ending everything adb started.
-#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
-const CABLE_SETTLE: Duration = Duration::from_secs(10);
+pub(crate) const CABLE_SETTLE: Duration = Duration::from_secs(10);
 
 /// How long a window whose connection went keeps looking for its phone — the
 /// cable pulled with Wi-Fi still there, a Samsung phone's adbd restarting.
@@ -228,8 +231,23 @@ fn via(serial: &str) -> &'static str {
 }
 
 /// One phone, whichever way it is attached: its `ro.serialno`.
-fn phone_id(d: &crate::adb::DeviceInfo) -> String {
+pub(crate) fn phone_id(d: &crate::adb::DeviceInfo) -> String {
     d.hardware_serial.clone().unwrap_or_else(|| d.serial.clone())
+}
+
+/// What a phone is called, for a person — as the page calls it (deviceName in
+/// features/desktop/model.ts): its own name, else its maker and model.
+pub(crate) fn device_name(d: &crate::adb::DeviceInfo) -> String {
+    if let Some(name) = d.name.as_ref().filter(|n| !n.is_empty()) {
+        return name.clone();
+    }
+    let brand: String = d.brand.as_deref().unwrap_or("").chars().enumerate().map(|(i, c)| if i == 0 { c.to_ascii_uppercase() } else { c }).collect();
+    let named = [brand.as_str(), d.model.as_str()].iter().filter(|s| !s.is_empty()).copied().collect::<Vec<_>>().join(" ");
+    if named.is_empty() {
+        "Your phone".into()
+    } else {
+        named
+    }
 }
 
 /// The phone `serial` is a way to. One the list does not have — a pinned
@@ -250,7 +268,7 @@ fn phone_of(devices: &[crate::adb::DeviceInfo], serial: &str) -> String {
 /// The way to open `phone`'s windows over: the cable once it has settled —
 /// faster, and drawn straight into the encoder — else Wi-Fi, else a cable not
 /// settled yet. None when the phone is not there at all.
-fn best_serial(devices: &[crate::adb::DeviceInfo], phone: &str) -> Option<String> {
+pub(crate) fn best_serial(devices: &[crate::adb::DeviceInfo], phone: &str) -> Option<String> {
     best_serial_by(devices, phone, |serial| crate::adb::attached_for(serial).is_some_and(|t| t >= CABLE_SETTLE))
 }
 
@@ -292,7 +310,11 @@ fn way_to(app: &tauri::AppHandle, serial: &str) -> Way {
 #[tauri::command(async)]
 pub fn apps_prepare(app: tauri::AppHandle, serial: String) -> Result<host::Hello, String> {
     let way = way_to(&app, &serial);
-    Ok(host::ensure(&app, &way.serial, &way.phone)?.hello.clone())
+    let server = host::ensure(&app, &way.serial, &way.phone)?;
+    // Started earlier for the phone's notifications alone, it skipped the
+    // warm-up; the first window is likely now. Once only, on the phone.
+    server.warm();
+    Ok(server.hello.clone())
 }
 
 /// The phone's apps, in its own launcher's names, A to Z. Icons this
@@ -443,7 +465,60 @@ fn open(
         }
         return Ok(());
     }
-    open_new(app, &way, pkg, device, clicked, since)
+    open_new(app, &way, pkg, device, clicked, since, None)
+}
+
+/// A phone app's window for one of its notifications (notifications/mod.rs):
+/// the app's window here brought forward, its key returned for the phone to
+/// open the notification in — or, with none open, a new window that opens at
+/// it (None). Over the cable when the phone is on one, as any window is.
+#[cfg(any(windows, target_os = "macos"))]
+pub(crate) fn open_at_notification(app: &tauri::AppHandle, serial: &str, pkg: &str, key: &str) -> Result<Option<String>, String> {
+    let way = way_to(app, serial);
+    if let Some(w) = window_of(&way.phone, pkg) {
+        w.focus();
+        return Ok(Some(w.key()));
+    }
+    let device = way.name.clone();
+    open_new(app, &way, pkg, device, Instant::now(), "the notification's click", Some(key.to_string())).map(|()| None)
+}
+
+/// The window of `pkg` from `phone`, if one is open.
+#[cfg(any(windows, target_os = "macos"))]
+fn window_of(phone: &str, pkg: &str) -> Option<Arc<native::Window>> {
+    let phones: HashMap<u64, String> = kept().lock().unwrap().iter().map(|(id, k)| (*id, k.phone.clone())).collect();
+    windows()
+        .lock()
+        .unwrap()
+        .values()
+        .find(|w| w.pkg == pkg && w.linux.is_none() && phones.get(&w.id).map(String::as_str) == Some(phone))
+        .cloned()
+}
+
+/// The key of `pkg`'s window from `phone`, if one is open: where a button of
+/// its notification that opens something should open it.
+#[cfg(any(windows, target_os = "macos"))]
+pub(crate) fn window_key(phone: &str, pkg: &str) -> Option<String> {
+    window_of(phone, pkg).map(|w| w.key())
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
+pub(crate) fn window_key(_phone: &str, _pkg: &str) -> Option<String> {
+    None
+}
+
+/// The phone app whose window is the one in front, if one is: its phone and
+/// its package. A notification of that app is not shown — the person is looking at it.
+#[cfg(any(windows, target_os = "macos"))]
+pub(crate) fn front_app() -> Option<(String, String)> {
+    let front = windows().lock().unwrap().values().find(|w| w.is_front()).cloned()?;
+    let phone = kept().lock().unwrap().get(&front.id).map(|k| k.phone.clone())?;
+    Some((phone, front.pkg.clone()))
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
+pub(crate) fn front_app() -> Option<(String, String)> {
+    None
 }
 
 /// What a window's notes call its phone.
@@ -456,7 +531,7 @@ fn phone_name(device: &str) -> &str {
     }
 }
 
-/// `pkg` in a new window, over `way`.
+/// `pkg` in a new window, over `way` — at one of its notifications (its key), if `notif` says.
 #[cfg(any(windows, target_os = "macos"))]
 fn open_new(
     app: &tauri::AppHandle,
@@ -465,6 +540,7 @@ fn open_new(
     device: String,
     clicked: Instant,
     since: &'static str,
+    notif: Option<String>,
 ) -> Result<(), String> {
     let serial = way.serial.as_str();
     let phone = way.phone.as_str();
@@ -531,6 +607,7 @@ fn open_new(
         direct: on_cable(serial),
         via: via(serial),
         clicked,
+        notif,
     };
     open_window(app, serial, phone, pkg, &row.label, spec, since, opening)
 }
@@ -1248,6 +1325,7 @@ pub fn probe(serial: &str, socket: &str, pkg: &str, label: &str, icon_png: Optio
         direct: on_cable(serial),
         via: via(serial),
         clicked: Instant::now(),
+        notif: None,
     };
     let _window = win::open(spec, host)?;
     let _ = rx.recv();
@@ -1397,6 +1475,7 @@ fn open_linux_window(app: &tauri::AppHandle, serial: &str, xid: i32, title: &str
         direct: on_cable(serial),
         via: via(serial),
         clicked: mapped,
+        notif: None,
     };
     if let Err(e) = open_window(app, serial, &phone, &app_pkg, &label, spec, "Linux mapped it", Opening::new(serial)) {
         log::warn!("apps [{serial}] Linux window 0x{xid:x}: {e}");

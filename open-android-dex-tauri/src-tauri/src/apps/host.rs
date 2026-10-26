@@ -13,8 +13,13 @@
 //! after that costs a display, a launch and an encoder.
 //!
 //! The control connection carries the list of apps, their icons, the
-//! clipboard, where the phone's sound plays and the phone's clock. Requests
-//! on it are one at a time.
+//! clipboard, where the phone's sound plays, the phone's clock, and its
+//! notifications while this computer shows them (notifications/mod.rs) —
+//! for which a server is started on its own, without the warm-up a window
+//! wants ([`ensure_quietly`]), and stopped again when they go off unless the
+//! Apps page has used it meanwhile ([`retire`]). The phone listens for the
+//! connection that asked, and stops when it goes: a connection made again is
+//! a new one ([`Server::connection`]), asked again. Requests on it are one at a time.
 
 use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Write};
@@ -71,6 +76,8 @@ enum Answer {
 pub struct Server {
     pub socket: String,
     pub hello: Hello,
+    /// The phone it runs on, by its `ro.serialno`: whichever way it is reached.
+    pub phone: String,
     /// Every adb serial this computer has reached it by: what [`running`] finds it by.
     ways: Mutex<HashSet<String>>,
     child: Mutex<Option<Child>>,
@@ -84,17 +91,34 @@ pub struct Server {
     asking: Mutex<()>,
     /// Its control connection is up.
     alive: Arc<AtomicBool>,
-    /// Which control connection is the server's: the reader of one replaced ends quietly.
+    /// Which control connection is the server's: the reader of one replaced
+    /// ends quietly. Changed only with `control` held, so what is sent there
+    /// and which connection took it agree.
     control_gen: Arc<AtomicU64>,
     /// The phone's text last handed over either way, so neither side gets its own back.
     pub clip_last: Arc<Mutex<String>>,
     /// What the phone last said of its sound outputs: it says so as they come and go.
     sound: Arc<Mutex<Option<PhoneSound>>>,
+    /// The Apps page or a window has used it, not only the phone's
+    /// notifications: what the phone copies comes to this computer only then,
+    /// as it did before notifications started a server of their own.
+    for_apps: Arc<AtomicBool>,
 }
 
 impl Server {
     pub fn alive(&self) -> bool {
         self.alive.load(Ordering::SeqCst)
+    }
+
+    /// Used by the Apps page or a window, not only by the phone's notifications.
+    pub fn for_apps(&self) -> bool {
+        self.for_apps.load(Ordering::SeqCst)
+    }
+
+    /// Which of its control connections is up now: the first is 0, and each
+    /// made again (the cable pulled, Wi-Fi still there) is one more.
+    pub fn connection(&self) -> u64 {
+        self.control_gen.load(Ordering::SeqCst)
     }
 
     /// The server is reached by `serial` too: a window's connection goes that way.
@@ -120,13 +144,17 @@ impl Server {
         }
         let _ = control.set_read_timeout(None);
         let reader = control.try_clone().map_err(|e| e.to_string())?;
-        let generation = self.control_gen.fetch_add(1, Ordering::SeqCst) + 1;
-        *self.control.lock().unwrap() = control;
+        let generation = {
+            let mut held = self.control.lock().unwrap();
+            *held = control;
+            self.control_gen.fetch_add(1, Ordering::SeqCst) + 1
+        };
         self.reached_by(serial);
         self.alive.store(true, Ordering::SeqCst);
         spawn_control_reader(
             app.clone(),
             serial.to_string(),
+            self.phone.clone(),
             reader,
             self.answer_tx.lock().unwrap().clone(),
             self.alive.clone(),
@@ -134,8 +162,70 @@ impl Server {
             generation,
             self.clip_last.clone(),
             self.sound.clone(),
+            self.for_apps.clone(),
         );
         Ok(())
+    }
+
+    /// The warm-up a server started for notifications alone skipped: the Apps
+    /// page asks for it as it is looked at. The phone runs it once at most.
+    pub fn warm(&self) {
+        let _ = self.send(&json!({"t": "warm"}));
+    }
+
+    /// The phone's notifications to this computer, or no longer. It answers
+    /// with `notifs` — whether it may listen — and then a snapshot of what it
+    /// has; it listens for the connection this went on, which is said
+    /// ([`connection`](Self::connection)'s number), and stops when that goes.
+    pub fn notifications(&self, on: bool) -> Result<u64, String> {
+        let control = self.control.lock().unwrap();
+        (&*control)
+            .write_all(&wire::json(&json!({"t": "notifs", "on": on})))
+            .map_err(|e| format!("the phone's app server: {e}"))?;
+        Ok(self.control_gen.load(Ordering::SeqCst))
+    }
+
+    /// Open what notification `key` is about: in the window the phone's server
+    /// knows as `window`, or on display `display` (`freeform`, a desktop's),
+    /// or on the phone's own screen with neither. The phone says how it went (`notifDone`).
+    pub fn notif_open(&self, key: &str, window: Option<&str>, display: Option<i32>, freeform: bool) -> Result<(), String> {
+        let mut ask = json!({"t": "notifOpen", "key": key, "freeform": freeform});
+        place(&mut ask, window, display);
+        self.send(&ask)
+    }
+
+    /// One of the notification's own buttons, by its index and what it said;
+    /// one that opens something opens it where [`notif_open`](Self::notif_open) would.
+    pub fn notif_action(&self, key: &str, i: i64, label: &str, window: Option<&str>, display: Option<i32>) -> Result<(), String> {
+        let mut ask = json!({"t": "notifAction", "key": key, "i": i, "label": label, "freeform": display.is_some()});
+        place(&mut ask, window, display);
+        self.send(&ask)
+    }
+
+    /// A reply typed here, into the notification's reply button `i`.
+    pub fn notif_reply(&self, key: &str, i: i64, label: &str, text: &str) -> Result<(), String> {
+        self.send(&json!({"t": "notifReply", "key": key, "i": i, "label": label, "text": text}))
+    }
+
+    /// Dismissed here, and so on the phone.
+    pub fn notif_dismiss(&self, key: &str) -> Result<(), String> {
+        self.send(&json!({"t": "notifDismiss", "key": key}))
+    }
+
+    /// A ringing call, answered or declined from here by CallStyle's own intents.
+    pub fn notif_call(&self, key: &str, answer: bool) -> Result<(), String> {
+        self.send(&json!({"t": "notifCall", "key": key, "answer": answer}))
+    }
+
+    /// One of a ringing call's own buttons — a dialer from before CallStyle's
+    /// — by its index, if it still says `label`: fired on the phone, where a call is taken.
+    pub fn notif_call_button(&self, key: &str, i: i64, label: &str) -> Result<(), String> {
+        self.send(&json!({"t": "notifCall", "key": key, "i": i, "label": label}))
+    }
+
+    /// A notification from the phone, for a person to see one arrive.
+    pub fn notif_test(&self, title: &str, text: &str) -> Result<(), String> {
+        self.send(&json!({"t": "notifTest", "title": title, "text": text}))
     }
 
     /// This computer's clipboard for the phone's next paste, on the phone's own
@@ -308,6 +398,15 @@ impl Server {
     }
 }
 
+/// Where something a notification opens goes: a window's key, else a display.
+fn place(ask: &mut Value, window: Option<&str>, display: Option<i32>) {
+    if let Some(w) = window {
+        ask["window"] = json!(w);
+    } else if let Some(d) = display {
+        ask["display"] = json!(d);
+    }
+}
+
 /// Each phone's server, by the phone.
 fn servers() -> &'static Mutex<HashMap<String, Arc<Server>>> {
     static S: OnceLock<Mutex<HashMap<String, Arc<Server>>>> = OnceLock::new();
@@ -320,20 +419,40 @@ fn starting() -> &'static Mutex<()> {
     S.get_or_init(Default::default)
 }
 
+/// This app is exiting and every server has been stopped ([`stop_all`]): none
+/// starts after that — the notifications' keeper may be in the middle of
+/// starting one as the app goes, and it would outlive it on the phone.
+static STOPPED: AtomicBool = AtomicBool::new(false);
+
 /// `phone`'s server, reached over `serial`: the one running — adopted over
 /// `serial` if it lost its control connection with the way that took (the
 /// cable pulled) — else one started now, and warmed up for the windows to come.
 pub fn ensure(app: &tauri::AppHandle, serial: &str, phone: &str) -> Result<Arc<Server>, String> {
-    ensure_with(app, serial, phone, true)
+    ensure_with(app, serial, phone, true, true)
 }
 
 /// [`ensure`] for a window that is waiting now: a server started for it
 /// skips the warm-up, since the window pays for that itself.
 pub fn ensure_for_window(app: &tauri::AppHandle, serial: &str, phone: &str) -> Result<Arc<Server>, String> {
-    ensure_with(app, serial, phone, false)
+    ensure_with(app, serial, phone, false, true)
 }
 
-fn ensure_with(app: &tauri::AppHandle, serial: &str, phone: &str, warm: bool) -> Result<Arc<Server>, String> {
+/// [`ensure`] for the phone's notifications alone: no warm-up, which on a slow
+/// phone would sit beside a desktop that may be starting; the Apps page asks
+/// for it when it is looked at ([`Server::warm`]).
+pub fn ensure_quietly(app: &tauri::AppHandle, serial: &str, phone: &str) -> Result<Arc<Server>, String> {
+    ensure_with(app, serial, phone, false, false)
+}
+
+fn ensure_with(app: &tauri::AppHandle, serial: &str, phone: &str, warm: bool, for_apps: bool) -> Result<Arc<Server>, String> {
+    let s = reach_or_start(app, serial, phone, warm)?;
+    if for_apps {
+        s.for_apps.store(true, Ordering::SeqCst);
+    }
+    Ok(s)
+}
+
+fn reach_or_start(app: &tauri::AppHandle, serial: &str, phone: &str, warm: bool) -> Result<Arc<Server>, String> {
     if let Some(s) = adopt(app, serial, phone) {
         return Ok(s);
     }
@@ -343,9 +462,20 @@ fn ensure_with(app: &tauri::AppHandle, serial: &str, phone: &str, warm: bool) ->
         s.reached_by(serial);
         return Ok(s);
     }
-    let s = Arc::new(start(app, serial, warm)?);
-    servers().lock().unwrap().insert(phone.to_string(), s.clone());
-    Ok(s)
+    if STOPPED.load(Ordering::SeqCst) {
+        return Err("Open Android DeX is closing.".into());
+    }
+    let s = Arc::new(start(app, serial, phone, warm)?);
+    {
+        // Kept — unless every server was stopped while this one started.
+        let mut servers = servers().lock().unwrap();
+        if !STOPPED.load(Ordering::SeqCst) {
+            servers.insert(phone.to_string(), s.clone());
+            return Ok(s);
+        }
+    }
+    s.stop();
+    Err("Open Android DeX is closing.".into())
 }
 
 /// `phone`'s server reached over `serial`, if there is one to reach: up, or
@@ -362,6 +492,8 @@ pub fn adopt(app: &tauri::AppHandle, serial: &str, phone: &str) -> Option<Arc<Se
     match s.reconnect_control(app, serial) {
         Ok(()) => {
             log::info!("apps [{serial}] the phone's app server is reached this way now");
+            // A new connection, which the phone's notifications are asked for on, now.
+            crate::notifications::look_again();
             Some(s)
         }
         Err(e) => {
@@ -377,9 +509,35 @@ pub fn running(serial: &str) -> Option<Arc<Server>> {
     servers().lock().unwrap().values().find(|s| s.alive() && s.reaches(serial)).cloned()
 }
 
-/// Every phone's server stops: this app is exiting.
+/// `phone`'s server, if it is up: whichever way it is reached.
+pub fn of_phone(phone: &str) -> Option<Arc<Server>> {
+    servers().lock().unwrap().get(phone).filter(|s| s.alive()).cloned()
+}
+
+/// `phone`'s server stops if the phone's notifications were all it was for:
+/// they are off now, and it would otherwise run until this app exits.
+pub fn retire(phone: &str) {
+    let _one = starting().lock().unwrap();
+    let retired = {
+        let mut servers = servers().lock().unwrap();
+        match servers.get(phone) {
+            Some(s) if !s.for_apps() => servers.remove(phone),
+            _ => None,
+        }
+    };
+    if let Some(s) = retired {
+        log::info!("apps [{phone}] the phone's app server stops: notifications were all it was running for");
+        s.stop();
+    }
+}
+
+/// Every phone's server stops, and none starts after: this app is exiting.
 pub fn stop_all() {
-    let all: Vec<Arc<Server>> = servers().lock().unwrap().drain().map(|(_, s)| s).collect();
+    let all: Vec<Arc<Server>> = {
+        let mut servers = servers().lock().unwrap();
+        STOPPED.store(true, Ordering::SeqCst);
+        servers.drain().map(|(_, s)| s).collect()
+    };
     for s in all {
         s.stop();
     }
@@ -391,7 +549,7 @@ fn random_name() -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
-fn start(app: &tauri::AppHandle, serial: &str, warm: bool) -> Result<Server, String> {
+fn start(app: &tauri::AppHandle, serial: &str, phone: &str, warm: bool) -> Result<Server, String> {
     let t0 = Instant::now();
     let dex = adb::bin_dir(app)?.join("openandroiddex-wmd.dex");
     if !dex.exists() {
@@ -503,10 +661,12 @@ fn start(app: &tauri::AppHandle, serial: &str, warm: bool) -> Result<Server, Str
     let clip_last = Arc::new(Mutex::new(String::new()));
     let sound = Arc::new(Mutex::new(None));
     let control_gen = Arc::new(AtomicU64::new(0));
+    let for_apps = Arc::new(AtomicBool::new(false));
     let reader = control.try_clone().map_err(|e| e.to_string())?;
     spawn_control_reader(
         app.clone(),
         serial.to_string(),
+        phone.to_string(),
         reader,
         answer_tx.clone(),
         alive.clone(),
@@ -514,6 +674,7 @@ fn start(app: &tauri::AppHandle, serial: &str, warm: bool) -> Result<Server, Str
         0,
         clip_last.clone(),
         sound.clone(),
+        for_apps.clone(),
     );
     log::info!(
         "apps [{serial}] app server up in {}ms: Android {} (API {}), {} {}{}",
@@ -527,6 +688,7 @@ fn start(app: &tauri::AppHandle, serial: &str, warm: bool) -> Result<Server, Str
     Ok(Server {
         socket,
         hello,
+        phone: phone.to_string(),
         ways: Mutex::new(HashSet::from([serial.to_string()])),
         child: Mutex::new(Some(child)),
         stdin: Mutex::new(stdin),
@@ -538,17 +700,21 @@ fn start(app: &tauri::AppHandle, serial: &str, warm: bool) -> Result<Server, Str
         control_gen,
         clip_last,
         sound,
+        for_apps,
     })
 }
 
 /// What the phone sends on its own: answers go to whoever asked, the
-/// clipboard straight to this computer's, word of its sound to the menus.
+/// clipboard straight to this computer's (once the server is the Apps
+/// page's, `for_apps`), word of its sound to the menus, its notifications to
+/// this computer's own (notifications/mod.rs).
 /// The server is no longer reached once this ends, unless a control
 /// connection made again (generation after `generation`) has it.
 #[allow(clippy::too_many_arguments)]
 fn spawn_control_reader(
     app: tauri::AppHandle,
     serial: String,
+    phone: String,
     mut stream: TcpStream,
     answers: Sender<Answer>,
     alive: Arc<AtomicBool>,
@@ -556,6 +722,7 @@ fn spawn_control_reader(
     generation: u64,
     clip_last: Arc<Mutex<String>>,
     sound: Arc<Mutex<Option<PhoneSound>>>,
+    for_apps: Arc<AtomicBool>,
 ) {
     let _ = thread::Builder::new().name("apps-control".into()).spawn(move || {
         loop {
@@ -587,11 +754,14 @@ fn spawn_control_reader(
                             let _ = answers.send(Answer::Routed(v));
                         }
                         Some("linux") => super::linux_event(&app, &serial, &v),
+                        Some("notifs") | Some("notif") | Some("notifDone") => {
+                            crate::notifications::phone_said(&serial, &phone, &v);
+                        }
                         // The server's own log, once the shell it printed to has gone with its cable.
                         Some("log") => log::info!("apps [{serial}] {}", v["line"].as_str().unwrap_or("")),
                         Some("clip") => {
                             let text = v["text"].as_str().unwrap_or("").to_string();
-                            if text.is_empty() {
+                            if text.is_empty() || !for_apps.load(Ordering::SeqCst) {
                                 continue;
                             }
                             let fresh = {

@@ -186,6 +186,35 @@ Pinning an app on its own is a Windows thing: on a Mac they all sit under this
 app's icon in the Dock. On a Linux computer an Android app opens in a simpler
 window, and Linux apps are not offered there.
 
+### Your phone's notifications, on your computer
+
+When a message arrives on your phone, it comes up on your computer as one of
+its own notifications. On Windows it comes from the app itself, with its name
+and icon, just like an app installed there.
+
+- **Reply without picking up your phone.** A message has a reply box right in
+  the notification, and the app's own buttons — mark as read, archive,
+  whatever it offers
+- **Click it and the conversation opens** in a window of its own on your
+  computer, right at that conversation. With the phone's desktop running, it
+  opens there instead
+- **Calls ring here too**, with Answer and Decline
+- **Read it on your phone and it goes from your computer as well**
+- **It knows when to stay quiet.** Nothing for the app whose window you are
+  using, nothing your phone would have kept quiet itself (Do Not Disturb, an
+  app you set to silent), and nothing while the phone's desktop is in front,
+  which shows its own
+- **The bell at the top of the window** turns it on and off. It is also where
+  you choose whether notifications say what they say or only which app has
+  something, whether calls ring here, and which apps come through: each has
+  its own switch. *Send a test* shows you one arriving. On Windows you can
+  also right-click a notification to turn its app off
+
+Nothing is installed or changed on your phone for this: the part that reads
+its notifications runs only while the phone is attached and notifications
+are on. They come to Windows and Mac computers; on Linux the phone's desktop
+shows them. How it works: [doc/phone-notifications.md](doc/phone-notifications.md).
+
 ### Ubuntu, a whole Linux computer, running on your phone
 
 This is Ubuntu 24.04 with a full desktop, running on the phone itself, in a

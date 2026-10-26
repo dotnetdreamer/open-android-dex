@@ -6,6 +6,7 @@ mod embed;
 mod files;
 mod gestures;
 mod hotkeys;
+mod notifications;
 mod projection;
 mod remote;
 mod remote_desktop;
@@ -125,7 +126,14 @@ pub fn run() {
             apps::apps_open,
             apps::apps_windows,
             apps::apps_close,
-            apps::apps_startup
+            apps::apps_startup,
+            notifications::notifications_state,
+            notifications::notifications_apps,
+            notifications::notifications_set,
+            notifications::notifications_mute,
+            notifications::notifications_test,
+            notifications::notifications_fix,
+            notifications::notifications_counts
         ])
         // A phone's desktop window takes its local port and its tunnel with it.
         .on_window_event(|window, event| {
@@ -150,6 +158,9 @@ pub fn run() {
             // Started from a phone app pinned to the taskbar: that app's window.
             let argv: Vec<String> = std::env::args().collect();
             apps::open_at_startup(&app.handle().clone(), &argv);
+            // The phone's notifications as this computer's own, for every phone
+            // that is attached while they are on.
+            notifications::start(&app.handle().clone());
             Ok(())
         })
         .build(tauri::generate_context!())
@@ -157,6 +168,8 @@ pub fn run() {
         .run(|app, event| {
             if let tauri::RunEvent::Exit = event {
                 log::info!("── application exiting ──");
+                // The phone's toasts first: nothing can act on them once this has gone.
+                notifications::stop();
                 // Every phone app's window closes first, each app back on its
                 // phone at once — before the seconds the desktop's undo takes.
                 apps::shutdown();

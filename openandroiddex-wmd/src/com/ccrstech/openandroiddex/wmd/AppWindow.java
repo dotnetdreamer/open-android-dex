@@ -3,6 +3,7 @@ package com.ccrstech.openandroiddex.wmd;
 import android.content.ComponentName;
 import android.hardware.display.VirtualDisplay;
 import android.net.LocalSocket;
+import android.os.Build;
 import android.os.SystemClock;
 import android.view.KeyEvent;
 
@@ -81,6 +82,8 @@ final class AppWindow implements LinuxStreamEncoder.Output, AppVideo.Gate {
     private static final long GONE_AFTER_MS = 900;
     /** A launch that has put nothing on the display after this long went somewhere else. */
     private static final long NEVER_CAME_MS = 12_000;
+    /** A notification's own intent that has not put its app on the window's display by now went elsewhere, or nowhere. */
+    private static final long NOTIFICATION_ARRIVES_MS = 1500;
     /**
      * How long a window whose connection went keeps its app on its display for
      * the computer to come back to: a Samsung phone's adbd is back about 3 s
@@ -115,7 +118,7 @@ final class AppWindow implements LinuxStreamEncoder.Output, AppVideo.Gate {
     private volatile int height;
     private volatile int dpi;
     /** Whether the phone made the display trusted: said again to a computer that comes back. */
-    private boolean trusted;
+    private volatile boolean trusted;
     /** What the window wants done with the app when it closes: "phone" hands it back, "close" ends it. */
     private volatile String onClose = "phone";
     /** On a cable: the display draws straight into the encoder (AppVideo#direct). */
@@ -346,7 +349,32 @@ final class AppWindow implements LinuxStreamEncoder.Output, AppVideo.Gate {
         server.hideIme(displayId);
         long t1 = SystemClock.uptimeMillis();
         // The app first: it takes far longer to draw than the encoder takes to make.
-        String how = xid != 0 ? AppTasks.startLinuxWindow(xid, displayId) : AppTasks.start(component, displayId);
+        // Opened from one of its notifications, by that notification's own
+        // intent: the conversation it is about, not the app's front screen.
+        String notif = open.optString("notif", "");
+        AppNotifications notifications = xid == 0 && !notif.isEmpty() ? server.notifications() : null;
+        String how;
+        // Straight onto the window's display only where Android takes the app's
+        // own intent there from the shell: a trusted display — an untrusted one
+        // (Android 12's shell can make no other) takes no activity another app
+        // asks onto it — on Android 16, whose "allow always" lends the intent the
+        // shell's leave to start an activity from the background. Before it,
+        // with the app nowhere on screen, the start is blocked (13, and 15 with
+        // "allowed") — and 15 still moves a task the app has to the display,
+        // empty of the conversation, which would pass for it having arrived.
+        boolean straight = trusted && Build.VERSION.SDK_INT >= 36;
+        if (notifications != null && straight && notifications.launch(notif, pkg, displayId)
+                && arrives(displayId, pkg, NOTIFICATION_ARRIVES_MS)) {
+            how = "its notification";
+        } else {
+            // Else the app is started in the window as any app is, and then its
+            // notification's intent fired with no display: on screen now, the app
+            // may start an activity, and that one joins its task — in the window.
+            // (An app that kept the conversation in its task on the phone's own
+            // screen is brought over with it, the notification gone with the tap.)
+            how = xid != 0 ? AppTasks.startLinuxWindow(xid, displayId) : AppTasks.start(component, displayId);
+            if (notifications != null && notifications.after(notif)) how += ", then its notification";
+        }
         long t2 = SystemClock.uptimeMillis();
         sayDisplay();
         newEncoder();
@@ -357,6 +385,26 @@ final class AppWindow implements LinuxStreamEncoder.Output, AppVideo.Gate {
                 + "): display " + (t1 - t0) + " ms, launch " + (t2 - t1) + " ms by " + how
                 + ", encoder " + (t3 - t2) + " ms");
         server.watch(this);
+    }
+
+    /**
+     * {@code pkg}'s own task on the window's display within {@code ms} — not
+     * just anything: Android 13 puts a launcher's secondary home on a new
+     * display, which an intent that never started would be taken for.
+     */
+    private static boolean arrives(int displayId, String pkg, long ms) {
+        long until = SystemClock.uptimeMillis() + ms;
+        do {
+            try {
+                for (AppTasks.Task t : AppTasks.onDisplay(displayId)) {
+                    if (pkg.equals(t.pkg)) return true;
+                }
+            } catch (Throwable t) {
+                return true; // the platform will not say: the watcher decides, as for any window
+            }
+            SystemClock.sleep(50);
+        } while (SystemClock.uptimeMillis() < until);
+        return false;
     }
 
     /** The window's display, and the app's name, to the computer. */
@@ -581,6 +629,11 @@ final class AppWindow implements LinuxStreamEncoder.Output, AppVideo.Gate {
 
     int displayId() {
         return displayId;
+    }
+
+    /** Its display is trusted: another app's intent may put an activity on it. */
+    boolean trusted() {
+        return trusted;
     }
 
     /** A connection of the computer's is this window's now: it holds the server. */

@@ -36,7 +36,7 @@ mod video;
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -111,6 +111,16 @@ impl Window {
         self.shared.link.route().serial
     }
 
+    /// What the phone's server calls it: a notification of its app opens in it by this.
+    pub fn key(&self) -> String {
+        self.shared.link.key().to_string()
+    }
+
+    /// It is the window the person is using: the key window, this app active.
+    pub fn is_front(&self) -> bool {
+        self.shared.front.load(Ordering::SeqCst)
+    }
+
     /// The way it reaches its phone now: the serial, the server, USB or Wi‑Fi.
     pub fn route(&self) -> Route {
         self.shared.link.route()
@@ -170,6 +180,9 @@ struct Shared {
     subtitle: Arc<Mutex<String>>,
     /// Counts the notes, so a note's fading never takes the next one with it.
     note_seq: Arc<AtomicU64>,
+    /// The key window: the one in front, what the keyboard types into. A
+    /// window resigns it when this app stops being the active one, too.
+    front: AtomicBool,
 }
 
 /// How the picture has been doing, for the log every ten seconds.
@@ -374,6 +387,7 @@ pub fn open(spec: Spec, host: Arc<dyn Host>) -> Result<Arc<Window>, String> {
         device: spec.device.clone(),
         subtitle: Arc::new(Mutex::new(link::way_line(&spec.device, spec.via))),
         note_seq: Arc::new(AtomicU64::new(0)),
+        front: AtomicBool::new(false),
     });
     let look = Look {
         id: spec.id,
@@ -402,6 +416,7 @@ pub fn open(spec: Spec, host: Arc<dyn Host>) -> Result<Arc<Window>, String> {
         linux: spec.linux,
         direct: spec.direct,
         via: spec.via,
+        notif: spec.notif.clone(),
     };
     link::start(shared.link.clone(), shared.clone(), net, out_rx);
     Ok(Arc::new(Window {
@@ -1080,6 +1095,7 @@ define_class!(
 
         #[unsafe(method(windowDidBecomeKey:))]
         fn window_did_become_key(&self, _notification: &NSNotification) {
+            self.ivars().shared.front.store(true, Ordering::SeqCst);
             let link = &self.ivars().shared.link;
             link.hand_clipboard_over();
             link.send(wire::json(&json!({"t": "focus"})));
@@ -1087,6 +1103,7 @@ define_class!(
 
         #[unsafe(method(windowDidResignKey:))]
         fn window_did_resign_key(&self, _notification: &NSNotification) {
+            self.ivars().shared.front.store(false, Ordering::SeqCst);
             let link = &self.ivars().shared.link;
             for (_, code) in self.ivars().keys_down.borrow_mut().drain() {
                 link.send(wire::key(false, 0, code, 0));
