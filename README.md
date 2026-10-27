@@ -27,11 +27,30 @@ https://github.com/user-attachments/assets/9b44d8f4-8e9b-47b5-bd44-3ef486eb8e60
 
 
 
-<img src="doc/img/windows.png" alt="Ubuntu and the DeX settings app open side by side on the desktop" width="100%">
+<img src="doc/img/windows.png" alt="Chrome and Google Maps open side by side on the desktop" width="100%">
 
-<sub>Ubuntu snapped to the left, the desktop's own settings app snapped to the right, both running on the phone.</sub>
+<sub>Chrome snapped to the left, Google Maps snapped to the right, both running on the phone.</sub>
 
 </div>
+
+---
+
+## Top features
+
+- **Your phone becomes a computer** when you plug it into your PC or Mac
+- **Open apps side by side** and move or resize them, just like on a laptop
+- **Use any phone app on your computer**, like WhatsApp, without opening the whole desktop
+- **Get your messages and calls on your computer**, and reply or answer without picking up your phone
+- **Copy and paste between your phone and computer**, and drag files onto your phone
+- **Use your phone as a touchpad** to move the mouse and click
+- **Pull out the cable and keep working** over Wi-Fi
+- **Works without a computer too**, right on your phone or on a monitor
+- **Run Ubuntu Linux on your phone** with Firefox and VS Code, plus Docker
+- **Open your phone's desktop in a web browser** on any computer, with nothing to install
+- **Make it yours** with themes, wallpapers, nine languages and a Windows 11 look
+- **Works on almost any Android phone** with Android 8 or newer, not just Samsung
+- **Your phone goes back to normal** when you are done
+- **Free and open source**, with no account, no subscription and no root
 
 ---
 
@@ -126,10 +145,11 @@ at your monitor's size, sitting next to your other windows.
 - **Two looks.** A DeX style desktop, or a Windows 11 style one with a Start
   button. Switch between them in one click
 
-Open the app drawer and the four built in tools sit at the top, above everything
-else you have installed.
+Open the app drawer and the five built in tools sit at the top, above everything
+else you have installed. One of them, File transfer, shows your computer's files
+next to your phone's so you can copy between them.
 
-![Settings, LinuxOnDroid, Docker and the Web viewer at the top of the app drawer](doc/img/app-drawer.png)
+![Settings, LinuxOnDroid, Docker, the Web viewer and File transfer at the top of the app drawer](doc/img/app-drawer.png)
 
 ### Or just your apps, each in its own window
 
@@ -138,6 +158,8 @@ whole desktop. Open the **Apps** tab on your computer and you will see the apps
 on your phone, with their real names and icons. Click one and it opens in its
 own window, right next to your other programs. It is usually there in under
 half a second.
+
+![The Apps tab listing the phone's apps, with Clock and Google Maps open in windows of their own](doc/img/apps-on-pc.png)
 
 - **They behave like your computer's own windows.** Move them, resize them,
   snap them side by side, minimise them. Each app gets its own button on the
