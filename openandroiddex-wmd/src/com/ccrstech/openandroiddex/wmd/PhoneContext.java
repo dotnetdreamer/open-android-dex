@@ -3,8 +3,10 @@ package com.ccrstech.openandroiddex.wmd;
 import android.content.AttributionSource;
 import android.content.Context;
 import android.content.ContextWrapper;
+import android.graphics.Typeface;
 import android.os.Build;
 import android.os.Process;
+import android.os.SystemClock;
 
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
@@ -61,6 +63,43 @@ final class PhoneContext extends ContextWrapper {
             set(at, thread, "mInitialApplication", app);
         } catch (Throwable t) {
             System.out.println("apps: no Application for the thread (" + t + ") — icons will be missing");
+        }
+    }
+
+    /** Its own lock, not the class's: get() must not wait behind the fonts loading. */
+    private static final Object FONTS = new Object();
+    private static boolean fontsLoaded;
+
+    /**
+     * The phone's fonts, which an app's process is handed as it starts and
+     * app_process never is. Text measured or drawn without a typeface of its
+     * own takes the default one, and with none loaded hwui aborts the process
+     * ("src == nullptr && gDefaultTypeface == nullptr") — no catch stops that.
+     * One UI's live Calendar icon measures today's date as it is drawn: asked
+     * for it, the whole server went, its windows with it, and every icon after
+     * Calendar's in the list never came.
+     *
+     * <p>Up to Android 11, Typeface's static block loads them, the first time
+     * the class is touched. Later releases load them with a hidden
+     * loadPreinstalledSystemFontMap, which the block now leaves to whoever
+     * starts the process (ENABLE_LAZY_TYPEFACE_INITIALIZATION): called here,
+     * once; where the block made a load too, a second costs only time. Before
+     * the first icon is drawn, not at start, where a window may be waiting.
+     */
+    static void loadFonts() {
+        synchronized (FONTS) {
+            if (fontsLoaded) return;
+            fontsLoaded = true;
+            // Touched, the class runs its static block: all it takes up to Android 11.
+            Typeface touched = Typeface.DEFAULT;
+            if (Build.VERSION.SDK_INT < 31 && touched != null) return;
+            long t0 = SystemClock.uptimeMillis();
+            try {
+                Refl.callStatic(Typeface.class, "loadPreinstalledSystemFontMap", new Class<?>[]{});
+                AppServer.log("fonts loaded in " + (SystemClock.uptimeMillis() - t0) + " ms");
+            } catch (Throwable t) {
+                AppServer.log("no fonts (" + t + ") — an icon with text in it will stop the server");
+            }
         }
     }
 

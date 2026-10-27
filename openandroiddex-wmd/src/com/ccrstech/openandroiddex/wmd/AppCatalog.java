@@ -90,6 +90,8 @@ final class AppCatalog {
 
     /** {@code pkg}'s launcher icon, {@code px} square, as a PNG; null if it cannot be drawn. */
     byte[] icon(String pkg, int px) {
+        // Some icons have text in them (One UI's live Calendar); without fonts, drawing one ends the process.
+        PhoneContext.loadFonts();
         ResolveInfo ri;
         synchronized (this) {
             ri = entries.get(pkg);
