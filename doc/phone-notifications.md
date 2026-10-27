@@ -151,7 +151,7 @@ this app may notify, the first time a phone listens. While that question is
 on screen, unanswered, the center says "denied" (macOS 26): the panel says
 macOS is asking, not that notifications are off in System Settings.
 
-**With "Show what they say" off**, a toast says only which app has something:
+**With "Show the message" off**, a toast says only which app has something:
 "Messages — New message", a call "Phone — Incoming call". No sender, no
 picture, no reply box, and none of the app's own buttons — a button can carry
 the message ("Copy 123456", as Messages offers for a code) — only "Turn off
@@ -232,7 +232,7 @@ pressed, by its index, if it still says what it said. Never by a button's
 place: AOSP's Dialer puts Decline before Answer.
 
 **Dismissing** a toast dismisses the notification on the phone only when the
-person asked for that ("Clear them on my phone too", off by default): the
+person asked for that ("Clear on my phone too", off by default): the
 phone is where they live, and closing a toast to get it out of the way is not
 "I've dealt with it".
 
@@ -276,7 +276,7 @@ this run's record of it and the system's toasts together — and a toast is
 made from what the person has chosen *as it goes up*, not as its
 notification arrived: the switch, the app's own, calls, and what it may say.
 A toast on its way when notifications, its app or calls are switched off does
-not go up; one on its way when "Show what they say" goes off goes up without
+not go up; one on its way when "Show the message" goes off goes up without
 it; one taken down — read on the phone, say — is not brought back by a
 redraw. A Mac posts a banner whose buttons are new only once the center has
 its categories, later and on a thread of its own: it goes then only if it is
@@ -334,9 +334,9 @@ coming through, an amber one when something stands in the way (the system's
 notifications turned off for this app, a Mac that has not asked, a phone
 that refused); it rings once as one arrives.
 
-Its panel: the switch, and under it a live line ("On this PC, from Galaxy
-A13", "Connecting to …", "Waiting for your phone", "This PC can't show them
-right now"); what stands in the way,
+Its panel: the switch, and under it a live line ("Connected to Galaxy
+A13", "Connecting to …", "Waiting for your phone", "This PC can't show
+notifications"); what stands in the way,
 with the way out (Windows' notification settings, System Settings, macOS's
 question); the four options; then every app that has notified, or has
 notifications on an attached phone — most recent first, with its icon
@@ -419,12 +419,12 @@ A13 and the Redmi attached, each toast read back from Windows' own history
 (`ToastNotificationManager.History`, its XML), the panel driven through UI
 Automation: each phone listening 20–55 ms after it was asked; the
 introduction; an SMS's toast with its sender, its text, the reply box,
-"Mark as read", "Turn off for Messages" and the sender's picture; "Show what
-they say" switched off and the same toast, in place, as "Messages — New
+"Mark as read", "Turn off for Messages" and the sender's picture; "Show the
+message" switched off and the same toast, in place, as "Messages — New
 message" with only "Turn off for Messages", its picture deleted; an SMS
 arriving then as the same, no picture written; a call on AOSP's Dialer as an
 incoming-call toast with `Decline` (button 0, red) and `Answer` (button 1,
-green); "Calls ring here" off and that toast gone at once; the switch off —
+green); "Ring when someone calls" off and that toast gone at once; the switch off —
 each phone told and no longer listening, the Redmi's server, started for
 notifications alone, stopping — and on: all three listening within a
 second. Closing the app: gone in 0.3 s, no toast left under any of its
@@ -453,12 +453,12 @@ conversation open in it; a ringing call putting its app on the panel's list,
 and with that switched off, the next call not coming up here; a click with
 no desktop, a window of its own at that conversation (another
 left unread), and a second click opening the next in the same window; "Show
-what they say" off, both redrawn as "Messages — New message" with the app's
+the message" off, both redrawn as "Messages — New message" with the app's
 icon, quietly (passive), 25 ms after the switch, their pictures gone from
 this app's folders and from macOS's; a call answered and one declined (the
 call log's answered, declined); "Turn off for Messages", and its Undo; Send a
 test; the switch off and on again (16 ms to listening); the connection
-dropped and made again, asked again at once; "Clear them on my phone too"
+dropped and made again, asked again at once; "Clear on my phone too"
 with one closed; the Apps page's badge; a photo, as a JPEG; and quitting —
 nothing left in Notification Center, the pictures' folders gone, no app
 server on the phone. A development run (the bare binary) showed the panel's

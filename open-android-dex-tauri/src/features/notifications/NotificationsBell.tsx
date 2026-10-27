@@ -69,7 +69,8 @@ const phoneNames = (phones: PhoneState[]) => names(phones.map((p) => p.name));
 /** When an app last had something to say here, the way a notification center says it. */
 function lastHeard(a: NotifyingApp, now: number): string {
   const ms = a.last;
-  if (!ms) return a.waiting > 0 ? `${a.waiting} on your phone` : "Nothing yet";
+  if (!ms && a.waiting > 0) return `${a.waiting} ${a.waiting === 1 ? "notification" : "notifications"} on your phone`;
+  if (!ms) return "Nothing yet";
   const min = Math.round((now - ms) / 60_000);
   if (min < 1) return "Just now";
   if (min < 60) return `${min} min ago`;
@@ -229,23 +230,23 @@ function Panel({ state, onState }: { state: NotificationState; onState: (s: Noti
           <p className="heading">Phone notifications</p>
           <p className="caption mt-0.5 flex min-w-0 items-center gap-1.5">
             {!state.on ? (
-              <span className="truncate">Off. They stay on your phone.</span>
+              <span className="truncate">Off, so notifications stay on your phone</span>
             ) : held ? (
-              <span className="truncate text-[var(--warn)]">{THIS_COMPUTER_CAP} can't show them right now</span>
+              <span className="truncate text-[var(--warn)]">{THIS_COMPUTER_CAP} can't show notifications</span>
             ) : live.length > 0 ? (
               <>
                 <span className="dot dot-ok dot-live !h-1.5 !w-1.5" aria-hidden="true" />
-                <span className="truncate">On {THIS_COMPUTER}, from {phoneNames(live)}</span>
+                <span className="truncate">Connected to {phoneNames(live)}</span>
               </>
             ) : starting.length > 0 ? (
               <>
                 <span className="spinner !h-3 !w-3 !border-[1.5px]" aria-hidden="true" />
-                <span className="truncate">Connecting to {phoneNames(starting)}…</span>
+                <span className="truncate">Connecting to {phoneNames(starting)}</span>
               </>
             ) : refused.length > 0 ? (
-              <span className="truncate text-[var(--warn)]">{phoneNames(refused)} can't share them</span>
+              <span className="truncate text-[var(--warn)]">{phoneNames(refused)} can't share notifications</span>
             ) : (
-              <span className="truncate">On. Waiting for your phone</span>
+              <span className="truncate">Waiting for your phone</span>
             )}
           </p>
         </div>
@@ -276,7 +277,7 @@ function Panel({ state, onState }: { state: NotificationState; onState: (s: Noti
             <div key={p.phone} className="callout callout-warn">
               <Icon name="alert" size={16} />
               <div className="min-w-0 flex-1 select-text">
-                <p>{p.name || "Your phone"} didn't let Open Android DeX read its notifications.</p>
+                <p>{p.name || "Your phone"} didn't let Open Android DeX read notifications</p>
                 {p.message && <p className="mt-1 text-[11.5px] opacity-75">{p.message}</p>}
               </div>
             </div>
@@ -285,29 +286,29 @@ function Panel({ state, onState }: { state: NotificationState; onState: (s: Noti
           <div className="card rows">
             <Option
               icon="eye"
-              title="Show what they say"
-              detail={state.content ? "Who it's from, and the message" : "Only which app has something new"}
+              title="Show the message"
+              detail={state.content ? "The sender and the full text" : "Only the app's name"}
               checked={state.content}
               onChange={(v) => choose("content", v)}
             />
             <Option
               icon="call"
-              title="Calls ring here"
-              detail={`Answer or decline from ${THIS_COMPUTER}`}
+              title="Ring when someone calls"
+              detail={`Answer or decline on ${THIS_COMPUTER}`}
               checked={state.calls}
               onChange={(v) => choose("calls", v)}
             />
             <Option
               icon="speaker"
               title="Play a sound"
-              detail={`${IS_MAC ? "The Mac's" : "Windows'"} own notification sound`}
+              detail={`${IS_MAC ? "Your Mac's" : "Your PC's"} usual alert sound`}
               checked={state.sound}
               onChange={(v) => choose("sound", v)}
             />
             <Option
               icon="sync"
-              title="Clear them on my phone too"
-              detail="Closing one here dismisses it on the phone"
+              title="Clear on my phone too"
+              detail={`When you close a notification on ${THIS_COMPUTER}`}
               checked={state.clearOnPhone}
               onChange={(v) => choose("clearOnPhone", v)}
             />
@@ -342,18 +343,16 @@ function Panel({ state, onState }: { state: NotificationState; onState: (s: Noti
             {apps === null ? (
               <div className="card flex items-center gap-2.5 px-3 py-3">
                 <span className="spinner" aria-hidden="true" />
-                <span className="caption">Getting the list…</span>
+                <span className="caption">Loading apps</span>
               </div>
             ) : apps.length === 0 ? (
               <div className="card px-3.5 py-3">
-                <p className="caption">
-                  Apps show up here as they send you something. Turn any of them off, and it stays quiet on{" "}
-                  {THIS_COMPUTER}.
-                </p>
+                <p className="caption">Apps that send you notifications show up here</p>
+                <p className="caption mt-1">Turn off any app you don't want to hear from on {THIS_COMPUTER}</p>
               </div>
             ) : shown.length === 0 ? (
               <div className="card px-3.5 py-3">
-                <p className="caption">Nothing called “{query.trim()}”.</p>
+                <p className="caption">No app called “{query.trim()}”</p>
               </div>
             ) : (
               <div className="card rows notif-apps" role="list" aria-label="Apps that notify you">
@@ -386,10 +385,10 @@ function Panel({ state, onState }: { state: NotificationState; onState: (s: Noti
           </div>
         </div>
       ) : (
-        <p className="caption notif-off">
-          Turn it on, and when your phone gets a notification it comes up on {THIS_COMPUTER} too, with its own reply
-          box and buttons. A call rings here, with answer and decline.
-        </p>
+        <div className="caption notif-off">
+          <p>See your phone's notifications on {THIS_COMPUTER}</p>
+          <p className="mt-1">Reply to messages, and answer or decline calls</p>
+        </div>
       )}
 
       <footer className="notif-foot">
@@ -397,7 +396,9 @@ function Panel({ state, onState }: { state: NotificationState; onState: (s: Noti
           className="btn btn-secondary btn-sm"
           onClick={sendTest}
           disabled={!state.on || live.length === 0 || test.kind === "sending"}
-          title={live.length === 0 ? "Connect your phone first" : "Your phone posts a notification, and it comes up here"}
+          title={
+            live.length === 0 ? "Connect your phone first" : `Your phone sends a test notification to ${THIS_COMPUTER}`
+          }
         >
           {test.kind === "sending" ? <span className="spinner !h-3 !w-3" aria-hidden="true" /> : <Icon name="send" size={14} />}
           Send a test
