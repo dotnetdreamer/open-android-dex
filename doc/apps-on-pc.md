@@ -255,13 +255,98 @@ is closed and nothing opens: the window was never replaced by another.
 - **Nowhere to go.** A window with no way to its phone says "Waiting for Galaxy
   S25 — plug it back in, or keep it on the same Wi‑Fi" and keeps looking (the
   keeper, every 0.7 s while a window waits). This app also makes the phone's
-  Wi‑Fi link again itself, every 5 s, if it remembers how (a phone set up for
-  Wi‑Fi here, by `ro.serialno`, by its mDNS name where it pairs): after a
-  Samsung phone's adbd restarted, nothing else does. After 30 s — 60 s while the
+  Wi‑Fi link again itself, every 5 s, if it knows how (a phone set up for
+  Wi‑Fi here, by `ro.serialno`, by its mDNS name where it pairs; or one made
+  reachable beside its cable this run, below): after a Samsung phone's adbd
+  restarted, nothing else does. After 30 s — 60 s while the
   phone is there but not usable yet, a cable settling — the window says "Your
   phone stopped answering. Open the app again to bring it back"; the phone's
   server has handed the app back by then. Opening it again brings it back in
   the same window.
+
+**Wi‑Fi beside the cable.** A window can only move to a way to its phone that
+exists, and a phone on the cable alone had none: pulling the cable left its
+windows waiting for it, "stuck", unless the phone had been set up for Wi‑Fi
+here first. So while a phone's windows go over a cable that has settled, the
+keeper makes the phone reachable over Wi‑Fi as well (`wireless::ready_wifi`):
+the phone's own Wireless debugging (Android 11 and later), switched on from the
+shell (`settings put global adb_wifi_enabled 1`), and `adb connect` to its
+port. The cable is pulled, and the window moves over a link that is already
+up — if one could be made: what it takes is below, and a window with none
+waits for the cable as before.
+
+- **No pairing — for a computer trusted for good.** adbd checks a computer
+  coming in over Wi‑Fi against the keys it keeps (the TLS handshake's
+  certificate, against `adb_keys`), so a computer allowed on the cable with
+  "Always allow from this computer" is let in at once. One allowed for the
+  cable's while only is not: adb answers "failed to connect" either way, so
+  the log names both causes. Seen on a Galaxy A13 (Android 12) and a Redmi 9A
+  (Android 11), neither paired with this computer.
+- **A cable in for 10 s.** No try is made over a cable plugged in while this
+  app runs until it has settled (`CABLE_SETTLE`, for a Samsung phone's adbd
+  restart about 5 s after the plug goes in, which moves Wireless debugging's
+  port), then 0.7–1.3 s to make the link: a cable pulled sooner leaves its
+  windows waiting for it. A phone already plugged in as the app starts counts
+  as settled.
+- **Not `adb tcpip`**, which the Desktop tab's "go wireless" uses: that
+  restarts adbd, and on a Samsung phone everything adbd started goes with it —
+  every window's server. Switching Wireless debugging on restarted nothing on
+  the Galaxy A13 (its cable's transport id stayed the same); other makers'
+  phones are not known to.
+- **A Xiaomi phone's shell may not switch it on**: the Redmi 9A refuses the
+  write (`SecurityException`: `WRITE_SECURE_SETTINGS`, which MIUI gives the
+  shell only with "USB debugging (Security settings)" on). Its windows say "To
+  carry on over Wi‑Fi when you unplug, turn on Wireless debugging on your
+  phone" for a minute, and the link is made once its owner has.
+- **The phone asks first**, the first time on a network: "Allow wireless
+  debugging on this network?", the switch put back off until its owner answers.
+  The windows on the cable say "Tap Allow on your phone, so this window carries
+  on over Wi‑Fi when you unplug" for a minute, the phone is looked at every 2 s
+  for the answer, and "Ready to carry on over Wi‑Fi when you unplug" once it
+  was allowed. Ticking "Always allow on this network" makes it the last time.
+  The switch is turned on once a run: turned off on the phone, or not allowed,
+  it stays off. Allowed only after the cable went, the phone is found by its
+  mDNS name while its windows wait for it.
+- **Its port** is read off the phone's socket table: a listener of the shell's
+  (adbd's) uid bound to every address, in `/proc/net/tcp6` — the touchpad's,
+  also the shell's, is on loopback. Else from mDNS, where the phone announces
+  `adb-<ro.serialno>-<suffix>`. Neither alone is enough: a Galaxy A13 does not
+  let the shell read `service.adb.tls.port`, and a Redmi 9A does not announce
+  itself.
+- **For this run only.** Never remembered with the phones set up for Wi‑Fi: a
+  remembered phone is taken over Wi‑Fi at the next start, its cable in.
+  Wireless debugging this app switched on goes off again as it exits, and the
+  links it made are let go; one its owner had on stays on. A link to a port
+  the phone has since left (adbd restarted) is let go as the next is made, or
+  as soon as the phone is up over Wi‑Fi another way: left offline in adb's
+  list, the Desktop page would read it as a phone that left the network.
+- **The exit** (`wireless::let_wifi_go`) first stops any new try and waits up
+  to 4 s for those under way, which check every half second and record
+  nothing once it has begun — a link one makes after, it lets go itself; a
+  switch it is about to turn on is recorded before it is turned. Then it
+  switches off over a device list made then, not the last poll's (the cable
+  may have been pulled a moment before), trying the cable first, then each
+  way over Wi‑Fi. An `adb connect` under way is not cut short: one that
+  outlasts the 4 s may leave a link adb lists offline after the app has gone.
+- After a Samsung phone's adbd restarts as the cable goes, Wireless debugging
+  listens on a new port; a waiting window has the link made again by the
+  phone's mDNS name.
+
+Android 10 and older have no Wireless debugging: their windows wait for the
+cable, unless the phone was set up for Wi‑Fi on the Desktop tab.
+
+Measured on Windows 11 with the Redmi 9A, Wireless debugging already on and
+the Clock in a window: the link over Wi‑Fi up 0.7–0.8 s after the window first
+showed the app, on a port read off the socket table; the cable dropped by this
+computer (`adb reconnect`), the same window on the phone over Wi‑Fi, its
+picture back 453–667 ms after the connection went; back onto the cable 10.3 s
+after it returned. adbd restarted (`adb usb`): the Redmi's server went with it
+too, adb's own mDNS connection found the new port, and the app was opened
+again in the same window over Wi‑Fi 7.5 s after — its task moved back onto
+the window's display, which keeps what Android keeps across a display change,
+not everything — the old link let go (`wireless::drop_stale`), and the window
+back on the cable once it settled. On the Galaxy A13, the phone asked 0.4–1.3
+s after the window showed Calendar, and the window said so for its minute.
 
 A window on Wi‑Fi moves onto the cable once the cable has been in for 10 s. A
 Samsung phone restarts adbd about 5 s after it is plugged in (its MTP switch),
@@ -860,10 +945,25 @@ Not yet:
 
 - **A cable pulled from a Samsung phone**, the case this was made for: the
   emulator's transports neither restart adbd nor drop Wi‑Fi on their own. Its
-  steps were each shown there ("Cable or Wi‑Fi"), not the phone's timing.
-- **A window's way changing, on Windows** (and the new note and title on a
-  Mac's screen, with the screen locked through the test): compiled and
-  type-checked, not yet run.
+  steps were each shown there ("Cable or Wi‑Fi"), not the phone's timing. Nor
+  a cable really pulled at all: Windows' adb cannot `detach` a phone, so the
+  cable was dropped by this computer (`adb reconnect`), and came back.
+- **Wi‑Fi beside the cable, after "Allow"**: a phone switched on by this app,
+  asked, allowed, and then unplugged — its owner's tap, which a test may not
+  give for them. Shown: the switch on and the phone asking (Galaxy A13), and
+  everything after "Allow" on a phone that had it on already (Redmi 9A).
+- **The exit undoing it on a phone**: waiting for a try under way, and
+  switching off over Wi‑Fi when the cable went just before — unit-tested
+  (`wind_up`, `ways_to_switch_off`), not run, for want of a phone this app
+  had switched on (above). Run: the exit letting go of a link, and switching
+  off a phone that never got as far as "Allow".
+- **A phone refusing the switch**: the Redmi 9A's refusal was seen, from the
+  shell; its windows' note, and its owner switching it on after, were not run.
+- **What it takes, besides**: a phone allowed for the cable's while only, or a
+  network that keeps phone and computer apart, has not been tried.
+- **A window's way changing on a Mac's screen**, with the new note and title:
+  type-checked, not yet run there. On Windows it was run with the Redmi 9A
+  (2026-10-27): "Now over Wi‑Fi", "Wi‑Fi · Redmi…", and back.
 - **Full screen on Windows**: compiled, and its layout's tests run, but not
   yet run on a Windows computer. Nowhere yet: a window taking over from a
   full-screen one (it should go full screen too).

@@ -222,6 +222,46 @@ const KEEP_LOST_EVERY: Duration = Duration::from_millis(700);
 #[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
 const WIFI_AGAIN_EVERY: Duration = Duration::from_secs(5);
 
+/// How soon a Wi-Fi link made beside the cable is made again once it has gone
+/// — adbd restarting on the phone, its Wi-Fi dropping — and how soon a try
+/// that came to nothing is tried again.
+#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
+const WIFI_GONE_AGAIN: Duration = Duration::from_secs(5);
+#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
+const WIFI_RETRY: Duration = Duration::from_secs(30);
+
+/// How long a phone's windows ask its owner to tap Allow on it, or switch
+/// Wireless debugging on — the phone may be locked, face down — and how often
+/// the phone is looked at meanwhile, for their answer.
+#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
+const ASK_FOR: Duration = Duration::from_secs(60);
+#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
+const ASKED_EVERY: Duration = Duration::from_secs(2);
+
+/// What a window on the cable says while its phone asks whether to allow
+/// Wireless debugging on this network; where the phone would not let this
+/// computer switch it on, and its owner must; and once it is on.
+#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
+const ASK_ALLOW: &str = "Tap Allow on your phone, so this window carries on over Wi\u{2011}Fi when you unplug";
+#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
+const ASK_TURN_ON: &str = "To carry on over Wi\u{2011}Fi when you unplug, turn on Wireless debugging on your phone";
+#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
+const ALLOWED: &str = "Ready to carry on over Wi\u{2011}Fi when you unplug";
+
+/// When `phone`'s next try at a Wi-Fi link beside its cable comes, after one
+/// that came to `last` — none after `Never`. `asking`: its windows are still
+/// asking its owner to allow it, or switch it on.
+#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
+fn wifi_again_in(last: &crate::wireless::WifiReady, asking: bool) -> Option<Duration> {
+    use crate::wireless::WifiReady::*;
+    match last {
+        Never => None,
+        Yes(_) => Some(WIFI_GONE_AGAIN),
+        Asking | Off | Refused if asking => Some(ASKED_EVERY),
+        _ => Some(WIFI_RETRY),
+    }
+}
+
 /// What a window's title bar says about how it reaches its phone.
 #[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
 fn via(serial: &str) -> &'static str {
@@ -664,7 +704,9 @@ fn wake_keeper() {
 /// went is moved onto the fastest way to its phone there is now, the same
 /// window, for RECONNECT_FOR; one on Wi-Fi moves onto the cable once the
 /// cable has settled. Each move is a thread of its own, so one slow phone
-/// holds up no other window, and none is ever replaced by another.
+/// holds up no other window, and none is ever replaced by another. A phone
+/// whose windows go over the cable is made reachable over Wi-Fi as well
+/// ([`wifi_beside`]), so that pulling the cable has somewhere to move them.
 #[cfg(any(windows, target_os = "macos"))]
 fn keep(app: tauri::AppHandle) {
     // When each phone's Wi-Fi link was last asked to be made again.
@@ -692,6 +734,26 @@ fn keep(app: tauri::AppHandle) {
         }
         // A fresh look: it is also what says how long the cable has been in.
         let Ok(devices) = crate::adb::adb_list_devices(app.clone()) else { continue };
+        // Each phone whose windows show their apps over a cable that has settled.
+        let mut on_the_cable: Vec<(String, String)> = Vec::new();
+        for (w, k) in &open {
+            let serial = w.serial();
+            let settled = crate::adb::attached_for(&serial).is_some_and(|t| t >= CABLE_SETTLE);
+            if k.live && k.lost.is_none() && k.failed.is_none() && !k.busy && on_cable(&serial) && settled
+                && !on_the_cable.iter().any(|(phone, _)| *phone == k.phone)
+            {
+                on_the_cable.push((k.phone.clone(), serial));
+            }
+        }
+        for (phone, cable) in &on_the_cable {
+            wifi_beside(&app, phone, cable, &devices);
+        }
+        let mut phones: Vec<&str> = open.iter().map(|(_, k)| k.phone.as_str()).collect();
+        phones.sort_unstable();
+        phones.dedup();
+        for phone in phones {
+            crate::wireless::drop_stale(&app, phone, &devices);
+        }
         for (w, k) in open {
             if k.busy {
                 continue;
@@ -736,6 +798,151 @@ fn keep(app: tauri::AppHandle) {
                 }
             }
         }
+    }
+}
+
+/// Each phone's tries at a Wi-Fi link beside its cable ([`wifi_beside`]).
+#[derive(Default)]
+#[cfg(any(windows, target_os = "macos"))]
+struct WifiTry {
+    /// A try is running now.
+    busy: bool,
+    /// When the last one ended, and what it came to.
+    last: Option<(Instant, crate::wireless::WifiReady)>,
+    /// Since when its windows ask its owner to do something on the phone, and what.
+    asking: Option<(Instant, &'static str)>,
+}
+
+#[cfg(any(windows, target_os = "macos"))]
+fn wifi_tries() -> &'static Mutex<HashMap<String, WifiTry>> {
+    static T: OnceLock<Mutex<HashMap<String, WifiTry>>> = OnceLock::new();
+    T.get_or_init(Default::default)
+}
+
+/// `phone`, whose windows go over the cable `cable`, made reachable over Wi-Fi
+/// as well when it is not (wireless::ready_wifi): pulling the cable then moves
+/// its windows there, where with only the cable they could but wait for it.
+/// On a thread of its own, as often as [`wifi_again_in`] says. Where the phone
+/// asks its owner whether to allow it, or its owner must switch it on, its
+/// windows say so, for ASK_FOR.
+#[cfg(any(windows, target_os = "macos"))]
+fn wifi_beside(app: &tauri::AppHandle, phone: &str, cable: &str, devices: &[crate::adb::DeviceInfo]) {
+    let asked_enough = {
+        let mut tries = wifi_tries().lock().unwrap();
+        let t = tries.entry(phone.to_string()).or_default();
+        match t.asking {
+            Some((at, text)) if at.elapsed() >= ASK_FOR => {
+                t.asking = None;
+                Some(text)
+            }
+            _ => None,
+        }
+    };
+    if let Some(text) = asked_enough {
+        unsay(phone, text, None);
+    }
+    let mut tries = wifi_tries().lock().unwrap();
+    let t = tries.entry(phone.to_string()).or_default();
+    let has_wifi = devices.iter().any(|d| d.state == "device" && !on_cable(&d.serial) && phone_id(d) == phone);
+    if has_wifi || t.busy {
+        return;
+    }
+    if let Some((at, last)) = &t.last {
+        match wifi_again_in(last, t.asking.is_some()) {
+            Some(wait) if at.elapsed() >= wait => {}
+            _ => return,
+        }
+    }
+    t.busy = true;
+    drop(tries);
+    let (app, phone, cable) = (app.clone(), phone.to_string(), cable.to_string());
+    let _ = std::thread::Builder::new().name("apps-wifi".into()).spawn(move || {
+        use crate::wireless::WifiReady;
+        let got = crate::wireless::ready_wifi(&app, &cable, &phone);
+        let (ask, allowed) = {
+            let mut tries = wifi_tries().lock().unwrap();
+            let t = tries.entry(phone.clone()).or_default();
+            let last = t.last.as_ref().map(|(_, r)| r);
+            let said = match (last, &got) {
+                // Asked, and not allowed yet: nothing new.
+                (Some(WifiReady::Asking | WifiReady::Off), WifiReady::Off) => true,
+                (last, got) => last == Some(got),
+            };
+            if !said {
+                match &got {
+                    WifiReady::Yes(serial) => {
+                        log::info!("apps [{cable}] over Wi-Fi as well now, as {serial}: its windows go there if the cable is pulled")
+                    }
+                    WifiReady::Asking => log::info!("apps [{cable}] the phone asks its owner to allow Wireless debugging on this network"),
+                    WifiReady::Refused => log::info!(
+                        "apps [{cable}] the phone does not let this computer switch Wireless debugging on (on a Xiaomi phone, \
+                         Developer options → USB debugging (Security settings)): its owner can, there"
+                    ),
+                    WifiReady::Off => log::info!("apps [{cable}] Wireless debugging is off on the phone: its windows wait for the cable if it is pulled"),
+                    WifiReady::No(why) => log::info!("apps [{cable}] not over Wi-Fi as well: {why}"),
+                    WifiReady::Never => {
+                        log::info!("apps [{cable}] no Wireless debugging before Android 11: its windows wait for the cable if it is pulled")
+                    }
+                }
+            }
+            // Asked of its owner the first time it comes to that, and once a run.
+            let ask = match got {
+                WifiReady::Asking => Some(ASK_ALLOW),
+                WifiReady::Refused if !said => Some(ASK_TURN_ON),
+                _ => None,
+            };
+            if let Some(text) = ask {
+                t.asking = Some((Instant::now(), text));
+            }
+            let allowed = if matches!(got, WifiReady::Yes(_)) { t.asking.take().map(|(_, text)| text) } else { None };
+            t.last = Some((Instant::now(), got));
+            t.busy = false;
+            (ask, allowed)
+        };
+        if let Some(text) = ask {
+            note_on_cable(&phone, text);
+        }
+        if let Some(text) = allowed {
+            unsay(&phone, text, Some(ALLOWED.into()));
+        }
+    });
+}
+
+/// `text`, kept up, in each window of `phone` that goes over the cable.
+#[cfg(any(windows, target_os = "macos"))]
+fn note_on_cable(phone: &str, text: &str) {
+    let ids: Vec<u64> = kept()
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(_, k)| k.phone == phone && k.lost.is_none())
+        .map(|(id, _)| *id)
+        .collect();
+    let all: Vec<Arc<native::Window>> = {
+        let open = windows().lock().unwrap();
+        ids.iter().filter_map(|id| open.get(id).cloned()).filter(|w| on_cable(&w.serial())).collect()
+    };
+    for w in all {
+        note(&w, Some(text.to_string()), true);
+    }
+}
+
+/// `text` taken down from `phone`'s windows where it is still what they say —
+/// a window whose cable went says something else by now — and `then` put up,
+/// to fade, in its place.
+#[cfg(any(windows, target_os = "macos"))]
+fn unsay(phone: &str, text: &str, then: Option<String>) {
+    let ids: Vec<u64> = kept().lock().unwrap().iter().filter(|(_, k)| k.phone == phone).map(|(id, _)| *id).collect();
+    let ids: Vec<u64> = {
+        let said = said().lock().unwrap();
+        ids.into_iter().filter(|id| said.get(id).map(String::as_str) == Some(text)).collect()
+    };
+    let all: Vec<Arc<native::Window>> = {
+        let open = windows().lock().unwrap();
+        ids.iter().filter_map(|id| open.get(id).cloned()).collect()
+    };
+    for w in all {
+        note(&w, then.clone(), false);
     }
 }
 
@@ -1022,6 +1229,9 @@ impl link::Host for WindowHost {
                     k.failed = None;
                     k.asked = false;
                 }
+                // Over the cable, the phone is made reachable over Wi-Fi as
+                // well: the sooner, the sooner the cable can be pulled.
+                wake_keeper();
                 log::info!("apps [{serial}] {pkg}: on screen {}ms after {}", after.as_millis(), self.since);
                 let _ = app.emit("apps:live", serde_json::json!({"serial": serial, "pkg": pkg, "ms": after.as_millis() as u64}));
                 // The app's sound comes here with it, as the desktop's does —
@@ -1300,10 +1510,12 @@ pub fn apps_close(serial: Option<String>) {
 }
 
 /// This app is exiting: every window closes, and every phone's server stops —
-/// which puts every app back on its phone.
-pub fn shutdown() {
+/// which puts every app back on its phone. Wireless debugging switched on for
+/// the windows goes off again.
+pub fn shutdown(app: &tauri::AppHandle) {
     apps_close(None);
     host::stop_all();
+    crate::wireless::let_wifi_go(app);
 }
 
 /// An app asked for on the command line: `--phone-app <serial> <pkg>`, which
@@ -1602,6 +1814,23 @@ mod tests {
         let asking = [device("R5CT30ABC", "unauthorized", "R5CT30ABC")];
         assert_eq!(best_serial_by(&asking, "R5CT30ABC", |_| true), None);
         assert_eq!(best_serial_by(&both, "NOTHERE", |_| true), None);
+    }
+
+    #[test]
+    fn wifi_beside_the_cable_is_tried_again_as_its_last_try_says() {
+        use crate::wireless::WifiReady;
+        // Made, and gone since: made again soon.
+        assert_eq!(wifi_again_in(&WifiReady::Yes("192.168.2.10:42761".into()), false), Some(WIFI_GONE_AGAIN));
+        // While its windows ask the phone's owner, the phone is looked at for their answer…
+        assert_eq!(wifi_again_in(&WifiReady::Asking, true), Some(ASKED_EVERY));
+        assert_eq!(wifi_again_in(&WifiReady::Off, true), Some(ASKED_EVERY));
+        assert_eq!(wifi_again_in(&WifiReady::Refused, true), Some(ASKED_EVERY));
+        // …and after, seldom: they may still allow it or switch it on, or the phone join the Wi-Fi.
+        assert_eq!(wifi_again_in(&WifiReady::Off, false), Some(WIFI_RETRY));
+        assert_eq!(wifi_again_in(&WifiReady::Refused, false), Some(WIFI_RETRY));
+        assert_eq!(wifi_again_in(&WifiReady::No("the phone is not on Wi-Fi".into()), false), Some(WIFI_RETRY));
+        // Android 10 and older have no Wireless debugging.
+        assert_eq!(wifi_again_in(&WifiReady::Never, false), None);
     }
 
     #[test]

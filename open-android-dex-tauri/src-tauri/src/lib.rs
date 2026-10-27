@@ -172,7 +172,7 @@ pub fn run() {
                 notifications::stop();
                 // Every phone app's window closes first, each app back on its
                 // phone at once — before the seconds the desktop's undo takes.
-                apps::shutdown();
+                apps::shutdown(app);
                 scrcpy::kill_all(app);
                 // The reader owns a host-wide subscription and, on Windows, a
                 // registry change: neither may outlive the process, and the

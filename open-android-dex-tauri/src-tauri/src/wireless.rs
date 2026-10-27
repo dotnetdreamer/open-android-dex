@@ -27,10 +27,11 @@
 //!   to` prefix can be believed.
 
 use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::process::Stdio;
-use std::sync::Mutex;
+use std::sync::{Condvar, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 use tauri::Manager;
@@ -594,6 +595,416 @@ pub fn wireless_go_wireless(app: tauri::AppHandle, serial: String) -> Result<Wir
     Err(format!("could not reach the phone at {address}: {last}"))
 }
 
+// ── Wi-Fi beside the cable, for the phone's app windows ─────────────────
+
+/// What came of making a phone on the cable reachable over Wi-Fi as well
+/// ([`ready_wifi`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
+pub enum WifiReady {
+    /// Attached over Wi-Fi as well now, as this serial.
+    Yes(String),
+    /// Wireless debugging was off and has just been switched on, and the
+    /// phone asks its owner first whether to allow it on this network.
+    Asking,
+    /// Wireless debugging is off, and the phone does not let this computer
+    /// switch it on — a Xiaomi phone's shell may not write the setting unless
+    /// "USB debugging (Security settings)" is on. Its owner can, on the phone.
+    Refused,
+    /// Wireless debugging is off: its owner has not allowed it on this
+    /// network (yet), or turned it off after this app switched it on. It is
+    /// switched on once a run, never again behind their back.
+    Off,
+    /// Not now, and why: the phone is not on Wi-Fi, or did not answer there.
+    No(String),
+    /// Never: Wireless debugging came with Android 11.
+    Never,
+}
+
+/// How long the phone takes to say whether it asks its owner first, and then
+/// to listen.
+const WIFI_ON_WAIT: Duration = Duration::from_secs(6);
+
+/// A Galaxy A13's first connection over Wi-Fi took 7.6 s; later ones 0.5–1.4 s.
+const WIFI_CONNECT_TIMEOUT: Duration = Duration::from_secs(12);
+
+/// Switching Wireless debugging on or off is one `settings` call.
+const SWITCH_TIMEOUT: Duration = Duration::from_secs(4);
+
+/// How long the exit waits for tries under way ([`let_wifi_go`]): each looks
+/// every half second whether the app is exiting, but an `adb connect` is not
+/// cut short.
+const TRIES_FINISH: Duration = Duration::from_secs(4);
+
+/// What a try says once the app is exiting.
+const EXITING: &str = "Open Android DeX is closing";
+
+/// What this run did to make phones reachable over Wi-Fi beside their cables
+/// ([`ready_wifi`]), for the exit to undo ([`let_wifi_go`]).
+#[derive(Default)]
+struct Beside {
+    /// Each phone's link made: its `ro.serialno`, and the serial adb calls it
+    /// by there. For this run only, never remembered: a remembered phone is
+    /// taken over Wi-Fi at the next start, its cable in or not.
+    made: HashMap<String, String>,
+    /// The phones whose Wireless debugging this run switched on. One that had
+    /// it on already keeps it.
+    switched: HashSet<String>,
+    /// The phones that would not let this run switch it on ([`WifiReady::Refused`]).
+    refused: HashSet<String>,
+    /// Tries under way ([`Trying`]): the exit waits for them.
+    running: usize,
+    /// The app is exiting: no try starts, and none records what it did — one
+    /// under way undoes it itself.
+    exiting: bool,
+}
+
+/// The app is exiting: what a try did is not kept for the exit to undo.
+#[derive(Debug, PartialEq, Eq)]
+struct Exiting;
+
+impl Beside {
+    /// `phone` about to be switched on — said before it is done, so that an
+    /// exit meanwhile switches it off again.
+    fn switching_on(&mut self, phone: &str) -> Result<(), Exiting> {
+        if self.exiting {
+            return Err(Exiting);
+        }
+        self.switched.insert(phone.to_string());
+        Ok(())
+    }
+
+    /// `way`, a link made to `phone`, kept for the exit to let go: the link it
+    /// replaces, if one was kept.
+    fn keep_link(&mut self, phone: &str, way: &str) -> Result<Option<String>, Exiting> {
+        if self.exiting {
+            return Err(Exiting);
+        }
+        Ok(self.made.insert(phone.to_string(), way.to_string()))
+    }
+}
+
+fn beside() -> &'static (Mutex<Beside>, Condvar) {
+    static B: OnceLock<(Mutex<Beside>, Condvar)> = OnceLock::new();
+    B.get_or_init(Default::default)
+}
+
+/// A try at a Wi-Fi link beside a cable, counted while it runs: the exit waits
+/// for it. None once the app is exiting.
+struct Trying(&'static (Mutex<Beside>, Condvar));
+
+impl Trying {
+    fn start(on: &'static (Mutex<Beside>, Condvar)) -> Option<Trying> {
+        let mut b = on.0.lock().unwrap();
+        if b.exiting {
+            return None;
+        }
+        b.running += 1;
+        Some(Trying(on))
+    }
+}
+
+impl Drop for Trying {
+    fn drop(&mut self) {
+        let (b, done) = self.0;
+        b.lock().unwrap().running -= 1;
+        done.notify_all();
+    }
+}
+
+/// No try starts from here on, and those under way are waited for, up to
+/// `most`: one could switch Wireless debugging on, or make a link, just after
+/// the exit undid them. What the run did, to undo.
+fn wind_up(on: &(Mutex<Beside>, Condvar), most: Duration) -> (HashSet<String>, HashMap<String, String>) {
+    let (b, done) = on;
+    let mut b = b.lock().unwrap();
+    b.exiting = true;
+    let until = Instant::now() + most;
+    while b.running > 0 {
+        let left = until.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            log::warn!("wireless: {} tries at Wi-Fi beside the cable still under way as the app exits", b.running);
+            break;
+        }
+        b = done.wait_timeout(b, left).unwrap().0;
+    }
+    (std::mem::take(&mut b.switched), std::mem::take(&mut b.made))
+}
+
+/// Make `phone`, on the cable as `cable`, reachable over Wi-Fi as well — so
+/// that its app windows have somewhere to go when the cable is pulled
+/// (apps/mod.rs), not only the cable to wait for.
+///
+/// It is the phone's own Wireless debugging (Android 11 and later), switched on
+/// from the shell. No pairing: adbd lets in over Wi-Fi the computers it trusts
+/// on the cable, by the same key. And unlike `adb tcpip` ([`wireless_go_wireless`])
+/// it does not restart adbd, which would end every window's server.
+///
+/// The first time on a network the phone asks its owner whether to allow it
+/// there, and says no until they do; it is switched on once a run, so that
+/// question is asked once. Its port is read off the phone's own socket table
+/// ([`adbd_ports`]), else from mDNS: a Galaxy A13 does not let the shell read
+/// `service.adb.tls.port`, and a Redmi 9A does not announce itself.
+///
+/// It takes a phone that trusts this computer for good — allowed on the cable
+/// with "Always allow from this computer" — and a network that lets the two
+/// reach each other; adb's answer does not say which one failed.
+#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
+pub fn ready_wifi(app: &tauri::AppHandle, cable: &str, phone: &str) -> WifiReady {
+    let Some(_trying) = Trying::start(beside()) else {
+        return WifiReady::No(EXITING.into());
+    };
+    let on = || {
+        run_adb_quiet(app, &["-s", cable, "shell", "settings get global adb_wifi_enabled"])
+            .is_ok_and(|v| v.trim() == "1")
+    };
+    let was_on = on();
+    if !was_on {
+        {
+            let b = beside().0.lock().unwrap();
+            if b.switched.contains(phone) {
+                return WifiReady::Off;
+            }
+            if b.refused.contains(phone) {
+                return WifiReady::Refused;
+            }
+        }
+        match getprop(app, cable, "ro.build.version.sdk").parse::<u32>() {
+            Ok(sdk) if sdk < 30 => return WifiReady::Never,
+            Ok(_) => {}
+            Err(_) => return WifiReady::No("the phone did not say which Android it runs".into()),
+        }
+    }
+    let Some(ip) = device_ip(app, cable) else {
+        return WifiReady::No("the phone is not on Wi-Fi".into());
+    };
+    if !was_on {
+        if beside().0.lock().unwrap().switching_on(phone).is_err() {
+            return WifiReady::No(EXITING.into());
+        }
+        log::info!("wireless: switching on Wireless debugging on {phone}, for its app windows");
+        let switch = ["-s", cable, "shell", "settings put global adb_wifi_enabled 1"];
+        match run_adb_timeout(app, &switch, SWITCH_TIMEOUT) {
+            Ok(_) => {}
+            // Refused outright (a Redmi 9A's shell lacks WRITE_SECURE_SETTINGS):
+            // nothing landed, so there is nothing to switch off.
+            Err(e) if e.contains("SecurityException") || e.contains("Permission denial") => {
+                let mut b = beside().0.lock().unwrap();
+                b.switched.remove(phone);
+                b.refused.insert(phone.to_string());
+                return WifiReady::Refused;
+            }
+            // Still counted as switched on: it may have landed all the same,
+            // and the exit then switches it off.
+            Err(e) => return WifiReady::No(format!("Wireless debugging would not switch on: {e}")),
+        }
+    }
+    let until = Instant::now() + WIFI_ON_WAIT;
+    loop {
+        if beside().0.lock().unwrap().exiting {
+            return WifiReady::No(EXITING.into());
+        }
+        // On a network it was never allowed on, the phone puts the switch back
+        // off at once, and asks.
+        if !was_on && !on() {
+            return WifiReady::Asking;
+        }
+        for way in wifi_ways(app, cable, phone, &ip) {
+            let said = match connect(app, &way, WIFI_CONNECT_TIMEOUT) {
+                Ok(said) => said,
+                Err(e) => {
+                    log::debug!("wireless: {way} did not answer — {e}");
+                    continue;
+                }
+            };
+            // Ours to let go, unless adb had it already.
+            let ours = !said.to_lowercase().contains("already");
+            let serial = getprop(app, &way, "ro.serialno");
+            if serial == phone {
+                let kept = beside().0.lock().unwrap().keep_link(phone, &way);
+                let Ok(was) = kept else {
+                    // The exit has undone this run's links already: this one goes too.
+                    if ours {
+                        let _ = run_adb_timeout(app, &["disconnect", &way], RECONNECT_TIMEOUT);
+                    }
+                    return WifiReady::No(EXITING.into());
+                };
+                log::info!("wireless: {said}");
+                // A link made earlier to a port the phone has since left.
+                if let Some(old) = was.filter(|old| *old != way) {
+                    let _ = run_adb_timeout(app, &["disconnect", &old], RECONNECT_TIMEOUT);
+                }
+                return WifiReady::Yes(way);
+            }
+            if serial.is_empty() {
+                // Let in, and then refused everything: what a phone that
+                // trusts this computer for the cable's while only looks like.
+                log::info!("wireless: {way} took the connection but would not run anything");
+            } else {
+                log::warn!("wireless: {way} is {serial}, not {phone}");
+            }
+            if ours {
+                let _ = run_adb_timeout(app, &["disconnect", &way], RECONNECT_TIMEOUT);
+            }
+        }
+        if Instant::now() >= until {
+            return WifiReady::No(format!(
+                "Wireless debugging is on, but {phone} did not let this computer in over Wi-Fi at {ip} — \
+                 allowed on the cable only once rather than always, or the network keeps them apart"
+            ));
+        }
+        thread::sleep(Duration::from_millis(500));
+    }
+}
+
+/// Where `phone`'s Wireless debugging may be listening: the ports adbd
+/// listens on for the network, at the phone's Wi-Fi address `ip`, then where
+/// the phone announces itself over mDNS.
+#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
+fn wifi_ways(app: &tauri::AppHandle, cable: &str, phone: &str, ip: &str) -> Vec<String> {
+    let mut ways: Vec<String> = adbd_ports(app, cable).into_iter().map(|port| format!("{ip}:{port}")).collect();
+    if let Some(way) = announced(app, phone) {
+        if !ways.contains(&way) {
+            ways.push(way);
+        }
+    }
+    ways
+}
+
+/// Where `phone` announces its Wireless debugging over mDNS: as
+/// `adb-<ro.serialno>-<a suffix of its own>`, which survives a new port.
+#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
+fn announced(app: &tauri::AppHandle, phone: &str) -> Option<String> {
+    let name = format!("adb-{phone}-");
+    mdns_services(app)
+        .into_iter()
+        .find(|s| s.service.contains("adb-tls-connect") && s.instance.starts_with(&name))
+        .map(|s| s.endpoint())
+}
+
+/// The ports adbd listens on for the network, from the phone's own socket table.
+#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
+fn adbd_ports(app: &tauri::AppHandle, serial: &str) -> Vec<u16> {
+    let table = run_adb_quiet(app, &["-s", serial, "shell", "cat /proc/net/tcp6 /proc/net/tcp"]).unwrap_or_default();
+    parse_adbd_ports(&table)
+}
+
+/// The listening sockets in `/proc/net/tcp6` and `/proc/net/tcp` that are the
+/// shell's — adbd runs as it — and bound to every address, as a port for the
+/// network is: the app server's touchpad, also the shell's, listens on loopback.
+#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
+fn parse_adbd_ports(table: &str) -> Vec<u16> {
+    let mut ports = Vec::new();
+    for line in table.lines() {
+        // sl, local address, remote address, state, queues, timer, retransmits, uid…
+        let cols: Vec<&str> = line.split_whitespace().collect();
+        let (Some(local), Some(state), Some(uid)) = (cols.get(1), cols.get(3), cols.get(7)) else {
+            continue;
+        };
+        if *state != "0A" || *uid != "2000" {
+            continue;
+        }
+        let Some((address, port)) = local.split_once(':') else { continue };
+        if !address.bytes().all(|b| b == b'0') {
+            continue;
+        }
+        if let Ok(port) = u16::from_str_radix(port, 16) {
+            if !ports.contains(&port) {
+                ports.push(port);
+            }
+        }
+    }
+    ports
+}
+
+/// `phone`'s link made beside its cable, let go once adb lists it offline
+/// while the phone is reached over Wi-Fi another way: its adbd restarted, and
+/// it was found again on a new port — by adb's own mDNS connection, say. Left
+/// in adb's list, the Desktop page reads it as a phone that left the network.
+#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
+pub fn drop_stale(app: &tauri::AppHandle, phone: &str, devices: &[crate::adb::DeviceInfo]) {
+    let Some(made) = beside().0.lock().unwrap().made.get(phone).cloned() else { return };
+    if !is_stale(&made, phone, devices) {
+        return;
+    }
+    {
+        let mut b = beside().0.lock().unwrap();
+        if b.made.get(phone) != Some(&made) {
+            return;
+        }
+        b.made.remove(phone);
+    }
+    log::info!("wireless: letting {made} go: {phone} is reached over Wi-Fi another way now");
+    let app = app.clone();
+    thread::spawn(move || {
+        let _ = run_adb_timeout(&app, &["disconnect", &made], RECONNECT_TIMEOUT);
+    });
+}
+
+/// Whether `made`, the link to `phone` made beside its cable, is offline in
+/// adb's list while another way to the phone over Wi-Fi is up. With no
+/// other, it is left to [`ready_wifi`], which lets it go as it makes the next.
+#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
+fn is_stale(made: &str, phone: &str, devices: &[crate::adb::DeviceInfo]) -> bool {
+    devices.iter().any(|d| d.serial == made && d.state != "device")
+        && devices.iter().any(|d| {
+            d.serial != made && d.state == "device" && d.connection == "wifi" && d.hardware_serial.as_deref() == Some(phone)
+        })
+}
+
+/// This app is exiting: what [`ready_wifi`] did is undone — Wireless debugging
+/// off again where it switched it on, over whichever way still reaches the
+/// phone, and the Wi-Fi links it made let go. Tries under way finish first
+/// ([`wind_up`]).
+pub fn let_wifi_go(app: &tauri::AppHandle) {
+    let (switched, made) = wind_up(beside(), TRIES_FINISH);
+    if switched.is_empty() && made.is_empty() {
+        return;
+    }
+    // A fresh look, not the last poll's: the cable may have gone a moment ago.
+    let devices = crate::adb::adb_list_devices(app.clone()).unwrap_or_default();
+    let handles: Vec<_> = switched
+        .into_iter()
+        .map(|phone| {
+            let ways = ways_to_switch_off(&phone, &devices, made.get(&phone));
+            let app = app.clone();
+            thread::spawn(move || {
+                let off = |way: &str| {
+                    let switch = ["-s", way, "shell", "settings put global adb_wifi_enabled 0"];
+                    run_adb_timeout(&app, &switch, SWITCH_TIMEOUT).is_ok()
+                };
+                match ways.iter().find(|way| off(way)) {
+                    Some(way) => log::info!("wireless: Wireless debugging switched off again on {phone}, over {way}"),
+                    None => log::warn!(
+                        "wireless: Wireless debugging could not be switched off again on {phone} — no way to it \
+                         answered ({ways:?}); the phone switches it off as it leaves this network"
+                    ),
+                }
+            })
+        })
+        .collect();
+    for h in handles {
+        let _ = h.join();
+    }
+    for serial in made.values() {
+        let _ = run_adb_timeout(app, &["disconnect", serial], Duration::from_secs(2));
+    }
+}
+
+/// The ways to switch `phone`'s Wireless debugging off over, in turn: the cable
+/// first — switched off over Wi-Fi, the link goes as it is — then each way over
+/// Wi-Fi adb has, and the link this run made if adb's list did not name it.
+fn ways_to_switch_off(phone: &str, devices: &[crate::adb::DeviceInfo], made: Option<&String>) -> Vec<String> {
+    let mut found: Vec<&crate::adb::DeviceInfo> =
+        devices.iter().filter(|d| d.state == "device" && d.hardware_serial.as_deref() == Some(phone)).collect();
+    found.sort_by_key(|d| d.connection != "usb");
+    let mut ways: Vec<String> = found.into_iter().map(|d| d.serial.clone()).collect();
+    if let Some(made) = made.filter(|m| !ways.contains(m)) {
+        ways.push(made.clone());
+    }
+    ways
+}
+
 // ── Pairing ─────────────────────────────────────────────────────────────
 
 /// `adb pair`, told apart from its failures properly.
@@ -1109,18 +1520,82 @@ pub fn wireless_reconnect_known(
 }
 
 /// `phone`'s Wi-Fi link made again (its `ro.serialno`), if this computer
-/// remembers how to reach it — what an app window waiting for its phone asks
-/// for: after a Samsung phone's adbd restarted as the cable went, nothing
-/// else brings its wireless transport back, and a pairing's port may have
-/// moved. The serials it is attached as now.
+/// remembers how to reach it, or made it reachable beside its cable this run
+/// ([`ready_wifi`]) — what an app window waiting for its phone asks for: after
+/// a Samsung phone's adbd restarted as the cable went, nothing else brings its
+/// wireless transport back, and its port may have moved. The serials it is
+/// attached as now.
 pub fn reconnect_phone(app: &tauri::AppHandle, phone: &str) -> Vec<String> {
-    reconnect_where(app, |d| d.hardware_serial.as_deref() == Some(phone))
+    let back = reconnect_where(app, |d| d.hardware_serial.as_deref() == Some(phone));
+    if !back.is_empty() {
+        return back;
+    }
+    // Made reachable beside its cable this run (ready_wifi): where it
+    // announces itself now, else where it was — a Samsung phone's adbd,
+    // restarting as the cable goes, listens on a new port after. Or never
+    // reached that way, and announcing Wireless debugging now: allowed on the
+    // phone only after its cable went.
+    let Some(_trying) = Trying::start(beside()) else {
+        return back;
+    };
+    let was = beside().0.lock().unwrap().made.get(phone).cloned();
+    let Some(address) = was.or_else(|| announced(app, phone)) else {
+        return back;
+    };
+    let device = KnownDevice {
+        label: phone.to_string(),
+        address,
+        guid: Some(format!("adb-{phone}-")),
+        hardware_serial: Some(phone.to_string()),
+    };
+    let back = reconnect_these(app, vec![device], moved_beside);
+    // Connected by this app, so let go as it exits; one adb made itself is
+    // named after its mDNS service.
+    if let Some(made) = back.iter().find(|s| s.contains(':')) {
+        let mut b = beside().0.lock().unwrap();
+        if b.exiting {
+            drop(b);
+            // The exit has undone this run's links already: this one goes too.
+            let _ = run_adb_timeout(app, &["disconnect", made], RECONNECT_TIMEOUT);
+        } else {
+            b.made.entry(phone.to_string()).or_insert_with(|| made.clone());
+        }
+    }
+    back
 }
 
 /// The remembered phones `keep` says, connected again: [`wireless_reconnect_known`].
 fn reconnect_where(app: &tauri::AppHandle, keep: impl Fn(&KnownDevice) -> bool) -> Vec<String> {
+    let known: Vec<KnownDevice> = load(app).into_iter().filter(|d| keep(d)).collect();
+    reconnect_these(app, known, moved_saved)
+}
+
+/// A remembered phone answered somewhere other than its saved address: the
+/// saved list follows it.
+fn moved_saved(app: &tauri::AppHandle, saved: &str, now: &str) {
+    let mut list = load(app);
+    if let Some(entry) = list.iter_mut().find(|d| d.address == saved) {
+        entry.address = now.to_string();
+    }
+    save(app, &list);
+}
+
+/// A phone made reachable beside its cable answered somewhere new: this run
+/// follows it, and its old link goes — left offline in adb's list, the Desktop
+/// page would take it for a phone that left the network.
+fn moved_beside(app: &tauri::AppHandle, saved: &str, now: &str) {
+    for address in beside().0.lock().unwrap().made.values_mut() {
+        if address == saved {
+            *address = now.to_string();
+        }
+    }
+    let _ = run_adb_timeout(app, &["disconnect", saved], RECONNECT_TIMEOUT);
+}
+
+/// `known` connected again, at once: the serials they are attached as now.
+/// `moved` is told of one that answered at another address than it had.
+fn reconnect_these(app: &tauri::AppHandle, known: Vec<KnownDevice>, moved: fn(&tauri::AppHandle, &str, &str)) -> Vec<String> {
     let app = app.clone();
-    let known: Vec<KnownDevice> = load(&app).into_iter().filter(|d| keep(d)).collect();
     if known.is_empty() {
         return Vec::new();
     }
@@ -1157,11 +1632,7 @@ fn reconnect_where(app: &tauri::AppHandle, keep: impl Fn(&KnownDevice) -> bool) 
                     log::info!("wireless: remembered phone is back — {msg}");
                     // The address it answered on may not be the one on file.
                     if address != saved {
-                        let mut list = load(&app);
-                        if let Some(entry) = list.iter_mut().find(|d| d.address == saved) {
-                            entry.address = address.clone();
-                        }
-                        save(&app, &list);
+                        moved(&app, &saved, &address);
                     }
                     Some(address)
                 }
@@ -1242,6 +1713,115 @@ mod tests {
                      inet 192.168.2.28/24 brd 192.168.2.255 scope global dynamic wlan0\n       \
                      valid_lft 81964sec preferred_lft 81964sec\n";
         assert_eq!(parse_inet_addr(addrs).as_deref(), Some("192.168.2.28"));
+    }
+
+    /// The listener on 0xA709 (42761) is verbatim from a Galaxy A13 (Android
+    /// 12) with Wireless debugging on; around it, what else a phone's table
+    /// holds: a connection to it, the app server's touchpad on loopback, `adb
+    /// tcpip`'s 5555, root's and an app's own listeners.
+    #[test]
+    fn reads_adbds_ports_off_the_socket_table() {
+        let table = "  sl  local_address                         remote_address                        st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n\
+                     0: 00000000000000000000000000000000:A709 00000000000000000000000000000000:0000 0A 00000000:00000000 00:00000000 00000000  2000        0 45251593 1 0000000000000000 100 0 0 10 0\n\
+                     1: 0000000000000000FFFF00000A02A8C0:A709 0000000000000000FFFF00002202A8C0:D2C4 01 00000000:00000000 02:00000A8C 00000000  2000        0 45251601 2 0000000000000000 20 4 30 10 -1\n\
+                     sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n\
+                     0: 0100007F:9715 00000000:0000 0A 00000000:00000000 00:00000000 00000000  2000        0 45250011 1 0000000000000000 100 0 0 10 0\n\
+                     1: 00000000:15B3 00000000:0000 0A 00000000:00000000 00:00000000 00000000  2000        0 45250099 1 0000000000000000 100 0 0 10 0\n\
+                     2: 00000000:1F90 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 30311 1 0000000000000000 100 0 0 10 0\n\
+                     3: 00000000:22B8 00000000:0000 0A 00000000:00000000 00:00000000 00000000 10234        0 30411 1 0000000000000000 100 0 0 10 0\n";
+        assert_eq!(parse_adbd_ports(table), vec![42761, 5555]);
+        assert!(parse_adbd_ports("").is_empty());
+    }
+
+    fn device(serial: &str, state: &str, hardware: Option<&str>) -> crate::adb::DeviceInfo {
+        crate::adb::DeviceInfo {
+            serial: serial.into(),
+            state: state.into(),
+            model: "M2006C3LG".into(),
+            product: String::new(),
+            connection: if serial.contains(':') || serial.contains("adb-tls-connect") { "wifi" } else { "usb" }.into(),
+            brand: None,
+            android_version: None,
+            hardware_serial: hardware.map(Into::into),
+            name: None,
+        }
+    }
+
+    #[test]
+    fn the_exit_waits_for_tries_under_way_and_takes_what_they_did() {
+        let on: &'static (Mutex<Beside>, Condvar) = Box::leak(Box::default());
+        // A try that switched a phone on and made a link before the exit…
+        let trying = Trying::start(on).unwrap();
+        on.0.lock().unwrap().switching_on("R58T51N3G2X").unwrap();
+        on.0.lock().unwrap().keep_link("R58T51N3G2X", "192.168.2.10:42761").unwrap();
+        let started = Instant::now();
+        let finishing = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(150));
+            // …and, the app exiting meanwhile, may keep nothing more: it lets
+            // its link go itself.
+            assert_eq!(on.0.lock().unwrap().keep_link("R58T51N3G2X", "192.168.2.10:37011"), Err(Exiting));
+            drop(trying);
+        });
+        let (switched, made) = wind_up(on, Duration::from_secs(5));
+        assert!(started.elapsed() >= Duration::from_millis(150), "the exit waited for the try");
+        finishing.join().unwrap();
+        assert!(switched.contains("R58T51N3G2X"));
+        assert_eq!(made.get("R58T51N3G2X").map(String::as_str), Some("192.168.2.10:42761"));
+        // None starts after, and none records.
+        assert!(Trying::start(on).is_none());
+        assert_eq!(on.0.lock().unwrap().switching_on("YPKRA6VS754L6XTO"), Err(Exiting));
+    }
+
+    #[test]
+    fn the_exit_waits_for_a_try_only_so_long() {
+        let on: &'static (Mutex<Beside>, Condvar) = Box::leak(Box::default());
+        // In an `adb connect` that is not cut short.
+        let _trying = Trying::start(on).unwrap();
+        let started = Instant::now();
+        wind_up(on, Duration::from_millis(50));
+        let waited = started.elapsed();
+        assert!(waited >= Duration::from_millis(50) && waited < Duration::from_secs(2), "{waited:?}");
+    }
+
+    /// The cable, then Wi-Fi, then the link this run made — and from a list
+    /// made at the exit: a cable pulled a moment before is not tried.
+    #[test]
+    fn wireless_debugging_is_switched_off_over_any_way_left() {
+        let phone = "YPKRA6VS754L6XTO";
+        let made = "192.168.2.24:34719".to_string();
+        let cable = device(phone, "device", Some(phone));
+        let adbs_own = device("adb-YPKRA6VS754L6XTO-g2Hl70._adb-tls-connect._tcp", "device", Some(phone));
+        let another = device("R58T51N3G2X", "device", Some("R58T51N3G2X"));
+        let offline = device("192.168.2.24:39551", "offline", None);
+        let list = [adbs_own.clone(), another.clone(), offline.clone(), cable];
+        assert_eq!(
+            ways_to_switch_off(phone, &list, Some(&made)),
+            vec![phone.to_string(), adbs_own.serial.clone(), made.clone()]
+        );
+        // The cable just pulled: Wi-Fi only.
+        assert_eq!(
+            ways_to_switch_off(phone, &[another, offline, adbs_own.clone()], Some(&made)),
+            vec![adbs_own.serial.clone(), made.clone()]
+        );
+        // The link this run made, already in the list, is not tried twice.
+        let listed = device(&made, "device", Some(phone));
+        assert_eq!(ways_to_switch_off(phone, &[listed], Some(&made)), vec![made]);
+    }
+
+    /// As adb listed a Redmi 9A after its adbd restarted (2026-10-27): the
+    /// link made beside the cable offline, adb's own mDNS one to the new port up.
+    #[test]
+    fn a_link_beside_the_cable_goes_stale_when_another_takes_over() {
+        let (made, phone) = ("192.168.2.24:39551", "YPKRA6VS754L6XTO");
+        let cable = device(phone, "device", Some(phone));
+        let offline = device(made, "offline", None);
+        let adbs_own = device("adb-YPKRA6VS754L6XTO-g2Hl70._adb-tls-connect._tcp", "device", Some(phone));
+        assert!(is_stale(made, phone, &[cable.clone(), offline.clone(), adbs_own.clone()]));
+        // No other way over Wi-Fi — the cable is not one: ready_wifi's to replace.
+        assert!(!is_stale(made, phone, &[cable.clone(), offline]));
+        // Up, or gone from the list already: nothing to let go.
+        assert!(!is_stale(made, phone, &[cable.clone(), device(made, "device", Some(phone)), adbs_own.clone()]));
+        assert!(!is_stale(made, phone, &[cable, adbs_own]));
     }
 
     #[test]

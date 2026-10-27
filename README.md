@@ -170,10 +170,15 @@ half a second.
   notification shade too while a window is open
 - **Close the window and the app goes back to your phone,** right where you
   left it. Whatever was on your phone's screen stays there
-- **Unplug and carry on.** If your phone is on Wi‑Fi here too, pulling the
-  cable doesn't close anything: each window keeps going over Wi‑Fi, and moves
-  back to the cable when you plug it in again. The title bar says which one
-  it's using. With no way back at all, the window waits half a minute for
+- **Unplug and carry on.** If your phone is on the same Wi‑Fi as your
+  computer (Android 11 and newer), pulling the cable doesn't close anything:
+  each window keeps going over Wi‑Fi, and moves back to the cable when you plug
+  it in again. The title bar says which one it's using. The first time on a
+  network, your phone asks whether to allow wireless debugging there: tap
+  Allow, and tick “Always allow on this network” so it doesn't ask again. On a
+  Xiaomi phone, turn Wireless debugging on yourself, in Developer options. It
+  also needs “Always allow from this computer” ticked when you first plugged
+  the phone in. With no way back at all, the window waits half a minute for
   your phone before giving the app back to it
 - **It is light.** Only the app you are looking at gets sent, and an app that is
   sitting still costs next to nothing. Your phone does not have to run a
