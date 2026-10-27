@@ -182,6 +182,16 @@ async function toastWithin(ms) {
   return false;
 }
 
+/** Whether, within `ms`, the activity on top of the phone is no longer one of `pkg`'s. */
+async function frontIsNot(pkg, ms) {
+  const until = Date.now() + ms;
+  while (Date.now() < until) {
+    if (!sh("dumpsys activity activities | grep topResumedActivity=").includes(pkg)) return true;
+    await sleep(150);
+  }
+  return false;
+}
+
 /** The pad's window on the phone's screen, as the window manager has it: its frame, or null. */
 function padFrame() {
   const dump = sh("dumpsys window windows");
@@ -205,6 +215,10 @@ async function main() {
   // The pad's grant is checked from a launcher not let draw over other apps; what it had is put back at the end.
   const overlayBefore = overlay();
   sh(`appops set ${LAUNCHER} SYSTEM_ALERT_WINDOW default`);
+  // And from one App Standby has as idle, as it has a launcher never opened on the phone: off
+  // the charger, an idle app's network is cut, loopback to the server included. The server
+  // leaves it active, as a desktop's start does, and so does the test.
+  sh(`am set-standby-bucket ${LAUNCHER} rare`);
   spawnSync(ADB, adbArgs("push", DEX, PHONE_DEX));
   sh("input keyevent KEYCODE_WAKEUP");
   sh("wm dismiss-keyguard");
@@ -221,6 +235,11 @@ async function main() {
   const offer = await control.next((m) => m.t === "padOn");
   check("the pad is offered", offer?.ok === true && offer.open === false, JSON.stringify(offer));
   check("…the launcher let draw it over other apps", overlayAllowed(), overlay());
+  const bucket = Number(sh(`am get-standby-bucket ${LAUNCHER}`).trim());
+  // 10 is active; 5, exempt (the launcher on the battery allow-list): either is not idle. On
+  // Android 12 the server's calls into the launcher count as a use of it and make it active
+  // too, so there this passes either way; Android 15 does not count them.
+  check("…and not left idle, which off the charger would cut it off from the server", bucket > 0 && bucket <= 10, `standby bucket ${bucket}`);
   check("…on a port only the launcher gets through: anyone else is refused", await (async () => {
     const port = Number((server.lines.join("\n").match(/pad: listening on 127\.0\.0\.1:(\d+)/) ?? [])[1]);
     if (!port) return false;
@@ -343,16 +362,21 @@ async function main() {
   const away = await control.next(pad("closed"), 4000);
   check("an app put in front on the phone's screen puts the pad away", !!away && (await padGone()));
   sh("input keyevent KEYCODE_HOME");
+  // Home acts a moment after `input` returns, and its `homekey` puts away any pad up by then:
+  // on the Galaxy A13 one run in four had the pad up again 85 ms before it, and nothing to
+  // tap. Home is in front only once the key has been heard.
+  const home = await frontIsNot("com.android.settings", 5000);
 
   // Up again, and ✕.
   control.json({ t: "padOn", open: true });
   await control.next((m) => m.t === "padOn");
-  await control.next(pad("open"), 8000);
+  const reopened = await control.next(pad("open"), 8000);
   await sleep(600);
   const again = padFrame();
   if (again) sh(`input tap ${again.right - dp(12) - dp(24)} ${again.top + dp(4) + dp(26)}`);
   const closed = await control.next(pad("closed"), 3000);
-  check("the pad's ✕ closes it, and the computer hears", !!again && !!closed && (await padGone()));
+  check("the pad's ✕ closes it, and the computer hears", !!again && !!closed && (await padGone()),
+    again && closed ? "" : `home ${home}, opened ${!!reopened}, ${again ? "no closed after the tap" : "no pad to tap"}`);
 
   // ── withdrawn ──
   control.json({ t: "padOn", open: true });

@@ -103,8 +103,11 @@ settings on the desktop opens the pad with no activity at all.
 phone's stack of screens, so Home, a call being answered or an app opened from
 the shade would come up *underneath* it. The pad asks the daemon twice a second
 what is in front of the phone's display (`TOP 0`, read-only like `LIST`, and
-answering on Android 11 too) and closes itself the moment that changes; our own
-tasks are not counted, so the trampoline passing through does not close it. Home
+answering on Android 11 too) and closes itself once that has changed; our own
+tasks are not counted, so the trampoline passing through does not close it. A
+task new in front is looked at again 300 ms later and must still be there: the
+app of a window closed on the computer lands in front of the phone's screen for
+a moment on its way behind (§10), and caught there it put the pad away. Home
 and Recents on a phone already at its home screen change nothing in front, so
 they are also caught from `ACTION_CLOSE_SYSTEM_DIALOGS` (reasons `homekey` and
 `recentapps` only — the shade sends others, and opens over the pad on purpose).
@@ -344,7 +347,11 @@ phone never clicks anything else on the computer.
   wheel go in as a real mouse's (`SendInput`) — only while the pointer is over
   one of the phone's windows, so its title bar, its buttons, its capture and
   its hover all work as they do for the mouse. A drag that began in one of
-  them is let go wherever it ends.
+  them is let go wherever it ends. Double-tap and slide on a title bar would
+  be a double-click to Windows — the pad presses where its tap just clicked —
+  and maximise the window it was to move, so that press waits until the
+  pointer is out of a double-click's reach, a few pixels on, and goes in
+  there; let go before, it was the double-click.
 - **On a Mac** the pointer is warped (`CGWarpMouseCursorPosition`), which takes
   no permission and makes no event, and what the pad does is handed to the
   phone's window whose picture is the frontmost thing under the pointer, the
@@ -372,7 +379,12 @@ what is in front of the phone's screen (§2) itself.
 **What it changes on the phone.** The pad is §2's overlay, so the server lets
 the launcher draw over other apps (the `SYSTEM_ALERT_WINDOW` app-op) while
 the computer offers the pad, and puts that back as it stops, unless a desktop
-is up and needs it too. Notifications are not given: revoking that runtime
+is up and needs it too. It also puts the launcher in App Standby's `active`
+bucket, as a desktop's start does: a launcher no one opens on the phone is idle
+to Android, and off the charger an idle app has no network, loopback to the
+server included — on an Android 15 emulator on battery the pad was up, its
+connection never made, and it said only "Waiting for the computer…". The bucket is the
+system's to change again, so it is not put back. Notifications are not given: revoking that runtime
 permission ends the launcher's processes, and the phone's Linux with them. So
 the offer is in the shade only where the launcher may already post one, and
 never over a desktop's own; ☰ always has it. A phone without this build's
@@ -499,6 +511,52 @@ where Mac notes went before, it had shown "Messages – Your phone hi…" — go
 is back on your phone's screen" with the pad on the phone's screen again and
 moving the pointer.
 
+**On Windows** (Windows 11, one screen at 96 DPI, 2026-10-26), the app run with
+`npm run tauri dev`: the pad offered as a window showed; ☰ → "Use phone as
+touchpad" installing this build's launcher where the phone had an older one (the
+Galaxy A13) or none (the Redmi 9A, an Android 15 emulator), and saying so in the
+window; the last window closed withdrawing it, the port closed and the app-op
+back to `default`; on the Android 15 emulator, Settings in a window making every
+window say the pad is hidden, and its closing that it is back. From that
+emulator's pad, the real pointer here, recorded by a low-level mouse hook: a
+160 dp slide 221–234 px; a tap a left click, a finger held a right click; two
+fingers 3.8 notches of wheel, a list in the window scrolling the natural way;
+three fingers bringing the next and the previous window in front; ◁ Back;
+hold-then-slide dragging a window by its title bar; and nothing pressed or
+scrolled with the pointer off the phone's windows. `node test/pad-test.mjs` on
+the Galaxy A13: 23 of 23 in three runs of four, and the Redmi 9A the 13 checks
+that need no touch (MIUI refuses the shell's injected touches).
+
+That run found what §2 and §10 now handle: the launcher idle to App Standby,
+its connection cut on battery; closing the Settings window putting the pad away
+instead of bringing it back, once in eight, the app passing through the phone's
+front; double-tap and slide on a title bar maximising the window; and adb's own
+error, with this computer's path to the APK and the phone's stack trace, as the
+window's note when the launcher would not install (a full emulator). The A13's
+one failure was the test's: Home, pressed to end the step before, acted only
+after the test had put the pad up again, and its `homekey` put the pad away (the
+launcher's log: up at 19:51:38.370, "the phone's homekey — putting the pad away"
+at .455). The test now waits for Home to be in front.
+
+The fixes, on the same Windows PC and the Galaxy A13, 2026-10-27: this build's
+launcher put on by a desktop launch, then Disconnect. A double-tap and slide on
+the pad over a window's title bar, the real pointer recorded as before: the tap
+a click at 946,78, the second press held until the pointer was 23 px on and
+pressed there, the window moved 114 px and not maximised; a double-tap there
+still maximised it. Twenty windows of the Clock closed with the pad up, each
+close passing the Clock through the front of the phone's screen for 24–56 ms
+(`wm_task_moved` in the events log): the pad stayed every time — where the
+launcher before it, that morning, had put itself away as a Calendar window
+closed ("the phone brought com.samsung.android.calendar to the front"). With
+the launcher in bucket 40, on battery (`dumpsys battery unplug`) and its
+notification listener off, so that nothing else held it up, App Standby cut it
+off (`10863-standby-deny`). On Android 12 that does not last: the app server's
+first call into the launcher counted as a use of it (`reason=u-si`, bucket 10)
+and lifted the cut before any pad was offered — the Android 15 emulator never
+counted the pad's own window as one. The offer then set the bucket itself
+(`reason=f`, the shell's hand), and the pad connected on battery. `node
+test/pad-test.mjs` on the A13: 24 of 24, three runs of three.
+
 Not yet:
 
 1. **A trusted display** (Android 13+, the S25 Ultra), where the arrow is an
@@ -513,10 +571,14 @@ Not yet:
    started on the phone were tried.
 6. **Latency** beyond "it follows the finger": the arrow moves in the daemon in
    the same step as the hover it shows, and reaches the computer in the video.
-7. **The computer's windows on Windows** (§10): type-checked
-   (`cargo check --target x86_64-pc-windows-msvc`), never run. The next and
-   previous window gestures bring a window forward with `SetForegroundWindow`,
-   which Windows may refuse an app that is not in front.
-8. **The computer's windows on a real phone**: the emulator only so far.
+7. **The computer's windows on Windows** (§10): one screen at 96 DPI only — not
+   another scale, nor a pointer clamped between monitors. The next and previous
+   window gestures bring a window forward with `SetForegroundWindow`, which
+   Windows may refuse an app that is not in front: it did not, but no one was
+   using another app at the time. The window's note for a launcher that would
+   not install is unit-tested only.
+8. **The computer's windows on a real phone**: the phone's half on the Galaxy
+   A13, and without touches on the Redmi 9A; the computer's pointer has been
+   moved from an emulator's pad only.
 9. **Below Android 15** nothing tells the pad it is kept off the screen (§2):
    it goes without a word.

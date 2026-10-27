@@ -1912,9 +1912,26 @@ pub(crate) fn ensure_launcher(app: &tauri::AppHandle, serial: &str) -> Result<()
         if asked.load(Ordering::SeqCst) {
             "Your phone is asking about installing Open Android DeX. Answer it on the phone, then try again.".into()
         } else {
-            e
+            log::warn!("{LAUNCHER_PACKAGE} did not install for the phone's touchpad: {e}");
+            not_installed(&e)
         }
     })
+}
+
+/// Why the launcher did not install, as the one line a window's note has.
+/// What adb said is the log's: this computer's path to the APK is in it, and
+/// a phone's stack trace, and the desktop's own words for it run to a paragraph.
+fn not_installed(err: &str) -> String {
+    let why = if is_install_restricted(err) {
+        "your phone doesn't allow installs from a computer (on Xiaomi: Developer options → Install via USB)"
+    } else if err.contains("INSUFFICIENT_STORAGE") || err.contains("not enough space") {
+        "your phone is out of space"
+    } else if is_signature_conflict(err) {
+        "uninstall Open Android DeX on your phone, then try again"
+    } else {
+        return "The touchpad couldn't be set up on your phone".into();
+    };
+    format!("The touchpad couldn't be set up: {why}")
 }
 
 /// What the phone has of the launcher: whether its installed APK is this very
@@ -3095,6 +3112,34 @@ unrelated_key=7
             "error: no devices/emulators found",
         ] {
             assert!(!is_signature_conflict(other), "must not uninstall for: {other}");
+        }
+    }
+
+    /// A window's note has one line, for a person: what adb said — the path
+    /// to the APK on this computer, the phone's stack trace — stays in the log.
+    #[test]
+    fn a_launcher_not_installed_for_the_pad_is_one_line_and_no_path() {
+        // As an Android 16 emulator with a full /data answered, 2026-10-26.
+        let full = "adb.exe: failed to install C:\\Users\\someone\\open-android-dex-tauri\\src-tauri\\target\\debug\\\
+                    resources\\bin\\openandroiddex-launcher.apk: \nException occurred while executing 'install':\n\
+                    android.os.ParcelableException: java.io.IOException: Requested internal only, but not enough space\n\
+                    \tat android.util.ExceptionUtils.wrap(ExceptionUtils.java:34)";
+        let other =
+            "adb: failed to install C:\\x\\openandroiddex-launcher.apk: Failure [INSTALL_FAILED_INTERNAL_ERROR]";
+        let said = [
+            not_installed(full),
+            not_installed("Failure [INSTALL_FAILED_INSUFFICIENT_STORAGE]"),
+            not_installed(&install_restricted_help(REAL_RESTRICTED)),
+            not_installed("Failure [INSTALL_FAILED_UPDATE_INCOMPATIBLE: Package signatures do not match]"),
+            not_installed(other),
+        ];
+        assert_eq!(said[0], "The touchpad couldn't be set up: your phone is out of space");
+        assert_eq!(said[1], said[0]);
+        assert!(said[2].contains("doesn't allow installs from a computer"), "{}", said[2]);
+        assert!(said[3].contains("uninstall Open Android DeX"), "{}", said[3]);
+        assert_eq!(said[4], "The touchpad couldn't be set up on your phone");
+        for s in &said {
+            assert!(!s.contains('\n') && !s.contains(".apk") && !s.contains("C:\\"), "{s}");
         }
     }
 

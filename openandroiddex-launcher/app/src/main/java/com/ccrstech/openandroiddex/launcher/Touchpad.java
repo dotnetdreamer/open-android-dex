@@ -74,7 +74,8 @@ import java.util.function.Consumer;
  * <p><b>What that costs, and what is done about it.</b> An overlay is not in the phone's
  * stack of screens, so Home, a call being answered or an app opened from the shade would
  * come up underneath it. The pad watches what is in front of the phone's display (the
- * daemon's TOP) and gets out of the way as soon as that changes, and goes on the phone's
+ * daemon's TOP) and gets out of the way once that has changed — seen twice, so an app only
+ * passing through the front is not taken for one put there — and goes on the phone's
  * Home and Recents keys as well, which change nothing in front when the phone was showing
  * its home screen already. The phone's own Back goes to the app underneath, which is
  * still the phone's foreground app; ✕ is the pad's. And Android keeps every app's overlay
@@ -92,6 +93,12 @@ final class Touchpad implements TouchpadGestures.Listener {
     private static final long STATUS_MS = 1000L;
     /** How often the front of the phone's display is looked at, while the screen is on. */
     private static final long WATCH_MS = 500L;
+    /**
+     * A task new in front of the phone's display is looked at once more, this soon, before
+     * the pad goes: an app a window of the computer's hands back to the phone lands in front
+     * for a moment on its way behind what the phone showed.
+     */
+    private static final long FRONT_AGAIN_MS = 300L;
     /**
      * The keyboard is handed back to the desktop as the pad opens, and once more this
      * long after: the notification's trampoline is still finishing when the pad opens,
@@ -208,6 +215,8 @@ final class Touchpad implements TouchpadGestures.Listener {
     private boolean closed;
     /** The task in front of the phone's display when the pad came up; -2 until seen. */
     private int front = -2;
+    /** A task seen in front once, not yet twice; -2 while none. */
+    private int passing = -2;
     /**
      * Whether Android has the pad's window on the phone's screen, as its listener last
      * said; null until it says. Android 15 and later: see {@link #watchShown}.
@@ -246,15 +255,13 @@ final class Touchpad implements TouchpadGestures.Listener {
             if (closed) return;
             checkShown();
             PowerManager power = app.getSystemService(PowerManager.class);
-            if (power == null || power.isInteractive()) {
-                actions.post(() -> {
-                    // For the computer's windows there is no window daemon: its server says.
-                    String[] top = host != null ? host.top() : actions.top(Display.DEFAULT_DISPLAY);
-                    if (top != null) main.post(() -> onFront(top));
-                });
-            }
+            if (power == null || power.isInteractive()) lookAtFront();
             main.postDelayed(this, WATCH_MS);
         }
+    };
+
+    private final Runnable lookAgain = () -> {
+        if (!closed) lookAtFront();
     };
 
     private final DisplayManager.DisplayListener displays = new DisplayManager.DisplayListener() {
@@ -420,10 +427,23 @@ final class Touchpad implements TouchpadGestures.Listener {
         DexLog.step("touchpad", "closed");
     }
 
+    /** What is in front of the phone's display, asked off the main thread, to {@link #onFront}. */
+    private void lookAtFront() {
+        actions.post(() -> {
+            // For the computer's windows there is no window daemon: its server says.
+            String[] top = host != null ? host.top() : actions.top(Display.DEFAULT_DISPLAY);
+            if (top != null) main.post(() -> onFront(top));
+        });
+    }
+
     /**
      * Something new in front of the phone's display — Home, a call answered, an app opened
      * from the shade — would be underneath the pad, so the pad goes. Our own tasks are not
-     * counted: the notification's trampoline passes through on its way to opening this.
+     * counted: the notification's trampoline passes through on its way to opening this. Nor
+     * is one seen there only once: the app of a window closed on the computer passes through
+     * the front on its way back behind (the app server's AppWindow.handBack), and closing the
+     * computer's Settings window put the pad away, one time in eight on an Android 15
+     * emulator — the very moment the pad was to come back (§10 of doc/phone-touchpad.md).
      */
     private void onFront(String[] top) {
         if (closed || app.getPackageName().equals(top[1])) return;
@@ -437,7 +457,15 @@ final class Touchpad implements TouchpadGestures.Listener {
             front = task;
             return;
         }
-        if (task == front) return;
+        if (task == front) {
+            passing = -2;
+            return;
+        }
+        if (task != passing) {
+            passing = task;
+            main.postDelayed(lookAgain, FRONT_AGAIN_MS);
+            return;
+        }
         DexLog.step("touchpad", "the phone brought " + top[1] + " to the front — putting the pad away");
         close();
     }

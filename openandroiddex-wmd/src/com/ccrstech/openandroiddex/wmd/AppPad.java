@@ -34,11 +34,17 @@ import java.security.SecureRandom;
  * <p><b>What it changes on the phone.</b> The pad is an overlay, so the
  * launcher must be allowed to draw over other apps: an app-op, given while the
  * computer has asked for the pad and taken back when it stops asking, unless it
- * was already the launcher's (a desktop session gives it too). Notifications are
- * not given: revoking that runtime permission ends the launcher's processes, the
- * phone's Linux with them. Where the launcher may already post one, the pad is
- * offered in the phone's shade; it is always one click away in each window's
- * menu on the computer.
+ * was already the launcher's (a desktop session gives it too). And App
+ * Standby's least restricted bucket, as a desktop session's start gives it: a
+ * launcher no one opens on the phone — one that only draws the pad for a
+ * computer never is — is an idle app, and while the phone is not charging an
+ * idle app has no network at all, loopback to here included (an Android 15
+ * emulator on battery, the launcher in bucket 50: the pad up, and nothing it
+ * did reaching the computer). The system's own to change again, so nothing to
+ * take back. Notifications are not given: revoking that runtime permission
+ * ends the launcher's processes, the phone's Linux with them. Where the
+ * launcher may already post one, the pad is offered in the phone's shade; it
+ * is always one click away in each window's menu on the computer.
  *
  * <p>The line protocol, launcher to here, one JSON object a line: {@code pad}
  * (the token, first), {@code move} (dx, dy: the computer's points), {@code
@@ -108,6 +114,11 @@ final class AppPad {
             } else {
                 AppServer.log("pad: the launcher was not let draw over other apps (" + out.trim() + ")");
             }
+        }
+        // Not idle, or its connection here is cut off the charger: see the class comment.
+        String standby = AppTasks.exec(5, "cmd", "activity", "set-standby-bucket", WmDaemon.LAUNCHER, "active");
+        if (!standby.trim().isEmpty()) {
+            AppServer.log("pad: the launcher's standby bucket was not set (" + standby.trim() + ")");
         }
         JSONObject arg = new JSONObject().put("port", listening.getLocalPort()).put("token", token);
         JSONObject said;

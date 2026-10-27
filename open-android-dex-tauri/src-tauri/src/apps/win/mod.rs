@@ -63,11 +63,11 @@ use windows::Win32::UI::HiDpi::{
 };
 use windows::Win32::UI::Input::Ime::{ImmGetCompositionStringW, ImmGetContext, ImmReleaseContext, GCS_RESULTSTR};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetKeyState, MapVirtualKeyW, ReleaseCapture, SendInput, SetCapture, TrackMouseEvent, INPUT, INPUT_0, INPUT_MOUSE,
-    MAPVK_VK_TO_CHAR, MOUSEEVENTF_HWHEEL, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN,
-    MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_WHEEL, MOUSEINPUT, MOUSE_EVENT_FLAGS,
-    TME_LEAVE, TME_NONCLIENT, TRACKMOUSEEVENT, VK_CAPITAL, VK_CONTROL, VK_ESCAPE, VK_F11, VK_F4, VK_LWIN, VK_MENU,
-    VK_NUMLOCK, VK_RMENU, VK_RWIN, VK_SHIFT, VK_SPACE,
+    GetDoubleClickTime, GetKeyState, MapVirtualKeyW, ReleaseCapture, SendInput, SetCapture, TrackMouseEvent, INPUT,
+    INPUT_0, INPUT_MOUSE, MAPVK_VK_TO_CHAR, MOUSEEVENTF_HWHEEL, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP,
+    MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_WHEEL,
+    MOUSEINPUT, MOUSE_EVENT_FLAGS, TME_LEAVE, TME_NONCLIENT, TRACKMOUSEEVENT, VK_CAPITAL, VK_CONTROL, VK_ESCAPE,
+    VK_F11, VK_F4, VK_LWIN, VK_MENU, VK_NUMLOCK, VK_RMENU, VK_RWIN, VK_SHIFT, VK_SPACE,
 };
 use windows::Win32::UI::Shell::PropertiesSystem::{IPropertyStore, SHGetPropertyStoreForWindow};
 use windows::Win32::UI::Shell::{DragAcceptFiles, DragFinish, DragQueryFileW, HDROP};
@@ -189,8 +189,35 @@ struct Pad {
     buttons: u8,
     /// Those of them pressed here — over one of the phone's windows: only these are let go.
     sent: u8,
+    /// The primary, held on the pad but not yet pressed here (see [`pad`]).
+    held: u8,
+    /// When and where the primary last went down here.
+    last_down: Option<(Instant, POINT)>,
     /// The part of a pixel rounding has left over, so a slow finger still moves.
     rest: (f64, f64),
+}
+
+impl Pad {
+    /// `bits` down where the pointer is, `at`.
+    fn press(&mut self, bits: u8, at: POINT) {
+        send_buttons(bits, true);
+        self.sent |= bits;
+        if bits & 1 != 0 {
+            self.last_down = Some((Instant::now(), at));
+        }
+    }
+
+    /// Whether the primary going down at `at` now could be the second click
+    /// of a double-click: soon enough after the last, and near it — taken as
+    /// twice as near as Windows takes it, so a press sent once it is not is
+    /// surely a click of its own.
+    fn second_click(&self, at: POINT) -> bool {
+        let Some((when, p)) = self.last_down else { return false };
+        let (w, h) = unsafe { (GetSystemMetrics(SM_CXDOUBLECLK), GetSystemMetrics(SM_CYDOUBLECLK)) };
+        when.elapsed() < Duration::from_millis(unsafe { GetDoubleClickTime() }.into())
+            && (at.x - p.x).abs() <= w
+            && (at.y - p.y).abs() <= h
+    }
 }
 
 fn pad_state() -> &'static Mutex<Pad> {
@@ -204,6 +231,13 @@ fn pad_state() -> &'static Mutex<Pad> {
 /// capture and its hover all work as they do for the mouse — and only over one
 /// of the phone's windows, so nothing else on this computer is ever clicked
 /// from the phone. A drag that started there is let go wherever it ends.
+///
+/// One press is held back: a double-tap-and-slide's, on a title bar. The pad
+/// presses where its tap clicked a moment before, and Windows takes the two
+/// for a double-click there — and maximises the window it was to move. It
+/// goes in once the pointer is out of a double-click's reach, a few pixels
+/// along the bar, and the drag starts there; let go first, it was the
+/// double-click.
 pub fn pad(input: super::pad::Input) {
     use super::pad::Input;
     let mut pad = pad_state().lock().unwrap();
@@ -222,18 +256,40 @@ pub fn pad(input: super::pad::Input) {
             unsafe {
                 let _ = SetCursorPos(to.x, to.y);
             }
+            if pad.held != 0 && !pad.second_click(to) {
+                // Out of the double-click's reach: the drag starts here — on one of
+                // the phone's windows still, or nowhere.
+                let held = std::mem::take(&mut pad.held);
+                if phone_window_at(to).is_some() {
+                    pad.press(held, to);
+                }
+            }
         }
         Input::Buttons(b) => {
             let (pressed, released) = (b & !pad.buttons, pad.buttons & !b);
             pad.buttons = b;
+            let late = released & pad.held;
+            if late != 0 {
+                // Let go before it went anywhere: the double-click it was, after all.
+                pad.held &= !late;
+                if phone_window_at(at).is_some() {
+                    pad.press(late, at);
+                }
+            }
             let up = released & pad.sent;
             if up != 0 {
                 send_buttons(up, false);
                 pad.sent &= !up;
             }
-            if pressed != 0 && phone_window_at(at).is_some() {
-                send_buttons(pressed, true);
-                pad.sent |= pressed;
+            if pressed != 0 {
+                if let Some(w) = phone_window_at(at) {
+                    let held =
+                        u8::from(pressed & 1 != 0 && pad.second_click(at) && on_the_title_bar(w.shared.hwnd(), at));
+                    pad.held |= held;
+                    if pressed & !held != 0 {
+                        pad.press(pressed & !held, at);
+                    }
+                }
             }
         }
         Input::Wheel { h, v } => {
@@ -265,6 +321,16 @@ pub fn pad(input: super::pad::Input) {
 /// The phone's window that is the top-level window at `at` on screen, if one is.
 fn phone_window_at(at: POINT) -> Option<Arc<Window>> {
     phone_window(unsafe { GetAncestor(WindowFromPoint(at), GA_ROOT) })
+}
+
+/// Whether `at` is on `hwnd`'s title bar — where a double-click is Windows'
+/// own, and maximises — as the window itself says.
+fn on_the_title_bar(hwnd: HWND, at: POINT) -> bool {
+    let mut hit = 0usize;
+    let lp = LPARAM(((at.y as u16 as isize) << 16) | at.x as u16 as isize);
+    let answered =
+        unsafe { SendMessageTimeoutW(hwnd, WM_NCHITTEST, WPARAM(0), lp, SMTO_ABORTIFHUNG, 100, Some(&mut hit)) };
+    answered.0 != 0 && hit as u32 == HTCAPTION
 }
 
 /// The phone's window `hwnd` is, if it is one.
