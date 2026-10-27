@@ -3,9 +3,10 @@ name: Build Desktop
 # Run from main, this cuts a release. Run from any other branch — or as a dry
 # run on main — it is a TEST BUILD: every installer is built from that exact
 # commit and left on the run as an artifact to download, and nothing is
-# versioned, tagged or released.
+# versioned, tagged or released. "Windows portable only" is a quicker test
+# build still: just the Windows portable zip, no installer, no macOS or Linux.
 run-name: >-
-  ${{ (github.ref_name != 'main' || inputs.dry_run) && format('Test build: {0}', github.ref_name) || 'Release' }}
+  ${{ (github.ref_name != 'main' || inputs.dry_run || inputs.windows_portable_only) && format('Test build: {0}', github.ref_name) || 'Release' }}
 
 on:
   workflow_dispatch:
@@ -26,10 +27,17 @@ on:
         description: "Test build — installers as artifacts, no release (always so on a branch other than main)"
         type: boolean
         default: false
+      windows_portable_only:
+        description: "Windows portable only — a quick test build of the chosen branch: just the portable .zip, as an artifact (no installer, no macOS/Linux, no version bump, no release)"
+        type: boolean
+        default: false
 
+# Per branch: a test build must never cancel a release, nor another branch's.
+# A quick Windows portable build replaces an older one of the same branch and
+# nothing else — on main too, where one landing mid-release would cancel the
+# release after its version commit and tag were already pushed.
 concurrency:
-  # Per branch: a test build must never cancel a release, nor another branch's.
-  group: desktop-build-${{ github.ref }}
+  group: ${{ inputs.windows_portable_only && format('desktop-portable-{0}', github.ref) || format('desktop-build-{0}', github.ref) }}
   cancel-in-progress: true
 
 permissions:
@@ -83,10 +91,11 @@ jobs:
             esac
             VERSION="$MAJOR.$MINOR.$PATCH"
           fi
-          # Only main releases. Anywhere else, and on a dry run, this is a test
-          # build: nothing below bumps, commits, tags or publishes, every job
-          # builds this run's exact commit, and the installers stay on the run.
-          if [ "$GITHUB_REF" = "refs/heads/main" ] && [ "${{ inputs.dry_run }}" != "true" ]; then
+          # Only main releases. Anywhere else, on a dry run, and for a Windows
+          # portable build, this is a test build: nothing below bumps, commits,
+          # tags or publishes, every job builds this run's exact commit, and the
+          # installers stay on the run.
+          if [ "$GITHUB_REF" = "refs/heads/main" ] && [ "${{ inputs.dry_run }}" != "true" ] && [ "${{ inputs.windows_portable_only }}" != "true" ]; then
             PUBLISH=true
             LABEL="$VERSION"
           else
@@ -210,6 +219,9 @@ jobs:
         run: ./gradlew --no-daemon assembleDebug
 
       - name: Build the standalone LinuxOnDroid APK
+        # Release assets only: a portable-only build ships nothing but the
+        # Windows zip, so it skips this and the two steps that publish the APKs.
+        if: ${{ !inputs.windows_portable_only }}
         working-directory: openandroiddex-launcher
         # The same sources as the launcher behind a three-component manifest —
         # see linuxapp/build.gradle. It ships as a release asset of its own, for
@@ -271,6 +283,7 @@ jobs:
           retention-days: 1
 
       - name: Stage the two phone apps under their download names
+        if: ${{ !inputs.windows_portable_only }}
         # The SAME two APKs the steps above already built, copied a second time
         # under a version-stamped name because these copies are downloaded BY
         # HAND from the releases page. The one staged into payloads/ is a build
@@ -299,6 +312,7 @@ jobs:
           ls -l standalone
 
       - uses: actions/upload-artifact@v4
+        if: ${{ !inputs.windows_portable_only }}
         with:
           # release-* is exactly what the release job globs, so attaching these
           # to the GitHub release takes no change there at all. Not retention-
@@ -323,6 +337,10 @@ jobs:
       # step guarantees neither can silently go missing.)
       SKIP_LAUNCHER_APK: "1"
       SKIP_WMD_DEX: "1"
+      # The phone payloads include scrcpy's patched server too, built by the
+      # `launcher` job; a portable-only build takes that one rather than clone
+      # and build scrcpy a second time here. ("0" builds it, as before.)
+      SKIP_SCRCPY_SERVER: ${{ inputs.windows_portable_only && '1' || '0' }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -417,6 +435,7 @@ jobs:
           Get-ChildItem $bin | Select-Object Name, Length | Format-Table -AutoSize
 
       - name: Build Tauri app
+        if: ${{ !inputs.windows_portable_only }}
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -425,6 +444,16 @@ jobs:
         with:
           projectPath: open-android-dex-tauri
           tauriScript: npx tauri
+
+      - name: Build the app alone (portable only)
+        # The same release build without the NSIS bundle — the portable zip
+        # below is the exe and its resources, nothing the installer makes.
+        # Called directly: tauri-action expects bundles to collect afterwards.
+        if: ${{ inputs.windows_portable_only }}
+        working-directory: open-android-dex-tauri
+        env:
+          RUSTFLAGS: "-C target-feature=+crt-static"
+        run: npx tauri build --no-bundle
 
       - name: Create portable zip
         shell: pwsh
@@ -446,6 +475,7 @@ jobs:
       # emailed — the moment Windows was done, with the Mac builds still
       # running and nothing to attach.
       - name: Stage release assets
+        if: ${{ !inputs.windows_portable_only }}
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -455,6 +485,7 @@ jobs:
           Get-ChildItem dist | Select-Object Name, Length | Format-Table -AutoSize
 
       - uses: actions/upload-artifact@v4
+        if: ${{ !inputs.windows_portable_only }}
         with:
           # A day as the release's input; two weeks as a test build's download.
           name: ${{ needs.version.outputs.publish == 'true' && 'release-windows' || format('Open.Android.DeX_{0}_windows', needs.version.outputs.label) }}
@@ -462,8 +493,19 @@ jobs:
           if-no-files-found: error
           retention-days: ${{ needs.version.outputs.publish == 'true' && 1 || 14 }}
 
+      # A portable-only build's whole product: kept for two weeks, to download
+      # from the run's page, rather than the day the release job's inputs live.
+      - uses: actions/upload-artifact@v4
+        if: ${{ inputs.windows_portable_only }}
+        with:
+          name: windows-portable
+          path: Open.Android.DeX_*_x64_portable.zip
+          if-no-files-found: error
+          retention-days: 14
+
   build-macos:
     needs: [version, launcher]
+    if: ${{ !inputs.windows_portable_only }}
     # One image, two Rust targets. macos-latest is Apple Silicon and
     # cross-compiles the Intel leg happily; building Intel natively would mean
     # macos-15-intel, the last x86_64 image, which GitHub retires in 2027.
@@ -660,6 +702,7 @@ jobs:
 
   build-linux:
     needs: [version, launcher]
+    if: ${{ !inputs.windows_portable_only }}
     # One arch only. scrcpy publishes a single Linux asset (x86_64); there is no
     # aarch64 tarball to pair with an ARM runner, and shipping a Linux build we
     # could not put a working scrcpy inside would be worse than not shipping one.

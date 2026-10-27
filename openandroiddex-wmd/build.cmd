@@ -29,6 +29,16 @@ echo [1/3] javac
 if exist "%HERE%build" rmdir /s /q "%HERE%build"
 mkdir "%HERE%build\classes"
 dir /s /b "%HERE%src\*.java" > "%HERE%build\sources.txt"
+REM The encoder's choice and set-up the app windows share with the launcher's
+REM Linux stream, from the launcher's sources (see build.sh): the same two.
+set LAUNCHER_SRC=%HERE%..\openandroiddex-launcher\app\src\main\java\com\ccrstech\openandroiddex\launcher
+for %%c in (LinuxStreamEncoder DexLog) do (
+  if not exist "%LAUNCHER_SRC%\%%c.java" (
+    echo ERROR: %LAUNCHER_SRC%\%%c.java is missing
+    exit /b 1
+  )
+  echo %LAUNCHER_SRC%\%%c.java>> "%HERE%build\sources.txt"
+)
 REM android.jar goes on the classpath, not the bootclasspath: JDK 17+ rejects
 REM -bootclasspath alongside -target 17. Everything we touch outside android.*
 REM is java.lang/util/io/net, which Android provides at runtime anyway.

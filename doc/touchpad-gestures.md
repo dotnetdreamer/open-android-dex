@@ -283,7 +283,9 @@ section that empties itself reads as broken.
 
 `GESTURE_VALUES` in `SettingsActivity.java` and `Action::parse` in
 `gestures/mod.rs` are two halves of one table, as are `DexPrefs.DEF_GESTURE_*`
-and `default_action()`. Changing one alone is a silent no-op.
+and `default_action()`. Changing one alone is a silent no-op. The phone's own
+screen, used as a touchpad (phone-touchpad.md), reads the same five slots and is
+a third reader of that table: `Touchpad.act` in the launcher.
 
 The keys sit in the **Streaming** reset scope, next to `KEY_MOUSE_MODE` and for
 the same non-obvious reason: `runFactoryReset` turns *any* `stream_` key into a

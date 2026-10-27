@@ -258,6 +258,147 @@ export function MenuItem({
   );
 }
 
+// ── Popover ────────────────────────────────────────────────────────────
+
+/**
+ * A panel that opens from a button and stays while it is used — switches, a
+ * search, a list — where a Menu goes with the first choice. Drawn into the
+ * body for the titlebar's sake, as a Menu is (see there), right-aligned under
+ * its button. It closes on a click anywhere else and on Escape (focus back to
+ * the button); not on a scroll inside it, which a long list needs, and the
+ * window resizing only moves it.
+ *
+ * Not on the window losing focus, as a Menu does: a switch pressed by a
+ * screen reader (UI Automation's Toggle) takes the window's focus away and
+ * back, and the panel closed under the press, which never landed.
+ */
+export function Popover({
+  open,
+  onOpenChange,
+  trigger,
+  children,
+  label,
+  width = 360,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  trigger: (props: { open: boolean; toggle: () => void; ref: React.Ref<HTMLButtonElement> }) => ReactNode;
+  children: ReactNode;
+  label: string;
+  width?: number;
+}) {
+  const button = useRef<HTMLButtonElement>(null);
+  const panel = useRef<HTMLDivElement>(null);
+  const [at, setAt] = useState<{ top: number; right: number } | null>(null);
+
+  const place = useCallback(() => {
+    const r = button.current?.getBoundingClientRect();
+    if (r) setAt({ top: r.bottom + 6, right: Math.max(8, window.innerWidth - r.right) });
+  }, []);
+
+  useLayoutEffect(() => {
+    if (open) place();
+  }, [open, place]);
+
+  const close = useCallback(
+    (refocus = false) => {
+      onOpenChange(false);
+      if (refocus) button.current?.focus();
+    },
+    [onOpenChange],
+  );
+
+  useEffect(() => {
+    if (!open) return;
+    const inside = (t: EventTarget | null) =>
+      !!t && (panel.current?.contains(t as Node) || button.current?.contains(t as Node));
+    const onDown = (e: MouseEvent) => {
+      if (!inside(e.target)) close();
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.stopPropagation();
+        close(true);
+      }
+    };
+    const onScroll = (e: Event) => {
+      if (!inside(e.target)) close();
+    };
+    window.addEventListener("mousedown", onDown, true);
+    window.addEventListener("keydown", onKey, true);
+    window.addEventListener("scroll", onScroll, true);
+    window.addEventListener("resize", place);
+    panel.current?.focus({ preventScroll: true });
+    return () => {
+      window.removeEventListener("mousedown", onDown, true);
+      window.removeEventListener("keydown", onKey, true);
+      window.removeEventListener("scroll", onScroll, true);
+      window.removeEventListener("resize", place);
+    };
+  }, [open, close, place]);
+
+  return (
+    <>
+      {trigger({ open, toggle: () => onOpenChange(!open), ref: button })}
+      {open &&
+        at &&
+        createPortal(
+          <div
+            ref={panel}
+            role="dialog"
+            aria-label={label}
+            tabIndex={-1}
+            className="popover card-raised"
+            style={{
+              position: "fixed",
+              top: at.top,
+              right: at.right,
+              width: `min(${width}px, calc(100vw - 16px))`,
+              maxHeight: `calc(100vh - ${at.top + 10}px)`,
+            }}
+          >
+            {children}
+          </div>,
+          document.body,
+        )}
+    </>
+  );
+}
+
+// ── Switch ─────────────────────────────────────────────────────────────
+
+/**
+ * On or off, as a switch — to a screen reader too (role="switch"). The thumb
+ * stretches while it is pressed and springs across when let go.
+ */
+export function Switch({
+  checked,
+  onChange,
+  label,
+  disabled = false,
+  size = "md",
+}: {
+  checked: boolean;
+  onChange: (on: boolean) => void;
+  label: string;
+  disabled?: boolean;
+  size?: "md" | "sm";
+}) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      aria-label={label}
+      disabled={disabled}
+      className={`switch ${size === "sm" ? "switch-sm" : ""}`}
+      onClick={() => onChange(!checked)}
+    >
+      <span className="switch-thumb" aria-hidden="true" />
+    </button>
+  );
+}
+
 // ── Toast ──────────────────────────────────────────────────────────────
 
 export type Tone = "info" | "ok" | "warn" | "bad";

@@ -463,6 +463,330 @@
     border-radius: var(--r-md);
   }
 
+  /* ── The phone's apps (Apps tab) ──────────────────────────────────── */
+
+  /* A launcher's grid: as many columns as fit, every tile the same width. */
+  .apps-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(92px, 1fr));
+    gap: 6px 4px;
+  }
+  .app-tile {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 7px;
+    padding: 12px 4px 10px;
+    border-radius: var(--r-md);
+    transition: background 120ms ease;
+  }
+  .app-tile:hover {
+    background: var(--surface-1);
+  }
+  .app-tile:active .app-icon {
+    transform: scale(0.94);
+  }
+  .app-icon {
+    position: relative;
+    display: inline-flex;
+    width: 52px;
+    height: 52px;
+    transition: transform 140ms var(--ease-spring);
+  }
+  .app-icon img {
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    filter: drop-shadow(0 3px 6px rgba(0, 0, 0, 0.35));
+  }
+  .app-icon-blank {
+    width: 100%;
+    height: 100%;
+    border-radius: 30%;
+    background: var(--surface-3);
+  }
+  /* The phone's own launcher marks its Linux apps the same way. */
+  .app-badge {
+    position: absolute;
+    left: -3px;
+    bottom: -3px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 18px;
+    height: 18px;
+    border-radius: 9px;
+    color: #f3f5f9;
+    background: #e95420;
+    box-shadow: 0 0 0 2px var(--bg);
+  }
+  .app-icon-spinner {
+    position: absolute;
+    right: -4px;
+    bottom: -4px;
+    width: 18px;
+    height: 18px;
+    background: var(--bg);
+  }
+  .app-label {
+    display: -webkit-box;
+    max-width: 100%;
+    overflow: hidden;
+    font-size: 12px;
+    line-height: 15px;
+    text-align: center;
+    color: var(--ink-2);
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    overflow-wrap: anywhere;
+  }
+  .app-tile:hover .app-label {
+    color: var(--ink-1);
+  }
+  /* Under the icon of an app that has a window open, as a taskbar marks one. */
+  .app-dot {
+    position: absolute;
+    top: 66px;
+    left: 50%;
+    width: 4px;
+    height: 4px;
+    margin-left: -2px;
+    border-radius: 2px;
+    background: var(--accent);
+    opacity: 0;
+    transition:
+      opacity 160ms ease,
+      width 160ms ease,
+      margin-left 160ms ease;
+  }
+  .app-tile[data-open] .app-dot {
+    opacity: 1;
+    width: 14px;
+    margin-left: -7px;
+  }
+  .apps-pref {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 12px 14px;
+    border-radius: var(--r-lg);
+    background: var(--surface-1);
+    box-shadow: inset 0 0 0 1px var(--line);
+  }
+  .apps-pref input {
+    margin-top: 2px;
+    accent-color: var(--accent);
+  }
+  /* How many notifications an app has on the phone: a launcher's badge, on its icon. */
+  .app-count {
+    position: absolute;
+    top: -5px;
+    right: -7px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 18px;
+    height: 18px;
+    padding: 0 5px;
+    border-radius: 9px;
+    font-size: 10.5px;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    color: #ffffff;
+    background: var(--accent);
+    box-shadow: 0 0 0 2px var(--bg);
+    animation: badge-in 300ms var(--ease-spring) both;
+  }
+
+  /* ── Switches ─────────────────────────────────────────────────────── */
+
+  .switch {
+    position: relative;
+    flex-shrink: 0;
+    width: 36px;
+    height: 20px;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.12);
+    box-shadow: inset 0 0 0 1px var(--line-2);
+    transition:
+      background 180ms ease,
+      box-shadow 180ms ease;
+  }
+  .switch:hover:not(:disabled) {
+    background: rgba(255, 255, 255, 0.17);
+  }
+  .switch[aria-checked="true"] {
+    background: var(--accent);
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 70%, black);
+  }
+  .switch[aria-checked="true"]:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--accent) 88%, white);
+  }
+  .switch:disabled {
+    opacity: 0.4;
+  }
+  .switch-thumb {
+    position: absolute;
+    top: 3px;
+    left: 3px;
+    width: 14px;
+    height: 14px;
+    border-radius: 7px;
+    background: #ffffff;
+    box-shadow:
+      0 1px 2px rgba(0, 0, 0, 0.45),
+      0 0 0 0.5px rgba(0, 0, 0, 0.12);
+    transition:
+      transform 240ms var(--ease-spring),
+      width 160ms var(--ease-out);
+  }
+  .switch[aria-checked="true"] .switch-thumb {
+    transform: translateX(16px);
+  }
+  /* Pressed, the thumb stretches toward where it is going. */
+  .switch:active:not(:disabled) .switch-thumb {
+    width: 18px;
+  }
+  .switch[aria-checked="true"]:active:not(:disabled) .switch-thumb {
+    transform: translateX(12px);
+  }
+  .switch-sm {
+    width: 30px;
+    height: 17px;
+  }
+  .switch-sm .switch-thumb {
+    top: 2.5px;
+    left: 2.5px;
+    width: 12px;
+    height: 12px;
+  }
+  .switch-sm[aria-checked="true"] .switch-thumb {
+    transform: translateX(13px);
+  }
+  .switch-sm:active:not(:disabled) .switch-thumb {
+    width: 15px;
+  }
+  .switch-sm[aria-checked="true"]:active:not(:disabled) .switch-thumb {
+    transform: translateX(10px);
+  }
+
+  /* ── Popovers ─────────────────────────────────────────────────────── */
+
+  .popover {
+    z-index: 50;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    border-radius: var(--r-lg);
+    transform-origin: top right;
+    animation: menu-in 180ms var(--ease-out) both;
+  }
+  .popover:focus-visible {
+    outline: none;
+  }
+
+  /* ── The phone's notifications (the bell in the title bar) ────────── */
+
+  .bell {
+    position: relative;
+  }
+  .bell.is-open {
+    background: var(--surface-3);
+    color: var(--ink-1);
+  }
+  /* Coming through (green), or something stands in the way (amber). */
+  .bell-dot {
+    position: absolute;
+    top: 5px;
+    right: 5px;
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--ok);
+    box-shadow: 0 0 0 2px var(--bg);
+  }
+  .bell-dot.is-warn {
+    background: var(--warn);
+  }
+  /* A notification just arrived: the bell rings once. */
+  .bell.is-ringing .icon {
+    animation: bell-ring 900ms var(--ease-out);
+    transform-origin: 50% 18%;
+  }
+  .notif-head {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 14px 14px 13px;
+  }
+  .notif-body {
+    display: flex;
+    min-height: 0;
+    flex-direction: column;
+    gap: 14px;
+    overflow-y: auto;
+    padding: 2px 14px 14px;
+  }
+  .notif-row {
+    display: flex;
+    align-items: center;
+    gap: 11px;
+    padding: 9px 12px;
+  }
+  .notif-row .tile {
+    width: 28px;
+    height: 28px;
+  }
+  .notif-row[data-off] .tile {
+    color: var(--ink-4);
+  }
+  .notif-app {
+    display: flex;
+    align-items: center;
+    gap: 11px;
+    padding: 8px 12px;
+    transition: opacity 160ms ease;
+  }
+  .notif-app[data-muted] .notif-app-icon {
+    filter: grayscale(1);
+    opacity: 0.55;
+  }
+  .notif-app-icon {
+    display: inline-flex;
+    flex-shrink: 0;
+    width: 28px;
+    height: 28px;
+    transition:
+      filter 160ms ease,
+      opacity 160ms ease;
+  }
+  .notif-app-icon img {
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+  }
+  /* A small field in a section's heading row: over .field's own size, which comes later. */
+  .field.notif-search {
+    height: 26px;
+    width: 132px;
+    padding: 0 9px 0 27px;
+    border-radius: var(--r-sm);
+    font-size: 12px;
+  }
+  .notif-off {
+    padding: 2px 14px 16px 66px;
+  }
+  .notif-foot {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-height: 48px;
+    padding: 9px 14px;
+    background: rgba(255, 255, 255, 0.015);
+    box-shadow: 0 -1px 0 var(--line);
+  }
+
   /* ── Callouts ─────────────────────────────────────────────────────── */
 
   .callout {
@@ -1189,6 +1513,37 @@
   to {
     opacity: 1;
     transform: none;
+  }
+}
+@keyframes badge-in {
+  from {
+    opacity: 0;
+    transform: scale(0.4);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@keyframes bell-ring {
+  0%,
+  100% {
+    transform: rotate(0);
+  }
+  15% {
+    transform: rotate(14deg);
+  }
+  30% {
+    transform: rotate(-12deg);
+  }
+  45% {
+    transform: rotate(8deg);
+  }
+  60% {
+    transform: rotate(-5deg);
+  }
+  75% {
+    transform: rotate(2deg);
   }
 }
 @keyframes cable-flow {

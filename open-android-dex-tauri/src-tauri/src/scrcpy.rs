@@ -1713,6 +1713,28 @@ fn stored_audio_forwarding(app: &AppHandle) -> (bool, bool) {
     (forward, dup)
 }
 
+/// "Where sound plays", as (forward, duplicate), for the app windows' sound menu.
+pub fn audio_forwarding(app: &AppHandle) -> (bool, bool) {
+    stored_audio_forwarding(app)
+}
+
+/// "Where sound plays", chosen in an app window's sound menu (apps/sound.rs):
+/// stored as the launcher's cfg rows store it — it is the desktop's setting
+/// too — and carried out now, for `serial` and every other phone whose apps
+/// have windows here, as the request pump carries out a choice made on the
+/// desktop.
+pub fn set_audio_forwarding(app: &AppHandle, serial: &str, forward: bool, duplicate: bool) {
+    remember_config(app, "audio", if forward { "on" } else { "off" });
+    remember_config(app, "audiodup", if duplicate { "on" } else { "off" });
+    let mut serials = APP_WINDOWS.lock().unwrap().clone();
+    if !serials.iter().any(|s| s == serial) {
+        serials.push(serial.to_string());
+    }
+    for s in serials {
+        reconcile_audio_session_bg(app, &s);
+    }
+}
+
 /// The audio companion's whole command line, by way of MirrorOptions.
 ///
 /// Everything visual is zeroed on purpose: `build_args` short-circuits on
@@ -1792,28 +1814,15 @@ fn audio_lock() -> std::sync::MutexGuard<'static, ()> {
 /// Blocking (adb round-trips, a SIGTERM grace): callers spawn it on a thread.
 fn reconcile_audio_session(app: &AppHandle, serial: &str) {
     let _guard = audio_lock();
-    let desktop_key = format!("{serial}|desktop");
     let audio_key = format!("{serial}|audio");
 
     let (forward, mut dup) = stored_audio_forwarding(app);
 
-    // The companion accompanies a desktop; without one there is nothing to
-    // keep silent-but-streaming, and a leftover companion would divert the
-    // phone's sound to a computer showing nothing.
-    let desktop_live = {
-        let state = app.state::<MirrorState>();
-        let map = state.0.lock().unwrap();
-        map.get(&desktop_key)
-            .map(|s| {
-                s.child
-                    .lock()
-                    .unwrap()
-                    .try_wait()
-                    .map(|st| st.is_none())
-                    .unwrap_or(false)
-            })
-            .unwrap_or(false)
-    };
+    // The companion accompanies a desktop, or the phone's apps in windows of
+    // their own; without either there is nothing to keep silent-but-streaming,
+    // and a leftover companion would divert the phone's sound to a computer
+    // showing nothing.
+    let desktop_live = sound_shown_here(app, serial);
     let mut want = desktop_live && forward;
 
     if want {
@@ -1896,20 +1905,7 @@ fn reconcile_audio_session(app: &AppHandle, serial: &str) {
     // stop grace). Teardown holds AUDIO_RECONCILE too, so a spawn past a dead
     // desktop would still be caught and stopped — this re-check just keeps
     // that from being a spawn at all when the desktop ended mid-reconcile.
-    let desktop_still_live = {
-        let state = app.state::<MirrorState>();
-        let map = state.0.lock().unwrap();
-        map.get(&desktop_key)
-            .map(|s| {
-                s.child
-                    .lock()
-                    .unwrap()
-                    .try_wait()
-                    .map(|st| st.is_none())
-                    .unwrap_or(false)
-            })
-            .unwrap_or(false)
-    };
+    let desktop_still_live = sound_shown_here(app, serial);
     if !desktop_still_live {
         log::info!("audio [{serial}] the desktop ended mid-reconcile — no companion");
         return;
@@ -1922,6 +1918,52 @@ fn reconcile_audio_session(app: &AppHandle, serial: &str) {
         ),
         Err(e) => log::warn!("audio [{serial}] companion did not start: {e}"),
     }
+}
+
+/// Phones whose apps are open in windows of their own (apps/mod.rs). Their
+/// sound comes to this computer as a desktop's does, by the same "where sound
+/// plays" choice.
+static APP_WINDOWS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// Whether this computer shows anything of `serial`'s: its desktop, or one of its apps.
+fn sound_shown_here(app: &AppHandle, serial: &str) -> bool {
+    if APP_WINDOWS.lock().unwrap().iter().any(|s| s == serial) {
+        return true;
+    }
+    let state = app.state::<MirrorState>();
+    let map = state.0.lock().unwrap();
+    map.get(&format!("{serial}|desktop"))
+        .map(|s| {
+            s.child
+                .lock()
+                .unwrap()
+                .try_wait()
+                .map(|st| st.is_none())
+                .unwrap_or(false)
+        })
+        .unwrap_or(false)
+}
+
+/// `serial` has app windows open on this computer now, or no longer has
+/// any: its sound follows them here, or goes back.
+pub fn apps_audio(app: &AppHandle, serial: &str, open: bool) {
+    {
+        let mut list = APP_WINDOWS.lock().unwrap();
+        let had = list.iter().any(|s| s == serial);
+        if open {
+            // Listed already is not the same as playing: a window that comes up
+            // after the link dropped finds the companion gone with it, while the
+            // dead windows keep the phone listed. Reconciling brings it back.
+            if !had {
+                list.push(serial.to_string());
+            }
+        } else if had {
+            list.retain(|s| s != serial);
+        } else {
+            return;
+        }
+    }
+    reconcile_audio_session_bg(app, serial);
 }
 
 /// `reconcile_audio_session` from a thread that must not block (the request
@@ -1941,6 +1983,10 @@ fn reconcile_audio_session_bg(app: &AppHandle, serial: &str) {
 /// otherwise not see. Behind the lock it runs after that spawn and stops it —
 /// or before the reconcile's own liveness check, which then answers "gone".
 fn stop_audio_companion(app: &AppHandle, serial: &str) {
+    // The desktop went, but the phone's apps are still open here: their sound stays.
+    if APP_WINDOWS.lock().unwrap().iter().any(|s| s == serial) {
+        return;
+    }
     let _guard = audio_lock();
     let audio_key = format!("{serial}|audio");
     let present = {
@@ -4736,6 +4782,13 @@ pub fn kill_all(app: &AppHandle) {
         for (key, s) in map.iter() {
             s.stop_requested.store(true, Ordering::SeqCst);
             children.push((key.clone(), s.child.clone()));
+            // The sound of a phone whose apps were open here in windows of
+            // their own is no desktop to undo: undoing one force-stops the
+            // launcher and sends the phone to its home screen, from whatever
+            // its owner had open on it.
+            if key.ends_with("|audio") {
+                continue;
+            }
             if !serials.contains(&s.serial) {
                 serials.push(s.serial.clone());
             }

@@ -106,6 +106,12 @@ at your monitor's size, sitting next to your other windows.
   and Decline**, so you never have to go and find the handset
 - **Volume and what's playing** in the quick settings panel. Sliders for media
   and ringer, and play, pause and skip for whatever the phone is playing
+- **Your phone as a touchpad.** While the desktop is open, a notification on the
+  phone turns its screen into a touchpad for it: slide a finger to move the
+  pointer, tap to click, two fingers to scroll or right-click, and three-finger
+  swipes for the gestures you have chosen — show what is open, clear to the
+  desktop, step through your windows. It is under Touchpad in quick settings
+  too
 - **Proper windows.** Every app gets a title bar with close, minimise, maximise
   and snap left or right. Drag them where you want. Resize them from a corner.
   Put two apps side by side and get something done
@@ -124,6 +130,103 @@ Open the app drawer and the four built in tools sit at the top, above everything
 else you have installed.
 
 ![Settings, LinuxOnDroid, Docker and the Web viewer at the top of the app drawer](doc/img/app-drawer.png)
+
+### Or just your apps, each in its own window
+
+Sometimes you only want WhatsApp or your calendar on the big screen, not a
+whole desktop. Open the **Apps** tab on your computer and you will see the apps
+on your phone, with their real names and icons. Click one and it opens in its
+own window, right next to your other programs. It is usually there in under
+half a second.
+
+- **They behave like your computer's own windows.** Move them, resize them,
+  snap them side by side, minimise them. Each app gets its own button on the
+  taskbar, and you can pin it there to open that app straight away next time
+- **Use your mouse and keyboard.** Click, scroll and type, in your own keyboard
+  layout. Copy something on your computer and paste it into the phone app, or
+  the other way round
+- **One clipboard, both ways.** What you copy on your computer is on your phone
+  the moment you copy it, so it is in your phone keyboard's clipboard history
+  too, and what you copy in a phone app is in your computer's (Win+V on
+  Windows). A password your password manager copies stays on your computer,
+  unless you paste it into the app yourself
+- **Choose where the sound plays.** The speaker in each window's title bar
+  sends it to your computer, to your computer and your phone, or keeps it on
+  your phone — its speaker or your earbuds, where the phone lets us choose —
+  just like the sound menu on the desktop
+- **Drop files on a window** to put them in your phone's Downloads folder, or
+  drop an app's APK to install it. A file is never overwritten: a second
+  `report.pdf` arrives as `report (2).pdf`
+- **Full screen when you want it.** The ☰ button next to Back has **Full
+  screen** (F11 on Windows). Move the mouse to the top of the screen and a
+  small bar comes down with Back, the way out of full screen, and close.
+  Press Esc to get your window back
+- **Your phone as the touchpad.** ☰ → **Use phone as touchpad** turns your
+  phone's screen into a touchpad for these windows: slide a finger to move
+  your computer's pointer, tap to click, hold or tap with two fingers to
+  right-click, two fingers to scroll, ◁ for Back. It works in your phone's
+  windows only — it never clicks anything else on your computer. If your
+  phone already lets Open Android DeX show notifications, it is in its
+  notification shade too while a window is open
+- **Close the window and the app goes back to your phone,** right where you
+  left it. Whatever was on your phone's screen stays there
+- **Unplug and carry on.** If your phone is on the same Wi‑Fi as your
+  computer (Android 11 and newer), pulling the cable doesn't close anything:
+  each window keeps going over Wi‑Fi, and moves back to the cable when you plug
+  it in again. The title bar says which one it's using. The first time on a
+  network, your phone asks whether to allow wireless debugging there: tap
+  Allow, and tick “Always allow on this network” so it doesn't ask again. On a
+  Xiaomi phone, turn Wireless debugging on yourself, in Developer options. It
+  also needs “Always allow from this computer” ticked when you first plugged
+  the phone in. With no way back at all, the window waits half a minute for
+  your phone before giving the app back to it
+- **It is light.** Only the app you are looking at gets sent, and an app that is
+  sitting still costs next to nothing. Your phone does not have to run a
+  desktop at all
+- **Your Linux apps are there too,** if you have set up Linux on the phone.
+  Closing one of their windows closes it, as on a Linux computer, and the app
+  may ask you to save first
+
+If that is all you ever want, tick **Open my apps here when my phone
+connects**, and the Apps tab opens instead of the desktop when you plug the
+phone in. The desktop is still one click away.
+
+On a Mac the apps open in proper Mac windows too, with a Back button at the
+top (⌘[ works as well) and the speaker at the other end, and ⌘C and ⌘V copy
+and paste as you would expect.
+Pinning an app on its own is a Windows thing: on a Mac they all sit under this
+app's icon in the Dock. On a Linux computer an Android app opens in a simpler
+window, and Linux apps are not offered there.
+
+### Your phone's notifications, on your computer
+
+When a message arrives on your phone, it comes up on your computer as one of
+its own notifications. On Windows it comes from the app itself, with its name
+and icon, just like an app installed there.
+
+- **Reply without picking up your phone.** A message has a reply box right in
+  the notification, and the app's own buttons — mark as read, archive,
+  whatever it offers
+- **Click it and the conversation opens** in a window of its own on your
+  computer, right at that conversation. With the phone's desktop running, it
+  opens there instead
+- **Calls ring here too**, with Answer and Decline
+- **Read it on your phone and it goes from your computer as well**
+- **It knows when to stay quiet.** No pop-up for the app whose window you
+  are using (it waits quietly in the notification center), nothing your
+  phone would have kept quiet itself (Do Not Disturb, an app you set to
+  silent), and nothing while the phone's desktop is in front, which shows
+  its own
+- **The bell at the top of the window** turns it on and off. It is also where
+  you choose whether notifications say what they say or only which app has
+  something, whether calls ring here, and which apps come through: each has
+  its own switch. *Send a test* shows you one arriving. On Windows you can
+  also right-click a notification to turn its app off
+
+Nothing is installed or changed on your phone for this: the part that reads
+its notifications runs only while the phone is attached and notifications
+are on. They come to Windows and Mac computers; on Linux the phone's desktop
+shows them. How it works: [doc/phone-notifications.md](doc/phone-notifications.md).
 
 ### Ubuntu, a whole Linux computer, running on your phone
 
@@ -225,7 +328,7 @@ and no restart.
   French, German and Portuguese, or just follow whatever your phone is set to
 - **Mouse pointers.** Pick a shape, a colour, an outline and a size
 - **Trackpad gestures.** Five three finger gestures, and you choose what each
-  one does
+  one does — on your laptop's touchpad and on your phone's
 - **Picture quality.** Resolution, frame rate, sharpness and sound, so you can
   trade smoothness for battery life on an older phone
 - **Text size, window behaviour and clipboard sharing**, among others
@@ -474,6 +577,14 @@ bash openandroiddex-docker/qemu/build.sh    # libqemu.so
 
 ```bash
 gh workflow run desktop.yml -f bump=patch      # or -f version=0.4.0, or -f dry_run=true
+```
+
+**Testing a branch on Windows.** Tick "Windows portable only" (or pass the flag)
+for a quick build of just the portable zip, downloadable from the run's page for
+two weeks — no installer, no macOS or Linux, no version bump, no release:
+
+```bash
+gh workflow run desktop.yml --ref <branch> -f windows_portable_only=true
 ```
 
 **Where things live**

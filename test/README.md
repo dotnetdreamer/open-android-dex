@@ -96,5 +96,83 @@ and icons found through links that name guest paths, and through links proot
 wrote with this side's. The window manager against a real Xvnc needs a guest
 and is recorded in the design record.
 
-Everything else needs a device. `doc/web-viewer.md`, `doc/remote-access.md`
-and `doc/usb-desktop.md` list what is still unverified there.
+The phone apps' windows (`doc/apps-on-pc.md`) keep their app when their
+connection goes — the cable pulled with Wi‑Fi still there — and the phone's
+half of that is checked on a phone or an emulator, with the Android SDK and
+nothing of the app's running:
+
+```sh
+node test/apps-reconnect-test.mjs [serial]
+```
+
+It pushes the window daemon's dex (build it first: `openandroiddex-wmd/build.sh`,
+or `npm run apk`) and runs the app server as the app does, then speaks the
+window wire to it over adb: a window that waits for its computer and takes a
+new connection, a second connection taking it from the first, a window closed
+after it came back handing its app back, an app opened on the phone while its
+window was away making that window "closed" to a computer that comes back, an
+unknown window, the server stopping 30 s after its shell went with nobody
+back, and "stop" ending it at once. It opens the phone's Settings in windows
+of its own, and every one goes back to the phone by the end.
+
+The phone's notifications on the computer (`doc/phone-notifications.md`) have
+their phone's half checked the same way:
+
+```sh
+node test/notifications-test.mjs [serial]
+```
+
+It runs the app server from the dex as the app does and speaks its control
+wire: notifications turned on (a snapshot, nothing already there as news, and
+the calls ringing), asked again while on (everything again), the shell's own
+`cmd notification post` as an app posting — news once, the same words again
+nothing, new words at once an update and a moment later news again — a
+conversation as its last messages, a sender's picture, a dismissal both ways,
+a button on a notification that has gone refused and said, the test
+notification, the listener stopping when the connection that asked goes
+(hello first on the next, nothing it has not asked for, everything once it
+does) and when another connection takes its place (the one replaced refused),
+and notifications turned off. On an emulator it also texts its Messages app
+(`emu sms send`) and rings its phone (`emu gsm call`), and reads what each
+did back from the phone itself rather than from what the server says: a
+window opened at a notification by its own intent shows Messages on the
+window's display and not the phone's, and Messages has that conversation
+read and another one not; a click with the window open, the same in that
+window; a reply sent is in the phone's sent messages, to the one who wrote;
+"Mark as read" leaves the text read; and a call answered from the computer
+puts the phone in the call and goes in its call log as answered, one
+declined goes in as declined, one the caller ends as missed — by CallStyle's
+own answer and decline, or, on a dialer from before it (AOSP's, on the
+Android 12 image), by its own buttons, chosen by their words. It uses the
+app's own adb when there is one, so a phone a running app shares is not
+dropped by an adb server of another version, and everything it posts is gone
+from the phone when it ends; run it on an AVD started with `-read-only` to
+leave the AVD's texts and call log as they were.
+
+The phone's screen as the touchpad of its apps' windows on the computer
+(`doc/phone-touchpad.md`, §10) has its phone's half checked the same way:
+
+```sh
+node test/pad-test.mjs [serial]
+```
+
+It needs this build's launcher on the phone (a desktop session installs it).
+It runs the app server from the dex, asks for the pad on the control wire and
+touches the pad the launcher puts up, for real, reading what reaches the
+computer: offered, with the launcher let draw over other apps; a connection to
+the pad's port from anything but the launcher refused; with one finger
+(`input`) a slide as moves, a tap as a click, a held finger as a right click,
+◁ as Back; with two and three (the dex's `Probe fingers`, as the shell) a
+scroll in notches, a right click, the next and previous window, Back, and the
+desktop's own gestures reaching nothing; Settings in a window of its own
+keeping the pad off the phone's screen, as Android does every app's overlay,
+and the pad saying so and then that it is back (Android 15 and later) — with
+its toast on the phone where the launcher may post notifications, Android
+dropping it otherwise — but not the shade pulled over it, nor the screen
+going dark and lit again; an app put in front on the phone's screen, and ✕,
+each putting the pad away; and withdrawn, the app-op as it was. It puts the
+launcher's app-op back to what it found.
+
+Everything else needs a device. `doc/web-viewer.md`, `doc/remote-access.md`,
+`doc/usb-desktop.md`, `doc/apps-on-pc.md` and `doc/phone-notifications.md`
+list what is still unverified there.

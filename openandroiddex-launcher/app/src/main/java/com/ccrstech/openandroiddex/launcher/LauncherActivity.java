@@ -482,6 +482,9 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
         @Override
         public void onReceive(Context ctx, Intent intent) {
             pcSeenAt = SystemClock.uptimeMillis();
+            // The first word from a computer is what says the phone's screen is free to
+            // be its touchpad. A field compare on every later beat.
+            maybeOfferTouchpad();
             int seq = intent.getIntExtra("seq", -1);
             if (seq >= 0) {
                 // drop stale in-flight broadcasts; a much smaller seq means
@@ -562,6 +565,14 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
                     // and the record of what has already been hidden, and the
                     // toggle needs both.
                     sendBroadcast(new Intent(ACTION_SHOW_DESKTOP).setPackage(getPackageName()));
+                    break;
+                case "home":
+                    // The phone touchpad's ○ (and a gesture of its set to
+                    // Home): the taskbar's own, not a key — see Touchpad#act.
+                    // Not this launcher as the phone's own home, which hears
+                    // the same broadcast: raised there, it would be what the
+                    // pad's watch takes as the phone in use, and close it.
+                    if (!onPhone()) goHome();
                     break;
                 case "close":
                     // Not a gesture: the computer's "Close the front app", when
@@ -743,6 +754,12 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
             String key = intent.getStringExtra(DexPrefs.EXTRA_KEY);
             // the display listener owns the density, whichever key moved it
             if (DexPrefs.KEY_SIZE_INDEX.equals(key) || DexPrefs.KEY_BASE_DPI.equals(key)) return;
+            // Not a shell setting — nothing here is drawn from it — but the desktop is
+            // what puts the touchpad's notification up, so it is what takes it down.
+            if (DexPrefs.KEY_PAD_NOTICE.equals(key)) {
+                maybeOfferTouchpad();
+                return;
+            }
             if (!DexPrefs.affectsShell(key)) return;        // a desktop-app setting
             if (DexPrefs.KEY_LANGUAGE.equals(key) || "*".equals(key)) {
                 // Resources were resolved against the old locale in
@@ -905,6 +922,7 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
         dm.registerDisplayListener(displayListener, handler);
         DexLog.step("launcher", "desktop ready — " + allApps.size() + " apps, taskbar "
                 + (taskbarOverlay ? "as an overlay window" : "inside the activity"));
+        maybeOfferTouchpad();
     }
 
 
@@ -1122,6 +1140,15 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
         // with the activity, and a leaked one is a cursor floating over the
         // phone's own home screen with no way left to dismiss it.
         if (pointer != null) pointer.detach();
+        // The phone's screen as this desktop's touchpad goes with the desktop: its
+        // notification, and the pad itself if it is up. Not for a recreate, which is
+        // the same desktop a moment later (a language change). Decided by what this
+        // desktop offered rather than by onPhone(): a pulled cable has already taken
+        // the display, and a desktop with no display reads as the phone's.
+        if (touchpadOffered && !isChangingConfigurations()) {
+            TouchpadNotice.hide(this);
+            Touchpad.closeAll();
+        }
         if (taskbarOverlay && taskbarView != null) {
             try {
                 getWindowManager().removeViewImmediate(taskbarView);
@@ -1649,9 +1676,13 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
      * trusted flag begin.
      */
     private boolean overlaysBuried() {
+        return Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && overlaysBuried(getDisplay());
+    }
+
+    /** {@link #overlaysBuried()} for any display: the phone touchpad's pointer asks too. */
+    static boolean overlaysBuried(Display display) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return false;
         if (!"samsung".equalsIgnoreCase(Build.MANUFACTURER)) return false;
-        Display display = getDisplay();
         return display != null
                 && display.getDisplayId() != Display.DEFAULT_DISPLAY
                 && (display.getFlags() & DISPLAY_FLAG_TRUSTED) == 0;
@@ -5358,6 +5389,17 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
         tiles.add(qsTile(getString(R.string.lx_phone_screen), null, "📱",
                 phoneScreenOn, true,
                 this::setPhoneScreen));
+        // Beside the tile that turns the phone's screen off, the other one here about
+        // the phone in the user's hand: it turns that screen into this desktop's
+        // touchpad. Not a toggle — it opens a screen over there.
+        if (touchpadUsable()) {
+            tiles.add(qsTile(getString(R.string.lx_pad_title), null, "🖱",
+                    false, false,
+                    on -> {
+                        dismissPopups();
+                        openTouchpad();
+                    }));
+        }
         tiles.add(qsTile(getString(R.string.lx_lock),
                 sysIcon(new String[0], android.R.drawable.ic_lock_idle_lock), "🔒",
                 false, false,
@@ -5482,6 +5524,43 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
                 if (uri != null) hud.show(thumb, uri);
             }
         }), 320);
+    }
+
+    // ── The phone's screen as this desktop's touchpad (Touchpad) ──
+
+    /** This desktop put the touchpad or its notification up, and so must take them down. */
+    private boolean touchpadOffered;
+
+    /**
+     * Whether the phone's screen can be this desktop's touchpad: the desktop is on a
+     * display of its own with a computer showing it — so the phone is free in the
+     * user's hand, and the window daemon is up to carry the pointer — on Android 11 or
+     * later (see Touchpad). The desktop drawn on the phone's own screen has the
+     * dock's strip instead.
+     */
+    private boolean touchpadUsable() {
+        return !onPhone() && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && pcAlive();
+    }
+
+    /** Put the touchpad's notification up on the phone, or take it down, as things stand. */
+    private void maybeOfferTouchpad() {
+        if (!touchpadUsable()) return;
+        if (!DexPrefs.getBool(this, DexPrefs.KEY_PAD_NOTICE, DexPrefs.DEF_PAD_NOTICE)) {
+            TouchpadNotice.hide(this);
+            return;
+        }
+        TouchpadNotice.show(this, displayId());
+        touchpadOffered = true;
+    }
+
+    /**
+     * Quick settings' Touchpad: the pad opens on the PHONE's screen, which is where it is
+     * used. The same pad the notification opens, for a phone that shows no notification —
+     * Android 13 does only with a permission — or a user who swiped it away. Straight from
+     * here, with no activity started on the phone, so nothing about focus moves at all.
+     */
+    private void openTouchpad() {
+        if (Touchpad.open(this, displayId())) touchpadOffered = true;
     }
 
     // ── Dock: the phone's touchpad ──

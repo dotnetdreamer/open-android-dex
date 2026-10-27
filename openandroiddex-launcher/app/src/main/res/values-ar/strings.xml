@@ -268,6 +268,22 @@
     <string name="lx_pad_no_service">لا يمكن للمؤشر النقر حتى تُفعّل Open Android DeX في إمكانية الوصول.</string>
     <string name="lx_pad_failed">تعذّر فتح لوحة اللمس.</string>
 
+    <string name="tp_channel">لوحة اللمس</string>
+    <string name="tp_notice_title">استخدم هاتفك كلوحة لمس</string>
+    <string name="tp_notice_text">انقر لتشير وتنقر وتمرّر على سطح المكتب من هذه الشاشة</string>
+    <string name="tp_hints">حرّك إصبعًا واحدًا لتحريك المؤشر · انقر للنقر\nانقر بإصبعين، أو أبقِ إصبعًا ثابتًا، للنقر بالزر الأيمن\nانقر مرتين ثم حرّك للسحب · إصبعان للتمرير\nثلاثة أصابع: اسحب أو انقر لإيماءاتك</string>
+    <string name="tp_close">إغلاق لوحة اللمس</string>
+    <string name="tp_options">خيارات لوحة اللمس</string>
+    <string name="tp_waiting">في انتظار سطح المكتب…</string>
+    <string name="tp_no_desktop">لا يعرض أي كمبيوتر سطح المكتب الآن، فلا شيء تحرّكه لوحة اللمس.</string>
+    <string name="tp_waiting_computer">في انتظار الكمبيوتر…</string>
+    <string name="tp_notice_text_computer">انقر لتشير وتنقر وتمرّر في تطبيقات هاتفك على الكمبيوتر</string>
+    <string name="tp_hidden">تُخفى لوحة اللمس ما دامت الإعدادات أو شاشة مشابهة مفتوحة، وتعود عند إغلاقها.</string>
+    <string name="st_phonepad">الهاتف كلوحة لمس</string>
+    <string name="st_phonepad_sub">إشعار على هاتفك يحوّل شاشته إلى لوحة لمس لسطح المكتب هذا</string>
+    <string name="st_phonepad_note">افتحها من ذلك الإشعار، أو من «لوحة اللمس» في الإعدادات السريعة. إصبع واحد يشير وينقر، وإصبعان للتمرير، وثلاثة تنفّذ الإيماءات أدناه.</string>
+    <string name="st_gestures_both">هذه الإيماءات نفسها على لوحة لمس الكمبيوتر المحمول وعلى لوحة لمس هاتفك.</string>
+
     <!-- Phone: who owns the Home button -->
     <string name="lx_home_title">إعادة زر الشاشة الرئيسية إلى هنا؟</string>
     <string name="lx_home_body">زر الشاشة الرئيسية وإيماءة السحب لأعلى يذهبان إلى مشغّل الهاتف، فمغادرة التطبيق تعني مغادرة سطح المكتب. اجعل Open Android DeX تطبيق الشاشة الرئيسية ليعودا إلى هنا. زر الرجوع يفعل ذلك أصلًا.</string>

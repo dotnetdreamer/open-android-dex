@@ -268,6 +268,22 @@
     <string name="lx_pad_no_service">ઍક્સેસિબિલિટીમાં Open Android DeX ચાલુ ન થાય ત્યાં સુધી પોઇન્ટર ક્લિક કરી શકતું નથી.</string>
     <string name="lx_pad_failed">ટચપૅડ ખૂલી શક્યું નહીં.</string>
 
+    <string name="tp_channel">ટચપૅડ</string>
+    <string name="tp_notice_title">તમારા ફોનને ટચપૅડ તરીકે વાપરો</string>
+    <string name="tp_notice_text">આ સ્ક્રીન પરથી ડેસ્કટોપ પર પોઇન્ટ, ક્લિક અને સ્ક્રોલ કરવા ટૅપ કરો</string>
+    <string name="tp_hints">ખસેડવા એક આંગળી સરકાવો · ક્લિક કરવા ટૅપ કરો\nરાઇટ-ક્લિક માટે બે આંગળીથી ટૅપ કરો, અથવા એક આંગળી સ્થિર રાખો\nખેંચવા બે વાર ટૅપ કરીને સરકાવો · સ્ક્રોલ કરવા બે આંગળી\nત્રણ આંગળી: તમારા જેસ્ચર માટે સ્વાઇપ કે ટૅપ કરો</string>
+    <string name="tp_close">ટચપૅડ બંધ કરો</string>
+    <string name="tp_options">ટચપૅડના વિકલ્પો</string>
+    <string name="tp_waiting">ડેસ્કટોપની રાહ જોવાઈ રહી છે…</string>
+    <string name="tp_no_desktop">કોઈ કમ્પ્યુટર ડેસ્કટોપ બતાવતું નથી, તેથી ટચપૅડ પાસે ખસેડવા જેવું કંઈ નથી.</string>
+    <string name="tp_waiting_computer">કમ્પ્યુટરની રાહ જોવાઈ રહી છે…</string>
+    <string name="tp_notice_text_computer">કમ્પ્યુટર પર તમારા ફોનની ઍપમાં પોઇન્ટ, ક્લિક અને સ્ક્રોલ કરવા ટૅપ કરો</string>
+    <string name="tp_hidden">સેટિંગ્સ કે તેના જેવી સ્ક્રીન ખુલ્લી હોય ત્યાં સુધી ટચપૅડ છુપાયેલું રહે છે. તે બંધ થતાં ટચપૅડ પાછું આવે છે.</string>
+    <string name="st_phonepad">ટચપૅડ તરીકે ફોન</string>
+    <string name="st_phonepad_sub">તમારા ફોન પરનું નોટિફિકેશન તેની સ્ક્રીનને આ ડેસ્કટોપનું ટચપૅડ બનાવી દે છે</string>
+    <string name="st_phonepad_note">તેને એ નોટિફિકેશનથી, અથવા ઝડપી સેટિંગ્સમાં ટચપૅડથી ખોલો. એક આંગળી પોઇન્ટ અને ક્લિક કરે છે, બે સ્ક્રોલ કરે છે, અને ત્રણ નીચેના જેસ્ચર ચલાવે છે.</string>
+    <string name="st_gestures_both">આ જેસ્ચર તમારા લેપટોપના ટચપૅડ પર અને તમારા ફોનના ટચપૅડ પર સરખા છે.</string>
+
     <!-- Phone: who owns the Home button -->
     <string name="lx_home_title">હોમ અહીં પાછું લાવવું?</string>
     <string name="lx_home_body">હોમ અને ઉપર સ્વાઇપ કરવાનો ઇશારો ફોનના પોતાના લૉન્ચરમાં જાય છે, એટલે ઍપ છોડતાં ડેસ્કટૉપ પણ છૂટી જાય છે. Open Android DeX ને હોમ ઍપ બનાવો એટલે એ બંને અહીં પાછાં આવશે. બૅક તો પહેલેથી જ આવે છે.</string>

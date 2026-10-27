@@ -1,0 +1,584 @@
+# The phone as the desktop's touchpad
+
+Samsung DeX puts a notification on the phone while it is showing a desktop:
+tap it, and the phone's screen becomes a touchpad for that desktop. This is the
+same thing for a desktop a computer is showing — one finger points, two scroll,
+three run the five gestures Settings → Touchpad maps — and the reasons each
+piece is where it is.
+
+Status: **built, and run on hardware** — a Galaxy A13 (Android 12) — see
+"Verified, and not yet" at the end. Two of its shapes were measured wrong there
+and replaced: the pad as an activity (§2), and the arrow as a window on One UI's
+untrusted display (§5).
+
+---
+
+## 0. The problem in one paragraph
+
+The desktop is a display of its own on the phone, shown by the computer. While a
+session runs, the phone's own screen is free in the user's hand — on a sofa in
+front of a TV, at a desk with a mouse but no touchpad, or just within reach. The
+pointer, though, belongs to the desktop's display: nothing on the phone's screen
+can move it, click with it or scroll under it, and Android draws no pointer for
+input it did not get from a device of its own. So the pad has to do three
+things: read fingers on the phone's screen without taking anything away from the
+desktop, turn them into a mouse on another display, and draw the pointer there
+itself.
+
+## 1. Shape
+
+```
+        phone's screen (display 0)                     desktop's display
+┌───────────────────────────────────┐   ┌──────────────────────────────────────┐
+│ TouchpadNotice  the notification  │   │ the arrow: an overlay, or a layer of │
+│ TouchpadActivity  its trampoline  │   │ the daemon's (PadPointer) — see §5   │
+│ Touchpad          the pad window  │   │  apps ◀── hover, buttons, wheel, keys │
+│ TouchpadGestures  what fingers    │   │            (AppInput, in the daemon)  │
+│                   mean            │   └──────────────────────────────────────┘
+└───────────────┬───────────────────┘                    ▲
+                │ moves, presses, wheel, keys            │
+                ▼                                        │
+         DesktopPointer ── outbox ── WmClient ──▶ wmd: MOUSE WHEEL LEAVE KEY FOCUS CURSOR
+```
+
+| Piece | File | What it owns |
+| --- | --- | --- |
+| The notification | `TouchpadNotice.java` | up while a computer shows the desktop; opens the pad |
+| Its trampoline | `TouchpadActivity.java` | opens the pad and finishes — see §2 |
+| The pad | `Touchpad.java` | the window on the phone's screen, its buttons and options, the three-finger actions, getting out of the way |
+| The grammar | `TouchpadGestures.java` | fingers → move, click, drag, wheel, gesture |
+| The pointer | `DesktopPointer.java` | where it is, the arrow, the outbox to the daemon |
+| The mouse | `WmDaemon.java` (`MOUSE` `WHEEL` `LEAVE` `KEY` `FOCUS` `TOP`), `AppInput.java` | injection into the desktop's display, at uid 2000 |
+| The daemon's arrow | `PadPointer.java` (`CURSOR`) | the arrow as a SurfaceFlinger layer, where no window of ours can be seen — §5 |
+| Entry points | `LauncherActivity.java` | the notification's lifetime; Touchpad in quick settings |
+| Settings | `SettingsActivity.java` | Phone as a touchpad (the notification), and the five gestures |
+| Where it lands | `PadTarget.java` | the desktop's pointer, or the computer's (§10) |
+| The computer's pointer | `HostPointer.java`, `AppsProvider.java` (`pad.*`) | the pad for the computer's own windows of the phone's apps — §10 |
+| Its way there | `openandroiddex-wmd/…/AppPad.java`, `AppServer.java` (`padOn`, `padOff`) | the port the pad reaches the computer through, who gets in, the overlay app-op |
+| The computer | `src-tauri/src/apps/pad.rs`, `apps/mac`, `apps/win` (`pad`), `apps/mod.rs` | offering it, its pointer moved, what it does handed to the phone's windows |
+| The check | `test/pad-test.mjs` | the phone's half of §10, over the wire |
+
+## 2. A window over the phone's screen, not an activity
+
+**The reason is focus.** Below Android 14 only the topmost display has a
+focused window (`config_perDisplayFocusEnabled` is false on both test phones),
+and touching a focusable window makes its display the topmost. A pad that could
+be focused takes the desktop's keyboard on every touch: the computer's keys,
+which scrcpy aims at the desktop's display, wait for a focused window that is no
+longer there — holding every key behind them — and time out. The daemon's
+`AppTasks.focus` records the same thing for the app windows.
+
+**An activity was built first, and measured wrong.** On a Galaxy A13 (Android
+12) the pad was an activity whose task the daemon then made one that cannot take
+focus (`WindowContainerTransaction.setFocusable(false)`, the line
+custom-titlebar-v2.md §4.1 calls mandatory for a chrome task) and whose window
+was `FLAG_NOT_FOCUSABLE`. The launch itself had already made it the phone
+display's focused app, and nothing gives that back: `dumpsys window` showed
+display 0 with the pad as `mFocusedApp`, no `mCurrentFocus` anywhere, and
+`mTopFocusedDisplayId=0`. That is the state InputDispatcher waits in: a Back
+from the phone's navigation bar is aimed at display 0, there is a focused app
+and no focused window, so it waits — and every touch on the pad waits behind
+it, because a touch only cuts the queue when it lands on a *different* app.
+After five seconds Android calls the pad not responding. It also explains why the
+daemon's `FOCUS` did nothing in that state: the task manager skipped display 0
+(nothing on it was both focusable and visible) and reported the desktop as
+focused, while the window manager — which is what keys follow — kept display 0
+on top because it had a focused app.
+
+**An overlay never enters that bookkeeping.** `TYPE_APPLICATION_OVERLAY` with
+`FLAG_NOT_FOCUSABLE` cannot be focused, and a touch on it moves no display to
+the top (`WindowState#canReceiveKeys` is false, so `onPointerDownOutsideFocus`
+returns early). The phone's focused app stays the phone's own, and the desktop
+keeps its keyboard. It is the shape the dock's own touchpad already has
+(`DexPointer`), under the overlay permission the computer grants for the session.
+
+**The notification still opens an activity** — a notification whose intent is a
+broadcast leaves the shade down over the pad it just opened — but one that only
+calls `Touchpad.open` and finishes (`TouchpadActivity`, on the Detour theme like
+the other trampolines). Finishing is what hands the phone's display back: the
+app the user had in front is resumed, and is its focused app again. Quick
+settings on the desktop opens the pad with no activity at all.
+
+**What the overlay costs, and what is done about it.** An overlay is not in the
+phone's stack of screens, so Home, a call being answered or an app opened from
+the shade would come up *underneath* it. The pad asks the daemon twice a second
+what is in front of the phone's display (`TOP 0`, read-only like `LIST`, and
+answering on Android 11 too) and closes itself once that has changed; our own
+tasks are not counted, so the trampoline passing through does not close it. A
+task new in front is looked at again 300 ms later and must still be there: the
+app of a window closed on the computer lands in front of the phone's screen for
+a moment on its way behind (§10), and caught there it put the pad away. Home
+and Recents on a phone already at its home screen change nothing in front, so
+they are also caught from `ACTION_CLOSE_SYSTEM_DIALOGS` (reasons `homekey` and
+`recentapps` only — the shade sends others, and opens over the pad on purpose).
+
+**Kept off the screen.** An overlay is also what Android hides while a screen
+that asks it to is showing: every page of Settings does, and so do the package
+installer, permission prompts and any app holding `HIDE_OVERLAY_WINDOWS`. The
+rule is the window manager's and spans every display, so Settings open on the
+desktop, or in a window of the computer's (§10), takes the pad off the phone's
+screen (`mForceHideNonSystemOverlayWindow=true` in `dumpsys window`). Nothing
+tells the pad's window, which stays; the phone's touches go through to
+whatever is under it, and when the screen that hid it goes, the pad is back by
+itself. From Android 15 a window can ask whether it really is on the screen
+(`WindowManager.registerTrustedPresentationListener`), and the pad does: off it
+for 1.5 s with the phone awake and unlocked, the pad shows a toast saying why —
+which Android drops from an app in the background that may not post
+notifications, so for the computer's windows the computer says it too (§10).
+Asleep or locked, the pad is off the screen for reasons that need no saying,
+and the shade pulled down over it is not counted either. Below 15, nothing
+tells.
+
+The phone's own Back is the app underneath's, which is still the phone's
+foreground app. Below Android 14, with the desktop holding the keyboard, a Back
+aimed at the phone's display waits like any other key there — the pre-14
+multi-display model, not something the pad adds — and the pad's next touch, on a
+different window, cuts it loose. ✕ is the pad's way out.
+
+## 3. A real mouse, through the daemon
+
+`WebInput` and the dock's touchpad put taps into the phone through
+`AccessibilityService#dispatchGesture`, because nothing else is open to an app,
+and say plainly what that costs: a mouse becomes a finger — no hover, no right
+button, a wheel turned into swipes that fling. The pad exists only while a
+computer is showing the desktop, and so only while the window daemon is up at
+uid 2000, which holds `INJECT_EVENTS`. So the pad is a real mouse: the daemon's
+`MOUSE` is `AppInput.pointer`, the injector the computer's own app windows use,
+which makes the sequence a mouse makes (hover; DOWN and BUTTON_PRESS; MOVE while
+held; BUTTON_RELEASE and UP), aimed at the desktop's display by id. A right
+click is `BUTTON_SECONDARY`, which is what opens context menus — the desktop's
+own included. `WHEEL` is `ACTION_SCROLL` in fractions of a notch.
+
+The old note that "`input -d` never lands on the desktop's display" (web-viewer.md)
+does not describe injection in-process: AppInput has put every app window's
+input into displays of its own since apps-on-pc shipped, and the desktop's
+display takes it the same way.
+
+**Nothing waits on the daemon.** The pad's moves go into an outbox drained on a
+client thread of its own, one line answered before the next. A move still waiting
+is replaced by the next one — the pointer follows the finger instead of replaying
+every place it has been, `WebInput`'s rule for drags — and consecutive wheel
+lines add up. A press, a release and a key are never folded into anything: a
+quick tap is still a click, and a drag still starts where the button went down.
+
+## 4. The grammar
+
+The Linux viewer's Mouse method (`dex-input.js`), constant for constant where
+the two share one, so the phone teaches one vocabulary:
+
+| Fingers | Does | Constants |
+| --- | --- | --- |
+| One, slid | moves the pointer, once past a tap's slop; the slop itself never moves it | `MOVE_SLOP` 12 dp |
+| One, tapped | clicks; never held back to wait for a second tap | — |
+| Two quick taps | two clicks; the app decides they are a double-click | `DOUBLE_MS` 300, `DOUBLE_SLOP` 40 dp |
+| Double-tap, then slide | holds the button: select, or drag a window by its bar | — |
+| One, held still | arms a right-click (a ring and a tick on the phone); lifting clicks it, sliding turns it into a drag | `LONG_MS` 500, `LONG_SLOP` 14 dp |
+| Two, slid | scrolls at the pointer; a flick keeps going and slows | 40 dp per notch; fling decay 325 ms |
+| Two, tapped | right-click | within 300 ms, unmoved |
+| Two, pinched | nothing — see below | `PINCH_SLOP` 24 dp |
+| Three (or more), slid | one gesture per touch, fired as the centre crosses ~10 mm | 60 dp |
+| Three, tapped | the tap gesture | still within 20 dp, 300 ms |
+
+Pointer speed is `DexPointer`'s curve (itself the viewer's), applied in dp on
+both sides — the finger's dp on the phone, the desktop's dp on the desktop — so a
+desktop drawn at twice the scale is not twice as slow to cross. Speed and scroll
+direction are the dock touchpad's two settings (`pad_speed`, `pad_natural`), set
+from the pad's ⚙.
+
+Pinching does nothing: Android has no mouse event that zooms. Ctrl with a wheel
+zooms a page in Chrome and almost nothing else; a real two-finger pinch would need
+touchscreen events injected beside a mouse's, which is a different piece of work.
+
+## 5. The pointer
+
+Android draws a pointer for an input device it owns; an injected event goes to
+the window under it and moves no sprite. So the arrow is ours: `DexCursors`'
+arrow in the style, colour and size Settings → Mouse & cursor picked (System,
+which has no picture of its own here, is drawn as DeX), at the desktop's
+density. Where it is drawn comes down to two things measured on the A13.
+
+**A window of ours can be buried.** One UI, on a virtual display that is not
+trusted — every scrcpy display below Android 13 — parents the display's whole
+app layer (`DefaultTaskDisplayArea`) to a `RootWrapper` above the `Root` that
+every overlay leaf lives in. The arrow as an accessibility overlay was added and
+reported drawn (`ty=2032` on the desktop's display), and was never composited:
+the desktop covers it. `LauncherActivity.overlaysBuried` already knew this for
+the taskbar.
+
+**Whatever is on the click's own point must be trusted.** The hot spot is
+exactly where each click lands, and a surface over it from another uid that is
+not a trusted overlay is "occlusion" to Android 12's tapjacking guard. With the
+guard on, InputDispatcher logged `Untrusted touch due to occlusion by /2000`
+and dropped the click. The session turns the guard off (`TOUCH_GLOBAL` in
+adb.rs), but only below Android 16, where the setting is gone and the guard is
+unconditional. An application overlay drawn at full alpha is occlusion by the
+same rule, so the arrow is never one.
+
+So the arrow comes from the first of these that takes it:
+
+1. the caption service's window context (`CaptionService.overlayContext`): an
+   accessibility overlay — trusted, above the taskbar and every menu, needing
+   no permission — Android 14 and later;
+2. the caption service's own display context. Below 14 a window context cannot
+   hold an accessibility overlay — "token null is not valid", measured on the
+   A13 — while an accessibility service's display context is made with the
+   service's overlay token for that display;
+3. the window daemon (`PadPointer`, `CURSOR`) — and first, where
+   `overlaysBuried` says no window of ours would be seen.
+
+A window is `NOT_TOUCHABLE`, so no click lands on it, and `LAYOUT_NO_LIMITS`,
+so near the right and bottom edges its tip is still where the clicks go; it is
+moved once per frame at most.
+
+**The daemon's arrow** is a layer at the root of SurfaceFlinger, on the
+desktop's layer stack: where the system draws a real mouse's pointer, above the
+`RootWrapper` and everything in it. A root layer is composited only for a caller
+holding `ACCESS_SURFACE_FLINGER`, which the shell has and an app never will, and
+the same authority makes it a trusted overlay (Android 12 and later). The
+launcher draws the bitmap and sends it once, a base64 PNG with its hot spot
+(`CURSOR`); each `MOUSE` then moves the layer in the same step as the hover it
+injects, so nothing on the phone places it frame by frame, and `LEAVE` hides it.
+The layer belongs to the connection that sent it: when that socket closes — the
+pad closed, the launcher died — the arrow goes too, rather than stay frozen over
+the desktop. `WmClient` counts its connections, and the pointer sends the arrow
+again on a new one.
+
+The arrow shows while the pad is up and goes with it; `LEAVE` lets go of
+anything held and ends the hover. Where it was left is remembered per display,
+so reopening the pad does not send it back to the middle.
+
+## 6. Three fingers
+
+The five slots Settings → Touchpad maps for a laptop's touchpad
+(`gest3up` … `gest3tap`), read from the phone's own copy of that mapping — one
+table for both pads, which is why the gesture cards in Settings are never dimmed
+now. Each action goes down the channel that owns it, as the laptop's do
+(`Sink::act`): the shell's panels as a `GESTURE` broadcast to the launcher, Back
+as a key through the daemon, maximise to the computer as a `window` request,
+exactly as the taskbar's app menu sends it.
+
+Home is the exception, and so is the pad's own ○: both are the taskbar's ○
+(`goHome`, through the same broadcast), not `KEYCODE_HOME`. On the A13 that key
+did nothing on the desktop — a display with no home of its own — and One UI
+still told every app the phone's Home key had been pressed, the pad among them,
+which put itself away. The laptop's Home gesture still sends the key.
+
+Next and previous window walk a remembered ring, for the reason
+`Sink::cycle_window` gives. Unlike the laptop's, our own windows — Settings,
+Linux — are in it; only the desktop itself is not. Both need `LIST`, which is
+Android 12's; on 11 they do nothing.
+
+`notifcentre` ("Notifications") was offered by Settings long before the desktop
+app's `Action::parse` knew it, so choosing it for a laptop gesture did the
+default instead. Both pads know it now.
+
+## 7. Focus, once more
+
+The pad never takes the keyboard, and gives it back to the desktop when
+something else on the phone did — pulling the shade down is enough:
+
+- `FOCUS <desktop>` as the pad opens, again 700 ms later (the notification's
+  trampoline takes the top back as it finishes), and as every touch begins. The
+  daemon does nothing when the desktop already has the keyboard, the usual case,
+  and otherwise focuses the desktop's top window (`setFocusedTask`, as the app
+  windows do).
+- `KEY` hands the keyboard over first, then presses the key — in-process, where
+  `KEYBACK` and the laptop's gestures fork `input` and wait for a VM to boot.
+
+So the computer's keyboard keeps typing where it was, and a click from the pad
+lands in a window that can take keys. Measured on the A13: with the phone's own
+screen holding the keyboard (the shade pulled down by touch,
+`mTopFocusedDisplayId=0`), one slide on the pad gave it back to the desktop, and
+the pad's Back, pressed straight away, closed the window in front there.
+
+## 8. The notification
+
+Up while the desktop is on a display of its own *and* a computer is behind it —
+the first heartbeat from the computer (`ACTION_RUNNING`) is the moment — on
+Android 11 and later. That excludes the desktop drawn on the phone's own screen
+(which has the dock's strip) and a desktop on a monitor with no computer (no
+daemon to carry the pointer). Ongoing, low importance, local only. Down with the
+desktop: the end-of-session force-stop clears it, a pulled cable takes the
+display and the activity that put it up, and the desktop takes it down itself
+otherwise (`touchpadOffered`). From Android 14 a user may swipe it away; that
+stands until the next desktop.
+
+From Android 13 a notification needs `POST_NOTIFICATIONS`. The computer grants
+it for the session (`grant_post_notifications` in adb.rs) by the rule notification
+access follows: an answer the user already gave stands either way — granted is
+theirs, and refused (`USER_SET` or `USER_FIXED` on a permission that is not
+granted) is theirs too — and `restore_phone` revokes it only when this app was
+what granted it, recorded in the per-phone restore map. Without it the
+notification is simply not shown, and quick settings' Touchpad still opens the pad.
+
+Settings → Touchpad → Phone as a touchpad turns the notification off. The pad
+itself stays one tap away in quick settings.
+
+## 9. Who may move the pointer
+
+The new verbs are open to the launcher's uid, and the launcher's uid is also the
+Linux guest's, where anything the user installs runs (see `PC_ONLY`). So for that
+uid every input verb is held to the desktop's own display — the one the launcher's
+`LauncherActivity` is on, looked up through `getTasks` at most every two seconds
+and never display 0, where the lock screen and every permission dialog live.
+`WHEEL` refuses `NaN`, infinities and absurd sizes, and `KEY` refuses codes
+Android does not have. `CURSOR` is held to the same display and to a picture no
+bigger than a pointer — 256 px either way, its size read before it is decoded —
+because a layer above everything on the desktop must not become a convincing
+dialog. `TOP` is read-only, like `LIST`. The PC's own uid may aim anywhere, as
+with every other verb.
+
+## 10. The computer's windows
+
+The phone's apps can be on the computer in windows of their own, with no
+desktop on the phone at all (doc/apps-on-pc.md). The pad is for those too:
+offered in the phone's shade while one of them is open, and in each window's
+☰, "Use phone as touchpad", which puts it up at once.
+
+**The pointer is the computer's own.** In those windows it always is — the
+phone is told where it is and what is held — so the pad moves it, as a
+touchpad of the computer's would. Nothing is drawn on the phone, and a move
+goes as how far: §4's speed curve over the finger's dp, in the computer's
+points, where on the desktop it is the desktop's dp. What it presses, scrolls
+and drags goes to the phone's window under the pointer, and only there: the
+phone never clicks anything else on the computer.
+
+- **On Windows** the pointer moves with `SetCursorPos`, and a press and the
+  wheel go in as a real mouse's (`SendInput`) — only while the pointer is over
+  one of the phone's windows, so its title bar, its buttons, its capture and
+  its hover all work as they do for the mouse. A drag that began in one of
+  them is let go wherever it ends. Double-tap and slide on a title bar would
+  be a double-click to Windows — the pad presses where its tap just clicked —
+  and maximise the window it was to move, so that press waits until the
+  pointer is out of a double-click's reach, a few pixels on, and goes in
+  there; let go before, it was the double-click.
+- **On a Mac** the pointer is warped (`CGWarpMouseCursorPosition`), which takes
+  no permission and makes no event, and what the pad does is handed to the
+  phone's window whose picture is the frontmost thing under the pointer, the
+  way its own picture takes the mouse; a press makes it the key window. Real
+  events posted there would need Accessibility, and would reach every app;
+  this needs neither. The title bar stays the Mac mouse's.
+
+**The gestures.** Back — the pad's ◁, or a gesture set to it — goes to the
+window the pointer is over, else the one in front. Next and previous window
+walk the phone's windows here in the order they opened; maximise zooms the
+one in front. The desktop's panels have nothing to act on here, and do
+nothing; ○ and ▢ are not on the pad.
+
+**Its way to the computer.** There is no window daemon: the phone's app
+server is there, and the pad reaches it over loopback TCP, as it reaches the
+daemon — an app may not connect to the shell's unix socket. On a port the
+server opens while the computer offers the pad, the kernel's pick, closed as
+it stops; one connection at a time, from the launcher's uid by `/proc/net`'s
+account (`Peers`, the daemon's), with the token the server made and handed the
+launcher through its own provider (`AppsProvider`'s `pad.offer` and
+`pad.open`, which only the shell may call). What the pad does goes on to the
+computer on the control connection, and the server answers the pad's look at
+what is in front of the phone's screen (§2) itself.
+
+**What it changes on the phone.** The pad is §2's overlay, so the server lets
+the launcher draw over other apps (the `SYSTEM_ALERT_WINDOW` app-op) while
+the computer offers the pad, and puts that back as it stops, unless a desktop
+is up and needs it too. It also puts the launcher in App Standby's `active`
+bucket, as a desktop's start does: a launcher no one opens on the phone is idle
+to Android, and off the charger an idle app has no network, loopback to the
+server included — on an Android 15 emulator on battery the pad was up, its
+connection never made, and it said only "Waiting for the computer…". The bucket is the
+system's to change again, so it is not put back. Notifications are not given: revoking that runtime
+permission ends the launcher's processes, and the phone's Linux with them. So
+the offer is in the shade only where the launcher may already post one, and
+never over a desktop's own; ☰ always has it. A phone without this build's
+launcher is given it by ☰ (`ensure_launcher` in adb.rs) — not while its
+Linux is running, which an install would end.
+
+**Kept off the screen.** Settings in one of these windows takes the pad off
+the phone's screen (§2) — the phone's own Settings on the phone would too, but
+that puts the pad away first. Each of that phone's windows here says so for a
+few seconds, "Your phone hides the touchpad while Settings or a similar screen
+is open", and again when the pad is back — a note, not a strip over the top of
+every window for as long as Settings is open: the pad's `hidden`, Android 15
+and later.
+
+The wire, on the app server's control connection (doc/apps-on-pc.md, "The
+wire"):
+
+| Message | Way | What |
+| --- | --- | --- |
+| `padOn {open}` | computer → phone | offer the pad, and with `open` put it up; answered by `padOn {ok, open, launcher, offered, message}` |
+| `padOff` | computer → phone | no longer offered: the pad and its notification down, the port closed, the app-op back |
+| `pad {k: open \| closed}` | phone → computer | the pad connected, or went |
+| `pad {k: move, dx, dy}` | phone → computer | the pointer moved, in the computer's points |
+| `pad {k: buttons, b}` | phone → computer | exactly these `MotionEvent.BUTTON_*` held |
+| `pad {k: wheel, h, v}` | phone → computer | notches, up and right positive |
+| `pad {k: key, code}` | phone → computer | Back (4), the one key taken |
+| `pad {k: act, action}` | phone → computer | `nextwindow`, `prevwindow`, `maximize` |
+| `pad {k: hidden, on}` | phone → computer | Android keeps the pad off the phone's screen (`on`), or has it back (§2) |
+
+The pad to its server, one JSON object a line: `pad {token}` first, then
+`move`, `buttons`, `wheel`, `key`, `act`, `hidden` as above, and `top`, answered
+`{task, pkg}`. The computer acts on `pad` only while it offers the pad, takes
+no key but Back and no button but the three a mouse has, and bounds a move and
+a wheel turn.
+
+## 11. Verified, and not yet
+
+On a Galaxy A13 (Android 12, One UI 4), USB, 2026-10-25, against a real
+desktop seen in the computer's window. Fingers were injected on the phone's
+screen by a uid-2000 touch injector (`input` cannot do several fingers), and the
+arrow's position read from SurfaceFlinger:
+
+- **The notification** comes up with the computer's first heartbeat, ongoing and
+  low importance, with the touchpad icon. Tapping it opens the pad; so does
+  Touchpad in the desktop's quick settings. Settings → Phone as a touchpad takes
+  it down and puts it back (an open pad stays open). Exit DeX takes it down.
+- **The pad** lays out between the system bars and leaves the phone's own app
+  focused. ✕ closes it; an app brought in front on the phone closes it ("the
+  phone brought com.android.settings to the front"); so does One UI's
+  `homekey` broadcast (seen when the pad's old Home sent it — below).
+- **The arrow**, as a window, was buried (§5); as the daemon's layer it shows
+  over the desktop and over app windows, in the computer's window. It goes when
+  the pad does, and when the connection that drew it closes.
+- **The gestures**: a slide moves the pointer (300 phone px → 148 desktop px at
+  the default speed) and hovering lights what is under it; a tap clicks (the
+  taskbar's Apps, the stopwatch's Start); two fingers tapped, and one held then
+  lifted, right-click (the desktop's Add widget… menu); one held then slid drags
+  a window by its handle, and a double-tap then slide drags a list as far as
+  the finger goes, where a plain slide only moves the pointer over it; two
+  fingers scroll in the natural direction, and a flick keeps the page moving
+  after the fingers lift; three swiped up ran `openapps`.
+- **Focus**, as §7 says: a slide gives the keyboard back, and Back reaches the
+  desktop's front window with no not-responding.
+- **The guard** (§5): an untrusted arrow layer made InputDispatcher drop a click
+  at its own hot spot; marked trusted, the same click went through. Both with
+  `block_untrusted_touches` set to block for the test, then put back.
+- **Home** as `KEYCODE_HOME` did nothing on the desktop and closed the pad; it is
+  the taskbar's ○ now, and the pad stays. On this phone the taskbar's ○ itself
+  does not bring the desktop in front of a freeform window either — the same
+  `goHome`, with or without the pad.
+- `CURSOR` refuses a picture wider than 256 px, and a line that is not one.
+- Below Android 13 the permission check finds nothing to grant.
+
+One thing to know when trying it: a click on One UI's window handle opens the
+window's Quick options, so a double-tap there opens those before the slide —
+hold, then slide, to move a window by its handle.
+
+**The computer's windows** (§10), the phone's half: `node test/pad-test.mjs
+[serial]` on the Android 16 emulator, 2026-10-26, 27 checks, the touches real
+ones on the phone's screen — one finger by `input`, two and three by the dex's
+`Probe fingers` (the shell's INJECT_EVENTS; `input` has one finger and
+`sendevent` is refused the touchscreen) — and what they did read off the
+control connection: the pad offered, the launcher let draw it over other
+apps; a connection to its port through an `adb forward` — the shell, not the
+launcher — refused, and its move never reaching the computer; the pad up and
+connected; a slide of 160 dp as moves 226–242 points to the right and none
+down; a tap as the primary button down and up; a finger held still as the
+secondary; two fingers slid 160 dp as 3.7 notches of wheel and no move; two
+tapped as the secondary; three to the right and the left as the next and the
+previous window, three tapped as Back, three up — the desktop's Apps —
+reaching nothing; the pad's ◁ as Back (4); Settings opened in a window of its
+own keeping the pad off the phone's screen (§2) and the pad saying so, then
+that it was back as the window closed, but neither the shade pulled down over
+it nor the screen put to sleep and woken; Settings started on the phone
+putting the pad away; ✕ closing it; withdrawn, the pad gone and the app-op
+back to `default`; the server stopping withdrawing it as well. The launcher
+there was not allowed notifications, so the offer was in the shade as nothing
+and Android dropped the pad's toast ("Suppressing toast from package … by user
+request"); one run with them allowed had the offer in the shade and the toast
+on the phone, 28 checks.
+
+**On a Mac** (macOS 26, the same emulator, 2026-10-26), the app built with all
+of it, in windows of Messages, Settings and Chrome: the pad offered as the
+first window showed its app, and More → "Use phone as touchpad" putting it up;
+slides on the phone moving the Mac's pointer — right, down and left, +98, +104
+and −118 points; a tap clicking where the pointer was, in the window under it,
+which came to the front (Messages' "Use Messages without an account", its
+"Start chat", Chrome's first-run buttons); two fingers scrolling Chrome's feed,
+the content following the fingers; three to the right and to the left bringing
+the other window in front; ◁, and three fingers tapped, each one Back (Messages'
+New conversation closed); ✕ closing the pad, a slide on the phone then moving
+nothing here, and More putting it up again; the last window closed
+withdrawing it, the app-op back to `default`. That run is what found §2's
+hiding: with Settings in a window the phone's touches went through to its
+home screen, and one opened Drive — which put the pad away.
+
+Then, built again with `hidden` and the Mac's note strip: the launcher let post
+notifications for the run, the offer in the phone's shade, and the pad opened
+by tapping it there; Settings opened in a window, and 1.9 s after its picture
+came, both windows saying "Your phone hides the touchpad while Settings or a
+similar screen is open" in two lines under the title bar — in the subtitle,
+where Mac notes went before, it had shown "Messages – Your phone hi…" — gone
+4.5 s later; Settings ended on the phone, its window closing, and "The touchpad
+is back on your phone's screen" with the pad on the phone's screen again and
+moving the pointer.
+
+**On Windows** (Windows 11, one screen at 96 DPI, 2026-10-26), the app run with
+`npm run tauri dev`: the pad offered as a window showed; ☰ → "Use phone as
+touchpad" installing this build's launcher where the phone had an older one (the
+Galaxy A13) or none (the Redmi 9A, an Android 15 emulator), and saying so in the
+window; the last window closed withdrawing it, the port closed and the app-op
+back to `default`; on the Android 15 emulator, Settings in a window making every
+window say the pad is hidden, and its closing that it is back. From that
+emulator's pad, the real pointer here, recorded by a low-level mouse hook: a
+160 dp slide 221–234 px; a tap a left click, a finger held a right click; two
+fingers 3.8 notches of wheel, a list in the window scrolling the natural way;
+three fingers bringing the next and the previous window in front; ◁ Back;
+hold-then-slide dragging a window by its title bar; and nothing pressed or
+scrolled with the pointer off the phone's windows. `node test/pad-test.mjs` on
+the Galaxy A13: 23 of 23 in three runs of four, and the Redmi 9A the 13 checks
+that need no touch (MIUI refuses the shell's injected touches).
+
+That run found what §2 and §10 now handle: the launcher idle to App Standby,
+its connection cut on battery; closing the Settings window putting the pad away
+instead of bringing it back, once in eight, the app passing through the phone's
+front; double-tap and slide on a title bar maximising the window; and adb's own
+error, with this computer's path to the APK and the phone's stack trace, as the
+window's note when the launcher would not install (a full emulator). The A13's
+one failure was the test's: Home, pressed to end the step before, acted only
+after the test had put the pad up again, and its `homekey` put the pad away (the
+launcher's log: up at 19:51:38.370, "the phone's homekey — putting the pad away"
+at .455). The test now waits for Home to be in front.
+
+The fixes, on the same Windows PC and the Galaxy A13, 2026-10-27: this build's
+launcher put on by a desktop launch, then Disconnect. A double-tap and slide on
+the pad over a window's title bar, the real pointer recorded as before: the tap
+a click at 946,78, the second press held until the pointer was 23 px on and
+pressed there, the window moved 114 px and not maximised; a double-tap there
+still maximised it. Twenty windows of the Clock closed with the pad up, each
+close passing the Clock through the front of the phone's screen for 24–56 ms
+(`wm_task_moved` in the events log): the pad stayed every time — where the
+launcher before it, that morning, had put itself away as a Calendar window
+closed ("the phone brought com.samsung.android.calendar to the front"). With
+the launcher in bucket 40, on battery (`dumpsys battery unplug`) and its
+notification listener off, so that nothing else held it up, App Standby cut it
+off (`10863-standby-deny`). On Android 12 that does not last: the app server's
+first call into the launcher counted as a use of it (`reason=u-si`, bucket 10)
+and lifted the cut before any pad was offered — the Android 15 emulator never
+counted the pad's own window as one. The offer then set the bucket itself
+(`reason=f`, the shell's hand), and the pad connected on battery. `node
+test/pad-test.mjs` on the A13: 24 of 24, three runs of three.
+
+Not yet:
+
+1. **A trusted display** (Android 13+, the S25 Ultra), where the arrow is an
+   accessibility overlay (§5's first two ways) rather than the daemon's layer.
+   Neither test phone is 13 or later; nor has the daemon's layer run on one.
+2. **One UI on Android 11**, which `overlaysBuried` also sends to the daemon.
+3. **`ACTION_CLOSE_SYSTEM_DIALOGS` on Android 14 and later** — whether it still
+   reaches a receiver that is not exported.
+4. **Android 13+ `POST_NOTIFICATIONS`** — the grant, the revoke, and whether a
+   shell `pm revoke` leaves flags the next session would read as a refusal.
+5. **An answered call** and Recents closing the pad; only Home and an app
+   started on the phone were tried.
+6. **Latency** beyond "it follows the finger": the arrow moves in the daemon in
+   the same step as the hover it shows, and reaches the computer in the video.
+7. **The computer's windows on Windows** (§10): one screen at 96 DPI only — not
+   another scale, nor a pointer clamped between monitors. The next and previous
+   window gestures bring a window forward with `SetForegroundWindow`, which
+   Windows may refuse an app that is not in front: it did not, but no one was
+   using another app at the time. The window's note for a launcher that would
+   not install is unit-tested only.
+8. **The computer's windows on a real phone**: the phone's half on the Galaxy
+   A13, and without touches on the Redmi 9A; the computer's pointer has been
+   moved from an emulator's pad only.
+9. **Below Android 15** nothing tells the pad it is kept off the screen (§2):
+   it goes without a word.

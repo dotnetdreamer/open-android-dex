@@ -77,6 +77,55 @@ windows-sys = { version = "0.60", features = [
     "Win32_System_JobObjects",
 ] }
 
+# The phone's apps in windows of their own (src/apps/win): a Win32 window per
+# app, its picture decoded by Media Foundation on the window's own D3D11
+# device and presented through a flip-model swap chain, its title bar drawn
+# with Direct2D and DirectWrite, its icon decoded with WIC, its taskbar
+# identity set through the shell's property store. COM throughout, which
+# windows-sys does not do. The version is the one wry already brings in.
+windows = { version = "0.62", features = [
+    # The phone's notifications as this computer's own (src/notifications):
+    # a toast is an XML document handed to the toast notifier, and what the
+    # person typed into its reply box comes back as a value set.
+    "Data_Xml_Dom",
+    "Foundation",
+    "Foundation_Collections",
+    "UI_Notifications",
+    "Win32_Foundation",
+    "Win32_Graphics_Direct2D",
+    "Win32_Graphics_Direct2D_Common",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D_Fxc",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_DirectWrite",
+    "Win32_Graphics_Dwm",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Graphics_Gdi",
+    "Win32_Graphics_Imaging",
+    "Win32_Media_MediaFoundation",
+    "Win32_Storage_EnhancedStorage",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    # This computer's clipboard, watched as it changes and read where a
+    # password manager may have marked it as not for other devices
+    # (apps/clipboard.rs).
+    "Win32_System_DataExchange",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Memory",
+    # When a frame reached the screen: DXGI's frame statistics are in QPC time.
+    "Win32_System_Performance",
+    "Win32_System_Registry",
+    "Win32_System_Threading",
+    "Win32_System_Variant",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Input_Ime",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_PropertiesSystem",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
 # Native window control for the spawned scrcpy windows (embed/macos.rs).
 # Both crates are already in the tree — tao and wry build on them — so this
 # adds resolution, not compilation. The Accessibility API needs no crate: it is
@@ -109,6 +158,20 @@ objc2-foundation = { version = "0.3", default-features = false, features = [
     "NSEnumerator",
     # NSRect and friends, for the title bar measurement in display.rs.
     "NSGeometry",
+    # The phone apps' windows (apps/mac): text input's strings and ranges, the
+    # window delegate's notifications, a display layer's error, an app's icon.
+    "NSArray",
+    "NSAttributedString",
+    "NSData",
+    "NSError",
+    "NSNotification",
+    "NSObjCRuntime",
+    "NSRange",
+    "NSString",
+    # A file dropped on one of them, as Finder hands it over.
+    "NSURL",
+    # Whether this run is the app bundle, which the notification center needs.
+    "NSBundle",
 ] }
 # Quartz Event Services, for the trackpad tap. Already in the tree via
 # objc2-app-kit, so this adds resolution rather than compilation — and unlike
@@ -123,6 +186,10 @@ objc2-core-graphics = { version = "0.3", default-features = false, features = [
     # Which screen the desktop's window is on (embed/macos.rs window_scale).
     "CGWindow",
     "CGGeometry",
+    # The phone's touchpad moving this Mac's pointer over the phone's windows
+    # (apps/mac, pad): a warp, which takes no permission and posts no event.
+    "CGRemoteOperation",
+    "CGError",
 ] }
 objc2-app-kit = { version = "0.3", default-features = false, features = [
     "std",
@@ -146,4 +213,87 @@ objc2-app-kit = { version = "0.3", default-features = false, features = [
     "NSWindow",
     # …and eventWithCGEvent: is gated behind the CoreGraphics bridge.
     "objc2-core-graphics",
+    # The phone's apps in windows of their own (apps/mac): the window, its
+    # view and its text input, the title bar's Back, the screens, and the
+    # view's layer that the picture's layer sits in.
+    "NSApplication",
+    "NSButton",
+    "NSColor",
+    "NSControl",
+    "NSGraphics",
+    "NSImage",
+    "NSLayoutConstraint",
+    "NSScreen",
+    "NSText",
+    "NSTextField",
+    "NSTextInputClient",
+    "NSTitlebarAccessoryViewController",
+    "NSTrackingArea",
+    "NSViewController",
+    "objc2-quartz-core",
+    # Their sound menu, the files dropped on them, and this Mac's clipboard
+    # watched as it changes (apps/mac, apps/clipboard.rs).
+    "NSCell",
+    "NSDragging",
+    "NSMenu",
+    "NSMenuItem",
+    "NSPasteboard",
+    "NSPasteboardItem",
+    # …the title bar's More, and the small bar a full-screen window slides
+    # down from the top of the screen (More's menu is NSMenu's, above).
+    "NSAnimation",
+    "NSAnimationContext",
+    "NSFont",
+    "NSFontDescriptor",
+    "NSParagraphStyle",
+    "NSVisualEffectView",
 ] }
+# The picture of a phone app's window on a Mac (apps/mac/video.rs): a layer
+# macOS decodes H.264 into, and the CoreMedia buffers it takes. The same
+# objc2 family as the rest, so these add bindings rather than a new runtime.
+objc2-av-foundation = { version = "0.3", default-features = false, features = [
+    "std",
+    "AVAnimation",
+    "AVQueuedSampleBufferRendering",
+    "AVSampleBufferDisplayLayer",
+    "objc2-core-media",
+    "objc2-quartz-core",
+] }
+objc2-core-media = { version = "0.3", default-features = false, features = [
+    "std",
+    "CMBase",
+    "CMBlockBuffer",
+    "CMFormatDescription",
+    "CMSampleBuffer",
+    "CMTime",
+] }
+objc2-quartz-core = { version = "0.3", default-features = false, features = [
+    "std",
+    "CALayer",
+    "CATransaction",
+    "objc2-core-foundation",
+] }
+# The main thread's queue, which AppKit's work for those windows goes through.
+dispatch2 = "0.3"
+# The phone's notifications as this Mac's own (src/notifications/macos.rs):
+# the notification center, its categories of buttons and reply box, and the
+# delegate that hears a click. Already in the tree (UIKit's bindings bring
+# it), so this adds compilation for the Mac, not a new family. Its completion
+# handlers are blocks.
+objc2-user-notifications = { version = "0.3", default-features = false, features = [
+    "std",
+    "block2",
+    "bitflags",
+    "UNNotification",
+    "UNNotificationAction",
+    "UNNotificationAttachment",
+    "UNNotificationCategory",
+    "UNNotificationContent",
+    "UNNotificationRequest",
+    "UNNotificationResponse",
+    "UNNotificationSettings",
+    "UNNotificationSound",
+    "UNNotificationTrigger",
+    "UNUserNotificationCenter",
+] }
+block2 = "0.6"

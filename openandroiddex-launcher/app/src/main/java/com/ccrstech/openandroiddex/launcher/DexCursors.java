@@ -512,6 +512,54 @@ final class DexCursors {
 
     private static PointerIcon draw(int role, Look look, int fill, int line,
                                     boolean shadow, float wantedPx) {
+        Sprite sprite = sprite(role, look, fill, line, shadow, wantedPx);
+        return PointerIcon.create(sprite.bitmap, sprite.hotX, sprite.hotY);
+    }
+
+    /** A pointer as a picture and the point of it, in that picture's pixels. */
+    static final class Sprite {
+        final Bitmap bitmap;
+        final float hotX;
+        final float hotY;
+
+        Sprite(Bitmap bitmap, float hotX, float hotY) {
+            this.bitmap = bitmap;
+            this.hotX = hotX;
+            this.hotY = hotY;
+        }
+    }
+
+    /**
+     * The arrow in the user's style, size and colour, for a pointer the platform does not
+     * draw: the phone touchpad's, which is a window of ours on the desktop
+     * ({@link DesktopPointer}). Null if it cannot be drawn.
+     *
+     * <p>At {@code densityDpi}, the desktop display's, and outside the cache: the cache is
+     * for the density PointerIcons are asked for at, and a pad on the phone's screen has no
+     * business invalidating it. System has nothing to hand back here — there is no platform
+     * pointer on that display to defer to — so it is drawn as DeX, the default.
+     */
+    static Sprite arrow(Context ctx, int densityDpi) {
+        String style = style(ctx);
+        if (STYLE_SYSTEM.equals(style)) style = STYLE_DEX;
+        DexTheme theme = DexTheme.of(ctx);
+        Look look = look(style);
+        int fill = hue(DexPrefs.getString(ctx, DexPrefs.KEY_CURSOR_COLOR,
+                DexPrefs.DEF_CURSOR_COLOR), theme);
+        int line = outline(DexPrefs.getString(ctx, DexPrefs.KEY_CURSOR_OUTLINE,
+                DexPrefs.DEF_CURSOR_OUTLINE), fill);
+        boolean shadow = look.shadow
+                || DexPrefs.getBool(ctx, DexPrefs.KEY_CURSOR_SHADOW, DexPrefs.DEF_CURSOR_SHADOW);
+        float wanted = BASE_DP * (densityDpi / 160f) * look.scale * (size(ctx) / 100f);
+        try {
+            return sprite(ROLE_ARROW, look, fill, line, shadow, wanted);
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    private static Sprite sprite(int role, Look look, int fill, int line,
+                                 boolean shadow, float wantedPx) {
         Shape shape = shape(role, look);
 
         // Padding has to hold the half of the keyline that sits outside the
@@ -551,7 +599,7 @@ final class DexCursors {
         // before the padding is added back.
         float hx = Math.min(side - 1f, Math.max(0f, (shape.hotX + pad) * side / box));
         float hy = Math.min(side - 1f, Math.max(0f, (shape.hotY + pad) * side / box));
-        return PointerIcon.create(bitmap, hx, hy);
+        return new Sprite(bitmap, hx, hy);
     }
 
     private static void paint(Canvas canvas, Shape shape, Look look, int fill, int line,

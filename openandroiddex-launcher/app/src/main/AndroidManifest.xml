@@ -160,6 +160,15 @@
             android:authorities="com.ccrstech.openandroiddex.launcher.remote"
             android:exported="true"
             android:permission="android.permission.DUMP" />
+        <!-- The phone's Linux apps for a computer that shows the phone's apps in
+             windows of its own: its app server, the shell's process, asks here
+             for the list and its icons, to open one, and what its windows do.
+             Guarded as the provider above, and checked again in call(). -->
+        <provider
+            android:name=".AppsProvider"
+            android:authorities="com.ccrstech.openandroiddex.launcher.apps"
+            android:exported="true"
+            android:permission="android.permission.DUMP" />
         <!-- Brings remote access back after a reboot, an update, and the
              desktop app's end-of-session force-stop (which sends RESUME over
              adb). DUMP for the same reason as the provider above: the system
@@ -259,9 +268,14 @@
 
              Every configuration change is handled in place: rebuilding the
              activity would take the surface from under a window mid-resize. -->
+        <!-- Exported to the shell alone (DUMP, which no ordinary app holds): on a
+             computer that shows the phone's apps in windows of their own, each
+             Linux window's task goes on a display the shell made, and only a
+             system-level caller may start an activity on one of those. -->
         <activity
             android:name=".LinuxWindowActivity"
-            android:exported="false"
+            android:exported="true"
+            android:permission="android.permission.DUMP"
             android:icon="@mipmap/ic_linux"
             android:label="@string/ln_label"
             android:launchMode="standard"
@@ -396,6 +410,26 @@
             android:taskAffinity="com.ccrstech.openandroiddex.launcher.taskmanager"
             android:resizeableActivity="true"
             android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|navigation|uiMode" />
+
+        <!-- What the touchpad's notification opens (TouchpadNotice): it puts the phone's
+             own screen up as the desktop's touchpad — an overlay window, see Touchpad and
+             doc/phone-touchpad.md — and finishes before it draws. A trampoline because a
+             notification that opens an activity is one the shade closes itself for.
+
+             It owns a task, is out of Recents and draws nothing — the task-shaped hole
+             LinuxAppActivity and WebConsentActivity are, under an affinity of its own for
+             the reason SettingsActivity spells out. -->
+        <activity
+            android:name=".TouchpadActivity"
+            android:exported="false"
+            android:label="@string/lx_pad_title"
+            android:launchMode="singleTask"
+            android:taskAffinity="com.ccrstech.openandroiddex.launcher.touchpad"
+            android:theme="@style/Theme.OpenAndroidDeX.Detour"
+            android:excludeFromRecents="true"
+            android:autoRemoveFromRecents="true"
+            android:resizeableActivity="true"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|density|keyboard|keyboardHidden|navigation|uiMode|locale|layoutDirection|fontScale" />
 
         <!-- Trampoline for the widget flow's two system detours (the bind
              confirmation, the provider's configure screen). It exists only to

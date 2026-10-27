@@ -41,6 +41,12 @@ adb shell "printf 'DESKTOP com.ccrstech.openandroiddex.launcher`nBYE`n' | toybox
 Protocol: `PING` · `DESKTOP <pkg>` · `LIST <display>` · `STRIP <display> <task> <px> [inset]` ·
 `UNSTRIP` · `MOVE <display> <task> <x> <y>` · `BOUNDS <display> <task> <l> <t> <r> <b>` ·
 `FRONT` · `BACK` · `FOCUSABLE <display> <task> <0|1>` · `CLOSE <task>` · `BYE`.
+The phone touchpad's input (doc/phone-touchpad.md): `MOUSE <display> <x> <y> <buttons>` ·
+`WHEEL <display> <x> <y> <h> <v>` · `LEAVE <display>` · `KEY <display> <keycode>` ·
+`FOCUS <display>` · `TOP <display>` · `CURSOR <display> <x> <y> <hx> <hy> <png>` (the
+arrow as a root SurfaceFlinger layer, kept only while that connection is open) — see the
+header of `WmDaemon.java` for the full list. Where the pad's arrow is:
+`dumpsys SurfaceFlinger | grep -A4 "Layer (Touchpad pointer"` (`pos=`).
 
 `LIST` returns **topmost first**, 17 whitespace fields:
 

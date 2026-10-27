@@ -276,6 +276,12 @@ final class DexPrefs {
     static final String KEY_PAD_NATURAL = PAD_PREFIX + "natural";
     /** Touchpad height as a percentage of the display. */
     static final String KEY_PAD_HEIGHT = PAD_PREFIX + "height";
+    /**
+     * The notification that offers the phone's screen as the desktop's touchpad
+     * while a computer is showing the desktop — see {@link Touchpad}.
+     * Speed and scrolling are the two keys above: one pad, however it is reached.
+     */
+    static final String KEY_PAD_NOTICE = PAD_PREFIX + "notice";
 
     /**
      * The home-role offer has been put to the user once — see
@@ -341,6 +347,12 @@ final class DexPrefs {
     static final boolean DEF_PAD_NATURAL = true;
     /** Enough strip to swipe across, with the shell still the larger half. */
     static final int DEF_PAD_HEIGHT = 28;
+    /**
+     * ON, unlike {@link #DEF_PAD_ON}: this takes nothing away. It is a line in the
+     * phone's notification shade that does nothing until it is tapped, and it is
+     * how anyone finds out the phone can be the touchpad at all.
+     */
+    static final boolean DEF_PAD_NOTICE = true;
     /** Stays scrcpy's own default: uhid captures the PC's mouse, so it is opt-in. */
     static final String DEF_MOUSE_MODE = "sdk";
     static final String DEF_FONT = "default";

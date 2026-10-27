@@ -268,6 +268,22 @@
     <string name="lx_pad_no_service">在无障碍中启用 Open Android DeX 之前，指针无法点击。</string>
     <string name="lx_pad_failed">无法打开触控板。</string>
 
+    <string name="tp_channel">触控板</string>
+    <string name="tp_notice_title">将手机用作触控板</string>
+    <string name="tp_notice_text">点按即可在此屏幕上对桌面进行指向、点击和滚动</string>
+    <string name="tp_hints">单指滑动移动指针 · 轻点即点击\n双指轻点或单指按住不动即为右键\n连点两下再滑动即为拖拽 · 双指滚动\n三指滑动或轻点，执行你设置的手势</string>
+    <string name="tp_close">关闭触控板</string>
+    <string name="tp_options">触控板选项</string>
+    <string name="tp_waiting">正在等待桌面…</string>
+    <string name="tp_no_desktop">没有电脑在显示桌面，触控板无可操作的对象。</string>
+    <string name="tp_waiting_computer">正在等待电脑…</string>
+    <string name="tp_notice_text_computer">点按即可在电脑上对手机应用进行指向、点击和滚动</string>
+    <string name="tp_hidden">“设置”或类似界面打开时，触控板会被隐藏；关闭后会重新出现。</string>
+    <string name="st_phonepad">手机用作触控板</string>
+    <string name="st_phonepad_sub">手机上的一条通知可将其屏幕变为此桌面的触控板</string>
+    <string name="st_phonepad_note">可从该通知或快捷设置中的“触控板”打开。单指指向和点击，双指滚动，三指执行下方的手势。</string>
+    <string name="st_gestures_both">这些手势在笔记本电脑的触控板和手机的触控板上完全相同。</string>
+
     <!-- Phone: who owns the Home button -->
     <string name="lx_home_title">让主页键回到这里？</string>
     <string name="lx_home_body">主页键和上滑手势会回到手机自带的启动器，所以离开应用就等于离开桌面。把 Open Android DeX 设为主屏幕应用，两者就会回到这里。返回键本来就会。</string>

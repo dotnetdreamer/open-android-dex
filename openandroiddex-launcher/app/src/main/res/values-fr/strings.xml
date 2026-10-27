@@ -268,6 +268,22 @@
     <string name="lx_pad_no_service">Le pointeur ne peut pas cliquer tant qu’Open Android DeX n’est pas activé dans l’Accessibilité.</string>
     <string name="lx_pad_failed">Impossible d’ouvrir le pavé tactile.</string>
 
+    <string name="tp_channel">Pavé tactile</string>
+    <string name="tp_notice_title">Utiliser votre téléphone comme pavé tactile</string>
+    <string name="tp_notice_text">Touchez pour pointer, cliquer et faire défiler sur le bureau depuis cet écran</string>
+    <string name="tp_hints">Glissez un doigt pour déplacer · Touchez pour cliquer\nTouchez à deux doigts, ou gardez un doigt immobile, pour un clic droit\nTouchez deux fois puis glissez pour faire glisser · Deux doigts font défiler\nTrois doigts : glissez ou touchez pour vos gestes</string>
+    <string name="tp_close">Fermer le pavé tactile</string>
+    <string name="tp_options">Options du pavé tactile</string>
+    <string name="tp_waiting">En attente du bureau…</string>
+    <string name="tp_no_desktop">Aucun ordinateur n’affiche le bureau : le pavé tactile n’a rien à déplacer.</string>
+    <string name="tp_waiting_computer">En attente de l’ordinateur…</string>
+    <string name="tp_notice_text_computer">Touchez pour pointer, cliquer et faire défiler dans les applications de votre téléphone sur l’ordinateur</string>
+    <string name="tp_hidden">Le pavé tactile est masqué tant que Paramètres ou un écran similaire est ouvert. Il revient dès sa fermeture.</string>
+    <string name="st_phonepad">Le téléphone comme pavé tactile</string>
+    <string name="st_phonepad_sub">Une notification sur votre téléphone transforme son écran en pavé tactile pour ce bureau</string>
+    <string name="st_phonepad_note">Ouvrez-le depuis cette notification, ou depuis Pavé tactile dans les réglages rapides. Un doigt pointe et clique, deux font défiler, trois lancent les gestes ci-dessous.</string>
+    <string name="st_gestures_both">Ces gestes sont les mêmes sur le pavé tactile de votre ordinateur portable et sur celui de votre téléphone.</string>
+
     <!-- Phone: who owns the Home button -->
     <string name="lx_home_title">Ramener Accueil ici ?</string>
     <string name="lx_home_body">Accueil et le balayage vers le haut mènent au lanceur du téléphone : quitter une application quitte donc le bureau. Faites d’Open Android DeX l’application d’accueil et ils reviendront ici. Retour le fait déjà.</string>

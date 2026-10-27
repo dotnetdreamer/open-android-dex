@@ -205,6 +205,13 @@ fn session_pid(app: &AppHandle, key: &str) -> Option<u32> {
     crate::scrcpy::session_pid(app, key)
 }
 
+/// Is the phone's desktop — session `key` — the window in front? The same
+/// answer the keys get, for the phone's notifications: the desktop shows
+/// its own while it is in front (notifications/mod.rs).
+pub fn desktop_in_front(app: &AppHandle, key: &str) -> bool {
+    backend::desktop_is_foreground(app, key)
+}
+
 /// State the host hooks reach through, because neither a Win32 hook procedure
 /// nor an event tap can be handed a closure.
 struct Ctx {

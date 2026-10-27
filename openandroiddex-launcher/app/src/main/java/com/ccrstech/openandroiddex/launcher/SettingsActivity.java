@@ -1547,7 +1547,8 @@ public class SettingsActivity extends Activity {
     };
 
     /**
-     * Three-finger gestures, and nothing else.
+     * Three-finger gestures, and nothing else — and the phone's screen as a second
+     * touchpad that uses the same five.
      *
      * One and two finger input is not offered because it is not ours to offer:
      * the computer's own driver already turns those into a pointer, a wheel
@@ -1555,6 +1556,10 @@ public class SettingsActivity extends Activity {
      * context menus depend on that right-click. Four fingers are left to the
      * computer on purpose, so a user still has their own window switcher while
      * the desktop has three.
+     *
+     * The phone's pad (Touchpad) reads the same five slots. That is why
+     * the gesture cards stay live while the laptop's master switch is off or the
+     * computer has no touchpad: the phone is a touchpad that is always there.
      */
     private void buildTouchpadSection(LinearLayout body) {
         boolean on = DexPrefs.getBool(this, DexPrefs.KEY_GESTURES, DexPrefs.DEF_GESTURES);
@@ -1563,6 +1568,18 @@ public class SettingsActivity extends Activity {
         // Accessibility yet — both are worth saying rather than leaving the
         // user to wonder why a section full of controls does nothing.
         boolean hostReady = DexPrefs.getBool(this, DexPrefs.KEY_HOST_TOUCHPAD, false);
+        // A phone setting, not a PC one: the desktop puts the notification up
+        // itself, so this is stored here and never pushed.
+        boolean phonePad = DexPrefs.getBool(this, DexPrefs.KEY_PAD_NOTICE,
+                DexPrefs.DEF_PAD_NOTICE);
+
+        LinearLayout phone = card(body);
+        toggleRow(phone, s(R.string.st_phonepad), s(R.string.st_phonepad_sub), phonePad, true,
+                next -> {
+                    DexPrefs.put(this, DexPrefs.KEY_PAD_NOTICE, next.booleanValue());
+                    showSection(SEC_TOUCHPAD, false);
+                });
+        note(phone, s(R.string.st_phonepad_note));
 
         LinearLayout master = card(body);
         toggleRow(master, s(R.string.st_touchpad), s(R.string.st_touchpad_sub), on, true,
@@ -1576,25 +1593,25 @@ public class SettingsActivity extends Activity {
             note(master, s(R.string.st_touchpad_permission));
         }
 
-        // Dim rather than hide, the same way the pointer-speed card does: a
-        // section that empties itself reads as broken, while a dimmed one
-        // reads as "not yet".
+        // Never dimmed any more, whatever the laptop's switch and pad: the
+        // phone's own touchpad runs these too, and it is one tap away in quick
+        // settings with or without its notification.
         LinearLayout rows = new LinearLayout(this);
         rows.setOrientation(LinearLayout.VERTICAL);
-        rows.setAlpha(on && hostReady ? 1f : 0.4f);
         body.addView(rows, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        note(rows, s(R.string.st_gestures_both));
 
         gestureCard(rows, R.string.st_gesture_3up, DexPrefs.KEY_GESTURE_3UP,
-                DexPrefs.DEF_GESTURE_3UP, on);
+                DexPrefs.DEF_GESTURE_3UP, true);
         gestureCard(rows, R.string.st_gesture_3down, DexPrefs.KEY_GESTURE_3DOWN,
-                DexPrefs.DEF_GESTURE_3DOWN, on);
+                DexPrefs.DEF_GESTURE_3DOWN, true);
         gestureCard(rows, R.string.st_gesture_3left, DexPrefs.KEY_GESTURE_3LEFT,
-                DexPrefs.DEF_GESTURE_3LEFT, on);
+                DexPrefs.DEF_GESTURE_3LEFT, true);
         gestureCard(rows, R.string.st_gesture_3right, DexPrefs.KEY_GESTURE_3RIGHT,
-                DexPrefs.DEF_GESTURE_3RIGHT, on);
+                DexPrefs.DEF_GESTURE_3RIGHT, true);
         gestureCard(rows, R.string.st_gesture_3tap, DexPrefs.KEY_GESTURE_3TAP,
-                DexPrefs.DEF_GESTURE_3TAP, on);
+                DexPrefs.DEF_GESTURE_3TAP, true);
 
         // Deliberately NOT restartFooter(): unlike every other PC-side setting
         // in this window, a gesture mapping is not a scrcpy argument — the

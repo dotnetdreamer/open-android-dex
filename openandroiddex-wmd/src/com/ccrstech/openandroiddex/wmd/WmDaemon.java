@@ -15,8 +15,9 @@ import java.util.List;
  * The privileged half of the desktop, as a resident socket server.
  *
  * The launcher runs at uid 10534 and can never hold MANAGE_ACTIVITY_TASKS. This process
- * runs at uid 2000 and does. It holds no policy and draws nothing — it is a mechanism the
- * launcher drives.
+ * runs at uid 2000 and does. It holds no policy and draws nothing of its own — it is a
+ * mechanism the launcher drives. (The one picture it shows is the launcher's: the phone
+ * touchpad's arrow, where no window of the launcher's will do — see PadPointer.)
  *
  * Transport is loopback TCP rather than a LocalSocket because SELinux policy between
  * untrusted_app and a shell-domain abstract socket is not dependable, whereas
@@ -52,6 +53,14 @@ import java.util.List;
  *   REQPUT <id> <cmd> <arg…>                  -> OK          launcher raises a PC request
  *   REQGET                                    -> REQ <id> <cmd> <arg…> … / END
  *   REQACK <id>                               -> OK          drop rows with id <= N
+ *   MOUSE <display> <x> <y> <buttons>         -> OK          the phone touchpad's pointer
+ *   WHEEL <display> <x> <y> <h> <v>           -> OK          …its wheel, in notches
+ *   LEAVE <display>                           -> OK          …gone: let go, stop hovering
+ *   CURSOR <display> <x> <y> <hx> <hy> <png>  -> OK          …drawn here (base64 PNG, hot spot)
+ *   CURSOR <display> -                        -> OK          …and no longer
+ *   KEY <display> <keycode>                   -> OK          one key, to what has the keyboard
+ *   FOCUS <display>                           -> OK [<task>] the keyboard back to <display>
+ *   TOP <display>                             -> OK <task> <pkg> | OK -1 -   what is in front
  *   BYE                                       -> (closes)
  *   ERR <reason>                              on any failure
  *
@@ -137,13 +146,15 @@ public final class WmDaemon {
                 if (line.isEmpty()) continue;
                 if ("BYE".equalsIgnoreCase(line)) return;
                 try {
-                    handle(line.split("\\s+"), out, caller);
+                    handle(line.split("\\s+"), out, caller, socket);
                 } catch (Throwable t) {
                     out.println("ERR " + t.getMessage());
                 }
             }
         } catch (IOException ignored) {
             // client went away mid-command; per-connection state dies with it
+        } finally {
+            PadPointer.dropOwnedBy(socket);
         }
     }
 
@@ -229,7 +240,8 @@ public final class WmDaemon {
         return Peers.sameApp(uid, launcherAppId);
     }
 
-    private static void handle(String[] a, PrintWriter out, Caller caller) {
+    /** {@code conn}: the connection the line came on, for what lasts only as long as it. */
+    private static void handle(String[] a, PrintWriter out, Caller caller, Socket conn) {
         String verb = a[0].toUpperCase();
         if (caller != Caller.PC && PC_ONLY.contains(verb)) {
             out.println("ERR not allowed: " + verb);
@@ -792,9 +804,226 @@ public final class WmDaemon {
                 return;
             }
 
+            // ── the phone's own screen as the desktop's touchpad (doc/phone-touchpad.md) ──
+            //
+            // The launcher's touchpad turns fingers on the phone into a pointer and says
+            // where it is; these put it into the desktop as a mouse — hover, buttons, a
+            // wheel — through AppInput, the injector the computer's own app windows use. An
+            // app cannot do this: INJECT_EVENTS is this uid's, and never the launcher's.
+            //
+            // The launcher's uid is also the Linux guest's (see PC_ONLY), so for it each of
+            // these is held to the desktop's own display (padDisplay): never the phone's
+            // screen, where the lock screen and every permission dialog are.
+
+            case "MOUSE": {
+                // "MOUSE <display> <x> <y> <buttons>" — the pointer is here, with these
+                // MotionEvent.BUTTON_* held. None held is a hover.
+                int d = padDisplay(a, caller, out);
+                if (d < 0) return;
+                PadPointer.moveTo(d, i(a, 2), i(a, 3));
+                padInput(d).pointer(i(a, 2), i(a, 3), i(a, 4), 0);
+                out.println("OK");
+                return;
+            }
+
+            case "WHEEL": {
+                // "WHEEL <display> <x> <y> <h> <v>" — the wheel, in notches, which a
+                // touchpad sends in fractions. Up and right are positive.
+                int d = padDisplay(a, caller, out);
+                if (d < 0) return;
+                float h = f(a, 4);
+                float v = f(a, 5);
+                // Float.parseFloat takes "NaN" and "Infinity" too, and an app handed either
+                // as a scroll amount is anyone's guess.
+                if (!Float.isFinite(h) || !Float.isFinite(v)
+                        || Math.abs(h) > WHEEL_MAX || Math.abs(v) > WHEEL_MAX) {
+                    out.println("ERR no such scroll");
+                    return;
+                }
+                padInput(d).scroll(i(a, 2), i(a, 3), h, v, 0);
+                out.println("OK");
+                return;
+            }
+
+            case "LEAVE": {
+                // "LEAVE <display>" — the pointer has gone. A drag it was holding is let
+                // go, and what was under it stops showing itself hovered.
+                int d = padDisplay(a, caller, out);
+                if (d < 0) return;
+                AppInput in = padInput(d);
+                in.releaseAll();
+                in.left();
+                PadPointer.hide(d);
+                out.println("OK");
+                return;
+            }
+
+            case "CURSOR": {
+                // "CURSOR <display> <x> <y> <hotX> <hotY> <png>" — draw the pointer here: a
+                // base64 PNG, its hot spot, shown with that spot at x, y and moved by every
+                // MOUSE after. "CURSOR <display> -" takes it away. The launcher asks only
+                // where no window of its own will do (PadPointer), and what is drawn lasts
+                // only as long as the connection that asked.
+                int d = padDisplay(a, caller, out);
+                if (d < 0) return;
+                if (a.length == 3 && "-".equals(a[2])) {
+                    PadPointer.remove(d);
+                    out.println("OK");
+                    return;
+                }
+                if (a.length < 7 || a[6].length() > PadPointer.MAX_BASE64) {
+                    out.println("ERR no such pointer");
+                    return;
+                }
+                byte[] png = android.util.Base64.decode(a[6], android.util.Base64.DEFAULT);
+                PadPointer.set(conn, d, i(a, 2), i(a, 3), i(a, 4), i(a, 5), png);
+                out.println("OK");
+                return;
+            }
+
+            case "KEY": {
+                // "KEY <display> <keycode>" — one key, pressed and let go, for whatever has
+                // the keyboard there: the touchpad's Back. In-process, where
+                // KEYBACK forks `input` and waits for a VM to boot. The keyboard is handed
+                // to the display first, or the key would wait for a focused window that
+                // is not coming (see giveKeyboard).
+                int d = padDisplay(a, caller, out);
+                if (d < 0) return;
+                int code = i(a, 2);
+                if (code <= 0 || code > android.view.KeyEvent.getMaxKeyCode()) {
+                    out.println("ERR no such key " + code);
+                    return;
+                }
+                giveKeyboard(d);
+                padInput(d).tap(code);
+                out.println("OK");
+                return;
+            }
+
+            case "FOCUS": {
+                // "FOCUS <display>" — the keyboard back to <display>, when the phone's own
+                // screen has taken it. The touchpad asks as each touch begins, so that the
+                // computer's keyboard types where it was typing before the phone was
+                // picked up. Answers the task it focused, or plain OK when it had nothing
+                // to do — the usual case, and one binder call.
+                int d = padDisplay(a, caller, out);
+                if (d < 0) return;
+                int task = giveKeyboard(d);
+                out.println(task > 0 ? "OK " + task : "OK");
+                return;
+            }
+
+            case "TOP": {
+                // "TOP <display>" — the task in front of a display and its package, or
+                // "OK -1 -" for none. The touchpad lies over the phone's own screen and
+                // asks this twice a second while it is up: Home, a call answered, an app
+                // opened from the shade all put a new task in front there, underneath it,
+                // and that is its cue to get out of the way. Read-only, as LIST is — and
+                // unlike LIST it answers on Android 11 too (AppTasks.onDisplay).
+                int d = i(a, 1);
+                for (AppTasks.Task t : AppTasks.onDisplay(d)) {
+                    if (!t.visible) continue;
+                    out.println("OK " + t.id + " " + (t.pkg.isEmpty() ? "-" : t.pkg));
+                    return;
+                }
+                out.println("OK -1 -");
+                return;
+            }
+
             default:
                 out.println("ERR unknown " + a[0]);
         }
+    }
+
+    // ── the touchpad's helpers ─────────────────────────────────────────────
+
+    /** One injector per display, so each keeps its own idea of what is held. */
+    private static final java.util.Map<Integer, AppInput> PAD_INPUT = new java.util.HashMap<>();
+
+    /** Notches in one WHEEL line, at most: a flick sends a few, never this many. */
+    private static final float WHEEL_MAX = 100f;
+
+    private static AppInput padInput(int displayId) {
+        synchronized (PAD_INPUT) {
+            AppInput in = PAD_INPUT.get(displayId);
+            if (in == null) {
+                // No clipboard: the pad sends no text, only the pointer and its Back key.
+                in = new AppInput(displayId, null);
+                PAD_INPUT.put(displayId, in);
+            }
+            return in;
+        }
+    }
+
+    /**
+     * Least time between two lookups of the desktop's display for the launcher. The pad
+     * sends sixty MOUSE lines a second, and the lookup asks for every task on the phone.
+     */
+    private static final long PAD_LOOKUP_GAP_MS = 2000L;
+    private static volatile int padDesktop = -1;
+    private static long padDesktopAt;
+
+    /**
+     * The display a touchpad verb names, or -1 having answered why not.
+     *
+     * The PC may aim anywhere, as with every other verb. The launcher may aim only at the
+     * display its desktop is on — the one LauncherActivity is running on, which is never
+     * the phone's own (0). A display the cached answer does not match is looked up again,
+     * at most every PAD_LOOKUP_GAP_MS: a reconnect makes a new desktop display, and the
+     * first line after it must not be refused for long.
+     */
+    private static int padDisplay(String[] a, Caller caller, PrintWriter out) {
+        int d = i(a, 1);
+        if (caller == Caller.PC) return d;
+        if (d > 0 && (d == padDesktop || d == lookUpPadDesktop())) return d;
+        out.println("ERR not the desktop's display: " + d);
+        return -1;
+    }
+
+    private static synchronized int lookUpPadDesktop() {
+        long now = System.currentTimeMillis();
+        if (now - padDesktopAt < PAD_LOOKUP_GAP_MS) return padDesktop;
+        padDesktopAt = now;
+        int found = -1;
+        try {
+            for (Wm.TaskRec t : Wm.runningTasks()) {
+                // Highest wins: ids only grow, and a session's corpse may still be listed
+                // beside the live one for a moment after a reconnect.
+                if (t.displayId > 0 && LAUNCHER.equals(t.pkg)
+                        && (LAUNCHER + ".LauncherActivity").equals(t.activity)) {
+                    found = Math.max(found, t.displayId);
+                }
+            }
+        } catch (Refl.WmError e) {
+            log("touchpad: cannot find the desktop (" + e.getMessage() + ")");
+        }
+        padDesktop = found;
+        return found;
+    }
+
+    /**
+     * Give {@code displayId} the keyboard if another display has it: the task it handed it
+     * to, 0 when it already had it, -1 when there was nothing there to hand it to.
+     *
+     * Before Android 14 only the topmost display has a focused window at all (see
+     * AppTasks.focus), and touching the phone's screen makes the phone's display the
+     * topmost — so a key aimed at the desktop afterwards waits for a window that is never
+     * focused, holding every key behind it, until it times out. Its top task is the one
+     * given focus: on a desktop that is the window in front, or the desktop itself.
+     */
+    private static int giveKeyboard(int displayId) {
+        if (AppTasks.focusedDisplay() == displayId) return 0;
+        for (AppTasks.Task t : AppTasks.onDisplay(displayId)) {
+            if (!t.visible) continue;
+            AppTasks.focus(t.id);
+            return t.id;
+        }
+        return -1;
+    }
+
+    private static float f(String[] a, int ix) {
+        if (a.length <= ix) throw new IllegalArgumentException("missing arg " + ix);
+        return Float.parseFloat(a[ix]);
     }
 
     // ── /proc readers ─────────────────────────────────────────────────────

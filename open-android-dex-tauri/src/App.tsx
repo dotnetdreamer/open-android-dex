@@ -5,9 +5,11 @@ import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { error as logError, info as logInfo, warn as logWarn } from "@tauri-apps/plugin-log";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import { AppsPanel, opensAppsOnConnect } from "./features/apps/AppsPanel";
 import { DesktopPage, type Method } from "./features/desktop/DesktopPage";
 import { deviceName, type AdbState, type LaunchMode, type Phase, type Progress } from "./features/desktop/model";
 import { useSessions } from "./features/mirror/useSessions";
+import { NotificationsBell } from "./features/notifications/NotificationsBell";
 import { RemotePanel } from "./features/remote/RemotePanel";
 import { WirelessPanel } from "./features/wireless/WirelessPanel";
 import { Icon } from "./ui/Icon";
@@ -110,6 +112,12 @@ export default function App() {
    * up first would make it look like it hadn't.
    */
   const [reconnectDone, setReconnectDone] = useState(false);
+  /**
+   * Whether this run was started to open one phone app (a taskbar button
+   * pinned from its window). Asked before anything launches by itself: such a
+   * start opens that app's window, and no desktop.
+   */
+  const [startupChecked, setStartupChecked] = useState(false);
 
   const phaseRef = useRef(phase);
   phaseRef.current = phase;
@@ -208,6 +216,19 @@ export default function App() {
     return () => {
       live = false;
     };
+  }, []);
+
+  useEffect(() => {
+    invoke<{ serial: string; pkg: string } | null>("apps_startup")
+      .then((startup) => {
+        if (startup) {
+          logInfo(`boot: started for ${startup.pkg} on ${startup.serial} — its window, no desktop`);
+          armedRef.current = false;
+          setTab("apps");
+        }
+      })
+      .catch(() => {})
+      .finally(() => setStartupChecked(true));
   }, []);
 
   // ── Device polling (always on — plugging a phone in is the trigger) ──
@@ -346,6 +367,7 @@ export default function App() {
 
   // ── Auto-launch as soon as a ready device shows up ──
   useEffect(() => {
+    if (!startupChecked) return;
     const current = phaseRef.current;
     if (current.kind !== "boot" && current.kind !== "connect") return;
     // A phone just moved onto Wi-Fi is briefly present twice, once per
@@ -353,12 +375,19 @@ export default function App() {
     const ready =
       devices.find((d) => d.state === "device" && d.serial === preferredSerial.current) ??
       devices.find((d) => d.state === "device");
-    if (ready && armedRef.current) {
+    if (ready && armedRef.current && opensAppsOnConnect()) {
+      // Its owner asked for the phone's apps here rather than its desktop:
+      // the Apps page, and no desktop is set up on the phone at all.
+      armedRef.current = false;
+      logInfo(`launch: ${deviceName(ready)} opens its apps here, not a desktop`);
+      setPhase({ kind: "connect" });
+      setTab("apps");
+    } else if (ready && armedRef.current) {
       launch(ready);
     } else if (current.kind === "boot" && scannedOnce.current && reconnectDone && !ready) {
       setPhase({ kind: "connect" });
     }
-  }, [devices, launch, reconnectDone]);
+  }, [devices, launch, reconnectDone, startupChecked]);
 
   // ── A phone on the cable that needs something done ──
   // Plugging one in is choosing the cable: the connect screen turns to it, so
@@ -735,7 +764,13 @@ export default function App() {
 
   return (
     <div className="app-backdrop flex h-screen flex-col">
-      <TitleBar tab={tab} onTab={setTab} menu={helpMenu} desktopBusy={phase.kind === "launching" || switching} />
+      <TitleBar
+        tab={tab}
+        onTab={setTab}
+        menu={helpMenu}
+        notifications={<NotificationsBell />}
+        desktopBusy={phase.kind === "launching" || switching}
+      />
       <main className="relative min-h-0 flex-1 overflow-y-auto">
         <div key={tab} className="fade-in min-h-full">
           {tab === "desktop" ? (
@@ -766,6 +801,8 @@ export default function App() {
                 chooseAnother: () => setPhase({ kind: "connect" }),
               }}
             />
+          ) : tab === "apps" ? (
+            <AppsPanel device={readyDevice} say={say} />
           ) : (
             <RemotePanel devices={devices} />
           )}

@@ -415,6 +415,15 @@ final class DexPointer {
 
     /** Finger velocity in dp/ms to a movement multiplier. */
     private float gain(float v) {
+        return gain(speed, v);
+    }
+
+    /**
+     * The curve itself, for the other surface that turns a finger into a pointer: the
+     * phone's screen as the desktop's touchpad ({@link DesktopPointer}). One copy, so the
+     * strip and the full-screen pad cannot drift apart at the same speed setting.
+     */
+    static float gain(int speed, float v) {
         float t = clamp((v - PTR_V0) / (PTR_V1 - PTR_V0), 0, 1);
         float base = PTR_BASE[clampInt(speed, MIN_SPEED, MAX_SPEED) - 1];
         return base * (1 + (PTR_ACCEL - 1) * (float) Math.pow(t, PTR_CURVE));

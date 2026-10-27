@@ -4,11 +4,11 @@ import { IS_MAC, TITLEBAR_LEAD } from "../lib/host";
 import { Icon } from "./Icon";
 import { Segmented } from "./kit";
 
-export type Tab = "desktop" | "linux";
+export type Tab = "desktop" | "apps" | "linux";
 
 /**
- * The window's top strip: the app's name, the switch between the two things
- * it does, and the help menu.
+ * The window's top strip: the app's name, the switch between the things it
+ * does, and the help menu.
  *
  * The caption buttons are ours on Windows and Linux and the system's on macOS,
  * where `titleBarStyle: "Overlay"` floats the real traffic lights over this
@@ -20,11 +20,14 @@ export function TitleBar({
   tab,
   onTab,
   menu,
+  notifications,
   desktopBusy,
 }: {
   tab: Tab;
   onTab: (t: Tab) => void;
   menu: ReactNode;
+  /** The phone's notifications' bell, beside the help menu: on every tab, since they are. */
+  notifications?: ReactNode;
   /** A desktop is being set up: said on its tab, for someone looking at the other one. */
   desktopBusy?: boolean;
 }) {
@@ -42,10 +45,12 @@ export function TitleBar({
         onChange={onTab}
         options={[
           { value: "desktop", label: "Desktop", icon: "laptop", busy: desktopBusy && tab !== "desktop" },
+          { value: "apps", label: "Apps", icon: "apps" },
           { value: "linux", label: "Linux", icon: "terminal" },
         ]}
       />
       <div className={`flex flex-1 items-center justify-end gap-1 ${IS_MAC ? "pr-2.5" : ""}`}>
+        {notifications}
         {menu}
         {!IS_MAC && (
           <div className="ml-1 flex self-stretch">

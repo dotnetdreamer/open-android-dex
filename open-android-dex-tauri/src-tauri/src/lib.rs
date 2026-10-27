@@ -1,10 +1,12 @@
 mod adb;
+mod apps;
 mod diag;
 mod display;
 mod embed;
 mod files;
 mod gestures;
 mod hotkeys;
+mod notifications;
 mod projection;
 mod remote;
 mod remote_desktop;
@@ -15,6 +17,14 @@ mod transfer;
 mod wireless;
 mod wm;
 
+/// One phone app's window and nothing else, for trying it by hand —
+/// examples/app_window.rs. Not part of the app.
+#[cfg(windows)]
+#[doc(hidden)]
+pub fn app_window_probe(serial: &str, socket: &str, pkg: &str, label: &str, icon_png: Option<Vec<u8>>) -> Result<(), String> {
+    apps::probe(serial, socket, pkg, label, icon_png)
+}
+
 /// `ssh-proxy`: when ssh runs this binary as a phone's ProxyCommand, that is
 /// all it is — see remote::run_cli. `Some(exit code)` when it was that.
 pub fn remote_cli() -> Option<i32> {
@@ -23,14 +33,20 @@ pub fn remote_cli() -> Option<i32> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // A phone app opened at start (a pinned taskbar button) is timed from here.
+    apps::note_start();
     let mut builder = tauri::Builder::default();
 
     #[cfg(desktop)]
     {
         // note: no window-state plugin — the launcher window is a fixed-size
         // status surface; tauri.conf.json is the single source of truth.
-        builder = builder.plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
             use tauri::Manager;
+            // A phone app pinned to the taskbar, clicked: its window, not this one.
+            if apps::open_from_args(app, &argv) {
+                return;
+            }
             if let Some(win) = app.get_webview_window("main") {
                 let _ = win.unminimize();
                 let _ = win.set_focus();
@@ -104,7 +120,20 @@ pub fn run() {
             remote_desktop::remote_desktop_inbox,
             remote_desktop::remote_desktop_stream,
             remote_desktop::remote_desktop_reveal,
-            remote_usb::remote_desktop_usb
+            remote_usb::remote_desktop_usb,
+            apps::apps_prepare,
+            apps::apps_list,
+            apps::apps_open,
+            apps::apps_windows,
+            apps::apps_close,
+            apps::apps_startup,
+            notifications::notifications_state,
+            notifications::notifications_apps,
+            notifications::notifications_set,
+            notifications::notifications_mute,
+            notifications::notifications_test,
+            notifications::notifications_fix,
+            notifications::notifications_counts
         ])
         // A phone's desktop window takes its local port and its tunnel with it.
         .on_window_event(|window, event| {
@@ -126,6 +155,12 @@ pub fn run() {
             // killed mid-session it left the host's own touchpad gestures
             // stood down, and this is the pass that gives them back.
             gestures::restore_host_settings(&app.handle().clone());
+            // Started from a phone app pinned to the taskbar: that app's window.
+            let argv: Vec<String> = std::env::args().collect();
+            apps::open_at_startup(&app.handle().clone(), &argv);
+            // The phone's notifications as this computer's own, for every phone
+            // that is attached while they are on.
+            notifications::start(&app.handle().clone());
             Ok(())
         })
         .build(tauri::generate_context!())
@@ -133,6 +168,11 @@ pub fn run() {
         .run(|app, event| {
             if let tauri::RunEvent::Exit = event {
                 log::info!("── application exiting ──");
+                // The phone's toasts first: nothing can act on them once this has gone.
+                notifications::stop();
+                // Every phone app's window closes first, each app back on its
+                // phone at once — before the seconds the desktop's undo takes.
+                apps::shutdown(app);
                 scrcpy::kill_all(app);
                 // The reader owns a host-wide subscription and, on Windows, a
                 // registry change: neither may outlive the process, and the

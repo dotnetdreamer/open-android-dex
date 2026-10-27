@@ -401,6 +401,82 @@ final class WmClient {
         }
     }
 
+    // ── the phone's screen as the desktop's touchpad — see DesktopPointer ──
+
+    /**
+     * The touchpad's pointer is at ({@code x}, {@code y}) in {@code displayId}'s pixels
+     * with {@code buttons} (MotionEvent.BUTTON_*) held; none held is a hover. The daemon
+     * turns this into the events a real mouse makes.
+     */
+    boolean mouse(int displayId, int x, int y, int buttons) {
+        return ok(request("MOUSE " + displayId + " " + x + " " + y + " " + buttons));
+    }
+
+    /** The wheel at (x, y), in notches — fractions of one, from a touchpad. Up and right are positive. */
+    boolean wheel(int displayId, int x, int y, float h, float v) {
+        return ok(request("WHEEL " + displayId + " " + x + " " + y + " "
+                + notches(h) + " " + notches(v)));
+    }
+
+    /** The pointer has gone: anything it held is let go, and nothing shows as hovered. */
+    boolean leave(int displayId) {
+        return ok(request("LEAVE " + displayId));
+    }
+
+    /**
+     * Have the daemon draw the pointer: {@code png} (base64) with its hot spot at
+     * ({@code hotX}, {@code hotY}), shown with that spot at ({@code x}, {@code y}) and moved
+     * by each {@link #mouse} after. For as long as this connection lasts — see
+     * {@link #connections}.
+     */
+    boolean cursor(int displayId, int x, int y, int hotX, int hotY, String png) {
+        return ok(request("CURSOR " + displayId + " " + x + " " + y + " "
+                + hotX + " " + hotY + " " + png));
+    }
+
+    /** The daemon stops drawing the pointer. */
+    boolean cursorGone(int displayId) {
+        return ok(request("CURSOR " + displayId + " -"));
+    }
+
+    /**
+     * How many times this client has connected. What the daemon keeps for a connection —
+     * the pointer it draws — ends with it, so a new number means it must be sent again.
+     */
+    synchronized int connections() {
+        return connections;
+    }
+
+    /** One key, pressed and let go, for whatever on {@code displayId} has the keyboard. */
+    boolean key(int displayId, int keyCode) {
+        return ok(request("KEY " + displayId + " " + keyCode));
+    }
+
+    /** Hand {@code displayId} the keyboard back, if the phone's own screen has taken it. */
+    boolean focus(int displayId) {
+        return ok(request("FOCUS " + displayId));
+    }
+
+    /**
+     * The task in front of {@code displayId}, as {@code {taskId, package}} — taskId -1 for
+     * none — or null when the daemon did not answer. What the touchpad watches the phone's
+     * own screen by.
+     */
+    String[] top(int displayId) {
+        String reply = request("TOP " + displayId);
+        if (!ok(reply)) return null;
+        String[] p = reply.trim().split("\\s+");
+        return p.length >= 3 ? new String[]{p[1], p[2]} : null;
+    }
+
+    /**
+     * "0.1250", never "0,1250": the daemon reads it with Float.parseFloat, and this
+     * process formats in whatever language the desktop is set to (see DexLocale).
+     */
+    private static String notches(float v) {
+        return String.format(java.util.Locale.ROOT, "%.4f", v);
+    }
+
     private static boolean ok(String reply) {
         return reply != null && reply.startsWith("OK");
     }
@@ -450,6 +526,7 @@ final class WmClient {
             socket = s;
             in = new BufferedReader(new InputStreamReader(s.getInputStream()));
             out = new PrintWriter(s.getOutputStream(), true);
+            connections++;
             if (!everConnected) {
                 everConnected = true;
                 DexLog.step("wmd", "connected to the window daemon on " + HOST + ":" + PORT);
@@ -473,6 +550,8 @@ final class WmClient {
     /** Whether the last connect attempt got through, so outages are logged once. */
     private boolean everConnected;
     private boolean reportedFailure;
+    /** Connections made so far. Guarded by this, as everything request() touches is. */
+    private int connections;
 
     private void close() {
         try {

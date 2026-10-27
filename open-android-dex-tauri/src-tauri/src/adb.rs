@@ -640,7 +640,48 @@ pub fn adb_list_devices(app: tauri::AppHandle) -> Result<Vec<DeviceInfo>, String
         log::info!("devices: {summary}");
         *last = Some(summary);
     }
+    note_attached(&devices);
+    *LAST_LIST.lock().unwrap() = Some((Instant::now(), devices.clone()));
     Ok(devices)
+}
+
+/// The last list, and when it was made: what a window opening reads, rather
+/// than wait on `adb devices` again (the UI asks every 2.5 s).
+static LAST_LIST: std::sync::Mutex<Option<(Instant, Vec<DeviceInfo>)>> = std::sync::Mutex::new(None);
+
+/// The device list, at most `fresh` old.
+pub fn recent_devices(app: &tauri::AppHandle, fresh: Duration) -> Vec<DeviceInfo> {
+    if let Some((at, list)) = LAST_LIST.lock().unwrap().as_ref() {
+        if at.elapsed() <= fresh {
+            return list.clone();
+        }
+    }
+    adb_list_devices(app.clone()).unwrap_or_default()
+}
+
+/// Since when each serial has been ready ("device") without a break: how long
+/// a cable has been in. One already there when this app first looked counts as
+/// in for long — nothing says otherwise.
+fn attached_since() -> &'static std::sync::Mutex<HashMap<String, Instant>> {
+    static SINCE: std::sync::OnceLock<std::sync::Mutex<HashMap<String, Instant>>> = std::sync::OnceLock::new();
+    SINCE.get_or_init(Default::default)
+}
+
+fn note_attached(devices: &[DeviceInfo]) {
+    static LOOKED: AtomicBool = AtomicBool::new(false);
+    let first = !LOOKED.swap(true, Ordering::SeqCst);
+    let now = Instant::now();
+    let long_ago = now.checked_sub(Duration::from_secs(3600)).unwrap_or(now);
+    let mut since = attached_since().lock().unwrap();
+    since.retain(|serial, _| devices.iter().any(|d| d.serial == *serial && d.state == "device"));
+    for d in devices.iter().filter(|d| d.state == "device") {
+        since.entry(d.serial.clone()).or_insert(if first { long_ago } else { now });
+    }
+}
+
+/// How long `serial` has been ready without a break, if it is.
+pub fn attached_for(serial: &str) -> Option<Duration> {
+    attached_since().lock().unwrap().get(serial).map(|t| t.elapsed())
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1469,6 +1510,15 @@ pub fn restore_phone(app: &tauri::AppHandle, serial: &str) {
          pm revoke {LAUNCHER_PACKAGE} android.permission.WRITE_SECURE_SETTINGS; "
     ));
 
+    // 3a. the touchpad notification's permission, Android 13 and later — but only
+    //     when it was ours to give (grant_post_notifications). A runtime permission's
+    //     revoke may end the app's processes; step 5 force-stops them anyway.
+    if post_notifications_grant_is_ours(app, serial) {
+        script.push_str(&format!(
+            "pm revoke {LAUNCHER_PACKAGE} android.permission.POST_NOTIFICATIONS; "
+        ));
+    }
+
     // 3b. the battery-optimisation exemption, for the same reason: the user
     //     never asked for it, and unlike the app-ops the doze whitelist
     //     SURVIVES A REBOOT — left behind, it would keep a package the phone
@@ -1836,6 +1886,54 @@ fn bundled_apk_sha256(apk: &std::path::Path) -> Option<String> {
     Some(hex)
 }
 
+/// This build's launcher on the phone, for something of its own the computer's
+/// windows of the phone's apps ask for — the phone's screen as their touchpad
+/// (apps/pad.rs) — where no desktop has put it there. Installed only if the
+/// phone's is not this build, and never while its Linux is running: an install
+/// stops the package, and that Linux with it.
+pub(crate) fn ensure_launcher(app: &tauri::AppHandle, serial: &str) -> Result<(), String> {
+    let apk = bin_dir(app)?.join("openandroiddex-launcher.apk");
+    if !apk.exists() {
+        return Err("This copy of Open Android DeX has no phone app to install.".into());
+    }
+    let (this_build, linux_running) = installed_launcher(app, serial, &apk);
+    if this_build {
+        return Ok(());
+    }
+    if linux_running {
+        return Err("Close Linux on your phone first: setting up the touchpad would end it.".into());
+    }
+    log::info!("installing {} for the phone's touchpad", apk.display());
+    let (done, asked) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false)));
+    watch_for_install_prompt(app, serial, done.clone(), asked.clone());
+    let installed = install_launcher(app, serial, &apk.to_string_lossy());
+    done.store(true, Ordering::SeqCst);
+    installed.map_err(|e| {
+        if asked.load(Ordering::SeqCst) {
+            "Your phone is asking about installing Open Android DeX. Answer it on the phone, then try again.".into()
+        } else {
+            log::warn!("{LAUNCHER_PACKAGE} did not install for the phone's touchpad: {e}");
+            not_installed(&e)
+        }
+    })
+}
+
+/// Why the launcher did not install, as the one line a window's note has.
+/// What adb said is the log's: this computer's path to the APK is in it, and
+/// a phone's stack trace, and the desktop's own words for it run to a paragraph.
+fn not_installed(err: &str) -> String {
+    let why = if is_install_restricted(err) {
+        "your phone doesn't allow installs from a computer (on Xiaomi: Developer options → Install via USB)"
+    } else if err.contains("INSUFFICIENT_STORAGE") || err.contains("not enough space") {
+        "your phone is out of space"
+    } else if is_signature_conflict(err) {
+        "uninstall Open Android DeX on your phone, then try again"
+    } else {
+        return "The touchpad couldn't be set up on your phone".into();
+    };
+    format!("The touchpad couldn't be set up: {why}")
+}
+
 /// What the phone has of the launcher: whether its installed APK is this very
 /// build, and whether its Linux is running. One round trip; any doubt answers
 /// no, which is the plain install.
@@ -2041,6 +2139,7 @@ pub fn adb_start_launcher(
         Ok(_) => log::info!("WRITE_SECURE_SETTINGS granted — the launcher can undo the session if the cable is pulled"),
         Err(e) => log::warn!("WRITE_SECURE_SETTINGS not granted ({e}) — a pulled cable leaves the undo to the window daemon"),
     }
+    grant_post_notifications(&app, &serial);
     // Shared-folder permission, for the Linux feature's /sdcard/LinuxOnDeX.
     //
     // MediaProvider gates TOP-LEVEL names on shared storage, so the launcher
@@ -2516,6 +2615,82 @@ fn enable_notification_listener(app: &tauri::AppHandle, serial: &str) {
     }
 }
 
+/// Let the launcher post notifications of its own, from Android 13 — above all the
+/// one that offers the phone's screen as the desktop's touchpad (TouchpadNotice in
+/// the launcher), which is how anyone finds out the phone can be one.
+///
+/// A runtime permission, which the user normally gives on the phone. A DeX session
+/// asks the phone nothing — every other grant here is given over adb — so this one is
+/// given the same way, and [`restore_phone`] takes it back only when it was this app
+/// that gave it, by the record notification access keeps ([`remember_grant`]).
+///
+/// An answer the user has already given stands, either way. Granted is theirs to
+/// keep. Refused — USER_SET or USER_FIXED on a permission that is not granted — is
+/// theirs too: the shell could override it, which is the one thing this must not do.
+/// Without the grant the notification is simply not shown, and quick settings on the
+/// desktop still opens the touchpad.
+///
+/// Below Android 13 there is no such runtime permission, its line is missing from
+/// the package dump, and nothing happens.
+fn grant_post_notifications(app: &tauri::AppHandle, serial: &str) {
+    const PERMISSION: &str = "android.permission.POST_NOTIFICATIONS";
+    // The colon is what picks out a permission STATE line ("…: granted=false,
+    // flags=[…]"); the "requested permissions:" list names it bare. The first is user
+    // 0's, which is the user a session runs for.
+    let state = run_adb_quiet(
+        app,
+        &[
+            "-s",
+            serial,
+            "shell",
+            // `|| true`: no line is the normal answer below Android 13, not a failure
+            // worth a warning on every connect.
+            &format!("dumpsys package {LAUNCHER_PACKAGE} | grep -m1 '{PERMISSION}:' || true"),
+        ],
+    )
+    .unwrap_or_default();
+    let state = state.trim();
+    if state.is_empty() {
+        return;
+    }
+    if state.contains("granted=true") {
+        remember_grant(app, serial, POST_NOTIFICATIONS_GRANT_KEY, false);
+        log::info!("notifications were already allowed for the launcher on {serial} — leaving them alone");
+        return;
+    }
+    if state.contains("USER_SET") || state.contains("USER_FIXED") {
+        log::info!(
+            "the launcher's notifications were turned off on {serial} by its owner — \
+             left off, so the touchpad is offered from the desktop's quick settings only"
+        );
+        return;
+    }
+    match run_adb(
+        app,
+        &["-s", serial, "shell", &format!("pm grant {LAUNCHER_PACKAGE} {PERMISSION}")],
+    ) {
+        Ok(_) => {
+            remember_grant(app, serial, POST_NOTIFICATIONS_GRANT_KEY, true);
+            log::info!("POST_NOTIFICATIONS granted — the phone can offer itself as the desktop's touchpad");
+        }
+        Err(e) => log::warn!(
+            "POST_NOTIFICATIONS not granted ({e}) — the touchpad is offered from the \
+             desktop's quick settings only"
+        ),
+    }
+}
+
+/// Key in the per-serial restore map: "1" when THIS app allowed the launcher's
+/// notifications — see [`grant_post_notifications`].
+const POST_NOTIFICATIONS_GRANT_KEY: &str = "post_notifications_granted_by_us";
+
+fn post_notifications_grant_is_ours(app: &tauri::AppHandle, serial: &str) -> bool {
+    load_restore_map(app)
+        .get(&restore_key(app, serial))
+        .and_then(|saved| saved.get(POST_NOTIFICATIONS_GRANT_KEY))
+        .is_some_and(|v| v == "1")
+}
+
 /// Key in the per-serial restore map: "1" when THIS app turned notification
 /// access on, so the exit path knows whether it has anything to undo.
 const NOTIFICATION_GRANT_KEY: &str = "notification_listener_granted_by_us";
@@ -2937,6 +3112,34 @@ unrelated_key=7
             "error: no devices/emulators found",
         ] {
             assert!(!is_signature_conflict(other), "must not uninstall for: {other}");
+        }
+    }
+
+    /// A window's note has one line, for a person: what adb said — the path
+    /// to the APK on this computer, the phone's stack trace — stays in the log.
+    #[test]
+    fn a_launcher_not_installed_for_the_pad_is_one_line_and_no_path() {
+        // As an Android 16 emulator with a full /data answered, 2026-10-26.
+        let full = "adb.exe: failed to install C:\\Users\\someone\\open-android-dex-tauri\\src-tauri\\target\\debug\\\
+                    resources\\bin\\openandroiddex-launcher.apk: \nException occurred while executing 'install':\n\
+                    android.os.ParcelableException: java.io.IOException: Requested internal only, but not enough space\n\
+                    \tat android.util.ExceptionUtils.wrap(ExceptionUtils.java:34)";
+        let other =
+            "adb: failed to install C:\\x\\openandroiddex-launcher.apk: Failure [INSTALL_FAILED_INTERNAL_ERROR]";
+        let said = [
+            not_installed(full),
+            not_installed("Failure [INSTALL_FAILED_INSUFFICIENT_STORAGE]"),
+            not_installed(&install_restricted_help(REAL_RESTRICTED)),
+            not_installed("Failure [INSTALL_FAILED_UPDATE_INCOMPATIBLE: Package signatures do not match]"),
+            not_installed(other),
+        ];
+        assert_eq!(said[0], "The touchpad couldn't be set up: your phone is out of space");
+        assert_eq!(said[1], said[0]);
+        assert!(said[2].contains("doesn't allow installs from a computer"), "{}", said[2]);
+        assert!(said[3].contains("uninstall Open Android DeX"), "{}", said[3]);
+        assert_eq!(said[4], "The touchpad couldn't be set up on your phone");
+        for s in &said {
+            assert!(!s.contains('\n') && !s.contains(".apk") && !s.contains("C:\\"), "{s}");
         }
     }
 

@@ -93,6 +93,8 @@ final class LinuxWindows implements LinuxWm.Host {
         FrameLayout frame;
         WindowManager windowManager;
         WindowManager.LayoutParams params;
+        /** On a computer: the window the menu is drawn in, rather than an overlay. */
+        LinuxWindowActivity host;
 
         Popup(LinuxWm.Win win) {
             this.win = win;
@@ -265,7 +267,10 @@ final class LinuxWindows implements LinuxWm.Host {
             X11 x = X11.open(s.getInputStream(), s.getOutputStream(), s, s::setFileDescriptorsForSend, cookie);
             LinuxWm.Options o = new LinuxWm.Options();
             o.dpi = dpi;
-            o.bottomReserve = Math.round(LauncherActivity.TASKBAR_DP * dpi / 96f);
+            // A computer's windows have no taskbar under them on the X screen; and
+            // each is on a display of its own, every one at the screen's origin.
+            o.bottomReserve = pc ? 0 : Math.round(LauncherActivity.TASKBAR_DP * dpi / 96f);
+            o.raiseOnPointer = pc;
             o.settings = LinuxWm.parseXfconf(xsettingsXml());
             LinuxWm w = new LinuxWm(x, this, o);
             w.start(segment(size.x * size.y * 4));
@@ -371,6 +376,12 @@ final class LinuxWindows implements LinuxWm.Host {
             entries.put(w.id, e);
             e.icon = iconFor(w);
             main.removeCallbacks(idleStop);
+            if (pc) {
+                // The computer opens a window for it, and asks for the task there.
+                e.launchedAt = android.os.SystemClock.uptimeMillis();
+                pcEvent("open", e);
+                return;
+            }
             startTask(e);
         });
     }
@@ -413,6 +424,7 @@ final class LinuxWindows implements LinuxWm.Host {
             if (w.icon != null) e.icon = iconFor(w);
             if (e.taskId > 0) titles.put(e.taskId, e.title());
             if (e.activity != null) e.activity.describe();
+            if (pc) pcEvent("title", e);
             changed();
         });
     }
@@ -427,6 +439,7 @@ final class LinuxWindows implements LinuxWm.Host {
                 titles.remove(e.taskId);
                 classes.remove(e.taskId);
             }
+            if (pc) pcEvent("closed", e);
             if (e.activity != null) e.activity.gone();
             changed();
             if (entries.isEmpty()) {
@@ -446,6 +459,10 @@ final class LinuxWindows implements LinuxWm.Host {
         wm = null;
         if (w != null) w.stop();
         LinuxService.winStop(app);
+        if (pc) {
+            pc = false;
+            pcEvent("ended", null);
+        }
     }
 
     @Override
@@ -587,13 +604,19 @@ final class LinuxWindows implements LinuxWm.Host {
         if (!finishing || e.win.closed) return;
         e.wm.close(e.win);
         main.postDelayed(() -> {
-            if (!e.win.closed && e.activity == null && entries.get(e.win.id) == e) startTask(e);
+            if (e.win.closed || e.activity != null || entries.get(e.win.id) != e) return;
+            // Kept (unsaved work): a computer opens a window for it again; a desktop, a task.
+            if (pc) pcEvent("open", e);
+            else startTask(e);
         }, 1500);
     }
 
     void placed(LinuxWm.Win w, int x, int y, int width, int height) {
         Entry e = entry(w);
-        if (e != null) e.wm.placed(w, x, y, width, height);
+        if (e == null) return;
+        // A computer's window can be any size: the pointer cannot go past the X screen's edge.
+        if (pc) e.wm.displaySize(x + width, y + height);
+        e.wm.placed(w, x, y, width, height);
     }
 
     void shown(Entry e, boolean on) {
@@ -644,6 +667,10 @@ final class LinuxWindows implements LinuxWm.Host {
     // ── menus ──
 
     private void showPopup(LinuxWm.Win w) {
+        if (pc) {
+            showPopupInWindow(w);
+            return;
+        }
         int[] g = w.geometry();
         Popup p = popups.get(w.id);
         if (p != null) {
@@ -712,6 +739,10 @@ final class LinuxWindows implements LinuxWm.Host {
     private void hidePopup(LinuxWm.Win w) {
         Popup p = popups.remove(w.id);
         if (p == null) return;
+        if (p.host != null) {
+            p.host.hidePopup(p.frame);
+            return;
+        }
         try {
             p.windowManager.removeViewImmediate(p.frame);
         } catch (RuntimeException ignored) {
@@ -797,6 +828,121 @@ final class LinuxWindows implements LinuxWm.Host {
         } catch (RuntimeException e) {
             DexLog.warn("linuxwin", "cannot bring task " + taskId + " forward: " + e);
         }
+    }
+
+    // ── the phone's apps on a computer (doc/apps-on-pc.md) ──
+
+    /**
+     * Windows go to a computer's windows, not to a desktop here: a computer
+     * started this session (AppsProvider). Each X window gets a window of its
+     * own there, and the task that shows it is put on that window's display
+     * by the phone's app server — Android lets only a system-level caller onto
+     * a display the shell made.
+     */
+    private volatile boolean pc;
+    /** What happened to windows since the computer last asked, oldest first. Guarded by itself. */
+    private final java.util.ArrayDeque<org.json.JSONObject> pcEvents = new java.util.ArrayDeque<>();
+
+    /**
+     * Open {@code a} for a computer, the window session started at w×h and
+     * {@code dpi} if it is not up. Null once it is on its way there; else why
+     * it is not, for the person at the computer.
+     */
+    String launchForPc(LinuxApps.App a, int w, int h, int dpi) {
+        LinuxWm running = wm;
+        if (running != null && running.running() && !pc) {
+            // The session is this desktop's, and so is every window it maps: the
+            // app would open here, on the phone, which is not what was asked.
+            DexLog.warn("linuxwin", "the window session belongs to this desktop; " + a.id + " not opened for the computer");
+            return "Linux is showing its windows on your phone's desktop right now. Close them there, then open "
+                    + a.name + " here again.";
+        }
+        pc = true;
+        main.removeCallbacks(idleStop);
+        LinuxService.winRun(app, a.command(), w, h, dpi);
+        DexLog.step("linuxwin", "opening " + a.id + " for a computer (" + a.command() + ")");
+        if (running != null && running.running()) running.displaySize(w, h);
+        connect(new Point(w, h), dpi);
+        return null;
+    }
+
+    boolean forPc() {
+        return pc;
+    }
+
+    private void pcEvent(String kind, Entry e) {
+        org.json.JSONObject j = new org.json.JSONObject();
+        try {
+            j.put("t", kind);
+            if (e != null) {
+                int[] g = e.win.geometry();
+                j.put("xid", e.win.id).put("title", e.title()).put("cls", e.win.wmClass)
+                        .put("instance", e.win.wmInstance).put("w", g[2]).put("h", g[3])
+                        .put("transient", e.win.transientFor).put("dialog", e.win.dialog);
+            }
+        } catch (org.json.JSONException ignored) {
+        }
+        synchronized (pcEvents) {
+            pcEvents.addLast(j);
+            pcEvents.notifyAll();
+        }
+    }
+
+    /** What happened since the last call, waiting up to {@code waitMs} for something to. Any thread. */
+    org.json.JSONArray takePcEvents(long waitMs) {
+        org.json.JSONArray out = new org.json.JSONArray();
+        long until = android.os.SystemClock.uptimeMillis() + waitMs;
+        synchronized (pcEvents) {
+            while (pcEvents.isEmpty()) {
+                long left = until - android.os.SystemClock.uptimeMillis();
+                if (left <= 0) break;
+                try {
+                    pcEvents.wait(left);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    break;
+                }
+            }
+            while (!pcEvents.isEmpty()) out.put(pcEvents.pollFirst());
+        }
+        return out;
+    }
+
+    /** Ask the app to close one of its windows, as a computer's ✕ does. Main thread. */
+    void closeXid(int xid) {
+        Entry e = entries.get(xid);
+        if (e != null && !e.win.closed) e.wm.close(e.win);
+    }
+
+    /**
+     * A menu, on a computer: drawn inside the window it belongs to, at its
+     * place in it. Every window sits at the X screen's origin, so where the
+     * menu is on the screen is where it is in the window.
+     */
+    private void showPopupInWindow(LinuxWm.Win w) {
+        int[] g = w.geometry();
+        Popup p = popups.get(w.id);
+        if (p != null && p.host != null) {
+            p.host.movePopup(p.frame, g[0], g[1], g[2], g[3]);
+            return;
+        }
+        Entry host = focusedEntry;
+        if (host == null || host.activity == null) {
+            for (Entry e : entries.values()) {
+                if (e.activity != null && (host == null || e.launchedAt > host.launchedAt)) host = e;
+            }
+        }
+        LinuxWm source = w.owner;
+        if (host == null || host.activity == null || source == null || !source.running()) return;
+        LinuxWindowActivity a = host.activity;
+        p = new Popup(w);
+        p.host = a;
+        p.view = new LinuxWinView(a, this, source, w, true);
+        p.frame = new FrameLayout(a);
+        p.frame.addView(p.view, new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT));
+        a.showPopup(p.frame, g[0], g[1], g[2], g[3]);
+        popups.put(w.id, p);
     }
 
     // ── icons ──

@@ -213,6 +213,16 @@ final class LinuxWm {
         Map<String, Object> settings = new LinkedHashMap<>();
         /** Largest icon kept, in pixels square. */
         int iconSize = 96;
+        /**
+         * Each window is on a display of its own, every one at the X screen's
+         * origin — the phone's apps in windows of their own on a computer
+         * (doc/apps-on-pc.md). The windows overlap on the X screen where none
+         * overlaps on the computer, so the pointer raises the window it is in
+         * the moment it moves in it, not only when it clicks: X sends motion and
+         * the wheel to the topmost window under the pointer, and the stacking
+         * order is nobody's to see.
+         */
+        boolean raiseOnPointer;
     }
 
     private final X11 x;
@@ -1306,6 +1316,7 @@ final class LinuxWm {
         synchronized (lock) {
             try {
                 x.batch(() -> {
+                    if (opt.raiseOnPointer && w != null && !w.closed && w.kind == KIND_WINDOW) raise(w);
                     if (w != null && !w.closed && (newButtons & ~buttons) != 0 && w.kind == KIND_WINDOW) {
                         raise(w);
                         // Click to focus, as any window manager does: the
@@ -1340,11 +1351,17 @@ final class LinuxWm {
 
     /** Scroll by whole steps: up/left negative. Buttons 4–7, as every X toolkit reads a wheel. */
     void wheel(int px, int py, int steps, boolean horizontal) {
+        wheel(null, px, py, steps, horizontal);
+    }
+
+    /** The wheel over {@code w}, which comes to the top first where windows share the screen's origin. */
+    void wheel(Win w, int px, int py, int steps, boolean horizontal) {
         if (steps == 0) return;
         int button = horizontal ? (steps < 0 ? 6 : 7) : (steps < 0 ? 4 : 5);
         synchronized (lock) {
             try {
                 x.batch(() -> {
+                    if (opt.raiseOnPointer && w != null && !w.closed && w.kind == KIND_WINDOW) raise(w);
                     if (px != pointerX || py != pointerY) {
                         x.xtestFakeInput(xtest, X11.MOTION_NOTIFY, 0, px, py);
                         pointerX = px;
