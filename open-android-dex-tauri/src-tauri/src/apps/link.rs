@@ -30,7 +30,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
-use super::{adbsock, sound, wire};
+use super::{adbsock, fetch, sound, wire};
 
 /// What a window is opened with.
 pub struct Spec {
@@ -181,6 +181,12 @@ pub trait Surface: Send + Sync {
     fn note(&self, text: Option<String>, busy: bool);
     /// The phone says the app has gone: the window goes, telling the phone nothing.
     fn gone(&self);
+    /// The app has a drag under way that may leave the window, or no longer
+    /// (doc/apps-on-pc.md, "Dragging out"): leaving with it hands it over.
+    fn dragging(&self, on: bool);
+    /// What a drag handed over carries, for this computer's own drag to take
+    /// on; None, it carries nothing this computer can take.
+    fn dragged(&self, offer: Option<fetch::Offer>);
 }
 
 /// What a window asks of the app around it, from the window's own threads
@@ -200,6 +206,10 @@ pub trait Host: Send + Sync {
     /// More's "Use phone as touchpad": the phone's screen up as the touchpad
     /// of its windows here (apps/pad.rs); `window` hears how it went.
     fn touchpad(&self, window: Arc<dyn Surface>);
+    /// More's Copy, sent to the app as its copy key: whatever the phone
+    /// copies next comes here as anything it copies does, and `window` says
+    /// so — or that nothing was.
+    fn copying(&self, window: Arc<dyn Surface>);
 }
 
 /// One window's link: what both its sides and its threads share.
@@ -657,6 +667,8 @@ fn read_loop(
                             surface.named(name);
                         }
                     }
+                    Some("drag") => surface.dragging(v["on"].as_bool() == Some(true)),
+                    Some("dragged") => surface.dragged(fetch::Offer::parse(&v)),
                     Some("video") => {
                         let coded = (v["w"].as_u64().unwrap_or(0) as u32, v["h"].as_u64().unwrap_or(0) as u32);
                         let content = (v["cw"].as_u64().unwrap_or(0) as u32, v["ch"].as_u64().unwrap_or(0) as u32);
@@ -756,6 +768,7 @@ mod tests {
         fn pick_sound(&self, _choice: sound::Choice, _window: Arc<dyn Surface>) {}
         fn dropped(&self, _paths: Vec<PathBuf>, _window: Arc<dyn Surface>) {}
         fn touchpad(&self, _window: Arc<dyn Surface>) {}
+        fn copying(&self, _window: Arc<dyn Surface>) {}
     }
 
     fn link() -> Arc<Link> {

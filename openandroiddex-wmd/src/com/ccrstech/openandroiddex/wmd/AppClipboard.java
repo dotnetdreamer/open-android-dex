@@ -3,12 +3,15 @@ package com.ccrstech.openandroiddex.wmd;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Context;
+import android.net.Uri;
 import android.os.Build;
 import android.os.Handler;
 import android.os.HandlerThread;
 import android.os.SystemClock;
 
 import java.lang.reflect.Constructor;
+import java.util.ArrayList;
+import java.util.List;
 
 /**
  * The phone's clipboard, for the computer's app windows: what the phone copies
@@ -27,11 +30,21 @@ import java.lang.reflect.Constructor;
  *
  * <p>It also lends itself to typing ({@link #lend}): characters no key types
  * reach an app as a paste, and the clipboard is given back what it held.
+ *
+ * <p>A picture or a file copied — a clip of content URIs: a gallery's "Copy
+ * to clipboard", the share sheet's Copy — is said as what it is, for the
+ * computer to take (AppOffers). Whoever reads a clip is granted its URIs by
+ * the clipboard as it is handed over, and this process reads it as the
+ * shell's package, so the shell may read them. Nothing is set the other way:
+ * a file copied on the computer stays there.
  */
 final class AppClipboard {
 
     interface Listener {
         void copied(String text);
+
+        /** Pictures or files copied, by their content URIs: the shell's to read now. */
+        void copied(List<AppOffers.Item> files);
     }
 
     /** The label a computer's text carries on the phone, where any app may read it. */
@@ -88,6 +101,13 @@ final class AppClipboard {
     }
 
     private void changed() {
+        List<AppOffers.Item> files = files(clip());
+        if (!files.isEmpty()) {
+            given = null;
+            Listener l = listener;
+            if (l != null) l.copied(files);
+            return;
+        }
         String text = read();
         if (text == null) return;
         // Every word of it within the window, not only the first: One UI tells
@@ -178,6 +198,22 @@ final class AppClipboard {
         } catch (Throwable t) {
             return null;
         }
+    }
+
+    /** A clip's content URIs, each with what its item says besides, if any; none for text alone. */
+    private static List<AppOffers.Item> files(ClipData clip) {
+        List<AppOffers.Item> out = new ArrayList<>();
+        for (int i = 0; clip != null && i < clip.getItemCount(); i++) {
+            ClipData.Item item = clip.getItemAt(i);
+            Uri uri = item.getUri();
+            if (uri == null || !"content".equals(uri.getScheme())) continue;
+            AppOffers.Item it = new AppOffers.Item();
+            it.uri = uri.toString();
+            CharSequence text = item.getText();
+            if (text != null) it.text = text.toString();
+            out.add(it);
+        }
+        return out;
     }
 
     private static String textOf(ClipData clip) {

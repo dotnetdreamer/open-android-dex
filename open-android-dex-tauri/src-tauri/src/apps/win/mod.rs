@@ -24,8 +24,14 @@
 //! the phone (drops.rs). How either went is a note in a strip under the bar,
 //! for a few seconds.
 //!
-//! The bar's More (☰) is the window's own menu: full screen, for now (F11 as
-//! well). Full screen, the window covers its screen with no frame and no
+//! A drag the app lets go of goes the other way: when the pointer leaves the
+//! window with one held, the phone drops it on the launcher's pixel and says
+//! what it carried (doc/apps-on-pc.md, "Dragging out"); its files come here
+//! first, then Windows' own drag carries them on from where the pointer is —
+//! the shell's data object, as Explorer drags files.
+//!
+//! The bar's More (☰) is the window's own menu: Copy and Paste, full screen
+//! (F11 as well), the phone as the touchpad. Full screen, the window covers its screen with no frame and no
 //! title bar, and a smaller bar comes down from the top of the screen while
 //! the pointer is up there, in the middle, drawn into the same surface as the
 //! picture — Remote Desktop's connection bar's shape — and while it is up, a
@@ -55,7 +61,12 @@ use windows::Win32::Graphics::Gdi::{
     ClientToScreen, GetMonitorInfoW, MonitorFromPoint, MonitorFromRect, MonitorFromWindow, ScreenToClient, MONITORINFO,
     MONITOR_DEFAULTTONEAREST, MONITOR_DEFAULTTONULL,
 };
-use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED, COINIT_MULTITHREADED};
+use windows::Win32::System::Com::{
+    CoInitializeEx, IDataObject, COINIT_APARTMENTTHREADED, COINIT_MULTITHREADED, DVASPECT_CONTENT, FORMATETC, STGMEDIUM,
+    STGMEDIUM_0, TYMED_HGLOBAL,
+};
+use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
+use windows::Win32::System::Ole::{IDropSource, OleInitialize, CF_UNICODETEXT, DROPEFFECT, DROPEFFECT_COPY};
 use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress, LoadLibraryW};
 use windows::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_DWORD};
 use windows::Win32::UI::HiDpi::{
@@ -63,16 +74,18 @@ use windows::Win32::UI::HiDpi::{
 };
 use windows::Win32::UI::Input::Ime::{ImmGetCompositionStringW, ImmGetContext, ImmReleaseContext, GCS_RESULTSTR};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetDoubleClickTime, GetKeyState, MapVirtualKeyW, ReleaseCapture, SendInput, SetCapture, TrackMouseEvent, INPUT,
+    GetAsyncKeyState, GetDoubleClickTime, GetKeyState, MapVirtualKeyW, ReleaseCapture, SendInput, SetCapture,
+    TrackMouseEvent, INPUT,
     INPUT_0, INPUT_MOUSE, MAPVK_VK_TO_CHAR, MOUSEEVENTF_HWHEEL, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP,
     MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_WHEEL,
     MOUSEINPUT, MOUSE_EVENT_FLAGS, TME_LEAVE, TME_NONCLIENT, TRACKMOUSEEVENT, VK_CAPITAL, VK_CONTROL, VK_ESCAPE,
-    VK_F11, VK_F4, VK_LWIN, VK_MENU, VK_NUMLOCK, VK_RMENU, VK_RWIN, VK_SHIFT, VK_SPACE,
+    VK_F11, VK_F4, VK_LBUTTON, VK_LWIN, VK_MENU, VK_NUMLOCK, VK_RBUTTON, VK_RMENU, VK_RWIN, VK_SHIFT, VK_SPACE,
 };
 use windows::Win32::UI::Shell::PropertiesSystem::{IPropertyStore, SHGetPropertyStoreForWindow};
-use windows::Win32::UI::Shell::{DragAcceptFiles, DragFinish, DragQueryFileW, HDROP};
+use windows::Win32::UI::Shell::{DragAcceptFiles, DragFinish, DragQueryFileW, SHCreateDataObject, SHDoDragDrop, HDROP};
 use windows::Win32::UI::WindowsAndMessaging::*;
 
+use super::fetch::{self, Offer, Taking};
 use super::keys::{self, Mods, Press};
 use super::link::{self, DisplaySize, Event, Host, Link, NetSpec, Refused, Route, Spec, Surface};
 use super::sound;
@@ -427,6 +440,10 @@ struct Shared {
     top_bar_leaving: AtomicBool,
     /// More's menu or the sound menu is open: the full-screen bar stays until it closes.
     menu_open: AtomicBool,
+    /// The app has a drag under way that may leave the window (link.rs, `dragging`).
+    phone_drag: AtomicBool,
+    /// What the phone says a drag it handed over carries, for the window's own thread.
+    dragged: Mutex<Option<Option<Offer>>>,
 }
 
 /// A full-screen window as it was before: its style, where it was, and
@@ -563,6 +580,17 @@ impl Surface for Shared {
             let _ = PostMessageW(Some(self.hwnd()), WM_APP_GONE, WPARAM(0), LPARAM(0));
         }
     }
+
+    fn dragging(&self, on: bool) {
+        self.phone_drag.store(on, Ordering::SeqCst);
+    }
+
+    fn dragged(&self, offer: Option<Offer>) {
+        *self.dragged.lock().unwrap() = Some(offer);
+        unsafe {
+            let _ = PostMessageW(Some(self.hwnd()), WM_APP_DRAGGED, WPARAM(0), LPARAM(0));
+        }
+    }
 }
 
 enum RenderMsg {
@@ -579,6 +607,10 @@ const WM_MOUSELEAVE: u32 = 0x02A3;
 const WM_APP_GONE: u32 = WM_APP + 1;
 /// A note was put up (wparam: busy, lparam: its number): the window times its fading.
 const WM_APP_NOTE: u32 = WM_APP + 2;
+/// The phone said what a drag handed over carries (Shared::dragged).
+const WM_APP_DRAGGED: u32 = WM_APP + 3;
+/// Its files are here, or failed: Windows' own drag carries them on.
+const WM_APP_TAKEN: u32 = WM_APP + 4;
 const RESIZE_TIMER: usize = 1;
 const NOTE_TIMER: usize = 2;
 /// How long a resize must hold before the phone is asked for it: the phone
@@ -605,18 +637,34 @@ const BAR_ON_ARRIVAL_MS: u32 = 2000;
 const MENU_FULL_SCREEN: usize = 1;
 /// More's "Use phone as touchpad" (apps/pad.rs).
 const MENU_TOUCHPAD: usize = 2;
+/// More's Copy and Paste: the app's own keys for them.
+const MENU_COPY: usize = 3;
+const MENU_PASTE: usize = 4;
 
 /// Open a window for `spec`; it runs until it is closed. The window shows
 /// at once, with the app's icon and name, and the picture follows.
 pub fn open(spec: Spec, host: Arc<dyn Host>) -> Result<Arc<Window>, String> {
     let (tx, rx) = mpsc::channel::<Result<Arc<Window>, String>>();
     let name = format!("app-window-{}", spec.pkg);
+    // Whichever comes first: the window's thread starting on it, or this
+    // giving up on it. One made after would be no one's, and the open asked
+    // for again beside it.
+    let begun = Arc::new(AtomicBool::new(false));
+    let starting = begun.clone();
     thread::Builder::new()
         .name(name)
-        .spawn(move || ui_thread(spec, host, tx))
+        .spawn(move || {
+            if !starting.swap(true, Ordering::SeqCst) {
+                ui_thread(spec, host, tx);
+            }
+        })
         .map_err(|e| e.to_string())?;
-    rx.recv_timeout(Duration::from_secs(10))
-        .map_err(|_| "the window did not open".to_string())?
+    match rx.recv_timeout(Duration::from_secs(10)) {
+        Ok(opened) => opened,
+        Err(_) if !begun.swap(true, Ordering::SeqCst) => Err("the window did not open".to_string()),
+        // Being made as this gave up: it is moments away.
+        Err(_) => rx.recv().map_err(|_| "the window did not open".to_string())?,
+    }
 }
 
 struct Geometry {
@@ -741,6 +789,8 @@ fn register_class() {
 fn ui_thread(spec: Spec, host: Arc<dyn Host>, opened: Sender<Result<Arc<Window>, String>>) {
     unsafe {
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        // OLE as well: a drag carried out of the window is Windows' own drag, from this thread.
+        let _ = OleInitialize(None);
     }
     register_class();
     let geo = geometry(spec.cascade, spec.size);
@@ -771,6 +821,8 @@ fn ui_thread(spec: Spec, host: Arc<dyn Host>, opened: Sender<Result<Arc<Window>,
         top_bar_down: AtomicBool::new(false),
         top_bar_leaving: AtomicBool::new(false),
         menu_open: AtomicBool::new(false),
+        phone_drag: AtomicBool::new(false),
+        dragged: Mutex::new(None),
     });
     let state = Box::new(Ui {
         shared: shared.clone(),
@@ -785,6 +837,8 @@ fn ui_thread(spec: Spec, host: Arc<dyn Host>, opened: Sender<Result<Arc<Window>,
         render_thread: None,
         props: None,
         note_fades: 0,
+        out: Out::No,
+        taking: None,
     });
     let state_ptr = Box::into_raw(state);
     let title: Vec<u16> = spec.label.encode_utf16().chain(std::iter::once(0)).collect();
@@ -998,6 +1052,26 @@ struct Ui {
     props: Option<IPropertyStore>,
     /// The note the fade timer is running for, by its number.
     note_fades: u64,
+    /// A drag of the app's carried out of the window, as far as it has got.
+    out: Out,
+    /// …and its files, on their way here before Windows' drag can carry them.
+    taking: Option<(Offer, Arc<Taking>)>,
+}
+
+/// A drag of the app's carried out of the window, as far as it has got.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Out {
+    No,
+    /// The pointer left with it: the phone is asked what it carries, the button still held.
+    Asked,
+    /// Its files are coming here, the button still held.
+    Taking,
+    /// The button was let go before Windows' drag could start: its files go to Downloads.
+    LetGo,
+    /// Windows' own drag has it.
+    Dragging,
+    /// The phone had nothing to hand over: not asked again until the next press.
+    Refused,
 }
 
 fn lo(l: LPARAM) -> i32 {
@@ -1045,6 +1119,69 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
         }
         (*ptr).handle(hwnd, msg, wp, lp)
     }
+}
+
+/// The primary button is down now: Windows' drag starts only from a press.
+fn left_button_down() -> bool {
+    unsafe {
+        // The physical button, which may be the right one for a left-handed mouse.
+        let vk = if GetSystemMetrics(SM_SWAPBUTTON) != 0 { VK_RBUTTON } else { VK_LBUTTON };
+        (GetAsyncKeyState(vk.0 as i32) as u16 & 0x8000) != 0
+    }
+}
+
+/// Windows' own drag of `paths` — the shell's data object for them, as
+/// Explorer drags files — or of `text`, from where the pointer is, until it
+/// is dropped. The shell's own drop source: the button let go drops, Esc cancels.
+unsafe fn drag_out(hwnd: HWND, paths: &[PathBuf], text: Option<&str>) -> windows::core::Result<DROPEFFECT> {
+    unsafe {
+        let data: IDataObject = if paths.is_empty() {
+            SHCreateDataObject(None, None, None::<&IDataObject>)?
+        } else {
+            super::clipboard::shell_data_object(paths)?
+        };
+        if let Some(text) = text {
+            put_text(&data, text)?;
+        }
+        SHDoDragDrop(Some(hwnd), &data, None::<&IDropSource>, DROPEFFECT_COPY)
+    }
+}
+
+/// `text` on `data`, as the text a drop takes.
+unsafe fn put_text(data: &IDataObject, text: &str) -> windows::core::Result<()> {
+    unsafe {
+        let wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+        let h = GlobalAlloc(GMEM_MOVEABLE, wide.len() * 2)?;
+        let p = GlobalLock(h) as *mut u16;
+        if p.is_null() {
+            return Err(windows::core::Error::from_thread());
+        }
+        std::ptr::copy_nonoverlapping(wide.as_ptr(), p, wide.len());
+        let _ = GlobalUnlock(h);
+        let format = FORMATETC {
+            cfFormat: CF_UNICODETEXT.0,
+            ptd: std::ptr::null_mut(),
+            dwAspect: DVASPECT_CONTENT.0,
+            lindex: -1,
+            tymed: TYMED_HGLOBAL.0 as u32,
+        };
+        let medium = STGMEDIUM {
+            tymed: TYMED_HGLOBAL.0 as u32,
+            u: STGMEDIUM_0 { hGlobal: h },
+            pUnkForRelease: std::mem::ManuallyDrop::new(None),
+        };
+        // The data object owns the memory from here.
+        data.SetData(&format, &medium, true)
+    }
+}
+
+/// A drag let go of before Windows' could carry it: its files into
+/// Downloads, off the window's thread, and the window says where.
+fn into_downloads(taking: Arc<Taking>, offer: Offer, say: fetch::Note) {
+    thread::spawn(move || {
+        let said = fetch::into_downloads(&taking, &offer);
+        say(Some(said), false);
+    });
 }
 
 /// One of DWM's window attributes that is a number.
@@ -1100,6 +1237,107 @@ impl Ui {
     fn pointer(&self, x: i32, y: i32) {
         let (dx, dy) = self.shared.to_display(x, y);
         self.shared.send(wire::pointer(self.buttons, dx, dy, mods().meta()));
+    }
+
+    // ── a drag of the app's, carried out of the window ──
+
+    /// The pointer moved with a button held: true if that carries a drag of
+    /// the app's out of the window — the phone is asked to hand it over, and
+    /// the app sees no more of the press.
+    fn carrying_out(&mut self, x: i32, y: i32) -> bool {
+        match self.out {
+            Out::Asked | Out::Taking | Out::LetGo | Out::Dragging => true,
+            Out::No if self.buttons == 1 && self.shared.phone_drag.load(Ordering::SeqCst) && !self.on_picture(x, y) => {
+                self.out = Out::Asked;
+                self.shared.send(wire::json(&json!({"t": "dragOut"})));
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether (`x`, `y`), in the client area, is on the app's picture.
+    fn on_picture(&self, x: i32, y: i32) -> bool {
+        let (w, h) = *self.shared.client.lock().unwrap();
+        x >= 0 && y >= self.bar_height() && x < w as i32 && y < h as i32
+    }
+
+    /// What the phone says the drag it handed over carries: its files come
+    /// here, then Windows' own drag carries them on (WM_APP_TAKEN) — text at
+    /// once. Let go of already, its files go to Downloads instead.
+    fn carry_out(&mut self, hwnd: HWND) {
+        let Some(answer) = self.shared.dragged.lock().unwrap().take() else { return };
+        let Some(offer) = answer else {
+            // Nothing to carry: the press goes on in the app, and is not handed over again.
+            if self.out == Out::Asked {
+                self.out = Out::Refused;
+            }
+            return;
+        };
+        let held = self.out == Out::Asked && left_button_down();
+        if offer.files().next().is_none() {
+            self.out = Out::No;
+            let text = offer.items.iter().find_map(|i| i.text.clone()).unwrap_or_default();
+            if held && !text.is_empty() {
+                self.out = Out::Dragging;
+                if let Err(e) = unsafe { drag_out(hwnd, &[], Some(&text)) } {
+                    log::warn!("apps: text dragged out of {}: {e}", self.shared.label());
+                }
+                self.out = Out::No;
+            }
+            return;
+        }
+        let say = self.say();
+        let taking = Taking::start(self.shared.link.route(), &offer, "drag", Some(say.clone()));
+        if !held {
+            self.out = Out::No;
+            into_downloads(taking, offer, say);
+            return;
+        }
+        self.out = Out::Taking;
+        // When they are all here, or have failed, the window hears it.
+        let (t, files, target) = (taking.clone(), offer.files().map(|(i, _)| i).collect::<Vec<_>>(), hwnd.0 as isize);
+        thread::spawn(move || {
+            for i in files {
+                let _ = t.wait(i, Duration::from_secs(600));
+            }
+            unsafe {
+                let _ = PostMessageW(Some(HWND(target as *mut core::ffi::c_void)), WM_APP_TAKEN, WPARAM(0), LPARAM(0));
+            }
+        });
+        self.taking = Some((offer, taking));
+    }
+
+    /// Its files are here: Windows' own drag carries them on from where the
+    /// pointer is — or, the button let go meanwhile, into Downloads.
+    fn carry_on(&mut self, hwnd: HWND) {
+        let Some((offer, taking)) = self.taking.take() else { return };
+        let say = self.say();
+        if self.out != Out::Taking || !left_button_down() {
+            self.out = Out::No;
+            into_downloads(taking, offer, say);
+            return;
+        }
+        let mut paths = Vec::new();
+        for (i, item) in offer.files() {
+            match taking.wait(i, Duration::ZERO) {
+                Ok(p) => paths.push(p),
+                Err(e) => say(Some(format!("{} couldn't be copied: {e}", fetch::short(&item.name))), false),
+            }
+        }
+        if !paths.is_empty() {
+            self.out = Out::Dragging;
+            if let Err(e) = unsafe { drag_out(hwnd, &paths, None) } {
+                log::warn!("apps: files dragged out of {}: {e}", self.shared.label());
+            }
+        }
+        self.out = Out::No;
+    }
+
+    /// The window's note, as what takes files from the phone says it.
+    fn say(&self) -> fetch::Note {
+        let shared = self.shared.clone();
+        Arc::new(move |text, busy| shared.note(text, busy))
     }
 
     fn key_tap(&self, code: u16) {
@@ -1390,14 +1628,18 @@ impl Ui {
         }
     }
 
-    /// More's menu, under its button: full screen, with its key beside it, and
-    /// the phone's own screen as the touchpad of its windows here.
+    /// More's menu, under its button: Copy and Paste, full screen, each with
+    /// its key beside it, and the phone's own screen as the touchpad of its
+    /// windows here.
     fn more_menu(&mut self, hwnd: HWND) {
         let full = self.full_screen();
         let button = self.button_rect(Hit::More);
         unsafe {
             let Ok(menu) = CreatePopupMenu() else { return };
             let text = if full { w!("Exit full screen\tEsc") } else { w!("Full screen\tF11") };
+            let _ = AppendMenuW(menu, MF_STRING, MENU_COPY, w!("Copy\tCtrl+C"));
+            let _ = AppendMenuW(menu, MF_STRING, MENU_PASTE, w!("Paste\tCtrl+V"));
+            let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
             let _ = AppendMenuW(menu, MF_STRING, MENU_FULL_SCREEN, text);
             let _ = AppendMenuW(menu, MF_STRING, MENU_TOUCHPAD, w!("Use phone as touchpad"));
             dark_menus(hwnd, self.shared.dark.load(Ordering::SeqCst));
@@ -1420,8 +1662,21 @@ impl Ui {
             if chosen.0 as usize == MENU_FULL_SCREEN {
                 self.toggle_full_screen(hwnd);
             } else {
-                if chosen.0 as usize == MENU_TOUCHPAD {
-                    self.shared.link.host().touchpad(self.shared.clone());
+                match chosen.0 as usize {
+                    MENU_TOUCHPAD => self.shared.link.host().touchpad(self.shared.clone()),
+                    MENU_COPY => {
+                        // The app's own copy key: what it copies comes to this PC's
+                        // clipboard — a picture or a file as a file — and the window says so.
+                        self.shared.link.host().copying(self.shared.clone());
+                        self.shared.send(wire::key(true, 0, keys::code::C, keys::meta::CTRL));
+                        self.shared.send(wire::key(false, 0, keys::code::C, keys::meta::CTRL));
+                    }
+                    MENU_PASTE => {
+                        self.hand_clipboard_over();
+                        self.shared.send(wire::key(true, 0, keys::code::V, keys::meta::CTRL));
+                        self.shared.send(wire::key(false, 0, keys::code::V, keys::meta::CTRL));
+                    }
+                    _ => {}
                 }
                 self.after_menu(hwnd);
             }
@@ -1589,6 +1844,9 @@ impl Ui {
                         self.tracking = true;
                     }
                     self.last_y = y;
+                    if self.buttons != 0 && self.carrying_out(x, y) {
+                        return LRESULT(0);
+                    }
                     if self.full_screen() {
                         let on = if self.buttons == 0 { self.track_top(hwnd, x, y) } else { Hit::None };
                         self.set_hover(if self.ours(on) { on } else { Hit::None });
@@ -1624,6 +1882,9 @@ impl Ui {
                 WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN | WM_LBUTTONDBLCLK | WM_RBUTTONDBLCLK
                 | WM_MBUTTONDBLCLK => {
                     let (x, y) = (lo(lp), hi(lp));
+                    if self.out == Out::Refused {
+                        self.out = Out::No;
+                    }
                     // On a bar (the title bar, or the full-screen bar while it is
                     // down), a press is the bar's, never the app's.
                     let on = if self.buttons == 0 { self.bar_hit(x, y) } else { Hit::None };
@@ -1655,6 +1916,10 @@ impl Ui {
                     let bit = Self::button_bit(msg);
                     if self.buttons & bit == 0 {
                         return LRESULT(0);
+                    }
+                    if matches!(self.out, Out::Asked | Out::Taking) {
+                        // Let go before Windows' drag could carry it: into Downloads, when it comes.
+                        self.out = Out::LetGo;
                     }
                     self.buttons &= !bit;
                     self.pointer(x, y);
@@ -1858,6 +2123,14 @@ impl Ui {
                 }
                 WM_DROPFILES => {
                     self.dropped(HDROP(wp.0 as *mut core::ffi::c_void));
+                    LRESULT(0)
+                }
+                WM_APP_DRAGGED => {
+                    self.carry_out(hwnd);
+                    LRESULT(0)
+                }
+                WM_APP_TAKEN => {
+                    self.carry_on(hwnd);
                     LRESULT(0)
                 }
                 WM_TIMER if wp.0 == SLIDE_TIMER => {

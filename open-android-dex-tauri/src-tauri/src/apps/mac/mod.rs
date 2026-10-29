@@ -21,6 +21,12 @@
 //! Files dropped on one from Finder go to the phone (drops.rs), and a note
 //! in a strip under the title bar says how it went, as on Windows.
 //!
+//! A drag the app lets go of goes the other way: when the pointer leaves the
+//! window with one held, the phone drops it on the launcher's pixel and says
+//! what it carried (doc/apps-on-pc.md, "Dragging out"), and this Mac's own
+//! drag takes it on from there — files promised to whatever they are dropped
+//! on, as Photos' are, and written there as they come from the phone.
+//!
 //! Full screen is macOS's own, in a space of its own — whichever way it is
 //! asked for: More, the green button, ⌃⌘F — but with the menu bar kept away,
 //! and with it the title bar that would come down from the top. A small bar
@@ -47,20 +53,24 @@ use objc2::{define_class, msg_send, sel, AnyThread, DefinedClass, MainThreadMark
 use objc2_app_kit::{
     NSAnimatablePropertyContainer, NSAnimationContext, NSApplication, NSApplicationPresentationOptions,
     NSAutoresizingMaskOptions, NSBackingStoreType, NSButton, NSColor, NSControlStateValueOn, NSDragOperation,
-    NSDraggingDestination, NSDraggingInfo, NSEvent, NSEventModifierFlags, NSFont, NSFontWeightMedium,
+    NSDraggingContext, NSDraggingDestination, NSDraggingInfo, NSDraggingItem, NSDraggingSession, NSDraggingSource,
+    NSEvent, NSEventModifierFlags, NSFilePromiseProvider, NSFilePromiseProviderDelegate, NSFont, NSFontWeightMedium,
     NSFontWeightSemibold, NSImage, NSImageSymbolConfiguration, NSLayoutAttribute, NSLineBreakMode, NSMenu,
-    NSMenuItem, NSPasteboardTypeFileURL, NSResponder, NSScreen, NSTextAlignment, NSTextField, NSTextInputClient,
+    NSMenuItem, NSPasteboardTypeFileURL, NSPasteboardWriting, NSResponder, NSScreen, NSTextAlignment, NSTextField,
+    NSTextInputClient,
     NSTitlebarAccessoryViewController, NSTrackingArea, NSTrackingAreaOptions, NSView, NSVisualEffectBlendingMode,
     NSVisualEffectMaterial, NSVisualEffectState, NSVisualEffectView, NSWindow, NSWindowCollectionBehavior,
-    NSWindowDelegate, NSWindowStyleMask, NSWindowTabbingMode,
+    NSWindowDelegate, NSWindowStyleMask, NSWindowTabbingMode, NSWorkspace,
 };
 use objc2_foundation::{
-    ns_string, NSArray, NSAttributedString, NSAttributedStringKey, NSData, NSInteger, NSNotFound, NSNotification,
-    NSPoint, NSRange, NSRangePointer, NSRect, NSSize, NSString, NSUInteger, NSURL,
+    ns_string, NSArray, NSAttributedString, NSAttributedStringKey, NSData, NSError, NSInteger, NSNotFound,
+    NSNotification, NSOperationQueue, NSPoint, NSQualityOfService, NSRange, NSRangePointer, NSRect, NSSize, NSString,
+    NSUInteger, NSURL,
 };
 use objc2_quartz_core::{CALayer, CATransaction};
 use serde_json::json;
 
+use super::fetch::{self, Offer, Taking};
 use super::keys::{self, mac as mk};
 use super::link::{self, DisplaySize, Event, Host, Link, NetSpec, Refused, Route, Spec, Surface};
 use super::sound;
@@ -319,6 +329,14 @@ impl Surface for Shared {
             w.close();
         });
     }
+
+    fn dragging(&self, on: bool) {
+        with_window(self.id, move |_, v| v.ivars().phone_drag.set(on));
+    }
+
+    fn dragged(&self, offer: Option<Offer>) {
+        with_window(self.id, move |_, v| v.carry_out(offer));
+    }
 }
 
 // ── the main thread's ──
@@ -551,15 +569,28 @@ pub fn open(spec: Spec, host: Arc<dyn Host>) -> Result<Arc<Window>, String> {
         size: spec.size,
     };
     let (tx, rx) = mpsc::channel::<()>();
+    // Whichever comes first: the main thread starting on the window, or this
+    // giving up on it. One made after would be no one's — its picture never
+    // coming — and the open asked for again beside it.
+    let begun = Arc::new(AtomicBool::new(false));
     {
-        let shared = shared.clone();
+        let (shared, begun) = (shared.clone(), begun.clone());
         DispatchQueue::main().exec_async(move || {
+            if begun.swap(true, Ordering::SeqCst) {
+                return;
+            }
             let mtm = MainThreadMarker::new().expect("the main queue runs on the main thread");
             make(mtm, &look, &shared);
             let _ = tx.send(());
         });
     }
-    rx.recv_timeout(Duration::from_secs(10)).map_err(|_| "the window did not open".to_string())?;
+    if rx.recv_timeout(Duration::from_secs(10)).is_err() {
+        if !begun.swap(true, Ordering::SeqCst) {
+            return Err("the window did not open".to_string());
+        }
+        // Being made as this gave up: it is moments away.
+        rx.recv().map_err(|_| "the window did not open".to_string())?;
+    }
     let net = NetSpec {
         serial: spec.serial.clone(),
         socket: spec.socket.clone(),
@@ -874,6 +905,23 @@ const BUTTON_TERTIARY: u8 = 4;
 /// A trackpad scrolls in points; a mouse wheel's notch is about this many.
 const POINTS_PER_NOTCH: f64 = 10.0;
 
+/// A drag of the app's carried out of the window, as far as it has got.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Out {
+    No,
+    /// The pointer left with it: the phone is asked what it carries, the button still held.
+    Asked,
+    /// The phone handed it over: this Mac's own drag starts at the pointer's
+    /// next move — from inside a drag of the mouse, where AppKit begins one.
+    Ready,
+    /// The button was let go before this Mac's drag could start: its files go to Downloads.
+    LetGo,
+    /// This Mac's own drag has it.
+    Dragging,
+    /// The phone had nothing to hand over: not asked again until the next press.
+    Refused,
+}
+
 /// The view's own state. Main thread only.
 struct Ui {
     shared: Arc<Shared>,
@@ -915,6 +963,15 @@ struct Ui {
     /// Closing because the phone said the app had gone: the phone is not told.
     gone: Cell<bool>,
     closed: Cell<bool>,
+    /// The app has a drag under way that may leave the window (link.rs, `dragging`).
+    phone_drag: Cell<bool>,
+    out: Cell<Out>,
+    /// What the phone handed over, its files already on their way, until
+    /// this Mac's own drag starts.
+    ready: RefCell<Option<(Offer, Arc<Taking>)>>,
+    /// What the last drag carried out promised its files with: a receiver
+    /// holds them weakly, and asks for each as it is dropped.
+    promised: RefCell<Vec<Retained<PhoneFile>>>,
 }
 
 define_class!(
@@ -980,6 +1037,9 @@ define_class!(
 
         #[unsafe(method(mouseDown:))]
         fn mouse_down(&self, event: &NSEvent) {
+            if self.ivars().out.get() == Out::Refused {
+                self.ivars().out.set(Out::No);
+            }
             let control = event.modifierFlags().contains(NSEventModifierFlags::Control);
             self.ivars().control_click.set(control);
             self.press(event, if control { BUTTON_SECONDARY } else { BUTTON_PRIMARY }, true);
@@ -987,6 +1047,19 @@ define_class!(
 
         #[unsafe(method(mouseUp:))]
         fn mouse_up(&self, event: &NSEvent) {
+            match self.ivars().out.get() {
+                // Let go before the phone said what the drag carries.
+                Out::Asked => self.ivars().out.set(Out::LetGo),
+                // Let go before it moved again: what the phone handed over goes to Downloads.
+                Out::Ready => {
+                    self.ivars().out.set(Out::No);
+                    let ready = self.ivars().ready.borrow_mut().take();
+                    if let Some((offer, taking)) = ready {
+                        into_downloads(taking, offer, self.noting());
+                    }
+                }
+                _ => {}
+            }
             let bit = if self.ivars().control_click.replace(false) { BUTTON_SECONDARY } else { BUTTON_PRIMARY };
             self.press(event, bit, false);
         }
@@ -1013,7 +1086,9 @@ define_class!(
 
         #[unsafe(method(mouseDragged:))]
         fn mouse_dragged(&self, event: &NSEvent) {
-            self.pointer(event);
+            if !self.carrying_out(event) {
+                self.pointer(event);
+            }
         }
 
         #[unsafe(method(rightMouseDragged:))]
@@ -1147,6 +1222,24 @@ define_class!(
             }
         }
 
+        /// More's Copy: the app's own copy key, as ⌘C sends it. What the app
+        /// copies comes to this Mac's clipboard — a picture or a file as a
+        /// file — and the window says so, or that nothing was.
+        #[unsafe(method(copyFromPhone:))]
+        fn copy_from_phone(&self, _sender: Option<&AnyObject>) {
+            let shared = self.ivars().shared.clone();
+            shared.link.host().copying(shared.clone());
+            self.key(keys::code::C, keys::meta::CTRL, false);
+            shared.link.send(wire::key(false, 0, keys::code::C, keys::meta::CTRL));
+        }
+
+        /// More's Paste: this Mac's clipboard into the app, as ⌘V pastes it.
+        #[unsafe(method(pasteToPhone:))]
+        fn paste_to_phone(&self, _sender: Option<&AnyObject>) {
+            self.key(keys::code::V, keys::meta::CTRL, false);
+            self.ivars().shared.link.send(wire::key(false, 0, keys::code::V, keys::meta::CTRL));
+        }
+
         /// More's "Use phone as touchpad": the phone's screen up as the touchpad
         /// of its windows here (apps/pad.rs). A note under the title bar says how it went.
         #[unsafe(method(usePhoneTouchpad:))]
@@ -1201,6 +1294,19 @@ define_class!(
                 shared.link.host().dropped(paths, shared.clone());
             }
             taken
+        }
+    }
+
+    /// A drag of the app's, carried out of the window: this Mac's own from there.
+    unsafe impl NSDraggingSource for AppView {
+        #[unsafe(method(draggingSession:sourceOperationMaskForDraggingContext:))]
+        fn source_operations(&self, _session: &NSDraggingSession, _context: NSDraggingContext) -> NSDragOperation {
+            NSDragOperation::Copy
+        }
+
+        #[unsafe(method(draggingSession:endedAtPoint:operation:))]
+        fn dragging_ended(&self, _session: &NSDraggingSession, at: NSPoint, operation: NSDragOperation) {
+            self.drag_out_ended(at, operation);
         }
     }
 
@@ -1384,6 +1490,10 @@ impl AppView {
             esc_held: Cell::new(false),
             gone: Cell::new(false),
             closed: Cell::new(false),
+            phone_drag: Cell::new(false),
+            out: Cell::new(Out::No),
+            ready: RefCell::new(None),
+            promised: RefCell::new(Vec::new()),
         });
         let view: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: frame] };
         view.setWantsLayer(true);
@@ -1521,11 +1631,27 @@ impl AppView {
         CATransaction::commit();
     }
 
-    /// More's menu, under the button that opened it: full screen, for now,
-    /// with the Mac's own keys for it beside it.
+    /// More's menu, under the button that opened it: Copy and Paste, which
+    /// the keyboard does too, then full screen, with the Mac's own keys for
+    /// each beside it, and the phone as the touchpad.
     fn more(&self, button: &NSView) {
         let ui = self.ivars();
         let mtm = self.mtm();
+        let target: &AnyObject = self;
+        let edit = |title: &str, action: Sel, key: &str| {
+            let item = unsafe {
+                NSMenuItem::initWithTitle_action_keyEquivalent(
+                    NSMenuItem::alloc(mtm),
+                    &NSString::from_str(title),
+                    Some(action),
+                    &NSString::from_str(key),
+                )
+            };
+            unsafe { item.setTarget(Some(target)) };
+            item
+        };
+        let copy = edit("Copy", sel!(copyFromPhone:), "c");
+        let paste = edit("Paste", sel!(pasteToPhone:), "v");
         let (title, key, held) = if ui.full_screen.get() {
             ("Exit full screen", "\u{1b}", NSEventModifierFlags::empty())
         } else {
@@ -1540,7 +1666,6 @@ impl AppView {
             )
         };
         item.setKeyEquivalentModifierMask(held);
-        let target: &AnyObject = self;
         unsafe { item.setTarget(Some(target)) };
         // The phone's own screen as the touchpad of its windows here (apps/pad.rs).
         let pad = unsafe {
@@ -1553,9 +1678,141 @@ impl AppView {
         };
         unsafe { pad.setTarget(Some(target)) };
         let menu = NSMenu::new(mtm);
+        menu.addItem(&copy);
+        menu.addItem(&paste);
+        menu.addItem(&NSMenuItem::separatorItem(mtm));
         menu.addItem(&item);
         menu.addItem(&pad);
         self.pop_up(&menu, button);
+    }
+
+    // ── a drag of the app's, carried out of the window ──
+
+    /// The pointer dragged with a button held: true if that carries a drag of
+    /// the app's out of the window — the phone is asked to hand it over, and
+    /// the app sees no more of the press.
+    fn carrying_out(&self, event: &NSEvent) -> bool {
+        let ui = self.ivars();
+        match ui.out.get() {
+            Out::Ready => {
+                ui.out.set(Out::No);
+                let ready = ui.ready.borrow_mut().take();
+                if let Some((offer, taking)) = ready {
+                    self.begin_drag(&offer, taking, event);
+                }
+                true
+            }
+            Out::Asked | Out::Dragging | Out::LetGo => true,
+            Out::No
+                if ui.phone_drag.get()
+                    && ui.buttons.get() == BUTTON_PRIMARY
+                    && !self.on_picture(self.convertPoint_fromView(event.locationInWindow(), None)) =>
+            {
+                ui.out.set(Out::Asked);
+                ui.shared.link.send(wire::json(&json!({"t": "dragOut"})));
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// What the phone says the drag it handed over carries: its files start
+    /// on their way here at once, and this Mac's own drag takes it on at the
+    /// pointer's next move — or, the button let go before it could, the
+    /// files go to Downloads.
+    fn carry_out(&self, offer: Option<Offer>) {
+        let ui = self.ivars();
+        let was = ui.out.replace(Out::No);
+        let Some(offer) = offer else {
+            // Nothing to carry: the press goes on in the app, and is not handed over again.
+            if was == Out::Asked {
+                ui.out.set(Out::Refused);
+            }
+            return;
+        };
+        let say = self.noting();
+        let taking = Taking::start(ui.shared.link.route(), &offer, "drag", Some(say.clone()));
+        let label = ui.shared.label();
+        if was == Out::Asked && NSEvent::pressedMouseButtons() & 1 != 0 {
+            log::info!("apps: {label}: a drag of {} item(s) handed over, this Mac's own from the next move", offer.items.len());
+            *ui.ready.borrow_mut() = Some((offer, taking));
+            ui.out.set(Out::Ready);
+        } else {
+            log::info!("apps: {label}: a drag out of the window, let go of before this Mac's could start ({was:?})");
+            into_downloads(taking, offer, say);
+        }
+    }
+
+    /// The window's note, as a taking of files says it.
+    fn noting(&self) -> fetch::Note {
+        let shared = self.ivars().shared.clone();
+        Arc::new(move |text, busy| shared.note(text, busy))
+    }
+
+    /// This Mac's own drag of what the phone handed over, from `event` — a
+    /// drag of the mouse, as AppKit wants one begun: each file a promise —
+    /// Finder, Mail, Messages and the rest ask for it as it is dropped, and
+    /// it is written there from the phone's copy in `taking`, on its way
+    /// already — and text as text.
+    fn begin_drag(&self, offer: &Offer, taking: Arc<Taking>, event: &NSEvent) {
+        let ui = self.ivars();
+        let say = self.noting();
+        let at = self.convertPoint_fromView(event.locationInWindow(), None);
+        let mut items: Vec<Retained<NSDraggingItem>> = Vec::new();
+        let mut promised = Vec::new();
+        for (i, item) in offer.items.iter().enumerate() {
+            let writer: Retained<ProtocolObject<dyn NSPasteboardWriting>> = if item.file {
+                let file = PhoneFile::new(Promise { taking: taking.clone(), i, name: item.name.clone(), say: say.clone() });
+                let provider = NSFilePromiseProvider::initWithFileType_delegate(
+                    NSFilePromiseProvider::alloc(),
+                    &NSString::from_str(file_type(&item.mime, &item.name)),
+                    ProtocolObject::from_ref(&*file),
+                );
+                promised.push(file);
+                ProtocolObject::from_retained(provider)
+            } else if let Some(text) = &item.text {
+                ProtocolObject::from_retained(NSString::from_str(text))
+            } else {
+                continue;
+            };
+            let dragging = NSDraggingItem::initWithPasteboardWriter(NSDraggingItem::alloc(), &writer);
+            // A small stack of icons under the pointer, as Finder shows several files.
+            let k = items.len().min(4) as f64;
+            let frame = NSRect::new(NSPoint::new(at.x - 24.0 + 6.0 * k, at.y - 24.0 - 6.0 * k), NSSize::new(48.0, 48.0));
+            let icon = icon_of(item);
+            unsafe { dragging.setDraggingFrame_contents(frame, Some(&icon)) };
+            items.push(dragging);
+        }
+        if items.is_empty() {
+            return;
+        }
+        log::info!("apps: {}: this Mac's drag of {} item(s) begins", ui.shared.label(), items.len());
+        *ui.promised.borrow_mut() = promised;
+        ui.out.set(Out::Dragging);
+        let session =
+            self.beginDraggingSessionWithItems_event_source(&NSArray::from_retained_slice(&items), event, ProtocolObject::from_ref(self));
+        // Dropped nowhere, it does not fly back into the window it left.
+        session.setAnimatesToStartingPositionsOnCancelOrFail(false);
+    }
+
+    /// This Mac's drag is over, wherever it went: the press it began as is
+    /// let go of on the phone too, which takes the pointer again.
+    fn drag_out_ended(&self, at: NSPoint, operation: NSDragOperation) {
+        let ui = self.ivars();
+        log::info!(
+            "apps: {}: the drag out of the window ended{}",
+            ui.shared.label(),
+            if operation == NSDragOperation::None { ", taken by nothing" } else { ", dropped" }
+        );
+        ui.out.set(Out::No);
+        ui.buttons.set(0);
+        ui.control_click.set(false);
+        let p = match self.window() {
+            Some(w) => view_point(&w, self, at),
+            None => NSPoint::new(0.0, 0.0),
+        };
+        let (x, y) = self.at_display(p);
+        ui.shared.link.send(wire::pointer(0, x, y, 0));
     }
 
     /// The pointer at `p` in a full-screen window: at the top of the screen
@@ -1859,6 +2116,133 @@ impl AppView {
             self.ivars().shared.link.send(wire::text(&text));
         }
     }
+}
+
+/// A drag let go of before this Mac's own could carry it: its files into
+/// Downloads, off the main thread, and the window says where.
+fn into_downloads(taking: Arc<Taking>, offer: Offer, say: fetch::Note) {
+    if offer.files().next().is_none() {
+        return;
+    }
+    std::thread::spawn(move || {
+        let said = fetch::into_downloads(&taking, &offer);
+        say(Some(said), false);
+    });
+}
+
+/// One file of a drag carried out of a window: promised to whatever it is
+/// dropped on, and written there from the phone's copy as that arrives.
+struct Promise {
+    taking: Arc<Taking>,
+    i: usize,
+    name: String,
+    say: fetch::Note,
+}
+
+thread_local! {
+    /// Where promised files are written as they are dropped: a queue of
+    /// their own, off the main thread, since a write waits for the phone.
+    static PROMISES: Retained<NSOperationQueue> = {
+        let q = NSOperationQueue::new();
+        q.setQualityOfService(NSQualityOfService::UserInitiated);
+        q
+    };
+}
+
+define_class!(
+    // SAFETY: NSObject asks nothing of a subclass that this breaks; a promise has no Drop of its own.
+    #[unsafe(super(NSObject))]
+    #[name = "OpenAndroidDeXPhoneFile"]
+    #[ivars = Promise]
+    struct PhoneFile;
+
+    unsafe impl NSObjectProtocol for PhoneFile {}
+
+    unsafe impl NSFilePromiseProviderDelegate for PhoneFile {
+        #[unsafe(method_id(filePromiseProvider:fileNameForType:))]
+        fn file_name(&self, _provider: &NSFilePromiseProvider, _file_type: &NSString) -> Retained<NSString> {
+            NSString::from_str(&fetch::safe_name(&self.ivars().name))
+        }
+
+        /// On the promises' own queue: it waits for the file to come from the phone.
+        #[unsafe(method(filePromiseProvider:writePromiseToURL:completionHandler:))]
+        fn write_promise(
+            &self,
+            _provider: &NSFilePromiseProvider,
+            url: &NSURL,
+            done: &block2::DynBlock<dyn Fn(*mut NSError)>,
+        ) {
+            let p = self.ivars();
+            let written = match url.path() {
+                None => Err("there was nowhere to write it".to_string()),
+                Some(to) => p
+                    .taking
+                    .wait(p.i, Duration::from_secs(600))
+                    .and_then(|from| std::fs::copy(from, to.to_string()).map(|_| ()).map_err(|e| e.to_string())),
+            };
+            match written {
+                Ok(()) => {
+                    log::info!("apps: {} dragged out of its window, written where it was dropped", p.name);
+                    done.call((std::ptr::null_mut(),))
+                }
+                Err(e) => {
+                    log::warn!("apps: {} dragged out of its window: {e}", p.name);
+                    (p.say)(Some(format!("{} couldn't be copied: {e}", fetch::short(&p.name))), false);
+                    let err = unsafe { NSError::errorWithDomain_code_userInfo(ns_string!("OpenAndroidDeX"), 1, None) };
+                    done.call((Retained::as_ptr(&err) as *mut NSError,));
+                }
+            }
+        }
+
+        #[unsafe(method_id(operationQueueForFilePromiseProvider:))]
+        fn operation_queue(&self, _provider: &NSFilePromiseProvider) -> Retained<NSOperationQueue> {
+            PROMISES.with(|q| q.clone())
+        }
+    }
+);
+
+impl PhoneFile {
+    fn new(promise: Promise) -> Retained<Self> {
+        let this = Self::alloc().set_ivars(promise);
+        unsafe { msg_send![super(this), init] }
+    }
+}
+
+/// A file's type as a Mac names it, for those whose receivers care — Photos
+/// takes pictures and films only; anything else is data.
+fn file_type(mime: &str, name: &str) -> &'static str {
+    let ext = std::path::Path::new(name).extension().map(|e| e.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
+    match (mime, ext.as_str()) {
+        ("image/jpeg", _) | (_, "jpg" | "jpeg") => "public.jpeg",
+        ("image/png", _) | (_, "png") => "public.png",
+        ("image/heic" | "image/heif", _) | (_, "heic" | "heif") => "public.heic",
+        ("image/gif", _) | (_, "gif") => "com.compuserve.gif",
+        ("image/webp", _) | (_, "webp") => "org.webmproject.webp",
+        ("video/mp4", _) | (_, "mp4") => "public.mpeg-4",
+        ("video/quicktime", _) | (_, "mov") => "com.apple.quicktime-movie",
+        ("video/3gpp", _) | (_, "3gp") => "public.3gpp",
+        ("audio/mpeg", _) | (_, "mp3") => "public.mp3",
+        ("audio/mp4" | "audio/aac", _) | (_, "m4a") => "public.mpeg-4-audio",
+        ("application/pdf", _) | (_, "pdf") => "com.adobe.pdf",
+        ("application/zip", _) | (_, "zip") => "public.zip-archive",
+        ("text/plain", _) | (_, "txt") => "public.plain-text",
+        (m, _) if m.starts_with("image/") => "public.image",
+        (m, _) if m.starts_with("video/") => "public.movie",
+        (m, _) if m.starts_with("audio/") => "public.audio",
+        _ => "public.data",
+    }
+}
+
+/// What an item looks like while it is dragged: the Mac's own icon for its kind.
+fn icon_of(item: &fetch::Item) -> Retained<NSImage> {
+    let ext = if item.file {
+        std::path::Path::new(&item.name).extension().map(|e| e.to_string_lossy().into_owned()).unwrap_or_default()
+    } else {
+        "txt".into()
+    };
+    // iconForContentType: wants UniformTypeIdentifiers' types; this gives the same icons.
+    #[allow(deprecated)]
+    NSWorkspace::sharedWorkspace().iconForFileType(&NSString::from_str(&ext))
 }
 
 /// The files a drag carries, as paths. Finder hands over references to them

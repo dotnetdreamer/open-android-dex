@@ -38,7 +38,9 @@ import java.util.concurrent.atomic.AtomicInteger;
  * connection carries what belongs to the phone as a whole — the list of apps and
  * their icons, the clipboard, where its sound plays ({@link AppAudio}), its
  * notifications while the computer wants them ({@link AppNotifications}). A
- * file dropped on a window comes on a connection of its own too ({@link AppDrop}).
+ * file dropped on a window comes on a connection of its own too ({@link AppDrop}),
+ * and so does one the computer takes from the phone — dragged out of a window
+ * ({@link AppDrags}), or a picture the phone copied ({@link AppOffers}).
  *
  * <p>The socket is abstract and named afresh by the computer for every run, and
  * each connection's peer is put to the kernel (SO_PEERCRED): the shell, which
@@ -150,6 +152,10 @@ public final class AppServer {
             });
     /** The phone's screen as the touchpad of its windows on the computer, while the computer asks for it. */
     private final AppPad pad = new AppPad(this::toComputer);
+    /** Drags the windows' apps let go of, heard by the launcher, and carried out to the computer. */
+    private final AppDrags drags = new AppDrags();
+    /** What the computer may take from the phone: what a drag carried out, what the clipboard holds. */
+    private final AppOffers offers = new AppOffers();
     /**
      * The pad asked for and let go, one at a time and off the control
      * connection's thread: both fork `cmd` and may wake the launcher's process.
@@ -218,13 +224,29 @@ public final class AppServer {
         clipboard = AppClipboard.open();
         clipboardMs = SystemClock.uptimeMillis() - t0;
         if (clipboard != null) {
-            clipboard.listen(text -> {
-                Wire c = control;
-                if (c == null) return;
-                try {
-                    c.json(new JSONObject().put("t", "clip").put("text", text));
-                } catch (Exception ignored) {
-                    // the computer's end went; the next control connection asks again
+            clipboard.listen(new AppClipboard.Listener() {
+                @Override
+                public void copied(String text) {
+                    Wire c = control;
+                    if (c == null) return;
+                    try {
+                        c.json(new JSONObject().put("t", "clip").put("text", text));
+                    } catch (Exception ignored) {
+                        // the computer's end went; the next control connection asks again
+                    }
+                }
+
+                @Override
+                public void copied(List<AppOffers.Item> files) {
+                    Wire c = control;
+                    if (c == null) return;
+                    try {
+                        for (AppOffers.Item it : files) AppOffers.complete(it);
+                        int id = offers.put(files);
+                        c.json(new JSONObject().put("t", "clipFiles").put("id", id).put("items", AppOffers.describe(files)));
+                    } catch (Exception ignored) {
+                        // as for text
+                    }
                 }
             });
         }
@@ -295,6 +317,14 @@ public final class AppServer {
     /** The phone's clipboard, which the windows' typing borrows; null where the shell has none. */
     AppClipboard clipboard() {
         return clipboard;
+    }
+
+    AppDrags drags() {
+        return drags;
+    }
+
+    AppOffers offers() {
+        return offers;
     }
 
     /** An output came or went: the computer's menus list what is there. */
@@ -506,6 +536,11 @@ public final class AppServer {
                 }
                 break;
             }
+            case "get":
+                // A file the computer takes: a drag's item, or the clipboard's.
+                Thread.currentThread().setName("apps-get");
+                offers.serve(s, wire, hello);
+                break;
             case "put": {
                 Thread.currentThread().setName("apps-put");
                 AppDrop d = new AppDrop(s, wire, hello);
