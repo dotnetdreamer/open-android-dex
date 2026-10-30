@@ -125,12 +125,15 @@ final class Content {
      * release's interface has it.
      */
     private static Object call(Object provider, String what, Uri uri, Object arg) throws IOException {
-        Object attribution = PhoneContext.get().getAttributionSource();
         String shell = PhoneContext.SHELL_PACKAGE;
         for (Method m : provider.getClass().getMethods()) {
             if (!m.getName().equals(what)) continue;
             Class<?>[] p = m.getParameterTypes();
             boolean attributed = p.length > 0 && p[0].getName().equals("android.content.AttributionSource");
+            // Made only for a call that takes one: before Android 12 there is no
+            // such class, and asking for it there ends the whole server
+            // (NoClassDefFoundError, on a Redmi 9A's clipboard thread).
+            Object attribution = attributed ? PhoneContext.get().getAttributionSource() : null;
             Object[] a;
             switch (what) {
                 case "openAssetFile":

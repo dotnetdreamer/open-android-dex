@@ -259,8 +259,8 @@ pub fn set_files(paths: &[std::path::PathBuf]) -> Result<(), String> {
     std::thread::spawn(move || unsafe {
         OleInitialize(None).map_err(|e| e.to_string())?;
         let set = shell_data_object(&paths).and_then(|data| {
-            OleSetClipboard(&data)?;
-            OleFlushClipboard()
+            when_free(|| OleSetClipboard(&data))?;
+            when_free(|| OleFlushClipboard())
         });
         OleUninitialize();
         set.map_err(|e| e.to_string())
@@ -269,8 +269,35 @@ pub fn set_files(paths: &[std::path::PathBuf]) -> Result<(), String> {
     .unwrap_or_else(|_| Err("the clipboard's thread failed".into()))
 }
 
+/// `f` on the clipboard, again for up to half a second while another app has
+/// it open — one reading what changed there, as every clipboard watcher does
+/// (CLIPBRD_E_CANT_OPEN, seen on Windows 11 with the phone's copied picture).
+/// Meanwhile what is asked of this thread is answered: a watcher that opened
+/// the clipboard between the set and the flush waits on OLE's window here for
+/// the files themselves (WM_RENDERFORMAT), and keeps the clipboard open until
+/// it has them. Left unanswered, a clipboard manager failed a third of the copies.
+#[cfg(windows)]
+fn when_free(f: impl Fn() -> windows::core::Result<()>) -> windows::core::Result<()> {
+    use windows::Win32::Foundation::CLIPBRD_E_CANT_OPEN;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        MsgWaitForMultipleObjects, PeekMessageW, MSG, PM_NOREMOVE, PM_QS_SENDMESSAGE, QS_SENDMESSAGE,
+    };
+    let until = std::time::Instant::now() + std::time::Duration::from_millis(500);
+    loop {
+        match f() {
+            Err(e) if e.code() == CLIPBRD_E_CANT_OPEN && std::time::Instant::now() < until => unsafe {
+                // 25 ms, or less if something is sent here: a peek delivers it, and takes nothing off the queue.
+                MsgWaitForMultipleObjects(None, false, 25, QS_SENDMESSAGE);
+                let _ = PeekMessageW(&mut MSG::default(), None, 0, 0, PM_NOREMOVE | PM_QS_SENDMESSAGE);
+            },
+            done => return done,
+        }
+    }
+}
+
 /// The shell's own data object for `paths` — files as Explorer hands them
 /// over, to a drop or a paste: the file list, the shell's own list, and the rest.
+/// They are one offer's files, so in one folder: any elsewhere are left out.
 #[cfg(windows)]
 pub(super) unsafe fn shell_data_object(
     paths: &[std::path::PathBuf],
@@ -278,26 +305,36 @@ pub(super) unsafe fn shell_data_object(
     use windows::core::HSTRING;
     use windows::Win32::System::Com::IDataObject;
     use windows::Win32::UI::Shell::Common::ITEMIDLIST;
-    use windows::Win32::UI::Shell::{ILFree, SHCreateDataObject, SHParseDisplayName};
+    use windows::Win32::UI::Shell::{ILFindLastID, ILFree, SHCreateDataObject, SHParseDisplayName};
+    let Some(dir) = paths.first().and_then(|p| p.parent()) else {
+        return Err(windows::core::Error::empty());
+    };
     unsafe {
+        // The folder, and each file as a child of it: given whole paths and no
+        // folder, the shell's data object offers nothing at all — no file list,
+        // so Explorer refuses the drop and a paste pastes nothing.
+        let mut folder: *mut ITEMIDLIST = std::ptr::null_mut();
+        SHParseDisplayName(&HSTRING::from(dir.as_os_str()), None, &mut folder, 0, None)?;
         let mut pidls: Vec<*const ITEMIDLIST> = Vec::new();
         let mut failed = None;
-        for p in paths {
+        for p in paths.iter().filter(|p| p.parent() == Some(dir)) {
             let mut pidl: *mut ITEMIDLIST = std::ptr::null_mut();
             match SHParseDisplayName(&HSTRING::from(p.as_os_str()), None, &mut pidl, 0, None) {
                 Ok(()) => pidls.push(pidl),
                 Err(e) => failed = Some(e),
             }
         }
-        let made = if pidls.is_empty() {
+        // Each child is the last part of its whole path, held in it until the data object has copied it.
+        let children: Vec<*const ITEMIDLIST> = pidls.iter().map(|&p| ILFindLastID(p) as *const ITEMIDLIST).collect();
+        let made = if children.is_empty() {
             Err(failed.unwrap_or_else(windows::core::Error::empty))
         } else {
-            // Whole paths, no folder: the data object keeps copies of them.
-            SHCreateDataObject::<_, IDataObject>(None, Some(&pidls), None::<&IDataObject>)
+            SHCreateDataObject::<_, IDataObject>(Some(folder), Some(&children), None::<&IDataObject>)
         };
         for p in pidls {
             ILFree(Some(p));
         }
+        ILFree(Some(folder));
         made
     }
 }
