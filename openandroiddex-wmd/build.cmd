@@ -9,7 +9,6 @@ REM   build.cmd push       ... and push to /data/local/tmp/wmd.dex
 setlocal enabledelayedexpansion
 set HERE=%~dp0
 set SDK=%LOCALAPPDATA%\Android\Sdk
-set JBR=C:\Program Files\Android\Android Studio\jbr\bin
 
 if not exist "%SDK%\platforms\android-36\android.jar" (
   echo ERROR: android-36 platform not found under %SDK%
@@ -25,7 +24,23 @@ if not defined BUILDTOOLS (
   exit /b 1
 )
 
-echo [1/3] javac
+REM JAVA_HOME if set, else Android Studio's bundled JBR wherever it installed,
+REM else whatever javac is on PATH. build.sh picks in the same order.
+set JAVAC=
+if defined JAVA_HOME if exist "%JAVA_HOME%\bin\javac.exe" set JAVAC=%JAVA_HOME%\bin\javac.exe
+for %%d in (
+  "%ProgramFiles%\Android\Android Studio"
+  "%LOCALAPPDATA%\Programs\Android Studio"
+) do (
+  if not defined JAVAC if exist "%%~d\jbr\bin\javac.exe" set JAVAC=%%~d\jbr\bin\javac.exe
+)
+if not defined JAVAC for %%p in (javac.exe) do if not defined JAVAC set JAVAC=%%~$PATH:p
+if not defined JAVAC (
+  echo ERROR: no javac. Set JAVA_HOME to a JDK 17 or newer, or install Android Studio.
+  exit /b 1
+)
+
+echo [1/3] javac  ^(!JAVAC!^)
 if exist "%HERE%build" rmdir /s /q "%HERE%build"
 mkdir "%HERE%build\classes"
 dir /s /b "%HERE%src\*.java" > "%HERE%build\sources.txt"
@@ -42,7 +57,7 @@ for %%c in (LinuxStreamEncoder DexLog) do (
 REM android.jar goes on the classpath, not the bootclasspath: JDK 17+ rejects
 REM -bootclasspath alongside -target 17. Everything we touch outside android.*
 REM is java.lang/util/io/net, which Android provides at runtime anyway.
-"%JBR%\javac.exe" -nowarn -Xlint:-options -source 17 -target 17 ^
+"%JAVAC%" -nowarn -Xlint:-options -source 17 -target 17 ^
   -cp "%SDK%\platforms\android-36\android.jar" ^
   -d "%HERE%build\classes" "@%HERE%build\sources.txt"
 if errorlevel 1 exit /b 1
