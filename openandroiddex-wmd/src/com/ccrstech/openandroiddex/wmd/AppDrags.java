@@ -27,11 +27,22 @@ import java.util.concurrent.Executors;
  * window: dragging out simply does not happen — the windows work as they did.
  * It is asked again as the next window opens, not before: the desktop, or the
  * phone's touchpad, may have brought the launcher up to date meanwhile.
+ *
+ * <p>Android 17 hides every other app's activities on a display that shows a
+ * presentation, which the launcher's pixel was: the window's own app was never
+ * shown while the launcher had no activity on screen. There the pixel is an
+ * overlay, so the launcher is let draw over others while windows are open
+ * ({@link LauncherOverlay}) — and a launcher from before that, which would put
+ * a presentation there, is asked for no pixel at all ({@code drag.caps}).
  */
 final class AppDrags {
 
     /** How long a call to the launcher waits for a drag to do something. */
     private static final long WAIT_MS = 10_000;
+    /** Android 17, by number: the first that hides the apps under a presentation. */
+    private static final int OVERLAY_FROM = 37;
+    /** What the pixels are, to the launcher's overlay app-op they need from Android 17. */
+    private static final String OVERLAY_NEED = "the drag catchers";
 
     private final Map<Integer, AppWindow> byDisplay = new ConcurrentHashMap<>();
     /** Displays the launcher would put no window on: not asked again. */
@@ -51,7 +62,7 @@ final class AppDrags {
         int display = w.displayId;
         if (display < 0) return;
         byDisplay.put(display, w);
-        asking.execute(() -> ask(display, true));
+        later(() -> ask(display, true));
     }
 
     /** {@code w}'s display is going: its window there goes with it. */
@@ -59,20 +70,64 @@ final class AppDrags {
         int display = w.displayId;
         if (byDisplay.remove(display) == null) return;
         refusedOn.remove(display);
-        if (unsupported != null) return;
-        asking.execute(() -> {
-            try {
-                Providers.call(AppServer.LINUX_PROVIDER, "drag.unwatch", new JSONObject().put("display", display));
-            } catch (Exception ignored) {
-                // the display, and the window with it, are going anyway
+        boolean asked = unsupported == null;
+        later(() -> {
+            // Not known: as if a desktop were up, whose taskbar keeps the app-op.
+            boolean desktop = true;
+            if (asked) {
+                try {
+                    JSONObject r = Providers.call(AppServer.LINUX_PROVIDER, "drag.unwatch", new JSONObject().put("display", display));
+                    desktop = r.optBoolean("desktop", true);
+                } catch (Exception ignored) {
+                    // the display, and the window with it, are going anyway
+                }
             }
+            if (byDisplay.isEmpty()) LauncherOverlay.release(OVERLAY_NEED, desktop);
         });
+    }
+
+    /**
+     * The server is stopping: what its windows' ends asked of the launcher —
+     * their pixels down, the overlay app-op back — is done before it goes.
+     */
+    void stopping() {
+        asking.shutdown();
+        try {
+            asking.awaitTermination(3, java.util.concurrent.TimeUnit.SECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
+    /** {@code r} on the asking thread, unless the server has stopped asking. */
+    private void later(Runnable r) {
+        try {
+            asking.execute(r);
+        } catch (java.util.concurrent.RejectedExecutionException ignored) {
+            // stopping: its windows are going with it
+        }
     }
 
     /** Asks for the launcher's window on {@code display}; a window just opened asks even where the last one could not. */
     private void ask(int display, boolean opened) {
         if ((unsupported != null && !opened) || !byDisplay.containsKey(display) || refusedOn.contains(display)) return;
         try {
+            if (android.os.Build.VERSION.SDK_INT >= OVERLAY_FROM) {
+                // A launcher from before Android 17's rule puts a presentation
+                // there, and the window's own app is never shown: none asked of
+                // it. Asked each time, as an update may have come meanwhile.
+                JSONObject caps = Providers.call(AppServer.LINUX_PROVIDER, "drag.caps", null);
+                if (!caps.optBoolean("ok") || !caps.has("overlayFrom")) {
+                    cannot("the launcher is from before Android 17, whose rule its window would break",
+                            "nothing can be dragged out of the windows here until the launcher is updated");
+                    return;
+                }
+                if (!LauncherOverlay.need(OVERLAY_NEED)) {
+                    refusedOn.add(display);
+                    AppServer.log("drags: no window to catch them on display " + display + " (the launcher may not draw over other apps)");
+                    return;
+                }
+            }
             JSONObject r = Providers.call(AppServer.LINUX_PROVIDER, "drag.watch", new JSONObject().put("display", display));
             if (r.optBoolean("ok")) {
                 unsupported = null;
@@ -132,7 +187,7 @@ final class AppDrags {
                         int d = e.getKey();
                         if (has.contains(d) || refusedOn.contains(d)) continue;
                         e.getValue().dragLost();
-                        asking.execute(() -> ask(d, false));
+                        later(() -> ask(d, false));
                     }
                 }
             }

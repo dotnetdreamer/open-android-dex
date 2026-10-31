@@ -1108,6 +1108,8 @@ public final class AppServer {
         while ((!running.isEmpty() || !drops.isEmpty()) && SystemClock.uptimeMillis() < until) {
             SystemClock.sleep(20);
         }
+        // The windows' drag pixels down, and the overlay app-op back if they had it given.
+        drags.stopping();
         System.out.flush();
         System.exit(0);
     }

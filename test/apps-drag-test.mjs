@@ -19,6 +19,14 @@
 // The Files app must open at Downloads, in its grid (it does on a fresh
 // emulator, and goes back there): the picture is the newest file, the first
 // in the grid. Needs Node 18+ and the Android SDK's adb.
+//
+// Every phone: the window's app must show — a picture, not only the encoder's
+// set-up. On Android 17 a presentation pixel hid the app under it for good.
+// There the pixel is an overlay instead, which this checks, with the launcher
+// let draw over others while the window is open and not after. And there the
+// drag itself is not tried: the Files app hides every other app's overlays
+// while it shows, so no drag out of it can be heard (PcDrags). A drag out of
+// an app that does not, Chrome's picture, was carried out by hand (2026-10-31).
 
 import { spawn, spawnSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
@@ -195,6 +203,16 @@ class Wire {
     }
     return null;
   }
+  /** The window's first picture: a video message that is not the encoder's set-up alone. */
+  async frame(ms = 15000) {
+    const until = Date.now() + ms;
+    while (Date.now() < until) {
+      const m = await this.read(until - Date.now());
+      if (!m) return false;
+      if (m.kind === 0x02 && m.data.length > 9 && (m.data[0] & 2) === 0) return true;
+    }
+    return false;
+  }
   /** Everything after the first message, until the phone closes the connection. */
   async rest(ms = 30000) {
     const until = Date.now() + ms;
@@ -244,6 +262,9 @@ adb("push", local, `/sdcard/Download/${name}`);
 fs.unlinkSync(local);
 adb("shell", `am broadcast -a android.intent.action.MEDIA_SCANNER_SCAN_FILE -d file:///sdcard/Download/${name}`);
 adb("push", DEX, PHONE_DEX);
+// The launcher's overlay app-op as it was: Android 17's pixel needs it while the window is open, and gives it back.
+const overlayOp = () => (adb("shell", "cmd appops get com.ccrstech.openandroiddex.launcher SYSTEM_ALERT_WINDOW").match(/SYSTEM_ALERT_WINDOW: (\w+)/) ?? [])[1] ?? "default";
+const overlayBefore = overlayOp();
 
 const server = new Server();
 await server.ready();
@@ -252,10 +273,12 @@ console.log(`server ${server.name} on port ${server.port}; ${FILES}; ${name}`);
 const W = 720;
 const H = 1440;
 const w = server.connect();
-w.json({ t: "open", pkg: FILES, activity: "", w: W, h: H, dpi: 320, fps: 30, onClose: "phone", direct: false, key: randomBytes(12).toString("hex") });
+// By its activity: One UI hides the Files app from the launcher ("has nothing to open").
+w.json({ t: "open", pkg: FILES, activity: "com.android.documentsui.files.FilesActivity", w: W, h: H, dpi: 320, fps: 30, onClose: "phone", direct: false, key: randomBytes(12).toString("hex") });
 const display = await w.until("display");
 check("the Files app opens in a window", display?.t === "display", JSON.stringify(display));
 await w.until("video");
+check("…and shows: its picture comes", await w.frame(15000));
 await sleep(3000); // its grid loaded
 
 // A press that only moves within the app is no drag: nothing to hand over.
@@ -272,56 +295,68 @@ w.pointer(0, 380, 1320);
 check("…and the app heard no drag start", noDrag === null, JSON.stringify(noDrag));
 await sleep(500);
 
-// The picture, pressed and dragged: Android's own drag starts in the window.
-// A slow emulator takes seconds to list Download: tried again until it has.
-let t0 = 0;
-let on = null;
-for (let attempt = 1; attempt <= 5 && !on; attempt++) {
-  t0 = Date.now();
-  await pressAndDrag(w, [200, 560], [420, 1000], 700);
-  on = await w.until("drag", 2500, (v) => v.on === true);
-  if (!on) {
-    w.pointer(0, 420, 1000);
-    console.log(`  no drag on attempt ${attempt}; the grid may not be there yet`);
-    await sleep(2500);
+if (sdkLevel < 37) {
+  // The picture, pressed and dragged: Android's own drag starts in the window.
+  // A slow emulator takes seconds to list Download: tried again until it has.
+  let t0 = 0;
+  let on = null;
+  for (let attempt = 1; attempt <= 5 && !on; attempt++) {
+    t0 = Date.now();
+    await pressAndDrag(w, [200, 560], [420, 1000], 700);
+    on = await w.until("drag", 2500, (v) => v.on === true);
+    if (!on) {
+      w.pointer(0, 420, 1000);
+      console.log(`  no drag on attempt ${attempt}; the grid may not be there yet`);
+      await sleep(2500);
+    }
   }
+  check("the phone says a drag has started", on?.on === true, JSON.stringify(on));
+  check("…and what it carries", (on?.mimes ?? []).some((m) => m.startsWith("image/")), JSON.stringify(on?.mimes));
+
+  // The computer's pointer leaves the window: the drag is dropped on the launcher's pixel.
+  const out0 = Date.now();
+  w.json({ t: "dragOut" });
+  const dragged = await w.until("dragged", 4000);
+  const handOverMs = Date.now() - out0;
+  check("dragOut hands the drag over", typeof dragged?.id === "number" && dragged.items?.length === 1, JSON.stringify(dragged));
+  const item = dragged?.items?.[0] ?? {};
+  check("…with its name, type and size", item.name === name && item.mime === "image/png" && item.size === picture.length, JSON.stringify(item));
+  check("…in good time", handOverMs < 1500, `${handOverMs} ms after dragOut, ${out0 - t0} ms after the press`);
+  const off = await w.until("drag", 3000, (v) => v.on === false);
+  check("the phone's drag has ended", off?.on === false, JSON.stringify(off));
+
+  // The computer still holds its button: its moves reach nothing until it lets go.
+  w.pointer(1, 700, 1400);
+  w.pointer(0, 700, 1400);
+  await sleep(300);
+
+  // The file itself, on a connection of its own.
+  const g = server.connect();
+  g.rawAfterFirst = true;
+  g.json({ t: "get", id: dragged?.id ?? -1, i: 0 });
+  const head = await g.read(5000);
+  const answer = head && head.kind === 0x01 ? JSON.parse(head.data.toString()) : null;
+  check("get answers with the file's name and size", answer?.ok === true && answer.name === name && answer.size === picture.length, JSON.stringify(answer));
+  const bytes = await g.rest();
+  const sha = (b) => createHash("sha256").update(b).digest("hex");
+  check("…then the file, byte for byte", sha(bytes) === sha(picture), `${bytes.length} of ${picture.length} bytes`);
+
+  const gone = server.connect();
+  gone.json({ t: "get", id: 9999, i: 0 });
+  const goneAnswer = await gone.until("get", 5000);
+  check("an item no longer on offer is refused", goneAnswer?.ok === false, JSON.stringify(goneAnswer));
+  gone.close();
+} else {
+  // Android 17: the pixel is an overlay, which hides no app under it (a
+  // presentation hid the window's own app for good) — and the Files app hides
+  // every other app's overlays while it shows, so its drags are not tried here.
+  const dump = adb("shell", "dumpsys window windows");
+  const at = dump.indexOf("Open Android DeX drop}");
+  const type = at < 0 ? null : (dump.slice(at, at + 1200).match(/ty=([A-Z_]+)/) ?? [])[1];
+  check("Android 17: the launcher's pixel is an overlay", type === "APPLICATION_OVERLAY", String(type));
+  check("…let draw over others while the window is open", overlayOp() === "allow", overlayOp());
+  console.log("  Android 17: no drag out of the Files app is tried — it hides other apps' overlays (see PcDrags)");
 }
-check("the phone says a drag has started", on?.on === true, JSON.stringify(on));
-check("…and what it carries", (on?.mimes ?? []).some((m) => m.startsWith("image/")), JSON.stringify(on?.mimes));
-
-// The computer's pointer leaves the window: the drag is dropped on the launcher's pixel.
-const out0 = Date.now();
-w.json({ t: "dragOut" });
-const dragged = await w.until("dragged", 4000);
-const handOverMs = Date.now() - out0;
-check("dragOut hands the drag over", typeof dragged?.id === "number" && dragged.items?.length === 1, JSON.stringify(dragged));
-const item = dragged?.items?.[0] ?? {};
-check("…with its name, type and size", item.name === name && item.mime === "image/png" && item.size === picture.length, JSON.stringify(item));
-check("…in good time", handOverMs < 1500, `${handOverMs} ms after dragOut, ${out0 - t0} ms after the press`);
-const off = await w.until("drag", 3000, (v) => v.on === false);
-check("the phone's drag has ended", off?.on === false, JSON.stringify(off));
-
-// The computer still holds its button: its moves reach nothing until it lets go.
-w.pointer(1, 700, 1400);
-w.pointer(0, 700, 1400);
-await sleep(300);
-
-// The file itself, on a connection of its own.
-const g = server.connect();
-g.rawAfterFirst = true;
-g.json({ t: "get", id: dragged?.id ?? -1, i: 0 });
-const head = await g.read(5000);
-const answer = head && head.kind === 0x01 ? JSON.parse(head.data.toString()) : null;
-check("get answers with the file's name and size", answer?.ok === true && answer.name === name && answer.size === picture.length, JSON.stringify(answer));
-const bytes = await g.rest();
-const sha = (b) => createHash("sha256").update(b).digest("hex");
-check("…then the file, byte for byte", sha(bytes) === sha(picture), `${bytes.length} of ${picture.length} bytes`);
-
-const gone = server.connect();
-gone.json({ t: "get", id: 9999, i: 0 });
-const goneAnswer = await gone.until("get", 5000);
-check("an item no longer on offer is refused", goneAnswer?.ok === false, JSON.stringify(goneAnswer));
-gone.close();
 
 // The app still takes the mouse: a press there is a press, not the hand-over's.
 w.pointer(0, 360, 1300);
@@ -341,6 +376,7 @@ await sleep(1500);
 adb("shell", `rm -f /sdcard/Download/${name}`);
 adb("shell", `am broadcast -a android.intent.action.MEDIA_SCANNER_SCAN_FILE -d file:///sdcard/Download/${name}`);
 adb("shell", `rm -f ${PHONE_DEX}`);
+if (sdkLevel >= 37) check("…and given back as it was when the window has closed", overlayOp() === overlayBefore, `${overlayOp()}, was ${overlayBefore}`);
 for (const l of server.lines.filter((l) => l.includes("drag"))) console.log("  phone: " + l);
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed ? 1 : 0);
