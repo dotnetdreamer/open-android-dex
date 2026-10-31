@@ -127,6 +127,8 @@ pub fn run() {
             apps::apps_windows,
             apps::apps_close,
             apps::apps_startup,
+            apps::apps_clipboard_files,
+            apps::apps_paste,
             notifications::notifications_state,
             notifications::notifications_apps,
             notifications::notifications_set,

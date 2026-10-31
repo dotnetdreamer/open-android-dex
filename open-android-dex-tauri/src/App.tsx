@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { getVersion } from "@tauri-apps/api/app";
-import { invoke } from "@tauri-apps/api/core";
+import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { error as logError, info as logInfo, warn as logWarn } from "@tauri-apps/plugin-log";
@@ -12,6 +12,7 @@ import { useSessions } from "./features/mirror/useSessions";
 import { NotificationsBell } from "./features/notifications/NotificationsBell";
 import { RemotePanel } from "./features/remote/RemotePanel";
 import { WirelessPanel } from "./features/wireless/WirelessPanel";
+import { ContextMenu, type ContextAction } from "./ui/ContextMenu";
 import { Icon } from "./ui/Icon";
 import { Menu, MenuItem, Toast, useToast } from "./ui/kit";
 import { TitleBar, type Tab } from "./ui/TitleBar";
@@ -700,6 +701,36 @@ export default function App() {
   const stalled =
     phase.kind === "ready" && sessions[`${phase.device.serial}|desktop`]?.status === "reconnecting";
 
+  /**
+   * Right-click Paste: the files copied here — in Explorer, in Finder — to
+   * the phone, down the same path a drop on an app window takes them
+   * (apps_paste). The clipboard is asked as the menu opens, so Paste is live
+   * only when there is something to send.
+   */
+  const pasteSerial = readyDevice?.serial;
+  const paste = useCallback(() => {
+    if (!pasteSerial) return;
+    const events = new Channel<{ text: string; busy: boolean; failed: boolean }>(({ text, busy, failed }) =>
+      say(text, failed ? "bad" : busy ? "info" : "ok"),
+    );
+    invoke<number>("apps_paste", { serial: pasteSerial, events })
+      .then((n) => logInfo(`apps: pasting ${n} file(s) to ${pasteSerial}`))
+      .catch((e) => say("Nothing was pasted", "bad", String(e)));
+  }, [pasteSerial, say]);
+
+  const contextActions = useCallback(async (): Promise<ContextAction[]> => {
+    const files = await invoke<number>("apps_clipboard_files").catch(() => 0);
+    return [
+      {
+        label: "Paste",
+        icon: "clipboard",
+        hint: files > 1 ? `${files} items` : undefined,
+        disabled: files === 0 || !pasteSerial,
+        onSelect: paste,
+      },
+    ];
+  }, [pasteSerial, paste]);
+
   const helpMenu = (
     <Menu
       label="Help"
@@ -808,6 +839,7 @@ export default function App() {
           )}
         </div>
       </main>
+      <ContextMenu actions={contextActions} />
       <Toast toast={toast} onDismiss={dismiss} />
     </div>
   );

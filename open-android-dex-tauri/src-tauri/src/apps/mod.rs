@@ -66,6 +66,7 @@ use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
+use tauri::ipc::Channel;
 use tauri::Emitter;
 
 /// Whether this computer has a window of ours for a phone app, rather than scrcpy's.
@@ -1352,7 +1353,7 @@ impl link::Host for WindowHost {
 
     fn dropped(&self, paths: Vec<PathBuf>, window: Arc<dyn link::Surface>) {
         let Some(route) = self.route() else { return };
-        drops::send(route.serial, route.socket, paths, window);
+        drops::send(route.serial, route.socket, paths, move |n| window.note(Some(n.text), n.busy));
     }
 
     fn touchpad(&self, window: Arc<dyn link::Surface>) {
@@ -1649,6 +1650,42 @@ pub fn apps_close(serial: Option<String>) {
     let _ = serial;
 }
 
+/// A line about a paste while it goes, as a window's strip says it of a drop:
+/// `busy` while more is coming, and `failed` when something did not land —
+/// none of it, or not all of it.
+#[derive(Debug, Clone, Serialize)]
+pub struct Note {
+    pub text: String,
+    pub busy: bool,
+    pub failed: bool,
+}
+
+/// How many files a paste would send: what this computer's clipboard holds.
+/// 0 when it holds none — text alone is not a file, and the page greys Paste out.
+#[tauri::command]
+pub fn apps_clipboard_files() -> usize {
+    clipboard::files().len()
+}
+
+/// Paste: the files on this computer's clipboard to the phone, exactly as
+/// dropping them on a window sends them — into its Download folder, an APK
+/// installed instead (doc/apps-on-pc.md, "Dropping files"). `events` hears
+/// how it goes, line by line.
+#[tauri::command(async)]
+pub fn apps_paste(app: tauri::AppHandle, serial: String, events: Channel<Note>) -> Result<usize, String> {
+    let paths = clipboard::files();
+    if paths.is_empty() {
+        return Err("Copy a file on this computer first".into());
+    }
+    let way = way_to(&app, &serial);
+    let server = host::ensure(&app, &way.serial, &way.phone)?;
+    let count = paths.len();
+    drops::send(way.serial, server.socket.clone(), paths, move |note| {
+        let _ = events.send(note);
+    });
+    Ok(count)
+}
+
 /// This app is exiting: every window closes, and every phone's server stops —
 /// which puts every app back on its phone. Wireless debugging switched on for
 /// the windows goes off again.
@@ -1787,7 +1824,7 @@ impl link::Host for ProbeHost {
     fn pick_sound(&self, _choice: sound::Choice, _window: Arc<dyn link::Surface>) {}
 
     fn dropped(&self, paths: Vec<PathBuf>, window: Arc<dyn link::Surface>) {
-        drops::send(self.serial.clone(), self.socket.clone(), paths, window);
+        drops::send(self.serial.clone(), self.socket.clone(), paths, move |n| window.note(Some(n.text), n.busy));
     }
 
     fn touchpad(&self, window: Arc<dyn link::Surface>) {

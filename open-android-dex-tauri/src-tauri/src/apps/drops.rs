@@ -16,14 +16,13 @@ use std::fs::File;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 use std::thread;
 use std::time::Duration;
 
 use serde_json::{json, Value};
 
-use super::link::Surface;
-use super::{adbsock, wire};
+use super::{adbsock, wire, Note};
 
 /// How much is read and sent at a time.
 const CHUNK: usize = 256 * 1024;
@@ -103,12 +102,13 @@ fn sending() -> &'static Mutex<()> {
 }
 
 /// Send what was dropped to `serial`'s phone, through its app server on
-/// `socket`, one file after another; `window` hears how it goes.
-pub fn send(serial: String, socket: String, paths: Vec<PathBuf>, window: Arc<dyn Surface>) {
+/// `socket`, one file after another; `note` hears how it goes — a line to
+/// show, whether more of it is coming, and whether anything was lost.
+pub fn send(serial: String, socket: String, paths: Vec<PathBuf>, note: impl Fn(Note) + Send + 'static) {
     let _ = thread::Builder::new().name("apps-drop".into()).spawn(move || {
         let (items, skipped) = plan(&paths);
         if items.is_empty() {
-            window.note(Some("Only files and folders can be dropped here".into()), false);
+            note(Note { text: "Only files and folders can be dropped here".into(), busy: false, failed: true });
             return;
         }
         let _one = sending().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -121,7 +121,7 @@ pub fn send(serial: String, socket: String, paths: Vec<PathBuf>, window: Arc<dyn
                 let pct = if item.size == 0 { 100 } else { (bytes * 100 / item.size) as i64 };
                 if pct != shown {
                     shown = pct;
-                    window.note(Some(progress(item, i, total, pct as u32)), true);
+                    note(Note { text: progress(item, i, total, pct as u32), busy: true, failed: false });
                 }
             });
             match r {
@@ -138,7 +138,11 @@ pub fn send(serial: String, socket: String, paths: Vec<PathBuf>, window: Arc<dyn
         if skipped > 0 {
             log::info!("apps [{serial}] a drop left {skipped} out (links, or more than {MAX_FILES} files)");
         }
-        window.note(Some(outcome(&items, &landed, last_error.as_deref())), false);
+        note(Note {
+            text: outcome(&items, &landed, last_error.as_deref()),
+            busy: false,
+            failed: landed.len() < items.len(),
+        });
     });
 }
 

@@ -26,6 +26,75 @@ pub fn get(app: &tauri::AppHandle) -> Option<String> {
     app.clipboard().read_text().ok().filter(|t| !t.is_empty())
 }
 
+/// The files on this computer's clipboard — what Explorer's Copy puts there,
+/// or Finder's — as paths. Empty when it holds none: text alone is not a
+/// file, and a paste of it has nothing to send the phone.
+#[cfg(windows)]
+pub fn files() -> Vec<std::path::PathBuf> {
+    use std::ffi::OsString;
+    use std::os::windows::ffi::OsStringExt;
+    use windows::Win32::System::DataExchange::{CloseClipboard, GetClipboardData, IsClipboardFormatAvailable, OpenClipboard};
+    use windows::Win32::UI::Shell::{DragQueryFileW, HDROP};
+    /// WinUser.h's, which the windows crate files under its Ole module.
+    const CF_HDROP: u32 = 15;
+
+    let mut paths = Vec::new();
+    unsafe {
+        // One at a time: whoever just wrote it may hold it a moment longer.
+        let mut open = false;
+        for _ in 0..10 {
+            if OpenClipboard(None).is_ok() {
+                open = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(15));
+        }
+        if !open {
+            return paths;
+        }
+        if IsClipboardFormatAvailable(CF_HDROP).is_ok() {
+            if let Ok(h) = GetClipboardData(CF_HDROP) {
+                // The clipboard owns the handle: no DragFinish, which would free what is not ours.
+                let drop = HDROP(h.0);
+                for i in 0..DragQueryFileW(drop, u32::MAX, None) {
+                    let len = DragQueryFileW(drop, i, None) as usize;
+                    let mut buf = vec![0u16; len + 1];
+                    let got = DragQueryFileW(drop, i, Some(&mut buf)) as usize;
+                    if got > 0 {
+                        paths.push(std::path::PathBuf::from(OsString::from_wide(&buf[..got.min(len)])));
+                    }
+                }
+            }
+        }
+        let _ = CloseClipboard();
+    }
+    paths
+}
+
+#[cfg(target_os = "macos")]
+pub fn files() -> Vec<std::path::PathBuf> {
+    use objc2_app_kit::{NSPasteboard, NSPasteboardTypeFileURL};
+    use objc2_foundation::NSURL;
+
+    objc2::rc::autoreleasepool(|_| {
+        let Some(items) = NSPasteboard::generalPasteboard().pasteboardItems() else { return Vec::new() };
+        items
+            .iter()
+            .filter_map(|item| {
+                // Finder hands over references (file:///.file/id=…), made paths again here.
+                let url = item.stringForType(unsafe { NSPasteboardTypeFileURL })?;
+                let path = NSURL::URLWithString(&url)?.filePathURL()?.path()?;
+                Some(std::path::PathBuf::from(path.to_string()))
+            })
+            .collect()
+    })
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
+pub fn files() -> Vec<std::path::PathBuf> {
+    Vec::new()
+}
+
 /// More text than this is not sent as it is copied: the phone takes its
 /// clipboard in one binder call, and a whole document is not a clip. A paste
 /// into a window still takes it.
