@@ -963,10 +963,12 @@ selects instead. For those, the app's Share → Copy (or its own "Copy to
 clipboard"), and More's Copy, bring a picture over through the clipboard
 ("The clipboard"). Android 11 and older: the launcher's listener needs 12. A
 phone whose launcher is from before this: nothing is heard, and nothing is
-carried out — until the desktop, or the phone's touchpad, brings the launcher
-up to date: the next window to open asks again, and the open ones with it. A
-Linux app's window: its drags are X's. Full screen: the pointer cannot leave
-the screen.
+carried out — until the desktop brings the launcher up to date: the next
+window to open asks again, and the open ones with it. The phone's touchpad
+does not: it puts this build's launcher there only where the phone's cannot
+open the pad, so one that has the pad but is from before this stays as it
+is. A Linux app's window: its drags are X's. Full screen: the pointer cannot
+leave the screen.
 
 Measured on the Android 16 emulator (`test/apps-drag-test.mjs`, 13 checks):
 Files' own drag of a picture heard as it started (`image/png`), handed over
@@ -1063,14 +1065,32 @@ More's "Use phone as touchpad" (an old one on the phone, as a read-only
 emulator has), and the window open already asking again with the next, the
 launcher catching drags on both displays.
 
+Dragging out on Windows 11 (2026-10-29 and 30), in the app:
+
+- with a Galaxy A13 (Android 12): a picture dragged out of My Files into an
+  Explorer folder, byte for byte (a long press: a plain drag scrolls its
+  list); Gallery's "Copy to clipboard", tapped from adb, then Explorer's own
+  Paste, byte for byte; More's Copy and Paste with text in Settings' search;
+  a copy of `test/apps-drag-test.mjs` naming DocumentsUI's `FilesActivity`
+  (neither phone lists Files to open), 13/13 in seven runs in a row,
+  hand-over 33–52 ms, with nothing else listed in Download (it presses the
+  first item there);
+- with a Redmi 9A (Android 11): a picture's clip, set from the shell (MIUI
+  refuses the shell's input), pasted into Explorer, byte for byte, the app
+  server staying up.
+
 Not yet:
 
 - **A drag out landing on this computer**: on a Mac, the drop on Finder
   (this Mac's drag now begins at the next move of the mouse — the first try,
   from an older event, never landed); a second try stopped on an emulator too
-  slow with the Mac swapping (windows taking 2 minutes, Files black). On
-  Windows, type-checked only. Nor yet run: More's Copy and Paste, and a
-  picture copied on the phone reaching this computer's clipboard.
+  slow with the Mac swapping (windows taking 2 minutes, Files black). Nor yet
+  run on a Mac: More's Copy and Paste, and a picture copied on the phone
+  reaching its clipboard. On Windows: More's Copy and Paste on the Redmi 9A,
+  whose MIUI refuses the shell's input while its "USB debugging (Security
+  settings)" is off; a folder dragged out (it ends in
+  "couldn't be copied"); and why the A13 once gave a drop to the app's own
+  window instead of the catcher (a folder's drag; not seen since).
 - **A cable pulled from a Samsung phone**, the case this was made for: the
   emulator's transports neither restart adbd nor drop Wi‑Fi on their own. Its
   steps were each shown there ("Cable or Wi‑Fi"), not the phone's timing. Nor
