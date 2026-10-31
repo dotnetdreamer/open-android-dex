@@ -6,6 +6,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { error as logError, info as logInfo, warn as logWarn } from "@tauri-apps/plugin-log";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { AppsPanel, opensAppsOnConnect } from "./features/apps/AppsPanel";
+import { ClosePrompt } from "./features/close/ClosePrompt";
 import { DesktopPage, type Method } from "./features/desktop/DesktopPage";
 import { deviceName, type AdbState, type LaunchMode, type Phase, type Progress } from "./features/desktop/model";
 import { useSessions } from "./features/mirror/useSessions";
@@ -809,6 +810,7 @@ export default function App() {
         </div>
       </main>
       <Toast toast={toast} onDismiss={dismiss} />
+      <ClosePrompt devices={devices} />
     </div>
   );
 }

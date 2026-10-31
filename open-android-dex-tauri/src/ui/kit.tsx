@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { Icon, type IconName } from "./Icon";
 
@@ -362,6 +362,104 @@ export function Popover({
           document.body,
         )}
     </>
+  );
+}
+
+// ── Dialog ─────────────────────────────────────────────────────────────
+
+/**
+ * A question the window waits on. Drawn over all of it, the rest out of reach
+ * until it is answered: to the pointer, the keyboard and a screen reader
+ * (`inert`). Focus starts on `initialFocus`, the safe answer, and Tab goes
+ * round the dialog's own controls. Escape, or a click beside it, is the safe
+ * answer too, and focus goes back where it was when it closes.
+ *
+ * `nudge` changing plays a small pulse: the same question asked again while
+ * it is up (✕ pressed twice) says "here" rather than stacking a second one.
+ */
+export function Dialog({
+  open,
+  title,
+  children,
+  actions,
+  onDismiss,
+  initialFocus,
+  nudge = 0,
+}: {
+  open: boolean;
+  title: string;
+  children: ReactNode;
+  actions: ReactNode;
+  onDismiss: () => void;
+  initialFocus?: React.RefObject<HTMLElement | null>;
+  nudge?: number;
+}) {
+  const box = useRef<HTMLDivElement>(null);
+  const titleId = useId();
+  const bodyId = useId();
+  const dismiss = useRef(onDismiss);
+  dismiss.current = onDismiss;
+
+  useEffect(() => {
+    if (!open) return;
+    const before = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const root = document.getElementById("root");
+    root?.setAttribute("inert", "");
+    (initialFocus?.current ?? box.current)?.focus({ preventScroll: true });
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        dismiss.current();
+        return;
+      }
+      if (e.key !== "Tab" || !box.current) return;
+      const items = [
+        ...box.current.querySelectorAll<HTMLElement>(
+          "button:not(:disabled), a[href], input:not(:disabled), [tabindex]:not([tabindex='-1'])",
+        ),
+      ];
+      if (!items.length) return;
+      e.preventDefault();
+      const at = items.indexOf(document.activeElement as HTMLElement);
+      const next = e.shiftKey ? (at <= 0 ? items.length - 1 : at - 1) : at === items.length - 1 ? 0 : at + 1;
+      items[next].focus();
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => {
+      window.removeEventListener("keydown", onKey, true);
+      root?.removeAttribute("inert");
+      before?.focus({ preventScroll: true });
+    };
+  }, [open, initialFocus]);
+
+  if (!open) return null;
+  return createPortal(
+    <div
+      className="dialog-scrim"
+      onMouseDown={(e) => {
+        if (e.target === e.currentTarget) dismiss.current();
+      }}
+    >
+      <div
+        ref={box}
+        role="alertdialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        aria-describedby={bodyId}
+        tabIndex={-1}
+        className={`dialog card-raised ${nudge ? (nudge % 2 ? "nudge-a" : "nudge-b") : ""}`}
+      >
+        <h2 id={titleId} className="dialog-title">
+          {title}
+        </h2>
+        <div id={bodyId} className="dialog-body">
+          {children}
+        </div>
+        <div className="dialog-actions">{actions}</div>
+      </div>
+    </div>,
+    document.body,
   );
 }
 

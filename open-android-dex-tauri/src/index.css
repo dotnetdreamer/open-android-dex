@@ -1287,6 +1287,80 @@
     flex-shrink: 0;
   }
 
+  /* ── Dialogs ──────────────────────────────────────────────────────── */
+
+  /* Over everything in the window: a question it waits on. */
+  .dialog-scrim {
+    position: fixed;
+    inset: 0;
+    z-index: 60;
+    display: grid;
+    place-items: center;
+    padding: 20px;
+    background: rgba(5, 7, 11, 0.55);
+    animation: fade-in 160ms var(--ease-out) both;
+  }
+  .dialog {
+    width: min(392px, 100%);
+    padding: 20px 20px 16px;
+    border-radius: var(--r-xl);
+    animation: dialog-in 260ms var(--ease-spring) both;
+  }
+  .dialog:focus-visible {
+    outline: none;
+  }
+  /* Asked again while it is up: here. Two names, so each asking replays it. */
+  .dialog.nudge-a {
+    animation: dialog-nudge-a 360ms var(--ease-out);
+  }
+  .dialog.nudge-b {
+    animation: dialog-nudge-b 360ms var(--ease-out);
+  }
+  .dialog-title {
+    font-family: var(--font-display);
+    font-size: 15.5px;
+    font-weight: 600;
+    letter-spacing: -0.012em;
+    line-height: 1.3;
+    color: var(--ink-1);
+  }
+  .dialog-body {
+    margin-top: 8px;
+    font-size: 13px;
+    color: var(--ink-2);
+  }
+  .dialog-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    margin-top: 18px;
+  }
+  /* What goes with the answer, one line each. */
+  .dialog-list {
+    display: grid;
+    gap: 7px;
+    margin-top: 10px;
+    padding: 10px 12px;
+    border-radius: var(--r-md);
+    background: var(--surface-1);
+    box-shadow: inset 0 0 0 1px var(--line);
+  }
+  .dialog-list li {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    color: var(--ink-1);
+  }
+  .dialog-list li .icon {
+    flex-shrink: 0;
+    color: var(--ink-3);
+  }
+  .dialog-note {
+    margin-top: 10px;
+    font-size: 12px;
+    color: var(--ink-3);
+  }
+
   /* ── Motion helpers ───────────────────────────────────────────────── */
 
   .fade-in {
@@ -1513,6 +1587,40 @@
   to {
     opacity: 1;
     transform: none;
+  }
+}
+@keyframes dialog-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px) scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@keyframes dialog-nudge-a {
+  0%,
+  100% {
+    transform: none;
+  }
+  35% {
+    transform: scale(1.025);
+  }
+  70% {
+    transform: scale(0.995);
+  }
+}
+@keyframes dialog-nudge-b {
+  0%,
+  100% {
+    transform: none;
+  }
+  35% {
+    transform: scale(1.025);
+  }
+  70% {
+    transform: scale(0.995);
   }
 }
 @keyframes badge-in {

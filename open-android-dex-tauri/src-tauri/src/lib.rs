@@ -8,6 +8,7 @@ mod gestures;
 mod hotkeys;
 mod notifications;
 mod projection;
+mod quit;
 mod remote;
 mod remote_desktop;
 mod remote_usb;
@@ -133,13 +134,17 @@ pub fn run() {
             notifications::notifications_mute,
             notifications::notifications_test,
             notifications::notifications_fix,
-            notifications::notifications_counts
+            notifications::notifications_counts,
+            quit::app_close_seen,
+            quit::app_close_answer
         ])
-        // A phone's desktop window takes its local port and its tunnel with it.
-        .on_window_event(|window, event| {
-            if let tauri::WindowEvent::Destroyed = event {
-                remote_desktop::window_closed(window.label());
-            }
+        .on_window_event(|window, event| match event {
+            // The main window's close is the app's: it asks first when that
+            // would end a desktop or a phone app's window (quit.rs).
+            tauri::WindowEvent::CloseRequested { api, .. } => quit::close_requested(window, api),
+            // A phone's desktop window takes its local port and its tunnel with it.
+            tauri::WindowEvent::Destroyed => remote_desktop::window_closed(window.label()),
+            _ => {}
         })
         .setup(|app| {
             diag::log_startup(&app.handle().clone());
