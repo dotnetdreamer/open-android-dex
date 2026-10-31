@@ -35,7 +35,7 @@
     <string name="st_reset">Redefinir</string>
 
     <string name="st_nav_display">Tela e interface</string>
-    <string name="st_nav_display_sub">Tema · Vidro · Tamanho da tela</string>
+    <string name="st_nav_display_sub">Tamanho da tela · Tema · Vidro</string>
     <string name="st_nav_perf">Desempenho</string>
     <string name="st_nav_perf_sub">Reduzir qualidade · Apps abrem mais rápido</string>
     <string name="st_nav_language">Idioma e fonte</string>
@@ -75,13 +75,35 @@
     <string name="st_blur_unsupported">Este aparelho não renderiza desfoque de janela — a transparência continua valendo.</string>
 
     <string name="st_display_size">Tamanho da tela</string>
-    <string name="st_display_size_note">Vale apenas para esta tela do desktop e tem efeito imediato.</string>
+    <string name="st_display_size_note">Muda só este desktop, não a tela do seu telefone. Alguns apps só têm layout de telefone, seja qual for o tamanho.</string>
     <string name="st_display_size_applying">Aplicando o tamanho da tela…</string>
-    <string name="st_size_xs">Tela muito pequena</string>
-    <string name="st_size_s">Tela pequena</string>
-    <string name="st_size_m">Tela padrão</string>
-    <string name="st_size_l">Tela grande</string>
-    <string name="st_size_xl">Tela muito grande</string>
+    <string name="st_size_xs">Muito pequeno</string>
+    <string name="st_size_s">Pequeno</string>
+    <string name="st_size_m">Padrão</string>
+    <string name="st_size_l">Grande</string>
+    <string name="st_size_xl">Muito grande</string>
+    <string name="st_display_size_keywords">densidade dpi escala zoom maior menor texto layout tablet telefone celular density scale</string>
+    <string name="st_dsize_more_space">Mais espaço</string>
+    <string name="st_dsize_larger">Maior</string>
+    <string name="st_dsize_smaller">Menor</string>
+    <string name="st_dsize_bigger">Maior</string>
+    <string name="st_dsize_dpi">%1$d dpi</string>
+    <string name="st_dsize_looks_like">Equivale a %1$d × %2$d</string>
+    <string name="st_dsize_phone">Layout de telefone</string>
+    <string name="st_dsize_mixed">Layouts mistos</string>
+    <string name="st_dsize_tablet">Layout de tablet</string>
+    <string name="st_dsize_phone_layout_sub">Janelas novas dão aos apps %1$d × %2$d, mais ou menos a largura de um telefone, então a maioria usa o layout de telefone</string>
+    <string name="st_dsize_mixed_sub">Janelas novas dão aos apps %1$d × %2$d: largas como um tablet, mas baixas como um telefone. Aqui alguns apps usam o layout de tablet, outros o de telefone</string>
+    <string name="st_dsize_tablet_sub">Janelas novas dão aos apps %1$d × %2$d, o espaço de um tablet nos dois sentidos, então a maioria dos apps que têm layout de tablet o usa</string>
+    <string name="st_dsize_custom">Tamanho personalizado</string>
+    <string name="st_dsize_applied">Aplicado</string>
+    <string name="st_dsize_waiting">Ainda não aplicado. O desktop vai usá-lo na próxima vez que iniciar</string>
+    <string name="st_dsize_reset">Voltar ao padrão</string>
+    <string name="st_dsize_preview">Prévia a %1$d dpi. O desktop equivale a %2$d por %3$d: %4$s</string>
+    <string name="st_dsize_on_phone">Tamanho da tela deste telefone</string>
+    <string name="st_dsize_on_phone_sub">Na tela do próprio telefone, o tamanho é um ajuste do Android. Isto o abre</string>
+    <string name="st_dsize_on_phone_failed">Não foi possível abrir os ajustes de tela do telefone</string>
+    <string name="st_desk_display_size">Tamanho da tela…</string>
 
     <string name="st_language">Idioma</string>
     <string name="st_language_note">O texto já exibido mantém o idioma antigo até a janela ser aberta de novo.</string>

@@ -67,20 +67,29 @@ final class DexPrefs {
     /** 0–100; corner-radius multiplier, 50 = the design's own radii. */
     static final String KEY_ROUNDING = "ui_rounding";
     /**
-     * Display size, as an index into {@link #SIZE_FACTORS}: a multiple of the
-     * desktop's Default density rather than a dpi, because the Default is the
-     * computer's — 160 on a 1x monitor, 320 on a Retina laptop — and the same
-     * choice has to mean the same size on both. See {@link #sizeIndex}.
+     * Display size, as a multiple of the desktop's Default density rather than
+     * a dpi, because the Default is the computer's — 160 on a 1x monitor, 320
+     * on a Retina laptop — and the same choice has to mean the same size on
+     * both. One of {@link #SIZE_FACTORS} or any size between and past them,
+     * cleaned by {@link DisplaySize#normalize}. See {@link #sizeFactor}.
+     */
+    static final String KEY_SIZE_FACTOR = "display_size_factor";
+
+    /**
+     * The preset nearest {@link #KEY_SIZE_FACTOR}, as an index into
+     * {@link #SIZE_FACTORS}: all a launcher from before sizes of the user's
+     * own could keep, still written beside the multiple so a phone taken back
+     * to one of those comes up at the nearest size rather than the Default.
      */
     static final String KEY_SIZE_INDEX = "display_size_index";
-    static final int DEF_SIZE_INDEX = 2;
+    static final int DEF_SIZE_INDEX = DisplaySize.DEFAULT_INDEX;
 
     /**
      * Display size presets as multiples of the Default density — MUST match
      * SIZE_FACTORS in the desktop app's display.rs, which remembers the choice
      * per phone and bakes it into every new display.
      */
-    static final float[] SIZE_FACTORS = {0.75f, 0.875f, 1f, 1.25f, 1.5f};
+    static final float[] SIZE_FACTORS = DisplaySize.PRESETS;
 
     /**
      * The Default density of the display the desktop runs on, as the desktop
@@ -463,11 +472,37 @@ final class DexPrefs {
 
     /** The preset whose factor is nearest {@code factor}. */
     static int nearestSize(float factor) {
-        int best = 0;
-        for (int i = 1; i < SIZE_FACTORS.length; i++) {
-            if (Math.abs(SIZE_FACTORS[i] - factor) < Math.abs(SIZE_FACTORS[best] - factor)) best = i;
+        return DisplaySize.nearestPreset(factor);
+    }
+
+    /**
+     * The Display size, as a multiple of the Default density: the one picked
+     * on the slider or a preset, or — on a launcher that only ever had presets
+     * — the preset it kept as an index.
+     */
+    static float sizeFactor(Context ctx) {
+        SharedPreferences p = prefs(ctx);
+        if (p.contains(KEY_SIZE_FACTOR)) {
+            try {
+                return DisplaySize.normalize(p.getFloat(KEY_SIZE_FACTOR, 1f));
+            } catch (ClassCastException ignored) {
+                // not a float: fall through to the index, which always is an int
+            }
         }
-        return best;
+        return SIZE_FACTORS[sizeIndex(ctx)];
+    }
+
+    /**
+     * Keep a Display size. No broadcast: the shell rebuilds when the density
+     * lands on the display, not when the choice is written, so a repaint here
+     * would be a second one for nothing — see LauncherActivity's receiver.
+     */
+    static void setSizeFactor(Context ctx, float factor) {
+        float f = DisplaySize.normalize(factor);
+        prefs(ctx).edit()
+                .putFloat(KEY_SIZE_FACTOR, f)
+                .putInt(KEY_SIZE_INDEX, DisplaySize.nearestPreset(f))
+                .apply();
     }
 
     /** "1920x1080" → {1920, 1080}; null for "auto", empty or junk. */

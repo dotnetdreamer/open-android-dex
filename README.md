@@ -353,7 +353,10 @@ and no restart.
   one does — on your laptop's touchpad and on your phone's
 - **Picture quality.** Resolution, frame rate, sharpness and sound, so you can
   trade smoothness for battery life on an older phone
-- **Text size, window behaviour and clipboard sharing**, among others
+- **Display size.** Make everything on the desktop bigger or smaller, from five
+  sizes or to the exact dpi. A live preview shows the result first, and whether
+  most apps are likely to use their phone or tablet layout
+- **Window behaviour and clipboard sharing**, among others
 
 <img src="doc/img/settings.png" alt="The settings app showing desktop style, themes and the glass sliders" width="560">
 <img src="doc/img/quick-settings.png" alt="The quick settings tray in the taskbar" width="200" align="top">
@@ -372,7 +375,8 @@ puts on your screen.
 Everything it changes gets put back when you are done, automatically. That
 happens even if you yank the cable out mid session, because the phone tidies up
 after itself a short while later. Nothing keeps running and nothing stays
-switched on behind your back.
+switched on behind your back. Display size only ever changes the desktop, never
+your phone's own screen.
 
 ---
 

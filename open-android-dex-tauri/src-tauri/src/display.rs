@@ -18,9 +18,11 @@
 //!
 //! The density follows the computer's own scaling: one dp is one point of the
 //! computer's UI (160 dpi at 1x, 320 at 2x), so an Android window is the size a
-//! Mac or Windows one is beside it. The Display size presets are multiples of
-//! that "Default" — see [`SIZE_FACTORS`] — and the launcher is told the base on
-//! every start (`base_dpi`), because only this side knows the screen.
+//! Mac or Windows one is beside it. A Display size is a multiple of that
+//! "Default" — one of the presets in [`SIZE_FACTORS`] or any size the launcher's
+//! slider reaches between and past them ([`normalize_factor`]) — and the
+//! launcher is told the base on every start (`base_dpi`), because only this
+//! side knows the screen.
 
 use std::collections::HashMap;
 #[cfg(target_os = "macos")]
@@ -260,8 +262,40 @@ pub fn is_wireless(serial: &str) -> bool {
     serial.contains(':') || serial.contains("adb-tls-connect")
 }
 
-/// The preset nearest to `factor`. The launcher only offers presets; snapping
-/// keeps a dpi it rounded from coming back as 1.0026.
+/// The fewest and most of the Default a Display size may be kept as — MUST
+/// match DisplaySize.MIN_FACTOR/MAX_FACTOR in the launcher, whose slider runs
+/// from half the computer's own size to as dense as the display allows.
+pub const MIN_FACTOR: f64 = 0.5;
+pub const MAX_FACTOR: f64 = 4.0;
+
+/// A multiple this close to a preset is that preset — MUST match
+/// DisplaySize.SNAP in the launcher, tolerance and all: a dpi rounded to a
+/// whole number divides back into its preset only to within 0.5 / Default, and
+/// the tolerance keeps a float there and an f64 here agreeing on a multiple
+/// exactly 0.01 away.
+const SNAP: f64 = 0.01;
+const SNAP_TOLERANCE: f64 = 1e-6;
+
+/// A Display size as it is kept: a preset when it is within [`SNAP`] of one —
+/// so a dpi the launcher rounded does not come back as 1.0026 — and otherwise
+/// the size the user picked between or past them, bounded and to four
+/// decimals, which is closer than any whole dpi can tell apart.
+pub fn normalize_factor(factor: f64) -> f64 {
+    if !factor.is_finite() || factor <= 0.0 {
+        return 1.0;
+    }
+    if let Some(preset) = SIZE_FACTORS
+        .iter()
+        .copied()
+        .find(|p| (p - factor).abs() <= SNAP + SNAP_TOLERANCE)
+    {
+        return preset;
+    }
+    (factor.clamp(MIN_FACTOR, MAX_FACTOR) * 10_000.0).round() / 10_000.0
+}
+
+/// The preset nearest to `factor`: what an absolute dpi from before the
+/// presets were multiples stood for, when the launcher only offered presets.
 pub fn snap_factor(factor: f64) -> f64 {
     if !factor.is_finite() || factor <= 0.0 {
         return 1.0;
@@ -554,14 +588,15 @@ fn save<T: serde::Serialize>(app: &AppHandle, name: &str, value: &T) {
     }
 }
 
-/// The phone's Display size preset, as a multiple of the Default density.
+/// The phone's Display size, as a multiple of the Default density: a preset
+/// or a size of the user's own.
 const SIZE_FILE: &str = "display-size.json";
 
 /// What came before it: an absolute dpi per adb route, which meant a preset
 /// only at the resolution it was picked at (160 is Default at 1080p).
 const LEGACY_DENSITY_FILE: &str = "display-density.json";
 
-/// This phone's Display size preset, 1.0 (Default) when it never picked one.
+/// This phone's Display size, 1.0 (Default) when it never picked one.
 ///
 /// A phone that only has a dpi from before is moved over once: that dpi was
 /// a preset of the 1080-dp-tall Default at the resolution then in force
@@ -570,7 +605,7 @@ pub fn size_factor(app: &AppHandle, serial: &str, legacy_res: (i32, i32)) -> f64
     let id = crate::adb::restore_key(app, serial);
     let mut factors: HashMap<String, f64> = load(app, SIZE_FILE);
     if let Some(f) = factors.get(&id) {
-        return snap_factor(*f);
+        return normalize_factor(*f);
     }
     let legacy: HashMap<String, i32> = load(app, LEGACY_DENSITY_FILE);
     let Some(dpi) = legacy.get(serial).or_else(|| legacy.get(&id)).copied() else {
@@ -584,9 +619,11 @@ pub fn size_factor(app: &AppHandle, serial: &str, legacy_res: (i32, i32)) -> f64
     f
 }
 
-/// Remember the preset the launcher just applied, as a multiple of `base_dpi`.
+/// Remember the Display size the launcher just applied, as a multiple of
+/// `base_dpi` — a preset or any size between and past them, so a desktop set to
+/// 280 dpi on a 1x screen comes back at 280 rather than at the nearest preset.
 pub fn remember_size_factor(app: &AppHandle, serial: &str, dpi: i32, base_dpi: i32) -> f64 {
-    let f = snap_factor(f64::from(dpi) / f64::from(base_dpi.max(1)));
+    let f = normalize_factor(f64::from(dpi) / f64::from(base_dpi.max(1)));
     let id = crate::adb::restore_key(app, serial);
     let mut factors: HashMap<String, f64> = load(app, SIZE_FILE);
     if factors.get(&id) != Some(&f) {
@@ -840,7 +877,7 @@ mod tests {
     }
 
     #[test]
-    fn factors_snap_to_the_presets() {
+    fn legacy_dpis_snap_to_the_presets() {
         assert_eq!(snap_factor(1.0026), 1.0);
         assert_eq!(snap_factor(200.0 / 160.0), 1.25);
         assert_eq!(snap_factor(0.8), 0.75);
@@ -848,6 +885,54 @@ mod tests {
         assert_eq!(snap_factor(9.0), 1.5);
         assert_eq!(snap_factor(f64::NAN), 1.0);
         assert_eq!(snap_factor(0.0), 1.0);
+    }
+
+    #[test]
+    fn a_size_of_the_users_own_is_kept_as_it_was_picked() {
+        // the issue's own numbers, on a 1x screen whose Default is 160
+        assert_eq!(normalize_factor(280.0 / 160.0), 1.75);
+        assert_eq!(normalize_factor(320.0 / 160.0), 2.0);
+        assert_eq!(normalize_factor(0.8), 0.8);
+        assert_eq!(normalize_factor(0.82), 0.82);
+        // a rounded dpi still lands on its preset
+        assert_eq!(normalize_factor(1.0026), 1.0);
+        assert_eq!(normalize_factor(200.0 / 160.0), 1.25);
+        assert_eq!(normalize_factor(134.0 / 107.0), 1.25);
+        // 0.01 away exactly snaps here as it does in the launcher's float
+        assert_eq!(normalize_factor(0.885), 0.875);
+        assert_eq!(normalize_factor(0.886), 0.886);
+        // bounded, and never nonsense
+        assert_eq!(normalize_factor(9.0), MAX_FACTOR);
+        assert_eq!(normalize_factor(0.1), MIN_FACTOR);
+        assert_eq!(normalize_factor(f64::NAN), 1.0);
+        assert_eq!(normalize_factor(0.0), 1.0);
+        assert_eq!(normalize_factor(-2.0), 1.0);
+        // four decimals: 300 dpi on a Default of 213 survives the round trip
+        let f = normalize_factor(300.0 / 213.0);
+        assert_eq!(f, 1.4085);
+        assert_eq!((213.0 * f).round() as i32, 300);
+    }
+
+    #[test]
+    fn every_whole_dpi_comes_back_from_its_multiple() {
+        // What is remembered is dpi / Default; what the next desktop is made at
+        // is Default x that. Any dpi the launcher can ask for has to survive it,
+        // or the launcher and this side would correct each other on every start.
+        for base in [107, 140, 160, 200, 213, 240, 280, 320, 360, 480] {
+            let lo = ((f64::from(base) * MIN_FACTOR).round() as i32).max(70);
+            for dpi in lo..=960 {
+                let f = normalize_factor(f64::from(dpi) / f64::from(base));
+                if f == MAX_FACTOR && f64::from(dpi) > f64::from(base) * MAX_FACTOR {
+                    continue;
+                }
+                let back = (f64::from(base) * f).round() as i32;
+                let snapped = SIZE_FACTORS.contains(&f);
+                assert!(
+                    back == dpi || snapped,
+                    "base {base}: {dpi} dpi kept as {f} comes back as {back}"
+                );
+            }
+        }
     }
 
     #[test]

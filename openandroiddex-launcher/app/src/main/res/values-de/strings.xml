@@ -35,7 +35,7 @@
     <string name="st_reset">Zurücksetzen</string>
 
     <string name="st_nav_display">Anzeige &amp; Oberfläche</string>
-    <string name="st_nav_display_sub">Design · Glas · Anzeigegröße</string>
+    <string name="st_nav_display_sub">Anzeigegröße · Design · Glas</string>
     <string name="st_nav_perf">Leistung</string>
     <string name="st_nav_perf_sub">Qualität reduzieren · Schnellere App-Starts</string>
     <string name="st_nav_language">Sprache &amp; Schrift</string>
@@ -75,13 +75,35 @@
     <string name="st_blur_unsupported">Dieses Gerät zeichnet keine Fensterunschärfe — die Transparenz wirkt trotzdem.</string>
 
     <string name="st_display_size">Anzeigegröße</string>
-    <string name="st_display_size_note">Gilt nur für diese Desktop-Anzeige und wirkt sofort.</string>
+    <string name="st_display_size_note">Ändert nur diesen Desktop, nicht den Bildschirm Ihres Telefons. Manche Apps haben nur ein Telefon-Layout, egal bei welcher Größe.</string>
     <string name="st_display_size_applying">Anzeigegröße wird angewendet…</string>
-    <string name="st_size_xs">Sehr kleiner Bildschirm</string>
-    <string name="st_size_s">Kleiner Bildschirm</string>
-    <string name="st_size_m">Standardbildschirm</string>
-    <string name="st_size_l">Großer Bildschirm</string>
-    <string name="st_size_xl">Sehr großer Bildschirm</string>
+    <string name="st_size_xs">Sehr klein</string>
+    <string name="st_size_s">Klein</string>
+    <string name="st_size_m">Standard</string>
+    <string name="st_size_l">Groß</string>
+    <string name="st_size_xl">Sehr groß</string>
+    <string name="st_display_size_keywords">Dichte dpi Skalierung Zoom größer kleiner Text Layout Tablet Telefon density scale</string>
+    <string name="st_dsize_more_space">Mehr Platz</string>
+    <string name="st_dsize_larger">Größer</string>
+    <string name="st_dsize_smaller">Kleiner</string>
+    <string name="st_dsize_bigger">Größer</string>
+    <string name="st_dsize_dpi">%1$d dpi</string>
+    <string name="st_dsize_looks_like">Wirkt wie %1$d × %2$d</string>
+    <string name="st_dsize_phone">Telefon-Layout</string>
+    <string name="st_dsize_mixed">Gemischte Layouts</string>
+    <string name="st_dsize_tablet">Tablet-Layout</string>
+    <string name="st_dsize_phone_layout_sub">Neue Fenster geben Apps %1$d × %2$d, etwa die Breite eines Telefons, also nutzen die meisten Apps ihr Telefon-Layout</string>
+    <string name="st_dsize_mixed_sub">Neue Fenster geben Apps %1$d × %2$d: so breit wie ein Tablet, aber so niedrig wie ein Telefon. Manche Apps nutzen hier ihr Tablet-Layout, andere ihr Telefon-Layout</string>
+    <string name="st_dsize_tablet_sub">Neue Fenster geben Apps %1$d × %2$d, in beide Richtungen so viel Platz wie ein Tablet, also nutzen die meisten Apps mit Tablet-Layout es</string>
+    <string name="st_dsize_custom">Eigene Größe</string>
+    <string name="st_dsize_applied">Angewendet</string>
+    <string name="st_dsize_waiting">Noch nicht angewendet. Der Desktop übernimmt es beim nächsten Start</string>
+    <string name="st_dsize_reset">Zurück zum Standard</string>
+    <string name="st_dsize_preview">Vorschau bei %1$d dpi. Der Desktop wirkt wie %2$d mal %3$d: %4$s</string>
+    <string name="st_dsize_on_phone">Anzeigegröße dieses Telefons</string>
+    <string name="st_dsize_on_phone_sub">Auf dem Bildschirm des Telefons ist die Größe eine Android-Einstellung. Hier öffnen Sie sie</string>
+    <string name="st_dsize_on_phone_failed">Die Anzeigeeinstellungen des Telefons ließen sich nicht öffnen</string>
+    <string name="st_desk_display_size">Anzeigegröße…</string>
 
     <string name="st_language">Sprache</string>
     <string name="st_language_note">Bereits sichtbarer Text behält seine Sprache, bis sein Fenster neu geöffnet wird.</string>

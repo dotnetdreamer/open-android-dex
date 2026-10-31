@@ -35,7 +35,7 @@
     <string name="st_reset">إعادة ضبط</string>
 
     <string name="st_nav_display">العرض والواجهة</string>
-    <string name="st_nav_display_sub">السمة · الزجاج · حجم العرض</string>
+    <string name="st_nav_display_sub">حجم العرض · السمة · الزجاج</string>
     <string name="st_nav_perf">الأداء</string>
     <string name="st_nav_perf_sub">تقليل الجودة · فتح أسرع للتطبيقات</string>
     <string name="st_nav_language">اللغة والخط</string>
@@ -75,13 +75,35 @@
     <string name="st_blur_unsupported">هذا الجهاز لا يعرض ضبابية النوافذ — أما الشفافية فتبقى فعّالة.</string>
 
     <string name="st_display_size">حجم العرض</string>
-    <string name="st_display_size_note">ينطبق على شاشة سطح المكتب هذه فقط ويسري فوراً.</string>
+    <string name="st_display_size_note">يغيّر سطح المكتب هذا فقط، وليس شاشة هاتفك نفسها. بعض التطبيقات لها تخطيط هاتف فقط مهما كان الحجم.</string>
     <string name="st_display_size_applying">جارٍ تطبيق حجم العرض…</string>
-    <string name="st_size_xs">شاشة صغيرة جداً</string>
-    <string name="st_size_s">شاشة صغيرة</string>
-    <string name="st_size_m">الشاشة الافتراضية</string>
-    <string name="st_size_l">شاشة كبيرة</string>
-    <string name="st_size_xl">شاشة كبيرة جداً</string>
+    <string name="st_size_xs">صغير جداً</string>
+    <string name="st_size_s">صغير</string>
+    <string name="st_size_m">افتراضي</string>
+    <string name="st_size_l">كبير</string>
+    <string name="st_size_xl">كبير جداً</string>
+    <string name="st_display_size_keywords">كثافة dpi نقطة/بوصة مقياس تكبير أكبر أصغر نص تخطيط جهاز لوحي هاتف density scale zoom</string>
+    <string name="st_dsize_more_space">مساحة أكبر</string>
+    <string name="st_dsize_larger">أكبر</string>
+    <string name="st_dsize_smaller">أصغر</string>
+    <string name="st_dsize_bigger">أكبر</string>
+    <string name="st_dsize_dpi">%1$d نقطة/بوصة</string>
+    <string name="st_dsize_looks_like">يعادل %1$d × %2$d</string>
+    <string name="st_dsize_phone">تخطيط الهاتف</string>
+    <string name="st_dsize_mixed">تخطيطات مختلطة</string>
+    <string name="st_dsize_tablet">تخطيط الجهاز اللوحي</string>
+    <string name="st_dsize_phone_layout_sub">تمنح النوافذ الجديدة التطبيقات %1$d × %2$d، أي عرض هاتف تقريباً، فتستخدم معظم التطبيقات تخطيط الهاتف</string>
+    <string name="st_dsize_mixed_sub">تمنح النوافذ الجديدة التطبيقات %1$d × %2$d: بعرض جهاز لوحي لكن بارتفاع هاتف. بعض التطبيقات تستخدم هنا تخطيط الجهاز اللوحي، وبعضها تخطيط الهاتف</string>
+    <string name="st_dsize_tablet_sub">تمنح النوافذ الجديدة التطبيقات %1$d × %2$d، أي مساحة جهاز لوحي في الاتجاهين، فتستخدمه معظم التطبيقات التي لها تخطيط لوحي</string>
+    <string name="st_dsize_custom">حجم مخصص</string>
+    <string name="st_dsize_applied">تم التطبيق</string>
+    <string name="st_dsize_waiting">لم يُطبَّق بعد. سيعتمده سطح المكتب عند تشغيله في المرة القادمة</string>
+    <string name="st_dsize_reset">العودة إلى الافتراضي</string>
+    <string name="st_dsize_preview">معاينة عند %1$d نقطة/بوصة. يعادل سطح المكتب %2$d × %3$d: %4$s</string>
+    <string name="st_dsize_on_phone">حجم العرض في هذا الهاتف</string>
+    <string name="st_dsize_on_phone_sub">على شاشة الهاتف نفسها، الحجم إعداد من Android. هذا يفتحه</string>
+    <string name="st_dsize_on_phone_failed">تعذّر فتح إعدادات العرض في الهاتف</string>
+    <string name="st_desk_display_size">حجم العرض…</string>
 
     <string name="st_language">اللغة</string>
     <string name="st_language_note">النص المعروض بالفعل يبقى بلغته حتى تُفتح نافذته من جديد.</string>

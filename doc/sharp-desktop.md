@@ -25,15 +25,15 @@ is the second half of this record.
 | --- | --- | --- |
 | The fit | `src-tauri/src/display.rs` | the screen, the display's size and Default density, the bit rate, what each phone has taught us |
 | Applying it | `scrcpy.rs` (`apply_stored_config`, `apply_stored_density`, `build_args`) | the command line of every desktop spawn and respawn |
-| Following the window | `openandroiddex-scrcpy` (`display-scale.patch`, `build.mjs`) | scrcpy's server, rebuilt: a window's size asked for in pixels |
+| Following the window | `openandroiddex-scrcpy` (`display-scale.patch`, `build.mjs`) | scrcpy's server, rebuilt: a window's size asked for in pixels; no density left forced on its displays |
 | …and the screen | `scrcpy.rs` (`watch_window_scale`), `embed::window_scale` | the scale of the screen the window is on; the density with it |
 | …and the window manager | `scrcpy.rs` (`parse_display_resized`, the enforcer's `refit`) | the display's live size; maximised windows kept maximised |
-| Telling the launcher | `adb.rs` (`adb_start_launcher`) | `--ei base_dpi` on every launcher start |
-| The presets | `SettingsActivity`, `DexPrefs.sizeIndex`, `LauncherActivity.reapplyDensity` | Display size as a multiple of the Default; the two new rows |
+| Telling the launcher | `adb.rs` (`adb_start_launcher`), `scrcpy.rs` (`watch_window_scale`) | `--ei base_dpi` on every launcher start, and a `DEFAULT_DENSITY` broadcast before a density that follows the window to another screen |
+| Display size | `DisplaySize` (the arithmetic), `SettingsActivity.buildDisplaySizeCard`, `DisplaySizePreview`, `DexPrefs.sizeFactor`, `LauncherActivity.reapplyDensity` | a multiple of the Default, preset or the user's own; the card and its preview; the two new rows |
 | Title bars | `CaptionService` (`px`, `trackDensity`) | bars in the display's own pixels |
 | Linux | `LinuxWm.atDpi`/`dpi`/`displaySize`, `LinuxWindows.desktopChanged`, `LinuxActivity.pixelsPerGuestPixel` | GTK's scale in a window, the X screen following the display; XFCE's framebuffer |
 | Who gets in | `openandroiddex-wmd`: `Peers.java`, `WmDaemon.callerOf`, `PC_ONLY`; `UnplugWatch.ARMED_KEYS` | the caller's uid; what each caller may ask |
-| Check | `cargo test display::`, `test/sharp-desktop-test.mjs`, `test/linux-windows-test.mjs` | the arithmetic and the parsing, off a phone |
+| Check | `cargo test display::`, `test/sharp-desktop-test.mjs`, `test/linux-windows-test.mjs`, `test/display-size-test.mjs` | the arithmetic and the parsing, off a phone |
 
 ## Following the window
 
@@ -78,8 +78,15 @@ screen's scale").
   (`CGWindowListCopyWindowInfo`, no permission needed; `GetDpiForWindow` on
   Windows), writes the new scale for the phone, which applies it to the last
   size asked for, and moves the density with it (`wm density`, Default × the
-  phone's preset) so the UI stays the size it was. The launcher re-derives its
-  Default from the new density (`followBaseDpi`).
+  phone's Display size) so the UI stays the size it was. Just before that it
+  tells the launcher the new Default (`DEFAULT_DENSITY`, `--ei base_dpi`; the
+  launcher takes it only from a sender holding `WRITE_SECURE_SETTINGS`, which
+  the shell has). The launcher used to divide the new density by its Display
+  size instead, which gave a Default too small whenever the density was held
+  at the 960 dpi limit: 3x on a screen whose Default is 480 is held at 960, and
+  960 / 3 is 320. The broadcast also updates the intent the desktop was
+  started with, which a re-creation (a language picked, a reset) reads the
+  Default from again.
 
 A resolution picked in Settings is a fixed display, as before, and Linux hosts
 keep the display fitted once (below): X11 and Wayland measure windows
@@ -129,25 +136,151 @@ degraded retry after a session that never got a display: whatever it strips,
 it also goes back to 1920x1080 at the same Display size preset, which every
 phone has run.
 
-## The Display size presets
+## Display size
 
 The five sizes (Very small to Very large) were absolute dpis, which only meant
 the same thing at the resolution they were picked at — 160 was Default at
 1080p. They are multiples now, `SIZE_FACTORS` {0.75, 0.875, 1, 1.25, 1.5} on
-both sides, of whatever the session's Default is.
+both sides, of whatever the session's Default is. Since
+[issue #6](https://github.com/dotnetdreamer/open-android-dex/issues/6) a size
+can also be any multiple between and past them, picked to the dpi: the five
+topped out at 1.5x, 240 dpi on a 1x screen, and the issue asked for 280 and 320.
 
 - The computer remembers each phone's multiple, by `ro.serialno` rather than
   by adb route, in `display-size.json`, and bakes `Default x multiple` into
   every `--new-display`. A Display size request from the launcher is turned
-  back into a multiple of the session's own Default before it is remembered.
-- The launcher keeps an index (`display_size_index`) and learns the Default
-  from the `base_dpi` extra the computer starts it with. Only the computer can
-  know it — it comes from a screen the phone has never seen.
-- An old absolute dpi, on either side, is moved over once as the multiple it
+  back into a multiple of the session's own Default before it is remembered
+  (`display::normalize_factor`): a preset when it is within 0.01 of one — a
+  whole dpi divides back into its preset only to within 0.5 / Default — and
+  otherwise the multiple itself, to four decimals, between 0.5 and 4. Until
+  #6 it was snapped to the nearest preset, which is why a density set any other
+  way never survived a reconnect.
+- The launcher keeps the same multiple (`display_size_factor`, by the same
+  rule in `DisplaySize.normalize`) with the nearest preset's index beside it
+  (`display_size_index`) for a launcher from before. It learns the Default from
+  the `base_dpi` extra the computer starts it with, and from the computer again
+  when the window goes to a screen of another scale. Only the computer can know
+  it — it comes from a screen the phone has never seen.
+- Every whole dpi the controls can show comes back as itself through
+  `dpi / Default` and `Default x multiple` on both sides (checked for ten
+  Defaults from half to 4x), or the launcher's `reapplyDensity` and the
+  computer would correct each other on every start.
+- An old absolute dpi, on either side, is moved over once as the preset it
   stood for at the resolution then in force (1080p unless one was picked):
   160 → Default.
 - A resolution picked in Settings keeps the old 1080-dp-tall Default
   (`default_density`, `SettingsActivity.defaultDpi`).
+
+### The card
+
+Settings → Display & UI opens on it, because it is the first thing a desktop on
+a new screen needs and the issue came from someone who had not found the five
+presets at the bottom of the section. It is also on the desktop's right-click
+menu ("Display size…", where Windows keeps Display settings; Settings opens on
+the card and outlines it for a moment), and Settings' search finds it under
+density, dpi, scale and zoom.
+
+- **A preview of the desktop** (`DisplaySizePreview`), drawn rather than
+  captured: the user's wallpaper, theme and taskbar style, the icon column and
+  the window a new app would open in, each at its size in dp at the density
+  under consideration. The window is the one `nextWindowBounds` would give —
+  its arithmetic now lives in `DisplaySize.newWindow`, which both call, and
+  the test compares it with the old inline code in 35,840 cases. It is a share
+  of the display in pixels, so it stays put while what is inside it grows or
+  shrinks. What is inside is a sketch of a typical app, not a real one, laid
+  out the way such an app would be in that room: one column under 600 dp,
+  list and detail from 600, a navigation rail beside both from 840.
+- **The five presets** as pills, one click each, applied at once.
+- **A slider** from half the Default to the densest that still leaves the
+  display 640 x 360 dp — a phone held sideways; any denser and the taskbar, the
+  Start menu and Settings itself stop fitting, and the way back is inside them
+  — and never past 4x the Default, the most a multiple is kept as. Without
+  that cap a 4K screen at a Default of 160 had a track to 960 dpi on which
+  everything past 640 was applied as 640, the thumb jumping back on release.
+  It is logarithmic, because 120 → 160 is felt as the same step as 240 → 320
+  and a linear track put the presets in its first third, with a detent and a
+  dot at each preset. It only ever shows a value it would apply (5 dpi apart,
+  a preset, or either end exactly), applies on release, and always reaches
+  every preset and the size in force, which a desktop that follows its window
+  can leave outside the display's own bounds. So the 640 x 360 dp is the
+  slider's own limit, not a promise: on a small display at a high Default,
+  Large and Very large can leave less (1280 x 720 at a Default of 320: Very
+  large is 480 dpi, about 427 x 240 dp). They were there before the slider
+  was, and stay one click away.
+- **− and +**, ten dpi a press, landing on a preset on the way rather than
+  stepping over it; held down — by a finger, the mouse, or Enter or Space —
+  they repeat until let go. A hold is the button's pressed state, which the
+  view also drops on losing focus or the window and when the pointer slides
+  off; an accessibility long press holds nothing down and is one step. They
+  apply 900 ms after the last press, as the slider's arrow keys do: every
+  apply is a `wm density` and a rebuild of every activity on the display, this
+  window included.
+- **What it leaves**: "Looks like W × H", the desktop in dp as macOS words it,
+  and the layout apps choose in a new window there (`DisplaySize.layout`):
+  *Tablet layout* when its content is at least 600 dp both ways, *Phone layout*
+  under 600 wide, and *Mixed layouts* between, where apps built on window size
+  classes (by width) and apps shipping `sw600dp` resources (by smallest width)
+  disagree. It is an estimate from those two breakpoints: each app picks its
+  own layout, so the sentences under it say "most apps" and "some apps", and
+  the note below the card says a few apps only have a phone layout. The issue
+  expected 240–320 dpi to bring tablet layouts at 1080p; a lower density is
+  what gives apps the room for them, and the card shows which way each goes.
+- **Status**: "Applying display size…" until the density lands. Landing
+  re-creates the window, and that is the confirmation: carried across in the
+  saved state, it shows as "✓ Applied". Eight seconds without it, the card says
+  the desktop picks it up at its next start, which it does: the request stays
+  in the queue and `reapplyDensity` asks again.
+- **The window keeps its size in dp**, as a computer's own windows do when its
+  scaling changes. A freeform task keeps its pixels through a density change,
+  so at twice the density Settings was half its size in dp and the card it was
+  changed from no longer fitted. Before the first change of a run the window's
+  size in dp is noted (and whether it is maximised); after each one lands,
+  `CaptionService.placeTask` puts it back at that size about its centre,
+  inside the maximised rect, through the daemon's one-shot `RESIZE` — or on the
+  maximised rect, which moved with the taskbar. A size the display clamped is
+  not noted as the user's: the note is only taken afresh when the window's size
+  differs from where the card last put it. A dimension that all but filled the
+  display (Settings opened at a large size) is noted as the 940 x 640 dp it
+  opens at. In a window still too short for everything, the preview gives up
+  height first and the controls are scrolled back into view.
+- `launchSettings` now centres the window in the room above the taskbar, which
+  at a large size is a good part of the display.
+- On the phone's own screen, where Settings opens when the launcher is the
+  phone's home, the card is a link to Android's own Display size instead:
+  there is no desktop display there to describe.
+
+### When the desktop ends
+
+The phone's own screen (display 0) is never given a density: every
+`wm density` here is `-d` the desktop's virtual display, and the reset below
+refuses display 0, where it would undo a size the owner set themselves.
+
+The desktop's display goes with the session, but on Android 14 and earlier its
+density may not. A density forced on a virtual display is kept in
+`/data/system/display_settings.xml`, across a reboot too, under the display's
+identity, `virtual:com.android.shell,2000,scrcpy,0`, and forced again on the
+next display that gets that identity: the next desktop, a phone app's window,
+anyone's scrcpy. Android 15 forgets it with the display
+(`DisplayWindowSettingsProvider` keeps virtual displays out of the file from
+`android15-release`; 11 to 14 do not). The Display size and a window moved to
+a screen of another scale are both `wm density -d`, so:
+
+- **A desktop that ends on purpose** (Exit DeX on the phone or here, the app
+  closing, a restart for new stream settings, a switch to Wi-Fi) has its
+  density taken off by the computer before scrcpy closes the display
+  (`release_display_density` in `stop_mirror` and `kill_all`): one shell line
+  that resets a forced density on Android 14 and earlier and leaves 15 and
+  later to Android, rather than re-laying out a desktop about to close. It
+  must come first: a display already gone cannot be reset.
+- **The server clears it too** (`clearForcedDensity`, display-scale.patch):
+  before it releases its display, which runs when it notices its connection
+  close, as a desktop in use does at once; and on each display it makes,
+  before it reports it, whatever an earlier display left there. So a cable
+  pulled, or a server killed before it could tidy up, is undone by the next
+  display the app makes on that phone at the latest. Until then it is still
+  there, and a stock scrcpy display made in between (it takes adb, so a
+  computer) would get it. The phone itself cannot clear it after the cable is
+  out: the reset needs the display, and the display has gone.
 
 ## Bit rate
 
@@ -284,6 +417,94 @@ The desktop following its window (2026-10-21, the patched server staged by
 - Calculator maximised at (0,0)-(1796,916) on a 1800x968 desktop; the window
   grown to 2160x1112 (macOS kept it on the screen): "re-fitted to the display",
   (0,0)-(2156,1060), still maximised.
+
+Display size, between and past the presets (2026-10-31; the desktop app from
+`tauri dev` on Windows at 100 %, a read-only Pixel 8a emulator on Android 16,
+a 1824x936 desktop whose Default is 160):
+
+- Off a phone: `node test/display-size-test.mjs` (57: what a size is kept as,
+  every dpi from half to 4x of ten Defaults back as itself, the slider's bounds,
+  detents and steps, the new-window rect against the old `nextWindowBounds` in
+  35,840 cases, the layouts); `cargo test` (196, `display::` 19 with the custom
+  multiples and the same round trip).
+- The desktop's right-click menu shows "Display size…"; it opens Settings on
+  the card, outlined for a moment. Search finds the section by "dpi".
+- Large: `wm density` 200, "display size 1.25x Default"; the next session's
+  display made at 1824x936/200. Three presses of +: one request, 230,
+  remembered as 1.4375 (it used to be snapped to 1.5). A drag: 330, remembered
+  as 2.0625, and the next session made at /330 with no correcting request from
+  the launcher. Holding +: 160 to 230, one request. The top of the track there:
+  415 (640 x 360 dp is 416; the track is in steps of 5).
+- The preview turned from list and detail with a rail (160) to without (200)
+  to one column (330); the verdict went Tablet → Mixed → Phone with them. Dark,
+  Light and Windows 11 Light all drawn in their own palette and taskbar.
+- Settings at 940 x 640 px at 160 → Very large: [207,0][1617,858] (940 dp
+  across, as tall as the room above the taskbar allows) → 415: the whole
+  maximised rect, the controls scrolled into view → Back to Default:
+  940 x 640 px again. Opened fresh at 335 it is [91,41][1732,785], 90 % of the
+  room each way; taken to Default it came back 796 x 408 until a dimension the
+  display had clamped was noted as the size it opens at, and with that,
+  [441,93][1381,733]: 940 x 640.
+- Factory reset of "Display size and language" alone: a request for 160,
+  remembered as 1x; the card reopened at Default, not at the 170 picked before.
+  (That scope resets the desktop's language as well; on an English emulator
+  left on Automatic it changed nothing visible.)
+
+After a review of the above found three bugs (the same day, same setup, the
+fixed launcher and desktop app; input as before, `adb shell input -d` on the
+desktop display):
+
+- Off a phone: `display-size-test.mjs` 61, with a check that walks every dpi
+  of 770 tracks (14 Defaults, 11 screens, 5 sizes in force). Before the fix it
+  failed: 1080p at a Default of 80 ran to 480 and applied everything past 320
+  as 320, and 4K at 160 likewise past 640; the top of a Retina track showed
+  755 for 756. `cargo test` 197.
+- Enter held for 1.5 s on + (focus moved there with Tab): 160 to 250 while
+  held, then nothing more, and one request, 250. The old repeat stopped only
+  on a touch's release, so a key or an accessibility long press ran it to the
+  top of the track. A touch held on −: 250 to 160, one request.
+- The end of the track: 416, applied as 416. Two presses of Right on the
+  slider: one request, 235, 900 ms after the second.
+- Windows scaling 100 % → 125 %: "told the launcher the Default is 200 dpi",
+  the launcher's "the desktop's Default density is 200 dpi" logged before
+  that line returned, then `wm density` 250 (Large, 1.25x); the card showed
+  250 with Large lit; no request from the launcher. A language picked and put
+  back re-created the desktop twice: no request either (it read 200 from its
+  start intent, which the broadcast updates; without that it would have read
+  the 160 it was started with and asked for 200, from the code, not run).
+  Back to 100 %: told 160, density 200.
+- Not run: a Default held at 960, which this PC cannot reach (its scaling
+  stops at 175 %, and the clamp needs a screen more than 2.1 times denser than
+  the one the size was picked on). With the Default no longer worked out from
+  the density, the clamp has nothing left to get wrong.
+
+The density left behind (the same day; a Galaxy A13 on Android 12 by USB, and
+the emulator):
+
+- On the A13, bare scrcpy displays with no window, not a desktop: one forced
+  to 200 and closed, and the next display with the same identity, asked for
+  160, came up at "Override density: 200". With the fixed server: "Forced
+  density 200 left by an earlier display cleared: 160 dpi again", logged
+  before "New display", and 160. The computer's reset line on a display
+  carrying the 200: "reset", then "none"; the next display made by the old
+  server, which clears nothing, came up at 160.
+- Also on the A13: the fixed server's clear on release did not run. Killing
+  the test client hung its server up before it noticed the connection close;
+  that display drew nothing, so the server had nothing to send to find out
+  sooner. The next display came up at 200, which is why the computer resets
+  first and every new display is cleared.
+- On the emulator, a real desktop at 235 with Large forced (200), Exit DeX
+  from the taskbar: the reset line ran on display 3 before the session
+  stopped and answered "forgotten" (Android 16), and the server's own release
+  clear ran: "Forced density 200 on this display cleared: 235 dpi again".
+
+Not yet: the card on the phone's own screen (Android's Display size link; the
+shell may not start Settings there and the launcher would have to leave the
+desktop), an accessibility long press on − or +, "Not applied yet" (needs a
+computer that stops draining the queue), a desktop on a real phone, Android 12
+with captions off (the window keeps its pixels as before), a real desktop on
+Android 11 to 14 ending by Exit or by a real cable pull, and a real cable pull
+anywhere.
 
 Not yet:
 

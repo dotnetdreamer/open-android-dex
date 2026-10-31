@@ -37,7 +37,7 @@
     <string name="st_reset">Reset</string>
 
     <string name="st_nav_display">Display &amp; UI</string>
-    <string name="st_nav_display_sub">Desktop style · Theme · Glass · Display size</string>
+    <string name="st_nav_display_sub">Display size · Desktop style · Theme · Glass</string>
     <string name="st_nav_perf">Performance</string>
     <string name="st_nav_perf_sub">Reduce quality · Faster app launches</string>
     <string name="st_nav_language">Language &amp; Font</string>
@@ -105,13 +105,35 @@
     <string name="w11_power">Power</string>
 
     <string name="st_display_size">Display size</string>
-    <string name="st_display_size_note">Applies to this desktop display only and takes effect immediately.</string>
+    <string name="st_display_size_note">Changes this desktop only, not your phone’s own screen. A few apps only have a phone layout, whatever the size.</string>
     <string name="st_display_size_applying">Applying display size…</string>
-    <string name="st_size_xs">Very small screen</string>
-    <string name="st_size_s">Small screen</string>
-    <string name="st_size_m">Default screen</string>
-    <string name="st_size_l">Large screen</string>
-    <string name="st_size_xl">Very large screen</string>
+    <string name="st_size_xs">Very small</string>
+    <string name="st_size_s">Small</string>
+    <string name="st_size_m">Default</string>
+    <string name="st_size_l">Large</string>
+    <string name="st_size_xl">Very large</string>
+    <string name="st_display_size_keywords">density dpi scale zoom bigger smaller text layout tablet phone</string>
+    <string name="st_dsize_more_space">More space</string>
+    <string name="st_dsize_larger">Larger</string>
+    <string name="st_dsize_smaller">Smaller</string>
+    <string name="st_dsize_bigger">Bigger</string>
+    <string name="st_dsize_dpi">%1$d dpi</string>
+    <string name="st_dsize_looks_like">Looks like %1$d × %2$d</string>
+    <string name="st_dsize_phone">Phone layout</string>
+    <string name="st_dsize_mixed">Mixed layouts</string>
+    <string name="st_dsize_tablet">Tablet layout</string>
+    <string name="st_dsize_phone_layout_sub">New windows give apps %1$d × %2$d, about a phone’s width, so most apps use their phone layout</string>
+    <string name="st_dsize_mixed_sub">New windows give apps %1$d × %2$d: as wide as a tablet but as short as a phone. Some apps use their tablet layout here, others their phone layout</string>
+    <string name="st_dsize_tablet_sub">New windows give apps %1$d × %2$d, a tablet’s room both ways, so most apps that have a tablet layout use it</string>
+    <string name="st_dsize_custom">Custom size</string>
+    <string name="st_dsize_applied">Applied</string>
+    <string name="st_dsize_waiting">Not applied yet. The desktop picks it up when it next starts</string>
+    <string name="st_dsize_reset">Back to Default</string>
+    <string name="st_dsize_preview">Preview at %1$d dpi. The desktop looks like %2$d by %3$d: %4$s</string>
+    <string name="st_dsize_on_phone">This phone’s display size</string>
+    <string name="st_dsize_on_phone_sub">On the phone’s own screen, sizes are an Android setting. This opens it</string>
+    <string name="st_dsize_on_phone_failed">Could not open the phone’s display settings</string>
+    <string name="st_desk_display_size">Display size…</string>
 
     <string name="st_language">Language</string>
     <string name="st_language_note">Text already on screen keeps its language until its window is opened again.</string>

@@ -855,7 +855,8 @@ fn write_display_scale(app: &AppHandle, serial: &str, scale: f64) {
 /// same. On macOS the phone is told the new pixels-per-point and applies it to
 /// the last size the window asked for; on Windows the window's pixel size
 /// changes by itself as Windows rescales it. Either way the density goes with
-/// the scale — one dp stays one point — at the phone's Display size preset.
+/// the scale — one dp stays one point — at the phone's Display size, and the
+/// launcher is told the new Default that size is a multiple of.
 ///
 /// Asked once a second, of the window server (embed::window_state): there is
 /// no event for it that this process could hear. The same answer is where the
@@ -904,6 +905,20 @@ fn watch_window_scale(
             let base = ((160.0 * now).round() as i32).clamp(80, 960);
             let factor = display::size_factor(&app, &serial, (1920, 1080));
             let dpi = ((f64::from(base) * factor).round() as i32).clamp(DPI_MIN, DPI_MAX);
+            // The launcher hears the new Default first, then the density. It
+            // works its Display size presets out as multiples of the Default,
+            // and the density alone cannot tell it which: held at DPI_MAX, the
+            // dpi divided by the multiple is a Default too small. `am
+            // broadcast` returns once the receiver has run, so the Default is
+            // in place before the density reaches the launcher.
+            let tell = format!(
+                "am broadcast -a {launcher}.DEFAULT_DENSITY -p {launcher} --ei base_dpi {base}",
+                launcher = adb::LAUNCHER_PACKAGE
+            );
+            match adb::run_adb(&app, &["-s", &serial, "shell", &tell]) {
+                Ok(_) => log::info!("scrcpy [{key}] told the launcher the Default is {base} dpi"),
+                Err(e) => log::warn!("scrcpy [{key}] could not tell the launcher the Default is {base} dpi: {e}"),
+            }
             match adb::run_adb(&app, &["-s", &serial, "shell", &format!("wm density {dpi} -d {display}")]) {
                 Ok(_) => {
                     base_dpi.store(base, Ordering::SeqCst);
@@ -4684,18 +4699,73 @@ fn shut_down(child: &Mutex<Child>) {
     let _ = child.lock().unwrap().kill();
 }
 
+/// How long a desktop that is ending waits for its density to come off: the
+/// phone may already be gone, and Exit should not hang on it.
+const DENSITY_RESET_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// The shell line that takes a desktop's density off before its display goes,
+/// and says which way it went ("reset", "none", "forgotten").
+///
+/// Android 14 and earlier keep a density forced on a virtual display after
+/// the display is gone — even across a reboot — under the display's identity,
+/// `virtual:com.android.shell,2000,scrcpy,0`, which the next scrcpy display
+/// gets too, and force it on that display: the next desktop, a phone app's
+/// window, anyone's scrcpy. The desktop's Display size and a window moved to a
+/// screen of another scale are both `wm density -d`. Android 15 and later
+/// forget it with the display, so there it is left alone rather than
+/// re-laying out a desktop that is about to close.
+fn density_reset_command(display: i32) -> String {
+    format!(
+        "if [ \"$(getprop ro.build.version.sdk)\" -ge 35 ]; then echo forgotten; \
+         elif wm density -d {display} | grep -q Override; then wm density reset -d {display} && echo reset; \
+         else echo none; fi"
+    )
+}
+
+/// Leave the phone's density as the desktop found it: called as a desktop
+/// ends on purpose (Exit DeX, from the phone or here; the app closing; a
+/// restart), before scrcpy takes the display away — a display already gone
+/// cannot be reset. A cable pulled first leaves it to the phone's scrcpy
+/// server, which clears whatever an earlier display left on each display it
+/// makes (`clearForcedDensity`, display-scale.patch).
+fn release_display_density(app: &AppHandle, key: &str, serial: &str, display: i32) {
+    // 0 is the phone's own screen, whose density is its owner's: a reset there
+    // would undo one they set themselves. A desktop is never on it.
+    if display <= 0 {
+        return;
+    }
+    let cmd = density_reset_command(display);
+    match adb::run_adb_timeout(app, &["-s", serial, "shell", &cmd], DENSITY_RESET_TIMEOUT) {
+        Ok(out) => match out.trim() {
+            "reset" => log::info!("mirror [{key}] display {display}: density back to its own before it goes"),
+            "forgotten" => log::info!("mirror [{key}] display {display}: density left to Android, which forgets it with the display"),
+            _ => log::info!("mirror [{key}] display {display}: no density forced on it"),
+        },
+        Err(e) => log::warn!("mirror [{key}] display {display}: could not take its density off: {e}"),
+    }
+}
+
 #[tauri::command(async)]
 pub fn stop_mirror(app: AppHandle, session_key: String) -> Result<(), String> {
     let state = app.state::<MirrorState>();
     let handle = {
         let map = state.0.lock().unwrap();
-        map.get(&session_key)
-            .map(|s| (s.child.clone(), s.stop_requested.clone()))
+        map.get(&session_key).map(|s| {
+            (
+                s.child.clone(),
+                s.stop_requested.clone(),
+                s.serial.clone(),
+                s.display_id.load(Ordering::SeqCst),
+            )
+        })
     };
     match handle {
-        Some((child, stop)) => {
+        Some((child, stop, serial, display)) => {
             log::info!("mirror [{session_key}] stop requested");
             stop.store(true, Ordering::SeqCst);
+            if session_key.ends_with("|desktop") {
+                release_display_density(&app, &session_key, &serial, display);
+            }
             shut_down(&child);
             Ok(())
         }
@@ -4777,11 +4847,15 @@ pub fn kill_all(app: &AppHandle) {
     // passes the key on when the lock is busy, so holding it across the wait
     // would spend the user's last half second in the app deaf to Escape.
     let mut children: Vec<(String, Arc<Mutex<Child>>)> = Vec::new();
+    let mut desktops: Vec<(String, String, i32)> = Vec::new();
     if let Some(state) = app.try_state::<MirrorState>() {
         let map = state.0.lock().unwrap();
         for (key, s) in map.iter() {
             s.stop_requested.store(true, Ordering::SeqCst);
             children.push((key.clone(), s.child.clone()));
+            if key.ends_with("|desktop") {
+                desktops.push((key.clone(), s.serial.clone(), s.display_id.load(Ordering::SeqCst)));
+            }
             // The sound of a phone whose apps were open here in windows of
             // their own is no desktop to undo: undoing one force-stops the
             // launcher and sends the phone to its home screen, from whatever
@@ -4793,6 +4867,12 @@ pub fn kill_all(app: &AppHandle) {
                 serials.push(s.serial.clone());
             }
         }
+    }
+    // Before the displays go, which takes them out of reach (see
+    // release_display_density) — and outside the lock, for the same reason
+    // as the restore below.
+    for (key, serial, display) in desktops {
+        release_display_density(app, &key, &serial, display);
     }
     for (key, child) in children {
         shut_down(&child);
@@ -4807,6 +4887,18 @@ pub fn kill_all(app: &AppHandle) {
 
 #[cfg(test)]
 mod tests {
+
+    /// A desktop takes its density off before its display goes, on the
+    /// Androids that would keep it, and only on its own display.
+    #[test]
+    fn an_ending_desktop_takes_its_density_off_where_android_would_keep_it() {
+        let cmd = super::density_reset_command(7);
+        assert!(cmd.contains("-ge 35 ]; then echo forgotten;"), "{cmd}");
+        assert!(cmd.contains("elif wm density -d 7 | grep -q Override;"), "{cmd}");
+        assert!(cmd.contains("then wm density reset -d 7 && echo reset;"), "{cmd}");
+        assert!(cmd.ends_with("else echo none; fi"), "{cmd}");
+        assert_eq!(cmd.matches("-d ").count(), 2, "{cmd}");
+    }
 
     /// The launcher queues every request twice — once in the ContentProvider, once in the
     /// window daemon — and the PC reads whichever answered. If the two shapes ever

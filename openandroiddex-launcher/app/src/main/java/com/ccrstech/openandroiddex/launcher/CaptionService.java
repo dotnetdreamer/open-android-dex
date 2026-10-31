@@ -170,6 +170,54 @@ public final class CaptionService extends AccessibilityService {
         s.wm.post(() -> s.wm.resize(display, taskId, left, top, right, bottom, px));
     }
 
+    /** A task's rect on the display — {left, top, right, bottom} — or null when it is not one we track. */
+    static int[] taskRect(int taskId) {
+        CaptionService s = live;
+        if (s == null) return null;
+        WmClient.Task t = s.tasks.get(taskId);
+        return t == null ? null : new int[]{t.left, t.top, t.right, t.bottom};
+    }
+
+    /**
+     * Put a task back at its size after the display's density moved under it:
+     * {@code w} x {@code h} px about its centre, inside the maximised rect — or,
+     * {@code maximised}, on the maximised rect itself, whose bottom moved with
+     * the taskbar's height in dp. That is the Settings window keeping its size
+     * in dp when the Display size it was just used for changes, as a
+     * computer's own windows do when its scaling changes: left alone, a window
+     * keeps its pixels, and at twice the density the card it was changed from
+     * no longer fits in it.
+     *
+     * Straight to the rect rather than through {@link #onMaximise}, which would
+     * file the stale maximised rect as the window's restore rect.
+     *
+     * @return the rect asked for, or null when there was nothing to do
+     */
+    static int[] placeTask(int taskId, int w, int h, boolean maximised) {
+        CaptionService s = live;
+        if (s == null || s.wm == null) return null;
+        WmClient.Task t = s.tasks.get(taskId);
+        if (t == null) return null;
+        final int display = t.displayId;
+        final int[] max = s.maxRect(display);
+        final int[] r;
+        if (maximised) {
+            r = max.clone();
+        } else {
+            int ww = Math.min(w, max[2] - max[0]);
+            int hh = Math.min(h, max[3] - max[1]);
+            if (ww < 64 || hh < 64) return null;
+            int cx = (t.left + t.right) / 2;
+            int cy = (t.top + t.bottom) / 2;
+            int left = Math.max(max[0], Math.min(cx - ww / 2, max[2] - ww));
+            int top = Math.max(max[1], Math.min(cy - hh / 2, max[3] - hh));
+            r = new int[]{left, top, left + ww, top + hh};
+        }
+        final int px = s.captionHeight(taskId);
+        s.wm.post(() -> s.wm.resize(display, taskId, r[0], r[1], r[2], r[3], px));
+        return r;
+    }
+
     /**
      * A context for {@code TYPE_ACCESSIBILITY_OVERLAY} windows on a display:
      * above every app window and the taskbar, needing no permission — where a

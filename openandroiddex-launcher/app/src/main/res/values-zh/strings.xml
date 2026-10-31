@@ -35,7 +35,7 @@
     <string name="st_reset">重置</string>
 
     <string name="st_nav_display">显示与界面</string>
-    <string name="st_nav_display_sub">主题 · 玻璃 · 显示尺寸</string>
+    <string name="st_nav_display_sub">显示尺寸 · 主题 · 玻璃</string>
     <string name="st_nav_perf">性能</string>
     <string name="st_nav_perf_sub">降低画质 · 应用启动更快</string>
     <string name="st_nav_language">语言与字体</string>
@@ -75,13 +75,35 @@
     <string name="st_blur_unsupported">此设备不渲染窗口模糊 — 透明度仍然有效。</string>
 
     <string name="st_display_size">显示尺寸</string>
-    <string name="st_display_size_note">仅作用于此桌面显示器，立即生效。</string>
+    <string name="st_display_size_note">只改变这个桌面，不影响手机本身的屏幕。有些应用无论尺寸如何都只有手机布局。</string>
     <string name="st_display_size_applying">正在应用显示尺寸…</string>
-    <string name="st_size_xs">极小屏幕</string>
-    <string name="st_size_s">小屏幕</string>
-    <string name="st_size_m">默认屏幕</string>
-    <string name="st_size_l">大屏幕</string>
-    <string name="st_size_xl">极大屏幕</string>
+    <string name="st_size_xs">极小</string>
+    <string name="st_size_s">小</string>
+    <string name="st_size_m">默认</string>
+    <string name="st_size_l">大</string>
+    <string name="st_size_xl">极大</string>
+    <string name="st_display_size_keywords">密度 dpi 缩放 放大 缩小 文字 布局 平板 手机 density scale zoom</string>
+    <string name="st_dsize_more_space">更多空间</string>
+    <string name="st_dsize_larger">更大</string>
+    <string name="st_dsize_smaller">更小</string>
+    <string name="st_dsize_bigger">更大</string>
+    <string name="st_dsize_dpi">%1$d dpi</string>
+    <string name="st_dsize_looks_like">相当于 %1$d × %2$d</string>
+    <string name="st_dsize_phone">手机布局</string>
+    <string name="st_dsize_mixed">混合布局</string>
+    <string name="st_dsize_tablet">平板布局</string>
+    <string name="st_dsize_phone_layout_sub">新窗口给应用 %1$d × %2$d，大约是手机的宽度，所以大多数应用使用手机布局</string>
+    <string name="st_dsize_mixed_sub">新窗口给应用 %1$d × %2$d：像平板一样宽，却像手机一样矮。这里有些应用使用平板布局，有些使用手机布局</string>
+    <string name="st_dsize_tablet_sub">新窗口给应用 %1$d × %2$d，横竖都有平板的空间，大多数有平板布局的应用会使用它</string>
+    <string name="st_dsize_custom">自定义尺寸</string>
+    <string name="st_dsize_applied">已应用</string>
+    <string name="st_dsize_waiting">尚未应用。桌面下次启动时会采用</string>
+    <string name="st_dsize_reset">恢复默认</string>
+    <string name="st_dsize_preview">%1$d dpi 预览。桌面相当于 %2$d × %3$d：%4$s</string>
+    <string name="st_dsize_on_phone">本手机的显示尺寸</string>
+    <string name="st_dsize_on_phone_sub">在手机自己的屏幕上，尺寸是 Android 的设置。点此打开</string>
+    <string name="st_dsize_on_phone_failed">无法打开手机的显示设置</string>
+    <string name="st_desk_display_size">显示尺寸…</string>
 
     <string name="st_language">语言</string>
     <string name="st_language_note">已经显示的文字会保持原语言，直到其窗口重新打开。</string>

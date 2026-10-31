@@ -35,7 +35,7 @@
     <string name="st_reset">रीसेट</string>
 
     <string name="st_nav_display">डिस्प्ले और UI</string>
-    <string name="st_nav_display_sub">थीम · ग्लास · डिस्प्ले आकार</string>
+    <string name="st_nav_display_sub">डिस्प्ले आकार · थीम · ग्लास</string>
     <string name="st_nav_perf">प्रदर्शन</string>
     <string name="st_nav_perf_sub">गुणवत्ता घटाएँ · ऐप्स तेज़ी से खुलें</string>
     <string name="st_nav_language">भाषा और फ़ॉन्ट</string>
@@ -75,13 +75,35 @@
     <string name="st_blur_unsupported">यह डिवाइस विंडो ब्लर नहीं दिखाता — पारदर्शिता फिर भी लागू होती है।</string>
 
     <string name="st_display_size">डिस्प्ले आकार</string>
-    <string name="st_display_size_note">यह केवल इसी डेस्कटॉप डिस्प्ले पर लागू होता है और तुरंत प्रभावी होता है।</string>
+    <string name="st_display_size_note">सिर्फ़ यह डेस्कटॉप बदलता है, आपके फ़ोन की अपनी स्क्रीन नहीं। कुछ ऐप में आकार चाहे जो हो, सिर्फ़ फ़ोन लेआउट होता है।</string>
     <string name="st_display_size_applying">डिस्प्ले आकार लागू किया जा रहा है…</string>
-    <string name="st_size_xs">बहुत छोटी स्क्रीन</string>
-    <string name="st_size_s">छोटी स्क्रीन</string>
-    <string name="st_size_m">डिफ़ॉल्ट स्क्रीन</string>
-    <string name="st_size_l">बड़ी स्क्रीन</string>
-    <string name="st_size_xl">बहुत बड़ी स्क्रीन</string>
+    <string name="st_size_xs">बहुत छोटा</string>
+    <string name="st_size_s">छोटा</string>
+    <string name="st_size_m">डिफ़ॉल्ट</string>
+    <string name="st_size_l">बड़ा</string>
+    <string name="st_size_xl">बहुत बड़ा</string>
+    <string name="st_display_size_keywords">घनत्व dpi स्केल ज़ूम बड़ा छोटा टेक्स्ट लेआउट टैबलेट फ़ोन density scale</string>
+    <string name="st_dsize_more_space">ज़्यादा जगह</string>
+    <string name="st_dsize_larger">बड़ा</string>
+    <string name="st_dsize_smaller">छोटा करें</string>
+    <string name="st_dsize_bigger">बड़ा करें</string>
+    <string name="st_dsize_dpi">%1$d dpi</string>
+    <string name="st_dsize_looks_like">%1$d × %2$d जैसा</string>
+    <string name="st_dsize_phone">फ़ोन लेआउट</string>
+    <string name="st_dsize_mixed">मिले-जुले लेआउट</string>
+    <string name="st_dsize_tablet">टैबलेट लेआउट</string>
+    <string name="st_dsize_phone_layout_sub">नई विंडो ऐप को %1$d × %2$d देती हैं, लगभग फ़ोन जितनी चौड़ाई, इसलिए ज़्यादातर ऐप अपना फ़ोन लेआउट इस्तेमाल करते हैं</string>
+    <string name="st_dsize_mixed_sub">नई विंडो ऐप को %1$d × %2$d देती हैं: टैबलेट जितनी चौड़ी पर फ़ोन जितनी नीची। यहाँ कुछ ऐप अपना टैबलेट लेआउट इस्तेमाल करते हैं, कुछ फ़ोन लेआउट</string>
+    <string name="st_dsize_tablet_sub">नई विंडो ऐप को %1$d × %2$d देती हैं, दोनों ओर टैबलेट जितनी जगह, इसलिए जिन ऐप में टैबलेट लेआउट है उनमें से ज़्यादातर उसे इस्तेमाल करते हैं</string>
+    <string name="st_dsize_custom">अपना आकार</string>
+    <string name="st_dsize_applied">लागू हो गया</string>
+    <string name="st_dsize_waiting">अभी लागू नहीं हुआ। डेस्कटॉप अगली बार शुरू होने पर इसे ले लेगा</string>
+    <string name="st_dsize_reset">डिफ़ॉल्ट पर वापस</string>
+    <string name="st_dsize_preview">%1$d dpi पर पूर्वावलोकन। डेस्कटॉप %2$d × %3$d जैसा दिखता है: %4$s</string>
+    <string name="st_dsize_on_phone">इस फ़ोन का डिस्प्ले आकार</string>
+    <string name="st_dsize_on_phone_sub">फ़ोन की अपनी स्क्रीन पर आकार Android की सेटिंग है। यह उसे खोलता है</string>
+    <string name="st_dsize_on_phone_failed">फ़ोन की डिस्प्ले सेटिंग नहीं खुल सकी</string>
+    <string name="st_desk_display_size">डिस्प्ले आकार…</string>
 
     <string name="st_language">भाषा</string>
     <string name="st_language_note">स्क्रीन पर पहले से मौजूद टेक्स्ट अपनी भाषा तब तक रखता है जब तक उसकी विंडो दोबारा न खुले।</string>

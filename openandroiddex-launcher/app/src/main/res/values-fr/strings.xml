@@ -35,7 +35,7 @@
     <string name="st_reset">Réinitialiser</string>
 
     <string name="st_nav_display">Affichage et interface</string>
-    <string name="st_nav_display_sub">Thème · Verre · Taille d\'affichage</string>
+    <string name="st_nav_display_sub">Taille d\'affichage · Thème · Verre</string>
     <string name="st_nav_perf">Performances</string>
     <string name="st_nav_perf_sub">Réduire la qualité · Ouverture plus rapide</string>
     <string name="st_nav_language">Langue et police</string>
@@ -75,13 +75,35 @@
     <string name="st_blur_unsupported">Cet appareil ne rend pas le flou des fenêtres — la transparence reste appliquée.</string>
 
     <string name="st_display_size">Taille d\'affichage</string>
-    <string name="st_display_size_note">Ne concerne que cet écran de bureau et prend effet immédiatement.</string>
+    <string name="st_display_size_note">Ne change que ce bureau, pas l\'écran de votre téléphone. Certaines applis n\'ont qu\'une mise en page de téléphone, quelle que soit la taille.</string>
     <string name="st_display_size_applying">Application de la taille d\'affichage…</string>
-    <string name="st_size_xs">Très petit écran</string>
-    <string name="st_size_s">Petit écran</string>
-    <string name="st_size_m">Écran par défaut</string>
-    <string name="st_size_l">Grand écran</string>
-    <string name="st_size_xl">Très grand écran</string>
+    <string name="st_size_xs">Très petite</string>
+    <string name="st_size_s">Petite</string>
+    <string name="st_size_m">Par défaut</string>
+    <string name="st_size_l">Grande</string>
+    <string name="st_size_xl">Très grande</string>
+    <string name="st_display_size_keywords">densité dpi ppp échelle zoom plus grand plus petit texte mise en page tablette téléphone density scale</string>
+    <string name="st_dsize_more_space">Plus d\'espace</string>
+    <string name="st_dsize_larger">Plus grand</string>
+    <string name="st_dsize_smaller">Plus petit</string>
+    <string name="st_dsize_bigger">Plus grand</string>
+    <string name="st_dsize_dpi">%1$d ppp</string>
+    <string name="st_dsize_looks_like">Équivaut à %1$d × %2$d</string>
+    <string name="st_dsize_phone">Mise en page téléphone</string>
+    <string name="st_dsize_mixed">Mises en page mixtes</string>
+    <string name="st_dsize_tablet">Mise en page tablette</string>
+    <string name="st_dsize_phone_layout_sub">Les nouvelles fenêtres donnent aux applis %1$d × %2$d, à peu près la largeur d\'un téléphone : la plupart utilisent leur mise en page téléphone</string>
+    <string name="st_dsize_mixed_sub">Les nouvelles fenêtres donnent aux applis %1$d × %2$d : larges comme une tablette mais basses comme un téléphone. Ici, certaines applis utilisent leur mise en page tablette, d\'autres celle du téléphone</string>
+    <string name="st_dsize_tablet_sub">Les nouvelles fenêtres donnent aux applis %1$d × %2$d, la place d\'une tablette dans les deux sens : la plupart des applis qui ont une mise en page tablette l\'utilisent</string>
+    <string name="st_dsize_custom">Taille personnalisée</string>
+    <string name="st_dsize_applied">Appliqué</string>
+    <string name="st_dsize_waiting">Pas encore appliqué. Le bureau le prendra en compte à son prochain démarrage</string>
+    <string name="st_dsize_reset">Revenir à la taille par défaut</string>
+    <string name="st_dsize_preview">Aperçu à %1$d ppp. Le bureau équivaut à %2$d sur %3$d : %4$s</string>
+    <string name="st_dsize_on_phone">Taille d\'affichage de ce téléphone</string>
+    <string name="st_dsize_on_phone_sub">Sur l\'écran du téléphone lui-même, la taille est un réglage d\'Android. Ceci l\'ouvre</string>
+    <string name="st_dsize_on_phone_failed">Impossible d\'ouvrir les réglages d\'affichage du téléphone</string>
+    <string name="st_desk_display_size">Taille d\'affichage…</string>
 
     <string name="st_language">Langue</string>
     <string name="st_language_note">Le texte déjà affiché garde sa langue jusqu\'à la réouverture de sa fenêtre.</string>

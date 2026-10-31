@@ -35,7 +35,7 @@
     <string name="st_reset">રીસેટ</string>
 
     <string name="st_nav_display">ડિસ્પ્લે અને UI</string>
-    <string name="st_nav_display_sub">થીમ · ગ્લાસ · ડિસ્પ્લે માપ</string>
+    <string name="st_nav_display_sub">ડિસ્પ્લે માપ · થીમ · ગ્લાસ</string>
     <string name="st_nav_perf">પ્રદર્શન</string>
     <string name="st_nav_perf_sub">ગુણવત્તા ઘટાડો · ઍપ ઝડપથી ખૂલે</string>
     <string name="st_nav_language">ભાષા અને ફોન્ટ</string>
@@ -75,13 +75,35 @@
     <string name="st_blur_unsupported">આ ઉપકરણ વિન્ડો બ્લર બતાવતું નથી — પારદર્શકતા તો લાગુ થાય જ છે.</string>
 
     <string name="st_display_size">ડિસ્પ્લે માપ</string>
-    <string name="st_display_size_note">આ ફક્ત આ ડેસ્કટોપ ડિસ્પ્લે પર લાગુ પડે છે અને તરત અસર કરે છે.</string>
+    <string name="st_display_size_note">ફક્ત આ ડેસ્કટોપ બદલાય છે, તમારા ફોનની પોતાની સ્ક્રીન નહીં. કેટલીક એપ્સમાં માપ ગમે તે હોય, ફક્ત ફોન લેઆઉટ હોય છે.</string>
     <string name="st_display_size_applying">ડિસ્પ્લે માપ લાગુ થઈ રહ્યું છે…</string>
-    <string name="st_size_xs">ખૂબ નાની સ્ક્રીન</string>
-    <string name="st_size_s">નાની સ્ક્રીન</string>
-    <string name="st_size_m">ડિફોલ્ટ સ્ક્રીન</string>
-    <string name="st_size_l">મોટી સ્ક્રીન</string>
-    <string name="st_size_xl">ખૂબ મોટી સ્ક્રીન</string>
+    <string name="st_size_xs">ખૂબ નાનું</string>
+    <string name="st_size_s">નાનું</string>
+    <string name="st_size_m">ડિફોલ્ટ</string>
+    <string name="st_size_l">મોટું</string>
+    <string name="st_size_xl">ખૂબ મોટું</string>
+    <string name="st_display_size_keywords">ઘનતા dpi સ્કેલ ઝૂમ મોટું નાનું ટેક્સ્ટ લેઆઉટ ટેબ્લેટ ફોન density scale</string>
+    <string name="st_dsize_more_space">વધુ જગ્યા</string>
+    <string name="st_dsize_larger">મોટું</string>
+    <string name="st_dsize_smaller">નાનું કરો</string>
+    <string name="st_dsize_bigger">મોટું કરો</string>
+    <string name="st_dsize_dpi">%1$d dpi</string>
+    <string name="st_dsize_looks_like">%1$d × %2$d જેવું</string>
+    <string name="st_dsize_phone">ફોન લેઆઉટ</string>
+    <string name="st_dsize_mixed">મિશ્ર લેઆઉટ</string>
+    <string name="st_dsize_tablet">ટેબ્લેટ લેઆઉટ</string>
+    <string name="st_dsize_phone_layout_sub">નવી વિન્ડો એપ્સને %1$d × %2$d આપે છે, લગભગ ફોન જેટલી પહોળાઈ, એટલે મોટાભાગની એપ્સ પોતાનું ફોન લેઆઉટ વાપરે છે</string>
+    <string name="st_dsize_mixed_sub">નવી વિન્ડો એપ્સને %1$d × %2$d આપે છે: ટેબ્લેટ જેટલી પહોળી પણ ફોન જેટલી નીચી. અહીં કેટલીક એપ્સ ટેબ્લેટ લેઆઉટ વાપરે છે, બીજી ફોન લેઆઉટ</string>
+    <string name="st_dsize_tablet_sub">નવી વિન્ડો એપ્સને %1$d × %2$d આપે છે, બંને બાજુ ટેબ્લેટ જેટલી જગ્યા, એટલે જે એપ્સમાં ટેબ્લેટ લેઆઉટ છે તેમાંની મોટાભાગની તેને વાપરે છે</string>
+    <string name="st_dsize_custom">પોતાનું માપ</string>
+    <string name="st_dsize_applied">લાગુ થયું</string>
+    <string name="st_dsize_waiting">હજી લાગુ નથી થયું. ડેસ્કટોપ આગલી વખતે શરૂ થશે ત્યારે લઈ લેશે</string>
+    <string name="st_dsize_reset">ડિફોલ્ટ પર પાછા</string>
+    <string name="st_dsize_preview">%1$d dpi પર પૂર્વાવલોકન. ડેસ્કટોપ %2$d × %3$d જેવું દેખાય છે: %4$s</string>
+    <string name="st_dsize_on_phone">આ ફોનનું ડિસ્પ્લે માપ</string>
+    <string name="st_dsize_on_phone_sub">ફોનની પોતાની સ્ક્રીન પર માપ Androidનું સેટિંગ છે. આ તેને ખોલે છે</string>
+    <string name="st_dsize_on_phone_failed">ફોનના ડિસ્પ્લે સેટિંગ્સ ખોલી શકાયા નહીં</string>
+    <string name="st_desk_display_size">ડિસ્પ્લે માપ…</string>
 
     <string name="st_language">ભાષા</string>
     <string name="st_language_note">સ્ક્રીન પર પહેલેથી દેખાતું લખાણ તેની વિન્ડો ફરી ખૂલે ત્યાં સુધી જૂની ભાષામાં રહે છે.</string>

@@ -208,6 +208,14 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
             "com.ccrstech.openandroiddex.launcher.GESTURE";
 
     /**
+     * The desktop's Default density moved, as {@code --ei base_dpi <dpi>}:
+     * the PC window went to a screen of another scale. Sent just before the
+     * density that goes with it (scrcpy.rs, watch_window_scale).
+     */
+    public static final String ACTION_DEFAULT_DENSITY =
+            "com.ccrstech.openandroiddex.launcher.DEFAULT_DENSITY";
+
+    /**
      * "Your caption's ✕ was pressed" — sent to one of OUR OWN windows instead
      * of closing its task, so the window can put a question in front of the
      * close. Only the Linux window wants one: closing it ends a container the
@@ -531,6 +539,29 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
     };
 
     /**
+     * The Default density the desktop app moved the display to. Kept, and
+     * nothing else: the density that goes with it is the PC's to apply, and
+     * comes next. Exported, because the sender is the PC's `adb shell` — but
+     * unlike the receivers around it, only to a sender holding
+     * WRITE_SECURE_SETTINGS, which that shell has and no ordinary app can: a
+     * Default kept here is applied by the next re-creation of the desktop.
+     */
+    private final BroadcastReceiver defaultDensityReceiver = new BroadcastReceiver() {
+        @Override
+        public void onReceive(Context ctx, Intent intent) {
+            int base = intent.getIntExtra("base_dpi", -1);
+            // the PC's own bounds on a Default (scrcpy.rs)
+            if (base < 80 || base > 960) return;
+            rememberBaseDpi(intent);
+            // A re-creation (a language picked, a reset) reads the Default
+            // from the intent this desktop was started with, which still has
+            // the old one.
+            Intent start = getIntent();
+            if (start != null) start.putExtra("base_dpi", base);
+        }
+    };
+
+    /**
      * A three-finger gesture on the computer's touchpad.
      *
      * Exported, like the running-apps and file-transfer receivers above and for
@@ -753,7 +784,8 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
         public void onReceive(Context ctx, Intent intent) {
             String key = intent.getStringExtra(DexPrefs.EXTRA_KEY);
             // the display listener owns the density, whichever key moved it
-            if (DexPrefs.KEY_SIZE_INDEX.equals(key) || DexPrefs.KEY_BASE_DPI.equals(key)) return;
+            if (DexPrefs.KEY_SIZE_INDEX.equals(key) || DexPrefs.KEY_SIZE_FACTOR.equals(key)
+                    || DexPrefs.KEY_BASE_DPI.equals(key)) return;
             // Not a shell setting — nothing here is drawn from it — but the desktop is
             // what puts the touchpad's notification up, so it is what takes it down.
             if (DexPrefs.KEY_PAD_NOTICE.equals(key)) {
@@ -899,6 +931,15 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
             registerReceiver(filesReceiver, filesFilter, Context.RECEIVER_EXPORTED);
         } else {
             registerReceiver(filesReceiver, filesFilter);
+        }
+        // And again, from the shell alone (see the receiver).
+        IntentFilter defaultDensityFilter = new IntentFilter(ACTION_DEFAULT_DENSITY);
+        String shellOnly = android.Manifest.permission.WRITE_SECURE_SETTINGS;
+        if (android.os.Build.VERSION.SDK_INT >= 33) {
+            registerReceiver(defaultDensityReceiver, defaultDensityFilter, shellOnly, null,
+                    Context.RECEIVER_EXPORTED);
+        } else {
+            registerReceiver(defaultDensityReceiver, defaultDensityFilter, shellOnly, null);
         }
         // sticky: returns the latest battery snapshot immediately
         lastBattery = registerReceiver(batteryReceiver,
@@ -1118,6 +1159,10 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
         } catch (Exception ignored) {
         }
         try {
+            unregisterReceiver(defaultDensityReceiver);
+        } catch (Exception ignored) {
+        }
+        try {
             unregisterReceiver(batteryReceiver);
         } catch (Exception ignored) {
         }
@@ -1189,24 +1234,31 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
 
     /**
      * Make sure the display is at the user's Display size: the Default density
-     * times their preset. The desktop app bakes exactly that into every display
-     * it makes, so this is normally a no-op — it is here for a display that came
-     * up at anything else (the phone's own ~340+ dpi, which reads as absurdly
-     * zoomed on a monitor), and for a preset this phone chose that the computer
-     * has not heard of.
+     * times their multiple. The desktop app bakes exactly that into every
+     * display it makes, so this is normally a no-op — it is here for a display
+     * that came up at anything else (the phone's own ~340+ dpi, which reads as
+     * absurdly zoomed on a monitor), and for a size this phone chose that the
+     * computer has not heard of.
      */
     private void reapplyDensity() {
-        int want = Math.round(SettingsActivity.defaultDensity(this)
-                * DexPrefs.SIZE_FACTORS[DexPrefs.sizeIndex(this)]);
+        int want = DisplaySize.dpiFor(SettingsActivity.defaultDensity(this),
+                DexPrefs.sizeFactor(this));
         if (want != currentDisplayDensity()) {
             RequestProvider.enqueue("density", String.valueOf(want));
         }
     }
 
     /**
-     * Keep the Default density the desktop app started us with ({@code base_dpi}):
-     * one dp per point of the computer's UI, worked out from its screen, which
-     * nothing on the phone can know. The Display size presets are multiples of it.
+     * Keep the Default density the desktop app gave us ({@code base_dpi}): one
+     * dp per point of the computer's UI, worked out from its screen, which
+     * nothing on the phone can know. The Display size presets are multiples of
+     * it. It comes with every start of the desktop and, when the PC window
+     * goes to a screen of another scale, ahead of the density that follows
+     * ({@link #defaultDensityReceiver}).
+     *
+     * Never worked out from the density instead: the density is the Default
+     * times the Display size only up to the PC's 960 dpi, where it is held,
+     * and dividing a held one by the size gives a Default too small.
      */
     private boolean rememberBaseDpi(Intent intent) {
         int base = intent == null ? -1 : intent.getIntExtra("base_dpi", -1);
@@ -1216,24 +1268,6 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
             DexLog.step("launcher", "the desktop's Default density is " + base + " dpi");
         }
         return true;
-    }
-
-    /**
-     * Keep the Default density in step with a density the desktop app moved.
-     *
-     * Every density this display gets is the Default times the Display size
-     * preset: baked in when it is made, applied when a preset is picked (the
-     * preset is stored first, see SettingsActivity#applyDensity), and applied
-     * again when a desktop that follows its window is dragged onto a screen of
-     * another scale — which only the desktop app can see. Dividing by the
-     * preset recovers the Default, so the presets offered from then on are
-     * multiples of the new one.
-     */
-    private void followBaseDpi(int density) {
-        int base = Math.round(density / DexPrefs.SIZE_FACTORS[DexPrefs.sizeIndex(this)]);
-        if (base > 0 && base != DexPrefs.getInt(this, DexPrefs.KEY_BASE_DPI, -1)) {
-            DexPrefs.prefs(this).edit().putInt(DexPrefs.KEY_BASE_DPI, base).apply();
-        }
     }
 
     /**
@@ -1304,7 +1338,6 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
         getWindowManager().getDefaultDisplay().getRealSize(size);
         int density = currentDisplayDensity();
         boolean changed = density != uiDensity || size.x != uiWidthPx;
-        if (density != uiDensity) followBaseDpi(density);
         uiDensity = density;
         uiWidthPx = size.x;
         compact = Math.round(size.x * 160f / Math.max(1, density)) < COMPACT_WIDTH_DP;
@@ -2952,8 +2985,25 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
      * it than simply opening big.
      */
     private void launchSettings() {
+        launchSettings(null);
+    }
+
+    /**
+     * The desktop's right-click "Display size…": Settings, open on that card,
+     * which lights up for a moment so the eye lands on it. Where Windows keeps
+     * "Display settings", because that is where people look for it.
+     */
+    void openDisplaySize() {
+        launchSettings(SettingsActivity.SEC_DISPLAY);
+    }
+
+    /** @param section the section to show, or null for wherever it was left */
+    private void launchSettings(String section) {
         hideDrawer();
         dismissPopups();
+        // Through a static rather than the intent: a minimised window is
+        // brought back by CaptionService below and never sees an intent at all.
+        if (section != null) SettingsActivity.openAt(section);
         // Settings wears our caption, so it can be minimised — and it is a
         // window with no taskbar icon to bring it back (loadApps skips our
         // own package). `am start` does not clear the hidden flag, so a restore
@@ -2969,10 +3019,13 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
         }
         Point size = new Point();
         getWindowManager().getDefaultDisplay().getRealSize(size);
-        int w = Math.min(dp(940), size.x * 9 / 10);
-        int h = Math.min(dp(640), size.y * 9 / 10);
+        // Out of the taskbar's way: at a large Display size it is a good part
+        // of the display, and a window centred on all of it sat under it.
+        int room = size.y - bottomReserve();
+        int w = Math.min(dp(SettingsActivity.WINDOW_W_DP), size.x * 9 / 10);
+        int h = Math.min(dp(SettingsActivity.WINDOW_H_DP), room * 9 / 10);
         int x = (size.x - w) / 2;
-        int y = (size.y - h) / 2;
+        int y = (room - h) / 2;
         Intent intent = new Intent(this, SettingsActivity.class)
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
         ActivityOptions opts = shapeForDesktop(
@@ -7009,6 +7062,10 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
      * The FALLBACK, not the first answer: {@link #windowBoundsFor} asks the
      * window memory before it comes here, and only reaches this when the app
      * has never been moved.
+     *
+     * The arithmetic is {@link DisplaySize#newWindow}, shared with the Display
+     * size card, which draws the window this would give at the density it is
+     * showing and says what layout an app would choose in it.
      */
     public Rect nextWindowBounds() {
         Point size = new Point();
@@ -7022,39 +7079,16 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
         // stays visible instead of being covered by what it launched.
         String mode = onPhone() ? "maximized"
                 : DexPrefs.getString(this, DexPrefs.KEY_LAUNCH_MODE, DexPrefs.DEF_LAUNCH_MODE);
-        float scale;
-        switch (DexPrefs.getString(this, DexPrefs.KEY_WINDOW_SIZE, DexPrefs.DEF_WINDOW_SIZE)) {
-            case "compact":
-                scale = 0.8f;
-                break;
-            case "large":
-                scale = 1.28f;
-                break;
-            default:
-                scale = 1f;
-        }
-        int w = Math.min(size.x - dp(16), Math.round(size.x * 0.55f * scale));
-        int h = Math.min(size.y - bottomReserve() - dp(16), Math.round(size.y * 0.72f * scale));
-        int x;
-        int y;
-        if ("maximized".equals(mode)) {
-            x = dp(2);
-            // Zero on a desktop display, which has no status bar — so this is
-            // the same rect it has always been there. On the phone it is what
-            // keeps the window's caption out from under the clock.
-            y = topSystemInset() + dp(2);
-            w = size.x - dp(4);
-            h = size.y - bottomReserve() - y - dp(2);
-        } else if ("center".equals(mode)) {
-            x = (size.x - w) / 2;
-            y = Math.max(dp(8), (size.y - bottomReserve() - h) / 2);
-        } else {
-            int step = dp(30);
-            x = dp(64) + (cascade % 5) * step;
-            y = dp(36) + (cascade % 5) * step;
-            cascade++;
-        }
-        return new Rect(x, y, x + w, y + h);
+        // The top inset is zero on a desktop display, which has no status bar,
+        // so a maximized window there is the same rect it has always been. On
+        // the phone it is what keeps the window's caption out from under the
+        // clock.
+        int[] r = DisplaySize.newWindow(size.x, size.y, uiDensity, bottomReserve(),
+                topSystemInset(), mode,
+                DexPrefs.getString(this, DexPrefs.KEY_WINDOW_SIZE, DexPrefs.DEF_WINDOW_SIZE),
+                cascade);
+        if (!"maximized".equals(mode) && !"center".equals(mode)) cascade++;
+        return new Rect(r[0], r[1], r[0] + r[2], r[1] + r[3]);
     }
 
     /**

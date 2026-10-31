@@ -825,6 +825,14 @@ class DesktopGrid extends ViewGroup {
                         () -> host.showWidgetPicker(prefCol, prefRow)),
                 new LinearLayout.LayoutParams(LayoutParams.MATCH_PARENT,
                         LayoutParams.WRAP_CONTENT));
+        // Not on the phone's own screen, which has Android's own display size
+        // and nothing of ours to change.
+        if (!host.onPhone()) {
+            panel.addView(menuRow(host.getString(R.string.st_desk_display_size),
+                            host::openDisplaySize),
+                    new LinearLayout.LayoutParams(LayoutParams.MATCH_PARENT,
+                            LayoutParams.WRAP_CONTENT));
+        }
         showPanelAtPointer(panel, null);
     }
 

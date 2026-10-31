@@ -64,7 +64,7 @@ import java.util.Locale;
  */
 public class SettingsActivity extends Activity {
 
-    private static final String SEC_DISPLAY = "display";
+    static final String SEC_DISPLAY = "display";
     private static final String SEC_PERF = "performance";
     private static final String SEC_LANGUAGE = "language";
     private static final String SEC_WALLPAPER = "wallpaper";
@@ -79,13 +79,95 @@ public class SettingsActivity extends Activity {
     /** Below this the window cannot hold sidebar and content side by side. */
     private static final int NARROW_DP = 660;
 
+    /**
+     * The size this window opens at (LauncherActivity.launchSettings), where
+     * the display has room: the section list and a section side by side.
+     */
+    static final int WINDOW_W_DP = 940;
+    static final int WINDOW_H_DP = 640;
+
     private static final String REPO_URL = "https://github.com/dotnetdreamer/open-android-dex";
     private static final String RELEASES_URL = REPO_URL + "/releases/latest";
     private static final String WMD_URL = REPO_URL + "/tree/main/openandroiddex-wmd";
 
     private DexTheme theme;
-    private int[] presetDpis;
-    private int densityIndex = -1;
+
+    /**
+     * The section the desktop asked this window to open on — its right-click
+     * "Display size…". A static rather than an intent extra because a
+     * minimised window is brought back by CaptionService and never gets an
+     * intent; both this process's activities read and write it on the main
+     * thread.
+     */
+    private static String pendingSection;
+
+    // ── the Display size card, updated in place while its controls move ──
+
+    /** A drag, a key or a press of − or + is applied once the controls have been left alone this long. */
+    private static final long SIZE_SETTLE_MS = 900;
+    private static final int SIZE_IDLE = 0;
+    private static final int SIZE_APPLYING = 1;
+    private static final int SIZE_APPLIED = 2;
+    private static final int SIZE_WAITING = 3;
+
+    /** What has become of the last size chosen — one of the SIZE_ states above. */
+    private int sizeStatus = SIZE_IDLE;
+    private final android.os.Handler sizeHandler =
+            new android.os.Handler(android.os.Looper.getMainLooper());
+    private final Runnable sizeCommit = this::commitDisplaySize;
+    private final Runnable sizeNotYet = () -> {
+        if (sizeStatus != SIZE_APPLYING) return;
+        sizeStatus = SIZE_WAITING;
+        refreshSizeStatus();
+    };
+    private final Runnable sizeQuiet = () -> {
+        if (sizeStatus != SIZE_APPLIED) return;
+        sizeStatus = SIZE_IDLE;
+        refreshSizeStatus();
+    };
+    private DisplaySize.Track sizeTrack;
+    private int sizeBase;
+    private int sizeW;
+    private int sizeH;
+    /** The density of this display as the window was built: what is applied. */
+    private int sizeLive;
+    /** The density the Display size is stored as. */
+    private int sizeChosen;
+    /** The density the controls show, which runs ahead of the other two while one is chosen. */
+    private int sizeShown;
+    /**
+     * This window's own size in dp, noted before the first size it applied —
+     * and again whenever the user has resized it since — and put back after
+     * every one lands, so the window keeps its size the way a computer's own
+     * windows do when its scaling changes. Carried across the re-creations
+     * the changes cause; 0 until noted. See {@link #noteWindowSize}.
+     */
+    private int sizeKeepW;
+    private int sizeKeepH;
+    private boolean sizeKeepMax;
+    /** The rect this window was last put on, to tell our own placing from the user's. */
+    private int[] sizePlaced;
+    /**
+     * Until when (uptime) a change of this window's size is the one a size
+     * that just landed asked for, after which the controls are brought back
+     * into view: that resize comes a moment after the re-creation.
+     */
+    private long sizeRevealUntil;
+    /** The scrolling body of the section on show — to bring the card's controls back into view. */
+    private ScrollView contentScroll;
+    private boolean sizeDragging;
+    private String sizeLaunchMode;
+    private String sizeWindowSize;
+    private LinearLayout sizeCardView;
+    private DisplaySizePreview sizePreview;
+    private LinearLayout sizePills;
+    private TickedSeekBar sizeBar;
+    private TextView sizeValue;
+    private TextView sizeLooks;
+    private TextView sizeLayout;
+    private TextView sizeLayoutSub;
+    private TextView sizeStatusText;
+    private TextView sizeReset;
 
     private String section = SEC_DISPLAY;
     /** Section to return to when the header's back chevron is used. */
@@ -166,11 +248,18 @@ public class SettingsActivity extends Activity {
             section = savedInstanceState.getString("section", SEC_DISPLAY);
             allLanguages = savedInstanceState.getBoolean("allLanguages", false);
             showingContent = savedInstanceState.getBoolean("showingContent", false);
+            // A Display size this window applied is what re-created it: the
+            // density landing is the "done", so say it where the eye already is.
+            if (savedInstanceState.getBoolean("sizeApplying", false)) sizeStatus = SIZE_APPLYING;
+            sizeKeepW = savedInstanceState.getInt("sizeKeepW", 0);
+            sizeKeepH = savedInstanceState.getInt("sizeKeepH", 0);
+            sizeKeepMax = savedInstanceState.getBoolean("sizeKeepMax", false);
+            sizePlaced = savedInstanceState.getIntArray("sizePlaced");
         }
-        presetDpis = computePresets();
-        densityIndex = DexPrefs.sizeIndex(this);
+        boolean asked = takePendingSection();
         buildNavs();
         buildUi();
+        if (asked) flashSizeCard();
         IntentFilter filter = new IntentFilter(DexPrefs.ACTION_CHANGED);
         if (android.os.Build.VERSION.SDK_INT >= 33) {
             registerReceiver(settingsReceiver, filter, Context.RECEIVER_NOT_EXPORTED);
@@ -179,9 +268,40 @@ public class SettingsActivity extends Activity {
         }
     }
 
+    /**
+     * Brought back, or to the front, by the desktop asking for a section: the
+     * right-click "Display size…" on a window that was already open.
+     */
+    @Override
+    protected void onResume() {
+        super.onResume();
+        if (takePendingSection()) {
+            applyNarrowVisibility();
+            showSection(section, false);
+            flashSizeCard();
+        }
+    }
+
+    /** Ask the next Settings window — or the one already open — to show {@code id}. */
+    static void openAt(String id) {
+        pendingSection = id;
+    }
+
+    private boolean takePendingSection() {
+        String id = pendingSection;
+        pendingSection = null;
+        if (id == null) return false;
+        section = id;
+        showingContent = true;
+        return true;
+    }
+
     @Override
     protected void onDestroy() {
         super.onDestroy();
+        // A size the controls were still settling on goes with the window;
+        // the next one starts from what was stored.
+        sizeHandler.removeCallbacksAndMessages(null);
         OwnWindows.closed(this);
         try {
             unregisterReceiver(settingsReceiver);
@@ -195,6 +315,11 @@ public class SettingsActivity extends Activity {
         out.putString("section", section);
         out.putBoolean("allLanguages", allLanguages);
         out.putBoolean("showingContent", showingContent);
+        out.putBoolean("sizeApplying", sizeStatus == SIZE_APPLYING);
+        out.putInt("sizeKeepW", sizeKeepW);
+        out.putInt("sizeKeepH", sizeKeepH);
+        out.putBoolean("sizeKeepMax", sizeKeepMax);
+        if (sizePlaced != null) out.putIntArray("sizePlaced", sizePlaced);
     }
 
     /** The window can be resized by its caption — re-lay out when it crosses the split. */
@@ -202,6 +327,11 @@ public class SettingsActivity extends Activity {
     public void onConfigurationChanged(Configuration newConfig) {
         super.onConfigurationChanged(newConfig);
         if (narrow != (newConfig.screenWidthDp < NARROW_DP)) buildUi();
+        // The resize a Display size that just landed asked for: once it is
+        // laid out, the controls that size was picked with come back into view.
+        if (android.os.SystemClock.uptimeMillis() < sizeRevealUntil) {
+            sizeHandler.postDelayed(this::revealSizeControls, 200);
+        }
     }
 
     // ── measurements ──
@@ -253,7 +383,7 @@ public class SettingsActivity extends Activity {
                 R.string.st_theme, R.string.st_theme_paper,
                 R.string.st_paper_texture, R.string.st_grain, R.string.st_glass,
                 R.string.st_blur, R.string.st_transparency, R.string.st_rounding,
-                R.string.st_display_size}));
+                R.string.st_display_size, R.string.st_display_size_keywords}));
         navs.add(new Nav(SEC_PERF, R.string.st_nav_perf, R.string.st_nav_perf_sub,
                 "⚡", 0xFFfacc15, new int[]{R.string.st_perf, R.string.st_perf_anim,
                 R.string.st_perf_effects, R.string.st_perf_stream}));
@@ -531,6 +661,7 @@ public class SettingsActivity extends Activity {
         ScrollView scroll = new ScrollView(this);
         scroll.setVerticalScrollBarEnabled(false);
         scroll.setClipToPadding(false);
+        contentScroll = scroll;
         LinearLayout body = new LinearLayout(this);
         body.setOrientation(LinearLayout.VERTICAL);
         body.setPadding(dp(14), dp(4), dp(24), dp(28));
@@ -904,8 +1035,14 @@ public class SettingsActivity extends Activity {
     // ── section: Display & UI ──
 
     private void buildDisplaySection(LinearLayout body) {
-        // First card in the window, because it is the widest-reaching choice
-        // in it: everything below — theme, glass, rounding — is applied ON TOP
+        // First, because it is the first thing a desktop on a new screen needs
+        // and the one people could not find when it sat at the bottom: how big
+        // everything is. It is also what this window opens on, so the first
+        // sight of Settings is the desktop itself in miniature.
+        buildDisplaySizeCard(body);
+
+        // The first of the look-and-feel cards, because it is the widest-reaching
+        // of them: everything below — theme, glass, rounding — is applied ON TOP
         // of whichever shell is picked here.
         LinearLayout shellCard = card(body);
         cardHeader(shellCard, s(R.string.st_shell));
@@ -969,18 +1106,511 @@ public class SettingsActivity extends Activity {
         if (glassOn && !Glass.blurSupported(this)) {
             note(glassCard, s(R.string.st_blur_unsupported));
         }
+    }
 
-        LinearLayout sizeCard = card(body);
-        cardHeader(sizeCard, s(R.string.st_display_size));
-        String[] labels = {s(R.string.st_size_xs), s(R.string.st_size_s), s(R.string.st_size_m),
-                s(R.string.st_size_l), s(R.string.st_size_xl)};
-        String[] glyphs = {"⛶", "🔍", "🖵", "🔎", "⤡"};
-        for (int i = 0; i < labels.length; i++) {
-            final int index = i;
-            choiceRow(sizeCard, glyphs[i], labels[i], null, i == densityIndex,
-                    () -> applyDensity(index));
+    // ── Display & UI: Display size ──
+
+    /**
+     * Display size: how big everything on the desktop is drawn, from half the
+     * computer's own size up to as dense as still leaves a phone held sideways
+     * (DisplaySize has the arithmetic).
+     *
+     * Built around a preview of the desktop itself, because a density is a
+     * number nobody can picture: the preview shows what it does — how much of
+     * the screen the taskbar takes, and whether the window an app opens in
+     * lays out like a phone or a tablet — and it follows the controls before
+     * anything is applied. Applying is a `wm density` on the computer's side
+     * and a rebuild of everything on the display, this window included, so it
+     * waits for the controls to stop: a preset at once, a drag on release, a
+     * key or a press of − and + once they have been left alone a moment.
+     *
+     * The five presets stay one click away, where people found them before;
+     * the slider and the buttons reach every size between and past them, to
+     * the dpi.
+     */
+    private void buildDisplaySizeCard(LinearLayout body) {
+        LinearLayout card = card(body);
+        sizeCardView = card;
+        cardHeader(card, s(R.string.st_display_size));
+
+        if (getDisplay() != null
+                && getDisplay().getDisplayId() == android.view.Display.DEFAULT_DISPLAY) {
+            // The phone's own screen, where this window opens when the
+            // launcher is the phone's home: its size is Android's setting, and
+            // everything below would describe a desktop that is not there.
+            actionRow(card, "⤢", theme.accent, s(R.string.st_dsize_on_phone),
+                    s(R.string.st_dsize_on_phone_sub), this::openPhoneDisplaySettings);
+            return;
         }
+
+        Point real = new Point();
+        getWindowManager().getDefaultDisplay().getRealSize(real);
+        sizeW = real.x;
+        sizeH = real.y;
+        sizeBase = defaultDensity();
+        sizeLive = getResources().getConfiguration().densityDpi;
+        sizeChosen = DisplaySize.dpiFor(sizeBase, DexPrefs.sizeFactor(this));
+        // A rebuild of the section (a theme picked, say) keeps a size the
+        // controls are still settling on; a new window starts from the stored one.
+        if (sizeShown <= 0) sizeShown = sizeChosen;
+        sizeTrack = new DisplaySize.Track(sizeBase, sizeW, sizeH, sizeChosen);
+        sizeShown = DisplaySize.clamp(sizeShown, sizeTrack.lo, sizeTrack.hi);
+        if (sizeStatus == SIZE_APPLYING && sizeLive == sizeChosen) {
+            sizeStatus = SIZE_APPLIED;
+            sizeHandler.removeCallbacks(sizeQuiet);
+            sizeHandler.postDelayed(sizeQuiet, 3500);
+            // A reconcile pass later, once the captions have followed the
+            // density, so the strip is re-inset at the new caption height;
+            // then the controls this was done with, back in view.
+            sizeHandler.postDelayed(this::restoreWindowSize, 450);
+            sizeHandler.postDelayed(this::revealSizeControls, 1100);
+            sizeRevealUntil = android.os.SystemClock.uptimeMillis() + 3000;
+        } else if (sizeStatus == SIZE_APPLYING) {
+            // re-created for something else on the way: keep waiting, not forever
+            sizeHandler.removeCallbacks(sizeNotYet);
+            sizeHandler.postDelayed(sizeNotYet, 8000);
+        }
+        sizeLaunchMode = DexPrefs.getString(this, DexPrefs.KEY_LAUNCH_MODE, DexPrefs.DEF_LAUNCH_MODE);
+        sizeWindowSize = DexPrefs.getString(this, DexPrefs.KEY_WINDOW_SIZE, DexPrefs.DEF_WINDOW_SIZE);
+
+        sizePreview = new DisplaySizePreview(this, theme, sizeW, sizeH, sizeShown,
+                sizeLaunchMode, sizeWindowSize, DexPrefs.wallpaper(this),
+                DexPrefs.getInt(this, DexPrefs.KEY_WALL_DIM, DexPrefs.DEF_WALL_DIM), dp(230));
+        LinearLayout.LayoutParams previewLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        previewLp.setMargins(dp(10), dp(2), dp(10), dp(8));
+        card.addView(sizePreview, previewLp);
+
+        // the presets, one click each — the five rows this card used to be
+        sizePills = new LinearLayout(this);
+        sizePills.setOrientation(LinearLayout.HORIZONTAL);
+        sizePills.setPadding(dp(8), dp(2), dp(8), dp(4));
+        int[] names = {R.string.st_size_xs, R.string.st_size_s, R.string.st_size_m,
+                R.string.st_size_l, R.string.st_size_xl};
+        for (int i = 0; i < names.length; i++) {
+            final int dpi = sizeTrack.presets[i];
+            TextView pill = new TextView(this);
+            pill.setText(s(names[i]));
+            pill.setTextSize(TypedValue.COMPLEX_UNIT_PX, sp(11.5f));
+            pill.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+            pill.setGravity(Gravity.CENTER);
+            pill.setSingleLine(true);
+            pill.setEllipsize(TextUtils.TruncateAt.END);
+            pill.setPadding(dp(6), dp(9), dp(6), dp(9));
+            pill.setOnClickListener(v -> showSize(dpi, true, 0));
+            LinearLayout.LayoutParams lp =
+                    new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+            lp.setMargins(dp(3), dp(2), dp(3), dp(2));
+            sizePills.addView(pill, lp);
+        }
+        card.addView(sizePills, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        // More space ← [−] 240 dpi [+] → Larger
+        LinearLayout head = new LinearLayout(this);
+        head.setOrientation(LinearLayout.HORIZONTAL);
+        head.setGravity(Gravity.CENTER_VERTICAL);
+        head.setPadding(dp(16), dp(10), dp(16), 0);
+        TextView less = new TextView(this);
+        less.setText(s(R.string.st_dsize_more_space));
+        less.setTextColor(theme.textFaint);
+        less.setTextSize(TypedValue.COMPLEX_UNIT_PX, sp(10.5f));
+        head.addView(less, new LinearLayout.LayoutParams(0,
+                ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        head.addView(stepButton("−", s(R.string.st_dsize_smaller), -1),
+                new LinearLayout.LayoutParams(dp(30), dp(30)));
+        sizeValue = new TextView(this);
+        sizeValue.setTextColor(theme.accent);
+        sizeValue.setTextSize(TypedValue.COMPLEX_UNIT_PX, sp(14));
+        sizeValue.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        sizeValue.setGravity(Gravity.CENTER);
+        sizeValue.setMinWidth(dp(84));
+        head.addView(sizeValue);
+        head.addView(stepButton("+", s(R.string.st_dsize_bigger), 1),
+                new LinearLayout.LayoutParams(dp(30), dp(30)));
+        TextView more = new TextView(this);
+        more.setText(s(R.string.st_dsize_larger));
+        more.setTextColor(theme.textFaint);
+        more.setTextSize(TypedValue.COMPLEX_UNIT_PX, sp(10.5f));
+        more.setGravity(Gravity.END);
+        head.addView(more, new LinearLayout.LayoutParams(0,
+                ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        card.addView(head, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        sizeBar = new TickedSeekBar(this);
+        sizeBar.setMax(DisplaySize.Track.STEPS);
+        sizeBar.setProgress(sizeTrack.position(sizeShown));
+        sizeBar.setContentDescription(s(R.string.st_display_size));
+        sizeBar.setProgressTintList(ColorStateList.valueOf(theme.accent));
+        sizeBar.setThumbTintList(ColorStateList.valueOf(theme.accent));
+        sizeBar.setProgressBackgroundTintList(ColorStateList.valueOf(theme.divider));
+        sizeBar.setPadding(dp(16), dp(6), dp(16), dp(14));
+        int[] ticks = new int[sizeTrack.presets.length];
+        for (int i = 0; i < ticks.length; i++) ticks[i] = sizeTrack.position(sizeTrack.presets[i]);
+        sizeBar.setTicks(ticks);
+        sizeBar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override
+            public void onProgressChanged(SeekBar bar, int progress, boolean fromUser) {
+                if (!fromUser) return;
+                int dpi = sizeTrack.dpiAt(progress);
+                // Inside a preset's detent the thumb sits ON the preset: the
+                // track feels the five sizes as notches, and what it shows is
+                // exactly what a release there would apply.
+                if (sizeTrack.isPreset(dpi)) bar.setProgress(sizeTrack.position(dpi));
+                if (dpi != sizeShown) {
+                    // a drag applies on release; a key press once the keys stop
+                    showSize(dpi, false, sizeDragging ? -1 : SIZE_SETTLE_MS);
+                }
+            }
+
+            @Override
+            public void onStartTrackingTouch(SeekBar bar) {
+                sizeDragging = true;
+                sizeHandler.removeCallbacks(sizeCommit);
+            }
+
+            @Override
+            public void onStopTrackingTouch(SeekBar bar) {
+                sizeDragging = false;
+                bar.setProgress(sizeTrack.position(sizeShown));
+                commitDisplaySize();
+            }
+        });
+        card.addView(sizeBar, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        // what it leaves: the desktop in dp, and the layout apps choose in it
+        LinearLayout info = new LinearLayout(this);
+        info.setOrientation(LinearLayout.HORIZONTAL);
+        info.setGravity(Gravity.CENTER_VERTICAL);
+        info.setPadding(dp(16), dp(2), dp(14), 0);
+        sizeLooks = new TextView(this);
+        sizeLooks.setTextColor(theme.text);
+        sizeLooks.setTextSize(TypedValue.COMPLEX_UNIT_PX, sp(13));
+        sizeLooks.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        info.addView(sizeLooks, new LinearLayout.LayoutParams(0,
+                ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        sizeLayout = new TextView(this);
+        sizeLayout.setTextSize(TypedValue.COMPLEX_UNIT_PX, sp(11.5f));
+        sizeLayout.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        sizeLayout.setSingleLine(true);
+        sizeLayout.setPadding(dp(10), dp(4), dp(10), dp(4));
+        info.addView(sizeLayout);
+        card.addView(info, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        sizeLayoutSub = new TextView(this);
+        sizeLayoutSub.setTextColor(theme.textFaint);
+        sizeLayoutSub.setTextSize(TypedValue.COMPLEX_UNIT_PX, sp(11.5f));
+        sizeLayoutSub.setPadding(dp(16), dp(6), dp(16), 0);
+        card.addView(sizeLayoutSub, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        // how the last choice is getting on, and the way back to the Default
+        LinearLayout foot = new LinearLayout(this);
+        foot.setOrientation(LinearLayout.HORIZONTAL);
+        foot.setGravity(Gravity.CENTER_VERTICAL);
+        foot.setPadding(dp(16), dp(6), dp(8), 0);
+        foot.setMinimumHeight(dp(36));
+        sizeStatusText = new TextView(this);
+        sizeStatusText.setTextSize(TypedValue.COMPLEX_UNIT_PX, sp(11.5f));
+        foot.addView(sizeStatusText, new LinearLayout.LayoutParams(0,
+                ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        sizeReset = new TextView(this);
+        sizeReset.setText(s(R.string.st_dsize_reset));
+        sizeReset.setTextColor(theme.accent);
+        sizeReset.setTextSize(TypedValue.COMPLEX_UNIT_PX, sp(12.5f));
+        sizeReset.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        sizeReset.setPadding(dp(10), dp(6), dp(10), dp(6));
+        sizeReset.setBackground(tapBackground(0x00000000, theme.hover, 10));
+        sizeReset.setOnClickListener(v ->
+                showSize(sizeTrack.presets[DisplaySize.DEFAULT_INDEX], true, 0));
+        foot.addView(sizeReset);
+        card.addView(foot, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        refreshSizeViews(false);
         note(body, s(R.string.st_display_size_note));
+    }
+
+    /**
+     * − or +: ten dpi a press, landing on any preset on the way; held down,
+     * it keeps going. Applied once it has been left alone for a moment, so a
+     * run of presses is one rebuild of the desktop rather than one each.
+     */
+    private TextView stepButton(String glyph, String description, int direction) {
+        TextView button = new TextView(this);
+        button.setText(glyph);
+        button.setTextColor(theme.text);
+        button.setTextSize(TypedValue.COMPLEX_UNIT_PX, sp(16));
+        button.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        button.setGravity(Gravity.CENTER);
+        button.setContentDescription(description);
+        button.setBackground(tapBackground(theme.field, theme.hover, 15));
+        Runnable once = () -> {
+            int next = sizeTrack.step(sizeShown, direction);
+            if (next != sizeShown) showSize(next, true, SIZE_SETTLE_MS);
+        };
+        // A hold lasts while the button is pressed. The view presses it for a
+        // finger, a mouse button and Enter or Space alike, and lets go on the
+        // release, on losing focus or the window, and when the pointer slides
+        // off — so a key held down stops with the key, not at the end of the
+        // track. An accessibility long press holds nothing down: one step.
+        Runnable[] repeat = new Runnable[1];
+        repeat[0] = () -> {
+            if (!button.isPressed() || !button.isAttachedToWindow()) return;
+            int before = sizeShown;
+            once.run();
+            if (sizeShown != before) sizeHandler.postDelayed(repeat[0], 90);
+        };
+        button.setOnClickListener(v -> once.run());
+        button.setOnLongClickListener(v -> {
+            sizeHandler.removeCallbacks(repeat[0]);
+            once.run();
+            if (button.isPressed()) sizeHandler.postDelayed(repeat[0], 90);
+            return true;
+        });
+        // the click and the long press are the view's own; this ends a touch
+        // hold at the release itself rather than at the next step
+        button.setOnTouchListener((v, ev) -> {
+            int action = ev.getActionMasked();
+            if (action == android.view.MotionEvent.ACTION_UP
+                    || action == android.view.MotionEvent.ACTION_CANCEL) {
+                sizeHandler.removeCallbacks(repeat[0]);
+            }
+            return false;
+        });
+        return button;
+    }
+
+    /**
+     * Move the controls to {@code dpi}. The display follows {@code commitMs}
+     * later — 0 is now, and a negative value is "not yet", for a drag that is
+     * still going.
+     */
+    private void showSize(int dpi, boolean animate, long commitMs) {
+        sizeShown = DisplaySize.clamp(dpi, sizeTrack.lo, sizeTrack.hi);
+        sizeHandler.removeCallbacks(sizeCommit);
+        refreshSizeViews(animate);
+        if (commitMs == 0) {
+            commitDisplaySize();
+        } else if (commitMs > 0) {
+            sizeHandler.postDelayed(sizeCommit, commitMs);
+        }
+    }
+
+    /**
+     * Keep the size the controls show and ask the PC to apply it: the
+     * launcher has no right to `wm density`, but the PC drains this queue with
+     * adb's. The resulting configuration change re-creates every activity on
+     * the display, this window included, at the new scale — which is the
+     * confirmation, picked up by onCreate from the saved state.
+     */
+    private void commitDisplaySize() {
+        sizeHandler.removeCallbacks(sizeCommit);
+        if (sizeTrack == null || sizeShown == sizeChosen) return;
+        float factor = DisplaySize.factorOf(sizeShown, sizeBase);
+        DexPrefs.setSizeFactor(this, factor);
+        sizeChosen = DisplaySize.dpiFor(sizeBase, factor);
+        // the PC remembers it for this phone from the request itself
+        RequestProvider.enqueue("density", String.valueOf(sizeChosen));
+        sizeHandler.removeCallbacks(sizeNotYet);
+        sizeHandler.removeCallbacks(sizeQuiet);
+        if (sizeChosen == sizeLive) {
+            // back to the size the display already has: nothing to rebuild
+            sizeStatus = SIZE_APPLIED;
+            sizeHandler.postDelayed(sizeQuiet, 3500);
+        } else {
+            sizeStatus = SIZE_APPLYING;
+            noteWindowSize();
+            sizeHandler.postDelayed(sizeNotYet, 8000);
+        }
+        refreshSizeStatus();
+    }
+
+    /**
+     * Note this window's size in dp, and whether it is maximised, before a
+     * size is applied — unless it is still the size this card last put it
+     * at, which may be a size the display clamped and must not be taken for
+     * the user's. A window the user has resized since is noted afresh.
+     */
+    private void noteWindowSize() {
+        int[] r = CaptionService.taskRect(getTaskId());
+        if (r == null) return;
+        boolean ours = sizePlaced != null
+                && Math.abs((r[2] - r[0]) - (sizePlaced[2] - sizePlaced[0])) <= 8
+                && Math.abs((r[3] - r[1]) - (sizePlaced[3] - sizePlaced[1])) <= 8;
+        if (sizeKeepW > 0 && ours) return;
+        sizeKeepMax = CaptionService.maximisedTask(getTaskId());
+        int w = r[2] - r[0];
+        int h = r[3] - r[1];
+        sizeKeepW = DisplaySize.dp(w, sizeLive);
+        sizeKeepH = DisplaySize.dp(h, sizeLive);
+        // A window all but filling the display one way was held back by the
+        // display, not sized by anyone: opened at a large size, it is 90% of a
+        // small desktop. What it would have had is the size it opens at, and
+        // that is what it is given back as the display grows.
+        int room = sizeH - DisplaySize.px(DisplaySize.TASKBAR_DP, sizeLive);
+        if (w >= sizeW * 0.85f) sizeKeepW = Math.max(sizeKeepW, WINDOW_W_DP);
+        if (h >= room * 0.85f) sizeKeepH = Math.max(sizeKeepH, WINDOW_H_DP);
+    }
+
+    /** After a size lands: this window back at the size in dp it was noted at. */
+    private void restoreWindowSize() {
+        if (isFinishing() || isDestroyed() || sizeKeepW <= 0) return;
+        int[] placed = CaptionService.placeTask(getTaskId(),
+                DisplaySize.px(sizeKeepW, sizeLive), DisplaySize.px(sizeKeepH, sizeLive),
+                sizeKeepMax);
+        if (placed != null) sizePlaced = placed;
+    }
+
+    /**
+     * Scroll the card's controls into view if this window is too short for
+     * all of it: the size just applied re-created the window at the top of the
+     * section, and the controls it was applied with are what come next.
+     */
+    private void revealSizeControls() {
+        View foot = sizeStatusText != null ? (View) sizeStatusText.getParent() : null;
+        if (isFinishing() || contentScroll == null || foot == null || !foot.isAttachedToWindow()) {
+            return;
+        }
+        android.graphics.Rect r = new android.graphics.Rect();
+        foot.getDrawingRect(r);
+        contentScroll.offsetDescendantRectToMyCoords(foot, r);
+        int visibleBottom = contentScroll.getScrollY() + contentScroll.getHeight();
+        if (r.bottom > visibleBottom) {
+            contentScroll.smoothScrollTo(0, r.bottom - contentScroll.getHeight() + dp(8));
+        }
+    }
+
+    /** Bring every part of the card in line with {@link #sizeShown}. */
+    private void refreshSizeViews(boolean animate) {
+        if (sizePreview == null || sizeTrack == null) return;
+        sizePreview.setDpi(sizeShown, animate);
+
+        int preset = -1;
+        for (int i = 0; i < sizeTrack.presets.length; i++) {
+            if (sizeTrack.presets[i] == sizeShown) preset = i;
+        }
+        for (int i = 0; i < sizePills.getChildCount(); i++) {
+            TextView pill = (TextView) sizePills.getChildAt(i);
+            boolean on = i == preset;
+            pill.setTextColor(on ? theme.accent : theme.textDim);
+            pill.setBackground(on
+                    ? plainFill(blend(theme.accent, 0x2E), 11)
+                    : tapBackground(theme.field, theme.hover, 11));
+        }
+        sizeBar.setSelectedTick(preset);
+        if (!sizeDragging) sizeBar.setProgress(sizeTrack.position(sizeShown));
+        sizeValue.setText(getString(R.string.st_dsize_dpi, sizeShown));
+        // read out as the size, not as how far along a logarithmic track it is
+        if (android.os.Build.VERSION.SDK_INT >= 30) sizeBar.setStateDescription(sizeValue.getText());
+
+        int wide = DisplaySize.dp(sizeW, sizeShown);
+        int high = DisplaySize.dp(sizeH, sizeShown);
+        sizeLooks.setText(getString(R.string.st_dsize_looks_like, wide, high));
+
+        int[] win = DisplaySize.newWindow(sizeW, sizeH, sizeShown,
+                DisplaySize.px(DisplaySize.TASKBAR_DP, sizeShown), 0,
+                sizeLaunchMode, sizeWindowSize, 0);
+        int[] room = DisplaySize.contentDp(win[2], win[3], sizeShown);
+        int layout = DisplaySize.layout(room[0], room[1]);
+        int name;
+        int sub;
+        int tint;
+        if (layout == DisplaySize.LAYOUT_TABLET) {
+            name = R.string.st_dsize_tablet;
+            sub = R.string.st_dsize_tablet_sub;
+            tint = theme.positive;
+        } else if (layout == DisplaySize.LAYOUT_MIXED) {
+            name = R.string.st_dsize_mixed;
+            sub = R.string.st_dsize_mixed_sub;
+            tint = theme.accent;
+        } else {
+            name = R.string.st_dsize_phone;
+            sub = R.string.st_dsize_phone_layout_sub;
+            tint = theme.textDim;
+        }
+        sizeLayout.setText(s(name));
+        sizeLayout.setTextColor(tint);
+        sizeLayout.setBackground(plainFill(blend(tint, 0x24), 10));
+        sizeLayoutSub.setText(getString(sub, room[0], room[1]));
+
+        sizePreview.setContentDescription(getString(R.string.st_dsize_preview,
+                sizeShown, wide, high, s(name)));
+        sizeReset.setVisibility(sizeShown == sizeTrack.presets[DisplaySize.DEFAULT_INDEX]
+                ? View.INVISIBLE : View.VISIBLE);
+        refreshSizeStatus();
+    }
+
+    /** The footer's left half: what happened to the last choice, or that this size is the user's own. */
+    private void refreshSizeStatus() {
+        if (sizeStatusText == null || sizeTrack == null) return;
+        String text;
+        int color = theme.textFaint;
+        if (sizeStatus == SIZE_APPLYING) {
+            text = s(R.string.st_display_size_applying);
+            color = theme.accent;
+        } else if (sizeStatus == SIZE_APPLIED) {
+            text = "✓  " + s(R.string.st_dsize_applied);
+            color = theme.positive;
+        } else if (sizeStatus == SIZE_WAITING) {
+            text = s(R.string.st_dsize_waiting);
+        } else if (!sizeTrack.isPreset(sizeShown)) {
+            text = s(R.string.st_dsize_custom);
+        } else {
+            text = "";
+        }
+        sizeStatusText.setText(text);
+        sizeStatusText.setTextColor(color);
+    }
+
+    /**
+     * Light the card up for a moment: the window was opened for it, from the
+     * desktop's right-click menu, and the eye should land on it.
+     */
+    private void flashSizeCard() {
+        View card = sizeCardView;
+        if (card == null || !SEC_DISPLAY.equals(section)) return;
+        GradientDrawable ring = new GradientDrawable();
+        ring.setColor(0x00000000);
+        ring.setCornerRadius(dp(theme.radius(16)));
+        ring.setStroke(dp(2), theme.accent);
+        card.setForeground(ring);
+        ValueAnimator fade = ValueAnimator.ofInt(255, 0);
+        fade.setStartDelay(600);
+        fade.setDuration(900);
+        fade.addUpdateListener(a -> ring.setAlpha((int) a.getAnimatedValue()));
+        fade.addListener(new android.animation.AnimatorListenerAdapter() {
+            @Override
+            public void onAnimationEnd(android.animation.Animator animation) {
+                card.setForeground(null);
+            }
+        });
+        // From the card's first frame, not from now: a window that is still
+        // opening draws nothing for most of a second, and the light would be
+        // spent before anyone could see it.
+        card.getViewTreeObserver().addOnPreDrawListener(
+                new android.view.ViewTreeObserver.OnPreDrawListener() {
+                    @Override
+                    public boolean onPreDraw() {
+                        card.getViewTreeObserver().removeOnPreDrawListener(this);
+                        fade.start();
+                        return true;
+                    }
+                });
+        card.invalidate();
+    }
+
+    /** The phone's own screen: Android's Display size, where that one lives. */
+    private void openPhoneDisplaySettings() {
+        try {
+            startActivity(new Intent(android.provider.Settings.ACTION_DISPLAY_SETTINGS)
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+        } catch (Exception e) {
+            Toast.makeText(this, s(R.string.st_dsize_on_phone_failed), Toast.LENGTH_SHORT).show();
+        }
     }
 
     /**
@@ -2840,8 +3470,8 @@ public class SettingsActivity extends Activity {
                 DexPrefs.KEY_GESTURES, DexPrefs.KEY_GESTURE_3UP,
                 DexPrefs.KEY_GESTURE_3DOWN, DexPrefs.KEY_GESTURE_3LEFT,
                 DexPrefs.KEY_GESTURE_3RIGHT, DexPrefs.KEY_GESTURE_3TAP));
-        scopes.add(new ResetScope(R.string.st_scope_display, DexPrefs.KEY_SIZE_INDEX,
-                DexPrefs.KEY_DENSITY, DexPrefs.KEY_LANGUAGE));
+        scopes.add(new ResetScope(R.string.st_scope_display, DexPrefs.KEY_SIZE_FACTOR,
+                DexPrefs.KEY_SIZE_INDEX, DexPrefs.KEY_DENSITY, DexPrefs.KEY_LANGUAGE));
 
         Dialog dialog = new Dialog(this);
         LinearLayout panel = dialogPanel(dialog, "⚠", theme.danger,
@@ -2933,7 +3563,8 @@ public class SettingsActivity extends Activity {
             if (!scope.checked) continue;
             for (String key : scope.keys) {
                 editor.remove(key);
-                if (DexPrefs.KEY_SIZE_INDEX.equals(key)) density = true;
+                if (DexPrefs.KEY_SIZE_INDEX.equals(key)
+                        || DexPrefs.KEY_SIZE_FACTOR.equals(key)) density = true;
                 if (key.startsWith(DexPrefs.PC_PREFIX)) stream = true;
                 if (DesktopGrid.KEY_WIDGETS.equals(key)) widgets = true;
                 if (DexPrefs.KEY_PERF.equals(key)) clearingPerf = true;
@@ -3120,29 +3751,50 @@ public class SettingsActivity extends Activity {
         return defaultDpi(size.x, size.y);
     }
 
-    /** Preset dpi values: the Default times {@link DexPrefs#SIZE_FACTORS}. */
-    private int[] computePresets() {
-        int base = defaultDensity();
-        int[] out = new int[DexPrefs.SIZE_FACTORS.length];
-        for (int i = 0; i < DexPrefs.SIZE_FACTORS.length; i++) {
-            out[i] = Math.round(base * DexPrefs.SIZE_FACTORS[i]);
-        }
-        return out;
-    }
+    // ── the size slider ──
 
     /**
-     * Persist the choice and ask the PC to apply it: the launcher has no
-     * right to `wm density`, but the PC side drains this queue with adb's.
-     * The resulting configuration change re-creates every activity on the
-     * display, this window included, at the new scale.
+     * The Display size track, with a dot under it at each preset: the places
+     * the thumb settles on. The track is logarithmic, so the dots are not
+     * evenly spaced — and seeing them is what makes the notches findable.
      */
-    private void applyDensity(int index) {
-        if (index == densityIndex) return;
-        densityIndex = index;
-        DexPrefs.prefs(this).edit().putInt(DexPrefs.KEY_SIZE_INDEX, index).apply();
-        RequestProvider.enqueue("density", String.valueOf(presetDpis[index]));
-        showSection(SEC_DISPLAY, false);
-        Toast.makeText(this, s(R.string.st_display_size_applying), Toast.LENGTH_SHORT).show();
+    private final class TickedSeekBar extends SeekBar {
+
+        private final Paint tick = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private int[] ticks = new int[0];
+        private int selected = -1;
+
+        TickedSeekBar(Context ctx) {
+            super(ctx);
+        }
+
+        void setTicks(int[] positions) {
+            ticks = positions;
+            invalidate();
+        }
+
+        void setSelectedTick(int index) {
+            if (selected == index) return;
+            selected = index;
+            invalidate();
+        }
+
+        @Override
+        protected synchronized void onDraw(Canvas canvas) {
+            super.onDraw(canvas);
+            int left = getPaddingLeft();
+            int width = getWidth() - left - getPaddingRight();
+            if (width <= 0 || getMax() <= 0) return;
+            // just clear of the thumb, under the middle of the track
+            float y = getPaddingTop() + (getHeight() - getPaddingTop() - getPaddingBottom()) / 2f
+                    + dp(13);
+            for (int i = 0; i < ticks.length; i++) {
+                float x = left + width * ticks[i] / (float) getMax();
+                tick.setColor(i == selected ? theme.accent : theme.textFaint);
+                float radius = i == DisplaySize.DEFAULT_INDEX ? dp(3) : dp(2) + 0.5f;
+                canvas.drawCircle(x, y, radius, tick);
+            }
+        }
     }
 
     // ── the switch ──
