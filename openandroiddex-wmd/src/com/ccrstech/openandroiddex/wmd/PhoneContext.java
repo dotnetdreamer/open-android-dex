@@ -85,6 +85,12 @@ final class PhoneContext extends ContextWrapper {
      * starts the process (ENABLE_LAZY_TYPEFACE_INITIALIZATION): called here,
      * once; where the block made a load too, a second costs only time. Before
      * the first icon is drawn, not at start, where a window may be waiting.
+     *
+     * <p>From Android 15 that load reads /system/etc/font_fallback.xml, which
+     * SELinux keeps from uid 2000: the map comes back with no "sans-serif" in
+     * it and setSystemFontMap throws on the null default. The older
+     * /system/etc/fonts.xml is readable, and Typeface's own static block
+     * still parses it — so the map is built from that one instead.
      */
     static void loadFonts() {
         synchronized (FONTS) {
@@ -94,9 +100,24 @@ final class PhoneContext extends ContextWrapper {
             Typeface touched = Typeface.DEFAULT;
             if (Build.VERSION.SDK_INT < 31 && touched != null) return;
             long t0 = SystemClock.uptimeMillis();
+            Class<?> systemFonts = Refl.clsOrNull("android.graphics.fonts.SystemFonts");
             try {
                 Refl.callStatic(Typeface.class, "loadPreinstalledSystemFontMap", new Class<?>[]{});
                 AppServer.log("fonts loaded in " + (SystemClock.uptimeMillis() - t0) + " ms");
+                return;
+            } catch (Throwable t) {
+                if (systemFonts == null || !Refl.hasMethod(systemFonts, "getSystemPreinstalledFontConfigFromLegacyXml")) {
+                    AppServer.log("no fonts (" + t + ") — an icon with text in it will stop the server");
+                    return;
+                }
+            }
+            try {
+                Class<?> config = Refl.cls("android.text.FontConfig");
+                Object legacy = Refl.callStatic(systemFonts, "getSystemPreinstalledFontConfigFromLegacyXml", new Class<?>[]{});
+                Object fallback = Refl.callStatic(systemFonts, "buildSystemFallback", new Class<?>[]{config}, legacy);
+                Object map = Refl.callStatic(systemFonts, "buildSystemTypefaces", new Class<?>[]{config, java.util.Map.class}, legacy, fallback);
+                Refl.callStatic(Typeface.class, "setSystemFontMap", new Class<?>[]{java.util.Map.class}, map);
+                AppServer.log("fonts loaded from fonts.xml in " + (SystemClock.uptimeMillis() - t0) + " ms");
             } catch (Throwable t) {
                 AppServer.log("no fonts (" + t + ") — an icon with text in it will stop the server");
             }

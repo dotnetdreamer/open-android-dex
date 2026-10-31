@@ -69,6 +69,9 @@ type Load =
   | { kind: "ready"; apps: PhoneApp[] }
   | { kind: "failed"; message: string };
 
+/** The page as it was left, so a tab switch comes back to it and only catches up. */
+const kept: { serial?: string; apps?: PhoneApp[]; query: string } = { query: "" };
+
 export function AppsPanel({
   device,
   say,
@@ -78,8 +81,10 @@ export function AppsPanel({
   say: (text: string, tone?: "ok" | "warn" | "bad" | "info", detail?: string) => void;
 }) {
   const serial = device?.serial;
-  const [load, setLoad] = useState<Load>({ kind: "idle" });
-  const [query, setQuery] = useState("");
+  const [load, setLoad] = useState<Load>(() =>
+    serial && kept.serial === serial && kept.apps ? { kind: "ready", apps: kept.apps } : { kind: "idle" },
+  );
+  const [query, setQuery] = useState(() => (serial && kept.serial === serial ? kept.query : ""));
   const [open, setOpen] = useState<OpenWindow[]>([]);
   /** The app a click is opening, until its window says it is up. */
   const [opening, setOpening] = useState<string | null>(null);
@@ -99,18 +104,31 @@ export function AppsPanel({
       .then((apps) => {
         if (mine !== attempt.current) return;
         logInfo(`apps: ${apps.length} apps from ${serial} in ${Math.round(performance.now() - t0)} ms`);
-        setLoad({ kind: "ready", apps });
+        setLoad((l) => {
+          if (l.kind !== "ready") return { kind: "ready", apps };
+          // An icon that came in by event is kept until the phone's list has it too.
+          const had = new Map(l.apps.map((a) => [a.pkg, a.icon]));
+          return { kind: "ready", apps: apps.map((a) => (a.icon ? a : { ...a, icon: had.get(a.pkg) ?? null })) };
+        });
       })
       .catch((e) => {
         if (mine !== attempt.current) return;
         logError(`apps: listing ${serial}: ${String(e)}`);
-        setLoad({ kind: "failed", message: String(e) });
+        setLoad((l) => (l.kind === "ready" ? l : { kind: "failed", message: String(e) }));
       });
   }, [serial]);
 
   useEffect(() => {
     refresh();
   }, [refresh]);
+
+  useEffect(() => {
+    if (!serial) return;
+    if (kept.serial !== serial) kept.apps = undefined;
+    kept.serial = serial;
+    kept.query = query;
+    if (load.kind === "ready") kept.apps = load.apps;
+  }, [serial, load, query]);
 
   // Icons that were not here yet, as the phone draws them.
   useEffect(() => {
