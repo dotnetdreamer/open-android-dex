@@ -80,6 +80,14 @@ final class AppWindow implements LinuxStreamEncoder.Output, AppVideo.Gate {
     private static final long WATCH_BUSY_FOR_MS = 4000;
     /** A display empty for this long, after it had the app, means the app has gone. */
     private static final long GONE_AFTER_MS = 900;
+    /**
+     * How long after a drag starts the launcher's pixel takes a drop: it is
+     * made touchable as the drag starts (PcDrags), and the window manager's
+     * relayout lands a frame or two later.
+     */
+    private static final long CATCH_READY_MS = 150;
+    /** A drag handed over that has dropped nothing by now went somewhere else. */
+    private static final long HAND_OVER_MS = 3000;
     /** A launch that has put nothing on the display after this long went somewhere else. */
     private static final long NEVER_CAME_MS = 12_000;
     /** A notification's own intent that has not put its app on the window's display by now went elsewhere, or nowhere. */
@@ -165,6 +173,16 @@ final class AppWindow implements LinuxStreamEncoder.Output, AppVideo.Gate {
     /** When the computer last sent input; the watcher looks closely for a while after it. */
     private volatile long inputAt = SystemClock.uptimeMillis();
     private long watchedAt;
+
+    // a drag on the display, carried out to the computer (AppDrags)
+    /** An app has a drag under way that it let go of, and since when. */
+    private volatile boolean dragging;
+    private volatile long dragStartedAt;
+    /** The hand-over whose drop is awaited, 0 for none: the drag was dropped on the launcher's pixel for the computer. */
+    private volatile int handingOver;
+    private int handOvers;
+    /** The drag went to the computer: the press it began with is over here until the computer lets go. */
+    private volatile boolean handedOver;
 
     AppWindow(AppServer server, LocalSocket sock, Wire wire, JSONObject open, int serial) {
         this.server = server;
@@ -385,6 +403,8 @@ final class AppWindow implements LinuxStreamEncoder.Output, AppVideo.Gate {
                 + "): display " + (t1 - t0) + " ms, launch " + (t2 - t1) + " ms by " + how
                 + ", encoder " + (t3 - t2) + " ms");
         server.watch(this);
+        // Drags its app lets go of, heard by the launcher's pixel there: an Android app's only.
+        if (xid == 0) server.drags().watch(this);
     }
 
     /**
@@ -423,6 +443,7 @@ final class AppWindow implements LinuxStreamEncoder.Output, AppVideo.Gate {
     private void end() {
         closeAll(null);
         server.forget(this);
+        server.drags().unwatch(this);
         if (input != null) input.releaseAll();
         if (display != null && xid != 0) {
             // A Linux window's task belongs on no phone screen: it goes, and its
@@ -823,7 +844,13 @@ final class AppWindow implements LinuxStreamEncoder.Output, AppVideo.Gate {
                     acked();
                     break;
                 case Wire.POINTER:
-                    if (d.length >= 9) input.pointer(Wire.u16(d, 1), Wire.u16(d, 3), d[0] & 0xff, Wire.i32(d, 5));
+                    if (d.length < 9) break;
+                    if (handedOver) {
+                        // The press that carried a drag out is the computer's: nothing here until it is let go.
+                        if ((d[0] & 0xff) == 0) handedOver = false;
+                        break;
+                    }
+                    input.pointer(Wire.u16(d, 1), Wire.u16(d, 3), d[0] & 0xff, Wire.i32(d, 5));
                     break;
                 case Wire.SCROLL:
                     if (d.length >= 16) {
@@ -912,6 +939,10 @@ final class AppWindow implements LinuxStreamEncoder.Output, AppVideo.Gate {
             case "keyframe":
                 video.requestKeyFrame();
                 break;
+            case "dragOut":
+                // The computer's pointer left the window with the drag held.
+                handOver();
+                break;
             case "close":
                 if (xid != 0 && "ask".equals(j.optString("app"))) {
                     // A Linux window's ✕: its app is asked, and may ask about unsaved
@@ -940,6 +971,100 @@ final class AppWindow implements LinuxStreamEncoder.Output, AppVideo.Gate {
                 break;
             }
             default:
+        }
+    }
+
+    // ── a drag, out of the window and onto the computer (AppDrags) ──
+
+    /** What a drag on the display did, as the launcher's pixel heard it. The drags' thread. */
+    void dragEvent(JSONObject e) {
+        try {
+            switch (e.optString("k")) {
+                case "started":
+                    dragging = true;
+                    dragStartedAt = SystemClock.uptimeMillis();
+                    JSONObject on = new JSONObject().put("t", "drag").put("on", true);
+                    if (e.has("mimes")) on.put("mimes", e.optJSONArray("mimes"));
+                    wire.json(on);
+                    break;
+                case "dropped": {
+                    int which = handingOver;
+                    if (which == 0) break; // a drop on the corner that was nobody's hand-over
+                    handingOver = 0;
+                    dragged(which, AppOffers.items(e.optJSONArray("items")));
+                    break;
+                }
+                case "ended":
+                    dragging = false;
+                    wire.json(new JSONObject().put("t", "drag").put("on", false));
+                    if (handingOver != 0) {
+                        // Ended without a drop on the pixel: the release landed on something else.
+                        handingOver = 0;
+                        nothingDragged("the drop missed the launcher's window");
+                    }
+                    break;
+                default:
+            }
+        } catch (Exception ignored) {
+            // the computer's connection went: it hears nothing of this drag
+        }
+    }
+
+    /** The launcher's window here went with its process: a drag it heard start ended unheard. */
+    void dragLost() {
+        if (!dragging) return;
+        try {
+            dragEvent(new JSONObject().put("k", "ended").put("display", displayId));
+        } catch (org.json.JSONException ignored) {
+        }
+    }
+
+    /**
+     * The computer's pointer left the window with a drag held: the phone's
+     * pointer goes to the launcher's pixel and lets go there, so the drag is
+     * dropped on it, and what it carried goes to the computer — whose own
+     * drag takes over. The window's input thread.
+     */
+    private void handOver() {
+        if (!dragging || input == null || handingOver != 0) {
+            if (handingOver == 0) nothingDragged(null);
+            return;
+        }
+        long early = dragStartedAt + CATCH_READY_MS - SystemClock.uptimeMillis();
+        if (early > 0) SystemClock.sleep(early);
+        int which;
+        synchronized (this) {
+            which = ++handOvers;
+        }
+        handingOver = which;
+        handedOver = true;
+        input.pointer(0, 0, 0, 0);
+        new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(() -> {
+            if (handingOver != which) return;
+            handingOver = 0;
+            nothingDragged("nothing was dropped on the launcher's window");
+        }, HAND_OVER_MS);
+    }
+
+    /** The drag carried {@code items}: on offer to the computer, which hears what they are. */
+    private void dragged(int which, List<AppOffers.Item> items) throws Exception {
+        if (items.isEmpty()) {
+            nothingDragged("the drag carried nothing to take");
+            return;
+        }
+        for (AppOffers.Item it : items) AppOffers.complete(it);
+        int id = server.offers().put(items);
+        wire.json(new JSONObject().put("t", "dragged").put("id", id).put("items", AppOffers.describe(items)));
+        AppServer.log("window " + serial + ": a drag out of " + pkg + " handed to the computer (" + items.size()
+                + (items.size() == 1 ? " item" : " items") + ", hand-over " + which + ")");
+    }
+
+    /** The computer's drag has nothing to carry: it stands down. */
+    private void nothingDragged(String why) {
+        if (why != null) AppServer.log("window " + serial + ": a drag out of " + pkg + ": " + why);
+        try {
+            wire.json(new JSONObject().put("t", "dragged").put("none", true));
+        } catch (Exception ignored) {
         }
     }
 

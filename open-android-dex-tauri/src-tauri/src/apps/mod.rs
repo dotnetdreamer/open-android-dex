@@ -16,6 +16,8 @@
 //! - `mac`: the window on a Mac (AppKit, and a display layer macOS decodes into).
 //! - `sound`: where the phone's sound plays, the windows' title-bar menu.
 //! - `drops`: files dropped on a window, to the phone.
+//! - `fetch`: what the phone hands this computer — a drag carried out of a
+//!   window, a picture or file it copied.
 //! - `icons`, `clipboard`, `keys`, `h264`, `wire`, `adbsock`: what those share.
 //!
 //! A Linux computer has no window of ours yet: an Android app opens in
@@ -26,6 +28,8 @@ mod adbsock;
 mod clipboard;
 #[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
 mod drops;
+#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
+mod fetch;
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod h264;
 pub(crate) mod host;
@@ -1355,6 +1359,142 @@ impl link::Host for WindowHost {
         let Some(phone) = self.phone() else { return };
         pad::open_now(&self.app, &self.serial(), &phone, window);
     }
+
+    fn copying(&self, window: Arc<dyn link::Surface>) {
+        if let Some(phone) = self.phone() {
+            copy_asked(&phone, window);
+        }
+    }
+}
+
+/// How long More's Copy waits for the phone to copy something before its window says nothing was.
+#[cfg(any(windows, target_os = "macos"))]
+const COPY_WAIT: Duration = Duration::from_millis(1500);
+/// What the phone copies is taken here up to this much, all its files
+/// together: a film copied there is not a clip, and dragging it out takes it.
+#[cfg(any(windows, target_os = "macos"))]
+const CLIP_FILES_MAX: u64 = 512 * 1024 * 1024;
+
+/// More's Copy in a window, waiting for its phone to copy something: by
+/// phone, the window that asked and which asking it was.
+#[cfg(any(windows, target_os = "macos"))]
+fn copy_waiting() -> &'static Mutex<HashMap<String, (u64, Arc<dyn link::Surface>)>> {
+    static W: OnceLock<Mutex<HashMap<String, (u64, Arc<dyn link::Surface>)>>> = OnceLock::new();
+    W.get_or_init(Default::default)
+}
+
+/// More's Copy went to the app as its copy key: the phone's next copy is
+/// this window's to answer, and none within COPY_WAIT says nothing was —
+/// nothing selected, or an app that copies nothing with the key.
+#[cfg(any(windows, target_os = "macos"))]
+fn copy_asked(phone: &str, window: Arc<dyn link::Surface>) {
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let n = SEQ.fetch_add(1, Ordering::SeqCst) + 1;
+    copy_waiting().lock().unwrap().insert(phone.to_string(), (n, window));
+    let phone = phone.to_string();
+    std::thread::spawn(move || {
+        std::thread::sleep(COPY_WAIT);
+        let unanswered = {
+            let mut waiting = copy_waiting().lock().unwrap();
+            match waiting.get(&phone) {
+                Some((m, _)) if *m == n => waiting.remove(&phone).map(|(_, w)| w),
+                _ => None,
+            }
+        };
+        if let Some(w) = unanswered {
+            w.note(Some("Nothing was copied. Select something first, or use the app's Share › Copy.".into()), false);
+        }
+    });
+}
+
+/// The phone copied something: the window whose Copy was waiting for it, if one was.
+#[cfg(any(windows, target_os = "macos"))]
+pub(crate) fn copy_answered(phone: &str) -> Option<Arc<dyn link::Surface>> {
+    copy_waiting().lock().unwrap().remove(phone).map(|(_, w)| w)
+}
+
+/// The phone copied text, which is this computer's to paste now: the window
+/// whose Copy asked for it says so, with the start of it.
+#[cfg(any(windows, target_os = "macos"))]
+pub(crate) fn copied_text(phone: &str, text: &str) {
+    let Some(w) = copy_answered(phone) else { return };
+    let words: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let shown: String = words.chars().take(32).collect();
+    let more = if words.chars().count() > 32 { "…" } else { "" };
+    w.note(Some(format!("Copied “{shown}{more}”")), false);
+}
+
+/// The phone copied pictures or files (doc/apps-on-pc.md, "The clipboard"):
+/// taken here at once, and put on this computer's clipboard as files — a
+/// paste in Finder or Explorer is the file, and in a document or a message,
+/// for a picture, the picture. Said in the window whose Copy asked for it,
+/// else in the phone's window in front, if one is.
+#[cfg(any(windows, target_os = "macos"))]
+pub(crate) fn clip_files(serial: &str, phone: &str, v: &serde_json::Value) {
+    let Some(offer) = fetch::Offer::parse(v) else { return };
+    let Some(server) = host::of_phone(phone).or_else(|| host::running(serial)) else { return };
+    let route = link::Route { serial: serial.to_string(), socket: server.socket.clone(), direct: false, via: "" };
+    let say: Option<fetch::Note> = match copy_answered(phone) {
+        Some(w) => Some(Arc::new(move |text, busy| w.note(text, busy))),
+        None => front_of(phone).map(|w| Arc::new(move |text, busy| note(&w, text, busy)) as fetch::Note),
+    };
+    let size: u64 = offer.files().filter_map(|(_, i)| i.size).sum();
+    if size > CLIP_FILES_MAX {
+        log::info!("apps [{serial}] the phone copied {size} bytes of files: too much for a clipboard");
+        if let Some(say) = &say {
+            say(Some("That's too big to copy over. Drag it out of the window instead.".into()), false);
+        }
+        return;
+    }
+    let serial = serial.to_string();
+    std::thread::spawn(move || {
+        let taking = fetch::Taking::start(route, &offer, "clip", say.clone());
+        let mut paths = Vec::new();
+        let mut failed = None;
+        for (i, item) in offer.files() {
+            match taking.wait(i, Duration::from_secs(600)) {
+                Ok(p) => paths.push(p),
+                Err(e) => failed = Some(format!("{} couldn't be copied: {e}", fetch::short(&item.name))),
+            }
+        }
+        let said = if paths.is_empty() {
+            failed.unwrap_or_else(|| "Nothing came from your phone".into())
+        } else {
+            match clipboard::set_files(&paths) {
+                Ok(()) => {
+                    log::info!("apps [{serial}] the phone copied {} file(s); on this computer's clipboard now", paths.len());
+                    copied_files(&paths)
+                }
+                Err(e) => {
+                    log::warn!("apps [{serial}] the phone's files could not go on this computer's clipboard: {e}");
+                    format!("They couldn't be put on {}'s clipboard", fetch::this_computer())
+                }
+            }
+        };
+        if let Some(say) = &say {
+            say(Some(said), false);
+        }
+    });
+}
+
+/// What a window says once files the phone copied are this computer's to paste.
+#[cfg(any(windows, target_os = "macos"))]
+fn copied_files(paths: &[PathBuf]) -> String {
+    let what = match paths {
+        [one] => fetch::short(&one.file_name().unwrap_or_default().to_string_lossy()),
+        many => format!("{} files", many.len()),
+    };
+    format!("Copied {what} — paste it anywhere on {}", fetch::this_computer())
+}
+
+/// The window of `phone` in front, or else its first: where what happens to the phone as a whole is said.
+#[cfg(any(windows, target_os = "macos"))]
+fn front_of(phone: &str) -> Option<Arc<native::Window>> {
+    let mut ids: Vec<u64> = kept().lock().unwrap().iter().filter(|(_, k)| k.phone == phone).map(|(id, _)| *id).collect();
+    ids.sort();
+    let open = windows().lock().unwrap();
+    let mine: Vec<Arc<native::Window>> = ids.iter().filter_map(|id| open.get(id).cloned()).collect();
+    mine.iter().find(|w| w.is_front()).or(mine.first()).cloned()
 }
 
 /// A three-finger gesture on the phone's touchpad, carried out over the
@@ -1653,6 +1793,9 @@ impl link::Host for ProbeHost {
     fn touchpad(&self, window: Arc<dyn link::Surface>) {
         window.note(Some("The phone's touchpad needs the app around the window".into()), false);
     }
+
+    /// The copy key goes to the app all the same; with no clipboard here, nothing comes back.
+    fn copying(&self, _window: Arc<dyn link::Surface>) {}
 }
 
 // ── the phone's Linux apps ──

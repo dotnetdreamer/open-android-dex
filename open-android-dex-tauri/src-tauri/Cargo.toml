@@ -113,6 +113,10 @@ windows = { version = "0.62", features = [
     "Win32_System_DataExchange",
     "Win32_System_LibraryLoader",
     "Win32_System_Memory",
+    # A drag carried out of a phone app's window, and what the phone copied,
+    # as files here: the shell's own data object for them, dragged with
+    # SHDoDragDrop or flushed onto the clipboard (apps/win, apps/clipboard.rs).
+    "Win32_System_Ole",
     # When a frame reached the screen: DXGI's frame statistics are in QPC time.
     "Win32_System_Performance",
     "Win32_System_Registry",
@@ -122,6 +126,7 @@ windows = { version = "0.62", features = [
     "Win32_UI_Input_Ime",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
     "Win32_UI_Shell_PropertiesSystem",
     "Win32_UI_WindowsAndMessaging",
 ] }
@@ -172,6 +177,10 @@ objc2-foundation = { version = "0.3", default-features = false, features = [
     "NSURL",
     # Whether this run is the app bundle, which the notification center needs.
     "NSBundle",
+    # A drag carried out of a phone app's window (apps/mac): the queue its
+    # files are written on as they are dropped, and the error a failed one gives.
+    "NSOperation",
+    "NSDictionary",
 ] }
 # Quartz Event Services, for the trackpad tap. Already in the tree via
 # objc2-app-kit, so this adds resolution rather than compilation — and unlike
@@ -247,6 +256,12 @@ objc2-app-kit = { version = "0.3", default-features = false, features = [
     "NSFontDescriptor",
     "NSParagraphStyle",
     "NSVisualEffectView",
+    # …a drag carried out of one onto this Mac: Finder's own kind, files
+    # promised and written as they are dropped (apps/mac).
+    "block2",
+    "NSDraggingItem",
+    "NSDraggingSession",
+    "NSFilePromiseProvider",
 ] }
 # The picture of a phone app's window on a Mac (apps/mac/video.rs): a layer
 # macOS decodes H.264 into, and the CoreMedia buffers it takes. The same

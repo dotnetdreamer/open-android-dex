@@ -8,6 +8,11 @@
 //! keyboard's both keep what passes through them. What a password manager
 //! marks as not for other devices or histories is left here — unless it is
 //! pasted into a window, which is a person handing it over.
+//!
+//! What the phone copies comes here too when it is a picture or a file
+//! (mod.rs, `clip_files`): as files, which Finder and Explorer paste, and a
+//! picture as the picture as well, on a Mac, for a paste into a document.
+//! Nothing goes the other way but text.
 
 use tauri_plugin_clipboard_manager::ClipboardExt;
 
@@ -185,6 +190,155 @@ unsafe fn text() -> Option<String> {
     }
 }
 
+/// The Mac's clipboard's count of changes when files from the phone were put
+/// there: that change is the phone's own, not one to hand back to it.
+#[cfg(target_os = "macos")]
+static OWN_CHANGE: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(-1);
+
+/// Files the phone copied, on the Mac's clipboard: each as a file, which
+/// Finder pastes — and a single picture as the picture too, in the same
+/// item, which a document, a message or a mail takes instead.
+#[cfg(target_os = "macos")]
+pub fn set_files(paths: &[std::path::PathBuf]) -> Result<(), String> {
+    use objc2::rc::Retained;
+    use objc2::runtime::ProtocolObject;
+    use objc2_app_kit::{NSPasteboard, NSPasteboardItem, NSPasteboardTypeFileURL, NSPasteboardWriting};
+    use objc2_foundation::{NSArray, NSData, NSString, NSURL};
+
+    objc2::rc::autoreleasepool(|_| {
+        let board = NSPasteboard::generalPasteboard();
+        let mut items: Vec<Retained<ProtocolObject<dyn NSPasteboardWriting>>> = Vec::new();
+        for p in paths {
+            let url = NSURL::fileURLWithPath(&NSString::from_str(&p.to_string_lossy()));
+            let item = NSPasteboardItem::new();
+            let Some(text) = url.absoluteString() else { continue };
+            item.setString_forType(&text, unsafe { NSPasteboardTypeFileURL });
+            if let (1, Some(uti)) = (paths.len(), picture_type(p)) {
+                if let Ok(bytes) = std::fs::read(p) {
+                    item.setData_forType(&NSData::with_bytes(&bytes), &NSString::from_str(uti));
+                }
+            }
+            items.push(ProtocolObject::from_retained(item));
+        }
+        if items.is_empty() {
+            return Err("no files".into());
+        }
+        board.clearContents();
+        if !board.writeObjects(&NSArray::from_retained_slice(&items)) {
+            return Err("the pasteboard refused them".into());
+        }
+        OWN_CHANGE.store(board.changeCount(), std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    })
+}
+
+/// A picture's type, by its extension, for those a Mac's apps paste as pictures.
+#[cfg(target_os = "macos")]
+fn picture_type(p: &std::path::Path) -> Option<&'static str> {
+    let ext = p.extension()?.to_string_lossy().to_ascii_lowercase();
+    Some(match ext.as_str() {
+        "jpg" | "jpeg" => "public.jpeg",
+        "png" => "public.png",
+        "heic" | "heif" => "public.heic",
+        "gif" => "com.compuserve.gif",
+        "tif" | "tiff" => "public.tiff",
+        "webp" => "org.webmproject.webp",
+        _ => return None,
+    })
+}
+
+/// Files the phone copied, on Windows' clipboard: the shell's own data
+/// object for them — what Explorer itself puts there for a copy, so a paste
+/// in Explorer, or into any app that takes files, is the files. Flushed, so
+/// the clipboard holds them itself and no thread of ours must answer for it.
+#[cfg(windows)]
+pub fn set_files(paths: &[std::path::PathBuf]) -> Result<(), String> {
+    use windows::Win32::System::Ole::{OleFlushClipboard, OleInitialize, OleSetClipboard, OleUninitialize};
+    let paths = paths.to_vec();
+    // OLE's own thread: the clipboard's calls want an apartment of their own.
+    std::thread::spawn(move || unsafe {
+        OleInitialize(None).map_err(|e| e.to_string())?;
+        let set = shell_data_object(&paths).and_then(|data| {
+            when_free(|| OleSetClipboard(&data))?;
+            when_free(|| OleFlushClipboard())
+        });
+        OleUninitialize();
+        set.map_err(|e| e.to_string())
+    })
+    .join()
+    .unwrap_or_else(|_| Err("the clipboard's thread failed".into()))
+}
+
+/// `f` on the clipboard, again for up to half a second while another app has
+/// it open — one reading what changed there, as every clipboard watcher does
+/// (CLIPBRD_E_CANT_OPEN, seen on Windows 11 with the phone's copied picture).
+/// Meanwhile what is asked of this thread is answered: a watcher that opened
+/// the clipboard between the set and the flush waits on OLE's window here for
+/// the files themselves (WM_RENDERFORMAT), and keeps the clipboard open until
+/// it has them. Left unanswered, a clipboard manager failed a third of the copies.
+#[cfg(windows)]
+fn when_free(f: impl Fn() -> windows::core::Result<()>) -> windows::core::Result<()> {
+    use windows::Win32::Foundation::CLIPBRD_E_CANT_OPEN;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        MsgWaitForMultipleObjects, PeekMessageW, MSG, PM_NOREMOVE, PM_QS_SENDMESSAGE, QS_SENDMESSAGE,
+    };
+    let until = std::time::Instant::now() + std::time::Duration::from_millis(500);
+    loop {
+        match f() {
+            Err(e) if e.code() == CLIPBRD_E_CANT_OPEN && std::time::Instant::now() < until => unsafe {
+                // 25 ms, or less if something is sent here: a peek delivers it, and takes nothing off the queue.
+                MsgWaitForMultipleObjects(None, false, 25, QS_SENDMESSAGE);
+                let _ = PeekMessageW(&mut MSG::default(), None, 0, 0, PM_NOREMOVE | PM_QS_SENDMESSAGE);
+            },
+            done => return done,
+        }
+    }
+}
+
+/// The shell's own data object for `paths` — files as Explorer hands them
+/// over, to a drop or a paste: the file list, the shell's own list, and the rest.
+/// They are one offer's files, so in one folder: any elsewhere are left out.
+#[cfg(windows)]
+pub(super) unsafe fn shell_data_object(
+    paths: &[std::path::PathBuf],
+) -> windows::core::Result<windows::Win32::System::Com::IDataObject> {
+    use windows::core::HSTRING;
+    use windows::Win32::System::Com::IDataObject;
+    use windows::Win32::UI::Shell::Common::ITEMIDLIST;
+    use windows::Win32::UI::Shell::{ILFindLastID, ILFree, SHCreateDataObject, SHParseDisplayName};
+    let Some(dir) = paths.first().and_then(|p| p.parent()) else {
+        return Err(windows::core::Error::empty());
+    };
+    unsafe {
+        // The folder, and each file as a child of it: given whole paths and no
+        // folder, the shell's data object offers nothing at all — no file list,
+        // so Explorer refuses the drop and a paste pastes nothing.
+        let mut folder: *mut ITEMIDLIST = std::ptr::null_mut();
+        SHParseDisplayName(&HSTRING::from(dir.as_os_str()), None, &mut folder, 0, None)?;
+        let mut pidls: Vec<*const ITEMIDLIST> = Vec::new();
+        let mut failed = None;
+        for p in paths.iter().filter(|p| p.parent() == Some(dir)) {
+            let mut pidl: *mut ITEMIDLIST = std::ptr::null_mut();
+            match SHParseDisplayName(&HSTRING::from(p.as_os_str()), None, &mut pidl, 0, None) {
+                Ok(()) => pidls.push(pidl),
+                Err(e) => failed = Some(e),
+            }
+        }
+        // Each child is the last part of its whole path, held in it until the data object has copied it.
+        let children: Vec<*const ITEMIDLIST> = pidls.iter().map(|&p| ILFindLastID(p) as *const ITEMIDLIST).collect();
+        let made = if children.is_empty() {
+            Err(failed.unwrap_or_else(windows::core::Error::empty))
+        } else {
+            SHCreateDataObject::<_, IDataObject>(Some(folder), Some(&children), None::<&IDataObject>)
+        };
+        for p in pidls {
+            ILFree(Some(p));
+        }
+        ILFree(Some(folder));
+        made
+    }
+}
+
 /// A Mac says nothing when its clipboard changes; its count of changes is
 /// asked twice a second instead, which costs nothing it would notice.
 #[cfg(target_os = "macos")]
@@ -203,6 +357,10 @@ pub fn watch(changed: impl Fn(Option<String>) + Send + 'static) {
                     return None;
                 }
                 seen = now;
+                // Files the phone copied, put there by this app: nothing to hand back.
+                if now == OWN_CHANGE.load(std::sync::atomic::Ordering::SeqCst) {
+                    return None;
+                }
                 // What 1Password and its kind mark concealed or passing
                 // (nspasteboard.org): not for other devices, nor histories.
                 let private = board.types().is_some_and(|types| {

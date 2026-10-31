@@ -786,6 +786,16 @@ fn spawn_control_reader(
                             if fresh {
                                 super::clipboard::set(&app, &text);
                             }
+                            #[cfg(any(windows, target_os = "macos"))]
+                            super::copied_text(&phone, &text);
+                        }
+                        // A picture or a file copied on the phone: taken here, for this computer's clipboard.
+                        Some("clipFiles") => {
+                            if !for_apps.load(Ordering::SeqCst) {
+                                continue;
+                            }
+                            #[cfg(any(windows, target_os = "macos"))]
+                            super::clip_files(&serial, &phone, &v);
                         }
                         _ => {}
                     }

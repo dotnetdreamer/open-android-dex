@@ -37,6 +37,8 @@ arbitrary until you know what was measured, or what the platform refuses.
 | Sound | `scrcpy.rs` (the audio companion) | the phone's sound here while any of its apps has a window |
 | Where the sound plays | `apps/sound.rs`, `AppAudio.java`, `Audio.java`, launcher `AppsProvider.java` (`media.mode`) | the title bar's menu: this computer, both, or one of the phone's own outputs |
 | Dropped files | `apps/drops.rs`, `AppDrop.java` | a file dropped on a window: into the phone's Download folder, an APK installed |
+| Dragging out | `AppDrags.java`, launcher `PcDrags.java`, `apps/mac`, `apps/win` | a drag the app lets go of, carried out of its window: dropped on the launcher's pixel, then this computer's own drag |
+| What the phone hands over | `AppOffers.java`, `Content.java`, `apps/fetch.rs` | a drag's files and a copied picture's, read as the shell and taken here on connections of their own |
 | The phone's notifications | `notifications/`, `AppNotifications.java` | as this computer's own; a window opened at one (doc/phone-notifications.md) |
 | The phone as their touchpad | `apps/pad.rs`, `AppPad.java`, launcher `Touchpad.java`, `HostPointer.java` | the phone's screen moving this computer's pointer over these windows (doc/phone-touchpad.md, §10) |
 | Probe | `src-tauri/examples/app_window.rs` | one window, without the rest of the app (Windows) |
@@ -388,7 +390,7 @@ it at once.
 
 One connection per window, one more for what is the phone's as a whole (the
 list, the icons, the clipboard, its sound, the clock), and one per dropped
-file. Every message is a type byte, a big-endian u32 length and that many
+file, or per file this computer takes from the phone. Every message is a type byte, a big-endian u32 length and that many
 bytes:
 
 | Type | Way | Body |
@@ -405,9 +407,11 @@ bytes:
 A window's JSON: `open` (package or Linux window, size, dpi, fps, `direct`,
 what closing does, the window's `key`, and the notification it opens at,
 `notif`), `resize`, `focus`/`blur`/`leave`,
-`clip`, `keyframe`, `bitrate`, `close`, `ping` one way; `video` (the encoder,
+`clip`, `keyframe`, `bitrate`, `close`, `ping`, `dragOut` one way; `video` (the encoder,
 its size, the part of it that is the display, `paced`), `display` (the app's
-name), `state` (`closed`, `failed`), `stats` once a second, `pong` the other.
+name), `state` (`closed`, `failed`), `stats` once a second, `pong`, `drag`
+(`on`, and the types a drag carries) and `dragged` (what a drag handed over
+carries, by number, or `none`) the other ("Dragging out").
 A window's connection made again starts with `attach` (its key, size, dpi,
 `direct`) instead of `open`, answered by `attached` — then `display` and
 `video` as for an open — or by `state`: `closed` (it ended while the computer
@@ -417,14 +421,18 @@ by `linuxRan`), `clip` both ways; `audio` — the computer asking, and the phone
 saying where its sound can go, after its hello, as outputs come and go, and
 after a pin; `audioRoute` (answered by `audioRouted`) and `audioMode`, the
 computer's; `stop` and `warm`, the computer's, and `log`, the phone's once its
-shell has gone; the phone's notifications — `notifs`, `notif`, `notifOpen`
+shell has gone; `clipFiles`, the phone's, a picture or file it copied, by
+number ("The clipboard"); the phone's notifications — `notifs`, `notif`, `notifOpen`
 and the rest, in doc/phone-notifications.md, "The wire"; and the phone as these
 windows' touchpad — `padOn`, `padOff` and `pad`, in doc/phone-touchpad.md, §10.
 
 A dropped file's connection is the one exception to the framing: its first
 message is `put` (the name, the size, the folder it goes in, whether it is an
 APK to install), and exactly that many bytes follow it, raw. The phone answers
-`got` as they land and `put` once, with how it went.
+`got` as they land and `put` once, with how it went. A file this computer
+takes from the phone is the same the other way: `get` (the offer's number and
+the item's), the phone's `get` with its name, type and size (-1 unknown), and
+its bytes, raw, until the connection closes.
 
 Each window's connection is its own adb stream, side by side on the one USB or
 Wi-Fi link, so one app's key frame never waits behind another's.
@@ -471,6 +479,13 @@ screen's height, at that screen's scale; the phone's display gets the window's
 pixels and 160 dpi times the scale, so text is the size it would be on the
 phone and one pixel is one pixel. Resizing the window resizes the display (a
 new encoder at the new size; the app lays itself out again).
+
+Opening one waits 10 s for the window to be made, and a pinned app's start
+asks again every 1.5 s for 45 s. A window is made only if it is still wanted:
+whichever comes first, its thread (the main thread, on a Mac) starting on it or
+the open giving up, wins — one made after would be no one's, and the open
+asked for again beside it (seen on a Mac swapping hard, 2026-10-29: four windows
+on "Opening…" behind the one that opened).
 
 ## On a Mac
 
@@ -522,8 +537,8 @@ H.264 framing). It has not run on a Mac yet ("Verified, and not yet").
 
 ## Full screen
 
-More (☰), beside Back in the title bar, is the window's own menu; for now it
-holds one choice, Full screen. Full screen, the app's picture is the whole
+More (☰), beside Back in the title bar, is the window's own menu: Copy and
+Paste ("The clipboard"), Full screen, and the phone as the touchpad. Full screen, the app's picture is the whole
 screen and there is no title bar: the phone's display takes the screen's size,
 as it takes any window's, and the app lays itself out for it. When the pointer
 touches the top of the screen a small bar comes down in the middle, as Remote
@@ -619,11 +634,33 @@ marks Windows' own history and sync obey; on a Mac
 a window, which is a person handing it over. Text over 256 KB waits for a
 paste too: the phone takes its clipboard in one binder call.
 
-Text only. An image copied here would have to become a file in the phone's
-shared storage — its gallery — to be a clip there; files go by dropping them
-instead. A Linux app's window shares the phone's clipboard through the
+From this computer, text only. An image copied here would have to become a
+file in the phone's shared storage — its gallery — to be a clip there; files
+go by dropping them instead. A Linux app's window shares the phone's clipboard through the
 launcher, which hands it to the X selection while one of its windows has the
 focus (`doc/linux-windows.md`).
+
+From the phone, pictures and files too. A clip of content URIs — a gallery's
+"Copy to clipboard", the share sheet's Copy, the Files app's own copy — is
+offered to this computer (`clipFiles`) as a drag's items are ("Dragging out"):
+the clipboard grants a clip's URIs to whichever package reads it, and the
+server reads it as the shell's, so the shell may read them. They are taken here at once,
+up to 512 MB in all — a film copied there is not a clip; dragging it out takes
+it — and put on this computer's clipboard as files: Finder's and Explorer's
+paste. On a Mac a single picture goes as the picture as well, in the same
+pasteboard item, which a document, a message or a mail takes instead; on
+Windows it is the shell's own data object for the files, what Explorer's copy
+puts there, flushed, so no thread of this app's has to answer for it after.
+The Mac's change of its clipboard is marked as this app's own, so it is not
+handed back. Nothing goes the other way but text.
+
+**More's Copy and Paste** are the app's own Ctrl+C and Ctrl+V, as ⌘C and ⌘V
+already send them — for whoever does not know the keys, and to say what
+happened: "Copied “…”", a picture's progress and then "Copied photo.jpg —
+paste it anywhere on this Mac", or, when the phone copied nothing within 1.5 s,
+"Nothing was copied. Select something first, or use the app's Share › Copy."
+Many galleries copy nothing with the key; their Share › Copy, or their own
+"Copy to clipboard", does.
 
 ## The picture
 
@@ -859,6 +896,86 @@ session shares).
 A 9 MB file took 516 ms over a Galaxy A13's USB (17 MB/s) and 904 ms over a
 Redmi 9A's (10 MB/s).
 
+## Dragging out
+
+A drag that starts in a phone app's window can end on this computer: a
+picture out of the Files app onto the desktop, into a mail, a folder. On the
+phone the drag is Android's own, started as the app starts it — Files on a
+mouse drag, most apps on a long press — and as the pointer leaves the window
+with it, the phone ends it on a window of its own and says what it carried,
+and this computer's own drag takes over from there, under the pointer, with
+the button still held.
+
+**Hearing a drag.** Android tells every window on a display when a drag an
+app let go of — a global one (`DRAG_FLAG_GLOBAL`) — starts and ends there, and
+gives what it carries, with the right to read it, to the window it is dropped
+on. A drag an app keeps to itself, reordering a list, is not told and does not
+leave. So each Android app window's display has a window of the launcher's
+(`PcDrags`): one pixel at its top left, fully transparent and taking no touch —
+Android lets every touch through a window like that — until a drag starts,
+when it takes them (the drag has the pointer then anyway). It is the
+launcher's because the server is no app: from Android 14 the window manager
+refuses a session to a process the activity manager did not start ("Unknown
+pid=… uid=2000", seen on the Android 16 emulator). It is a presentation
+window, which any app may put on a public presentation display — every
+window's display is one — so it needs no overlay permission, and Android does
+not hide it while Settings shows, as it hides overlays (an overlay is the
+fallback where a presentation is refused). The server asks for it as the window opens
+(`drag.watch`), and hears what the drags do on one call that waits until
+something happens (`drag.events`), as Linux's windows are heard; the window
+tells this computer (`drag`, on and off).
+
+**Handing it over.** When the pointer leaves the picture with the primary
+button held while the phone says a drag is under way, this computer asks for
+it (`dragOut`). The server moves the phone's pointer onto the pixel and lets go
+there: the drag is dropped on the launcher's window, which takes its read
+permission through the platform's own content listener (Android 12 and later:
+`setOnReceiveContentListener` — no hidden call), grants each content URI to the
+shell for fifteen minutes, and says what it carried: each item's name, type
+and size, as its provider says them, and any text. The server offers them by
+number (`dragged`), and the press is this computer's from then: the phone
+ignores its pointer until the button is let go. A drop that landed elsewhere,
+or none within 3 s, is `dragged` with `none`, and the press goes on in the
+app. The pixel takes a drop 150 ms after the drag started at the earliest —
+its relayout has to land — and the server waits out the rest if the pointer
+left sooner.
+
+**On this computer.** Every file starts on its way here as soon as the phone
+says what the drag carries, into a folder of this app's under the temporary
+folder (`apps/fetch.rs`), so a drop seldom waits for it; one that takes longer
+than 0.4 s says how far it is under the title bar. A Mac's own drag starts at
+the pointer's next move — inside a drag of the mouse, where AppKit begins
+one — each file promised (`NSFilePromiseProvider`), as Photos drags
+pictures: Finder, Mail, Messages and the rest ask for a file as it is dropped,
+on a queue of this app's, and it is written there; text goes as text. On Windows the files come
+first, then Windows' own drag carries them on (`SHDoDragDrop`, with the
+shell's data object for them, as Explorer drags files): Windows' drag wants
+files that exist, and the note says how far they are meanwhile. Let go before
+either could start, they go to Downloads, and the window says so.
+
+Each file comes on a connection of its own (`get`), as a dropped one goes the
+other way: the phone reads it as the shell, its provider reached as an
+external one — as `content read` reaches it — and held for that read only.
+
+**What does not leave.** An app that starts no global drag: many galleries
+start one only in split screen or on a tablet, and a long press there
+selects instead. For those, the app's Share → Copy (or its own "Copy to
+clipboard"), and More's Copy, bring a picture over through the clipboard
+("The clipboard"). Android 11 and older: the launcher's listener needs 12. A
+phone whose launcher is from before this: nothing is heard, and nothing is
+carried out — until the desktop brings the launcher up to date: the next
+window to open asks again, and the open ones with it. The phone's touchpad
+does not: it puts this build's launcher there only where the phone's cannot
+open the pad, so one that has the pad but is from before this stays as it
+is. A Linux app's window: its drags are X's. Full screen: the pointer cannot
+leave the screen.
+
+Measured on the Android 16 emulator (`test/apps-drag-test.mjs`, 13 checks):
+Files' own drag of a picture heard as it started (`image/png`), handed over
+117 ms after `dragOut`, its name, type and size said, and the file taken
+byte for byte; a press with no drag under way hands nothing over; the window
+takes the mouse again after.
+
 ## Verified, and not yet
 
 On a Galaxy A13 (Android 12, USB), from the app itself and from the probe, on
@@ -941,8 +1058,39 @@ The sound menu, the clipboard as it is copied, and drops (2026-10-24):
   Explorer's arrives (the probe's window): a file, a 6 MB file and a folder
   with one inside it, an APK, the same file again as "(2)", each with its note.
 
+Dragging out (2026-10-29, the Android 16 emulator; `test/apps-drag-test.mjs`
+above): in the Mac app, a picture dragged out of Files was handed over and
+taken byte for byte into the app's folder; the launcher brought up to date by
+More's "Use phone as touchpad" (an old one on the phone, as a read-only
+emulator has), and the window open already asking again with the next, the
+launcher catching drags on both displays.
+
+Dragging out on Windows 11 (2026-10-29 and 30), in the app:
+
+- with a Galaxy A13 (Android 12): a picture dragged out of My Files into an
+  Explorer folder, byte for byte (a long press: a plain drag scrolls its
+  list); Gallery's "Copy to clipboard", tapped from adb, then Explorer's own
+  Paste, byte for byte; More's Copy and Paste with text in Settings' search;
+  a copy of `test/apps-drag-test.mjs` naming DocumentsUI's `FilesActivity`
+  (neither phone lists Files to open), 13/13 in seven runs in a row,
+  hand-over 33–52 ms, with nothing else listed in Download (it presses the
+  first item there);
+- with a Redmi 9A (Android 11): a picture's clip, set from the shell (MIUI
+  refuses the shell's input), pasted into Explorer, byte for byte, the app
+  server staying up.
+
 Not yet:
 
+- **A drag out landing on this computer**: on a Mac, the drop on Finder
+  (this Mac's drag now begins at the next move of the mouse — the first try,
+  from an older event, never landed); a second try stopped on an emulator too
+  slow with the Mac swapping (windows taking 2 minutes, Files black). Nor yet
+  run on a Mac: More's Copy and Paste, and a picture copied on the phone
+  reaching its clipboard. On Windows: More's Copy and Paste on the Redmi 9A,
+  whose MIUI refuses the shell's input while its "USB debugging (Security
+  settings)" is off; a folder dragged out (it ends in
+  "couldn't be copied"); and why the A13 once gave a drop to the app's own
+  window instead of the catcher (a folder's drag; not seen since).
 - **A cable pulled from a Samsung phone**, the case this was made for: the
   emulator's transports neither restart adbd nor drop Wi‑Fi on their own. Its
   steps were each shown there ("Cable or Wi‑Fi"), not the phone's timing. Nor

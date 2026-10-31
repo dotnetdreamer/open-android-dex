@@ -55,6 +55,13 @@ import java.util.concurrent.TimeUnit;
  *     a window's menu on the computer asked. {@code pad.close} — no longer offered:
  *     the pad and the notification down; says whether a desktop is up
  *     ({@code desktop}), which the overlay permission is still needed for.</li>
+ * <li>{@code drag.watch} {@code {display}} — hear the drags on an app window's
+ *     display, and take the one the app server drops on its corner
+ *     ({@link PcDrags}); {@code drag.unwatch} {@code {display}} — its window
+ *     closed. {@code drag.events} {@code {wait}} — what those drags did since
+ *     the last call (started, dropped here, ended), waiting up to {@code wait}
+ *     ms for something to, as {@code linux.events} does, and the displays it
+ *     has a window on ({@code watching}).</li>
  * </ul>
  *
  * <p>{@code linux.apps} also says how far the setup is ({@code phase},
@@ -198,6 +205,26 @@ public class AppsProvider extends ContentProvider {
                         TouchpadNotice.hideForComputer(ctx);
                     });
                     out.put("ok", true).put("desktop", LauncherActivity.desktopShell() != null);
+                    break;
+                }
+                case "drag.watch": {
+                    int display = in.optInt("display", -1);
+                    String[] refused = new String[1];
+                    onMain(() -> refused[0] = PcDrags.get(ctx).watch(display));
+                    out.put("ok", refused[0] == null);
+                    if (refused[0] != null) out.put("message", refused[0]);
+                    break;
+                }
+                case "drag.unwatch": {
+                    int display = in.optInt("display", -1);
+                    onMain(() -> PcDrags.get(ctx).unwatch(display));
+                    out.put("ok", true);
+                    break;
+                }
+                case "drag.events": {
+                    long wait = Math.max(0, Math.min(EVENTS_WAIT_MAX_MS, in.optLong("wait", 10_000)));
+                    PcDrags drags = PcDrags.get(ctx);
+                    out.put("events", drags.takeEvents(wait)).put("watching", drags.watching());
                     break;
                 }
                 default:

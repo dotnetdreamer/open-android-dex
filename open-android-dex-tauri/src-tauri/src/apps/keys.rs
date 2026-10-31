@@ -32,6 +32,9 @@ pub mod code {
     pub const ENTER: u16 = 66;
     pub const DEL: u16 = 67;
     pub const ESCAPE: u16 = 111;
+    /// With Ctrl: copy and paste, as More's Copy and Paste send them.
+    pub const C: u16 = 31;
+    pub const V: u16 = 50;
 }
 
 /// Which modifiers are held, as Windows reports them.
