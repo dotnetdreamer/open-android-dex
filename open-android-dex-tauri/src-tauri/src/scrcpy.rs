@@ -4827,6 +4827,30 @@ pub fn live_session_output(app: &AppHandle) -> String {
         .join("\n\n")
 }
 
+/// What quitting would end here (quit.rs): the phones whose desktop is up or
+/// coming up, by serial, and the phone apps in scrcpy windows of their own, by
+/// package — how an app opens where it has no window of this app's own (Linux).
+/// The sound beside the app windows is not one: it goes with them.
+pub fn running(app: &AppHandle) -> (Vec<String>, Vec<String>) {
+    let Some(state) = app.try_state::<MirrorState>() else {
+        return (Vec::new(), Vec::new());
+    };
+    let map = state.0.lock().unwrap();
+    let mut desktops: Vec<String> = Vec::new();
+    let mut apps: Vec<String> = Vec::new();
+    for (key, s) in map.iter() {
+        if key.ends_with("|desktop") {
+            desktops.push(s.serial.clone());
+        } else if let Some(pkg) = &s.app_package {
+            apps.push(pkg.clone());
+        }
+    }
+    desktops.sort();
+    desktops.dedup();
+    apps.sort();
+    (desktops, apps)
+}
+
 /// Kill every running session — called when the app exits.
 ///
 /// The phone is put back too. Closing the desktop app is as much an "exit
