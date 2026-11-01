@@ -37,7 +37,7 @@ arbitrary until you know what was measured, or what the platform refuses.
 | Sound | `scrcpy.rs` (the audio companion) | the phone's sound here while any of its apps has a window |
 | Where the sound plays | `apps/sound.rs`, `AppAudio.java`, `Audio.java`, launcher `AppsProvider.java` (`media.mode`) | the title bar's menu: this computer, both, or one of the phone's own outputs |
 | Dropped files | `apps/drops.rs`, `AppDrop.java` | a file dropped on a window: into the phone's Download folder, an APK installed |
-| Dragging out | `AppDrags.java`, launcher `PcDrags.java`, `apps/mac`, `apps/win` | a drag the app lets go of, carried out of its window: dropped on the launcher's pixel, then this computer's own drag |
+| Dragging out | `AppDrags.java`, `LauncherOverlay.java`, launcher `PcDrags.java`, `apps/mac`, `apps/win` | a drag the app lets go of, carried out of its window: dropped on the launcher's pixel, then this computer's own drag |
 | What the phone hands over | `AppOffers.java`, `Content.java`, `apps/fetch.rs` | a drag's files and a copied picture's, read as the shell and taken here on connections of their own |
 | The phone's notifications | `notifications/`, `AppNotifications.java` | as this computer's own; a window opened at one (doc/phone-notifications.md) |
 | The phone as their touchpad | `apps/pad.rs`, `AppPad.java`, launcher `Touchpad.java`, `HostPointer.java` | the phone's screen moving this computer's pointer over these windows (doc/phone-touchpad.md, §10) |
@@ -925,6 +925,25 @@ fallback where a presentation is refused). The server asks for it as the window 
 something happens (`drag.events`), as Linux's windows are heard; the window
 tells this computer (`drag`, on and off).
 
+**Android 17.** There a presentation hides every other app's activities on its
+display whenever the app showing it has none of its own on screen: with no
+desktop running, the window's own app was never shown, and its window here
+waited on "Opening on …" for good (a Galaxy S25 Ultra's logs, 2026-10-31,
+and the Android 17 emulator; with a desktop running it was shown). So from
+Android 17 the pixel is an overlay, which hides nothing beneath it. The server
+lets the launcher draw over other apps while windows are open, and gives that
+back with the last one unless a desktop keeps it (`LauncherOverlay`, shared
+with the phone's touchpad; who gave it is kept on the phone, so a server that
+dies with it given still has it taken back). A launcher from before this,
+which would put a presentation there, is asked for no pixel at all
+(`drag.caps`): its windows open, and nothing is dragged out of them until the
+launcher is updated. An overlay has its own cost: Android hides every app's
+overlays while an app that wants none is on screen (the Files app, Settings, a
+prompt such as "Allow wireless debugging"), so on Android 17 a drag out of
+those is not heard. A pixel put up only at the hand-over would not hear it
+either: a window that comes while a drag is under way is not told of it there
+(tried).
+
 **Handing it over.** When the pointer leaves the picture with the primary
 button held while the phone says a drag is under way, this computer asks for
 it (`dragOut`). The server moves the phone's pointer onto the pixel and lets go
@@ -1079,8 +1098,31 @@ Dragging out on Windows 11 (2026-10-29 and 30), in the app:
   refuses the shell's input), pasted into Explorer, byte for byte, the app
   server staying up.
 
+Android 17's pixel (2026-10-31, the Pixel 9 Pro Fold emulator, read-only;
+this change's launcher and dex in the released v0.3.27 portable, whose
+computer's side it leaves as it was), with no desktop running:
+
+- v0.3.27 first: Files opened in a window stayed on "Opening on …" (its
+  activity never asked to be shown, `visibleRequested=false`), and showed 4.6 s
+  after the launcher was force-stopped, its pixel going with it — 63 s after
+  it was asked for. With this change, Files showed in 3.1 s, its pixel an
+  overlay (`dumpsys window`), the launcher let draw over others while it was
+  open and given back (`default`) when it closed;
+- `test/apps-drag-test.mjs`, which now opens Files by its activity and checks
+  for its picture: 8/8 there (its Android 17 branch), and 14/14 on the Galaxy
+  A13 (Android 12) with this dex and v0.3.27's launcher;
+- a picture dragged out of Chrome (a page served from this computer), handed
+  over and taken byte for byte, 761 of 761 bytes; the Files app's drag not
+  heard, as said;
+- `test/pad-test.mjs`: 27/28; the one failure, the pad not force-hidden by
+  `dumpsys`'s account while Settings shows (the pad itself says it is hidden),
+  is the same with v0.3.27's dex.
+
 Not yet:
 
+- **This change on a phone with Android 17**: a Galaxy S25 Ultra's logs with
+  v0.3.27 were read, not this change run there; nor yet on One UI's own apps
+  (My Files, Gallery), which may or may not hide overlays as Files does.
 - **A drag out landing on this computer**: on a Mac, the drop on Finder
   (this Mac's drag now begins at the next move of the mouse — the first try,
   from an older event, never landed); a second try stopped on an emulator too

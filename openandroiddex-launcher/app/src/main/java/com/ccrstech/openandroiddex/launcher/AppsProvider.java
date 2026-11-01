@@ -218,7 +218,15 @@ public class AppsProvider extends ContentProvider {
                 case "drag.unwatch": {
                     int display = in.optInt("display", -1);
                     onMain(() -> PcDrags.get(ctx).unwatch(display));
-                    out.put("ok", true);
+                    // A desktop keeps the overlay app-op the server may give back with its last window.
+                    out.put("ok", true).put("desktop", LauncherActivity.desktopShell() != null);
+                    break;
+                }
+                case "drag.caps": {
+                    // Asked first on Android 17, where a launcher from before this
+                    // puts a presentation on the window's display and its app is
+                    // never shown: this one puts an overlay there, or nothing.
+                    out.put("ok", true).put("overlayFrom", PcDrags.OVERLAY_ONLY_FROM);
                     break;
                 }
                 case "drag.events": {

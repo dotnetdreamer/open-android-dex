@@ -48,6 +48,19 @@ import java.util.Map;
  * through. It takes one only from the moment a drag starts until it ends, when
  * the drag has the pointer anyway.
  *
+ * <p>Up to Android 16 the pixel is a presentation window. Android 17 hides
+ * every other app's activities on a display that shows a presentation: with no
+ * activity of this app's on screen (no desktop running) the window's own app
+ * was never shown, and its window on the computer waited on "Opening on …" for
+ * good. There it is an overlay, which hides nothing beneath it, for as long as
+ * the server has this app let draw over others (its LauncherOverlay), and none
+ * where it has not: dragging out stops, the window does not. An overlay has a
+ * cost of its own: Android hides every app's overlays while an app that wants
+ * none is on screen — the Files app, Settings, a prompt such as "Allow wireless
+ * debugging" — so a drag out of those is not heard on Android 17. Nor would a
+ * presentation be that came only at the hand-over: Android 17 tells no window
+ * that comes while a drag is under way that it started (tried, 2026-10-31).
+ *
  * <p>What is dropped is handed on, not kept: each content URI granted to the
  * shell (for {@link #GRANT_MS}, then taken back), which reads it itself, and
  * the items — with their names and sizes, which this app may ask for — said
@@ -65,6 +78,12 @@ final class PcDrags {
      * Android hides while Settings shows.
      */
     private static final int TYPE_PRESENTATION = WindowManager.LayoutParams.FIRST_SYSTEM_WINDOW + 37;
+    /**
+     * Android 17, by number: the first that hides the apps under a
+     * presentation (see the class comment), and so the first where the
+     * pixel is an overlay only. Said to the server as {@code drag.caps}.
+     */
+    static final int OVERLAY_ONLY_FROM = 37;
     /** How long the shell may read what was dropped: the computer copies it as it is dropped there. */
     private static final long GRANT_MS = 15 * 60_000L;
     private static final int EVENTS_MAX = 64;
@@ -124,9 +143,15 @@ final class PcDrags {
         if (d == null) return "no display " + displayId;
         String refused = null;
         // A presentation window first: no permission to ask for. Where it is
-        // refused, an overlay, if this app may draw over others.
-        for (int type : new int[]{TYPE_PRESENTATION, WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY}) {
+        // refused, an overlay, if this app may draw over others. From Android
+        // 17 an overlay only: a presentation there hides the window's own app.
+        boolean overlayOnly = Build.VERSION.SDK_INT >= OVERLAY_ONLY_FROM;
+        int[] types = overlayOnly
+                ? new int[]{WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY}
+                : new int[]{TYPE_PRESENTATION, WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY};
+        for (int type : types) {
             if (type == WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY && !android.provider.Settings.canDrawOverlays(app)) {
+                if (overlayOnly) refused = "this app may not draw over other apps";
                 break;
             }
             try {

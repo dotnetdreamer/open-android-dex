@@ -69,6 +69,8 @@ final class AppPad {
     private static final int LINE_MAX = 4096;
     /** The pad says who it is at once; a connection that does not is let go. */
     private static final int HELLO_MS = 5000;
+    /** What the pad is, to the launcher's overlay app-op it needs ({@link LauncherOverlay}). */
+    private static final String OVERLAY_NEED = "the pad";
 
     private final Sink computer;
     private final SecureRandom random = new SecureRandom();
@@ -77,8 +79,6 @@ final class AppPad {
     private ServerSocket listening;
     private String token;
     private Socket pad;
-    /** The overlay app-op was given here, and is this run's to take back. */
-    private boolean overlayGiven;
     /** The launcher's app id, as the package manager says; -1 until asked. */
     private int launcherAppId = -1;
 
@@ -106,15 +106,7 @@ final class AppPad {
             t.start();
             AppServer.log("pad: listening on 127.0.0.1:" + s.getLocalPort());
         }
-        if (!overlayGiven && !overlayAllowed()) {
-            String out = AppTasks.exec(5, "cmd", "appops", "set", WmDaemon.LAUNCHER, "SYSTEM_ALERT_WINDOW", "allow");
-            if (overlayAllowed()) {
-                overlayGiven = true;
-                AppServer.log("pad: the launcher may draw over other apps while the computer wants the pad");
-            } else {
-                AppServer.log("pad: the launcher was not let draw over other apps (" + out.trim() + ")");
-            }
-        }
+        LauncherOverlay.need(OVERLAY_NEED);
         // Not idle, or its connection here is cut off the charger: see the class comment.
         String standby = AppTasks.exec(5, "cmd", "activity", "set-standby-bucket", WmDaemon.LAUNCHER, "active");
         if (!standby.trim().isEmpty()) {
@@ -154,20 +146,13 @@ final class AppPad {
         closeQuietly(pad);
         pad = null;
         token = null;
-        if (overlayGiven && !desktop) {
-            AppTasks.exec(5, "cmd", "appops", "set", WmDaemon.LAUNCHER, "SYSTEM_ALERT_WINDOW", "default");
-            overlayGiven = false;
-        }
+        // A launcher out of reach may be a desktop's: the app-op stays rather than take a taskbar down.
+        LauncherOverlay.release(OVERLAY_NEED, desktop || !told);
         AppServer.log("pad: no longer offered (" + why + ")" + (told ? "" : ", the launcher unreachable"));
     }
 
     synchronized boolean armed() {
         return listening != null;
-    }
-
-    private static boolean overlayAllowed() {
-        String out = AppTasks.exec(5, "cmd", "appops", "get", WmDaemon.LAUNCHER, "SYSTEM_ALERT_WINDOW");
-        return out.contains("SYSTEM_ALERT_WINDOW: allow");
     }
 
     // ── the pad's connection ──
