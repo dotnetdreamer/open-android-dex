@@ -237,6 +237,8 @@ pub struct Link {
     /// The display size last asked of the phone.
     asked: Mutex<DisplaySize>,
     closing: AtomicBool,
+    /// The app closes on the phone with the window, rather than going back to it.
+    end_app: AtomicBool,
     live: AtomicBool,
     clicked: Instant,
     /// The phone's CLOCK_MONOTONIC minus this computer's clock (µs), from the
@@ -265,6 +267,7 @@ impl Link {
             switching: AtomicU64::new(0),
             asked: Mutex::new(DisplaySize { w: 0, h: 0, dpi: 0 }),
             closing: AtomicBool::new(false),
+            end_app: AtomicBool::new(false),
             live: AtomicBool::new(false),
             clicked,
             clock_offset_us: AtomicI64::new(i64::MIN),
@@ -311,18 +314,36 @@ impl Link {
         self.lost.load(Ordering::SeqCst)
     }
 
-    /// The window is going. The phone is told what becomes of the app, unless
-    /// it is the one that said; the writer sends what it has and closes the
+    /// The window is going. The phone is told what becomes of the app — back
+    /// to the phone, or closed with the window ([`Link::end_app`]) — unless it
+    /// is the one that said; the writer sends what it has and closes the
     /// socket, and with it the phone's display. True the first time.
     pub fn close(&self, tell_phone: bool) -> bool {
         if self.closing.swap(true, Ordering::SeqCst) {
             return false;
         }
         if tell_phone {
-            self.send(wire::json(&json!({"t": "close", "app": "phone"})));
+            self.send(wire::json(&json!({"t": "close", "app": self.after_close()})));
         }
         self.out.lock().unwrap().take();
         true
+    }
+
+    /// When the window closes, the app closes on the phone too — the tasks on
+    /// its display removed, as swiping it out of Recents does — instead of
+    /// going back to the phone.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub fn end_app(&self) {
+        self.end_app.store(true, Ordering::SeqCst);
+    }
+
+    /// What the phone is told becomes of the app as the window closes.
+    fn after_close(&self) -> &'static str {
+        if self.end_app.load(Ordering::SeqCst) {
+            "close"
+        } else {
+            "phone"
+        }
     }
 
     /// The display size last asked of the phone.
@@ -545,22 +566,25 @@ fn answer_of(first: &wire::Msg) -> Result<(), Refused> {
     })
 }
 
-/// Hand the window's app back to the phone, over `route`, for a window closed
+/// Hand the window's app back to the phone — or close it there, if the window
+/// asked for that ([`Link::end_app`]) — over `route`, for a window closed
 /// while its connection was gone: the phone's server still has it waiting.
-pub fn hand_back(link: &Link, route: &Route) {
-    let Ok(mut stream) = adbsock::connect(&route.serial, &route.socket) else { return };
+/// False if the phone could not be told that way; true once it has been, or
+/// has answered that it no longer has the window.
+pub fn hand_back(link: &Link, route: &Route) -> bool {
+    let Ok(mut stream) = adbsock::connect(&route.serial, &route.socket) else { return false };
     let want = link.asked();
     let ask = json!({"t": "attach", "key": link.key, "w": want.w, "h": want.h, "dpi": want.dpi, "direct": route.direct});
     let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
     if stream.write_all(&wire::json(&ask)).is_err() {
-        return;
+        return false;
     }
-    if let Ok(Some(first)) = wire::read(&mut stream) {
-        if answer_of(&first).is_ok() {
-            let _ = stream.write_all(&wire::json(&json!({"t": "close", "app": "phone"})));
-            let _ = stream.flush();
-        }
+    let Ok(Some(first)) = wire::read(&mut stream) else { return false };
+    if answer_of(&first).is_err() {
+        return true;
     }
+    let close = wire::json(&json!({"t": "close", "app": link.after_close()}));
+    stream.write_all(&close).and_then(|()| stream.flush()).is_ok()
 }
 
 /// One of the window's connections: what the window sends, in order, on a
@@ -863,5 +887,29 @@ mod tests {
         assert_eq!(l.age_ms_at(1_000_000 + 4_000 - 12_500, 4_000), Some(12.5));
         // A frame from the future, or from long ago, is a clock that slipped.
         assert_eq!(l.age_ms_at(1_000_000 + 9_000, 4_000), None);
+    }
+
+    /// The app goes back to the phone as its window closes, unless the window
+    /// asked for it to close there too; once, and not when the phone said.
+    #[test]
+    fn a_closing_window_says_what_becomes_of_its_app() {
+        let said = |end: bool, tell_phone: bool| {
+            let (l, rx) = Link::new(Instant::now(), Arc::new(NoHost));
+            if end {
+                l.end_app();
+            }
+            assert!(l.close(tell_phone));
+            assert!(!l.close(tell_phone), "a window closes once");
+            rx.try_iter()
+                .map(|bytes| {
+                    let m = wire::read(&mut &bytes[..]).unwrap().unwrap();
+                    serde_json::from_slice::<Value>(&m.data).unwrap()
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(said(false, true), [json!({"t": "close", "app": "phone"})]);
+        assert_eq!(said(true, true), [json!({"t": "close", "app": "close"})]);
+        // The phone said the app went: there is nothing to tell it.
+        assert!(said(true, false).is_empty());
     }
 }

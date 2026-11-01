@@ -114,10 +114,11 @@ impl Window {
         }
     }
 
-    /// Close it, as its ✕ does: the app goes back to the phone.
+    /// Close it from this app, as it quits: the app goes back to the phone and
+    /// nothing is asked. (Its ✕ asks first, and closes the app there too.)
     pub fn close(&self) {
         unsafe {
-            let _ = PostMessageW(Some(self.shared.hwnd()), WM_CLOSE, WPARAM(0), LPARAM(0));
+            let _ = PostMessageW(Some(self.shared.hwnd()), WM_APP_CLOSE, WPARAM(0), LPARAM(0));
         }
     }
 
@@ -167,8 +168,9 @@ impl Window {
     }
 
     /// Its app handed back to the phone over `route`, for a window closed while its connection was gone.
-    pub fn hand_back(&self, route: &Route) {
-        link::hand_back(&self.shared.link, route);
+    /// False if the phone could not be told that way (link::hand_back).
+    pub fn hand_back(&self, route: &Route) -> bool {
+        link::hand_back(&self.shared.link, route)
     }
 
     /// A short note in the strip under its title bar (Surface::note).
@@ -425,6 +427,11 @@ struct Shared {
     linux: bool,
     /// When the ✕ last asked a Linux app to close its window; a second ✕ soon after closes it here.
     asked_close: Mutex<Option<Instant>>,
+    /// The ✕'s question is up (Ui::ask_to_close). What would destroy the
+    /// window meanwhile is never done from under it: it waits in `held` —
+    /// WM_APP_GONE or WM_APP_CLOSE — until the question has gone (Ui::hold).
+    asking: AtomicBool,
+    held: AtomicU32,
     /// Said under the bar for a while: where the sound went, how a drop goes.
     note: Mutex<Option<String>>,
     /// Counts the notes, so a note's fading never takes the next one with it.
@@ -466,6 +473,12 @@ impl Shared {
 
     fn send(&self, bytes: Vec<u8>) {
         self.link.send(bytes);
+    }
+
+    /// It shows its app: it has, and says nothing in its place. One whose
+    /// phone stopped answering says so instead, and the phone has the app back.
+    fn shows_app(&self) -> bool {
+        self.link.is_live() && self.message.lock().unwrap().is_none()
     }
 
     fn repaint(&self) {
@@ -612,6 +625,8 @@ const WM_APP_NOTE: u32 = WM_APP + 2;
 const WM_APP_DRAGGED: u32 = WM_APP + 3;
 /// Its files are here, or failed: Windows' own drag carries them on.
 const WM_APP_TAKEN: u32 = WM_APP + 4;
+/// This app closes the window (Window::close), as it quits: nothing is asked, and the app goes back to the phone.
+const WM_APP_CLOSE: u32 = WM_APP + 5;
 const RESIZE_TIMER: usize = 1;
 const NOTE_TIMER: usize = 2;
 /// How long a resize must hold before the phone is asked for it: the phone
@@ -814,6 +829,8 @@ fn ui_thread(spec: Spec, host: Arc<dyn Host>, opened: Sender<Result<Arc<Window>,
         render: Mutex::new(None),
         linux: spec.linux.is_some(),
         asked_close: Mutex::new(None),
+        asking: AtomicBool::new(false),
+        held: AtomicU32::new(0),
         note: Mutex::new(None),
         note_seq: AtomicU64::new(0),
         full_screen: AtomicBool::new(false),
@@ -1073,6 +1090,30 @@ enum Out {
     Dragging,
     /// The phone had nothing to hand over: not asked again until the next press.
     Refused,
+}
+
+/// What the ✕'s question came to (Ui::ask_to_close).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Answered {
+    /// The app went on the phone meanwhile: the window goes, telling the phone nothing.
+    Gone,
+    /// This app is quitting: the window goes, its app back on the phone.
+    HandBack,
+    /// OK: the window goes, and the app closes on the phone with it.
+    End,
+    /// Cancel: the window stays, its app with it.
+    Keep,
+}
+
+/// What was `held` while the question was up has its way, whatever the
+/// answer (Ui::hold); else the answer does, `ok` or not.
+fn answered(held: u32, ok: bool) -> Answered {
+    match held {
+        WM_APP_GONE => Answered::Gone,
+        WM_APP_CLOSE => Answered::HandBack,
+        _ if ok => Answered::End,
+        _ => Answered::Keep,
+    }
 }
 
 fn lo(l: LPARAM) -> i32 {
@@ -1715,6 +1756,63 @@ impl Ui {
         }
     }
 
+    /// The person's ✕ — the title bar's, the full-screen bar's, Alt+F4, the
+    /// taskbar's Close window — on a window showing its app. Closing it closes
+    /// the app on the phone too, as swiping it out of Recents does
+    /// (Link::end_app), so the window asks first: OK closes both, Cancel neither.
+    ///
+    /// The question is a modal loop on this thread, as a menu is. The phone
+    /// saying its app went, or this app closing its windows as it quits, takes
+    /// the question down and has its way, whatever the answer (Ui::hold).
+    fn ask_to_close(&mut self, hwnd: HWND) -> LRESULT {
+        let label = self.shared.label.lock().unwrap().clone();
+        let phone = super::phone_name(&self.shared.phone_name);
+        let title: Vec<u16> = format!("Close {label}?").encode_utf16().chain(std::iter::once(0)).collect();
+        let text = format!("This also closes {label} on {phone}, as swiping it away from your recent apps does.");
+        let text: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+        self.shared.asking.store(true, Ordering::SeqCst);
+        let answer = unsafe {
+            // Over its own window, which a close from the taskbar may find minimised.
+            if IsIconic(hwnd).as_bool() {
+                let _ = ShowWindow(hwnd, SW_RESTORE);
+            }
+            let style = MB_OKCANCEL | MB_ICONQUESTION | MB_SETFOREGROUND;
+            MessageBoxW(Some(hwnd), PCWSTR(text.as_ptr()), PCWSTR(title.as_ptr()), style)
+        };
+        self.shared.asking.store(false, Ordering::SeqCst);
+        match answered(self.shared.held.swap(0, Ordering::SeqCst), answer == IDOK) {
+            Answered::Gone => self.close(hwnd, false),
+            Answered::HandBack => self.close(hwnd, true),
+            Answered::End => {
+                self.shared.link.end_app();
+                self.close(hwnd, true);
+            }
+            // The question had the mouse: whatever was under it then is not hovered now.
+            Answered::Keep => self.set_hover(Hit::None),
+        }
+        LRESULT(0)
+    }
+
+    /// `msg` would destroy the window while the ✕'s question is up: it waits
+    /// until the question has gone, and the question is taken down, as Cancel
+    /// takes it — what it asked is settled. The app gone on the phone counts
+    /// for more than this app closing the window.
+    fn hold(&self, hwnd: HWND, msg: u32) {
+        if msg == WM_APP_GONE {
+            self.shared.held.store(msg, Ordering::SeqCst);
+        } else {
+            let _ = self.shared.held.compare_exchange(0, msg, Ordering::SeqCst, Ordering::SeqCst);
+        }
+        unsafe {
+            // The question is the window's enabled popup; with none, that is the window itself.
+            if let Ok(question) = GetWindow(hwnd, GW_ENABLEDPOPUP) {
+                if question != hwnd {
+                    let _ = PostMessageW(Some(question), WM_CLOSE, WPARAM(0), LPARAM(0));
+                }
+            }
+        }
+    }
+
     fn button_bit(msg: u32) -> u8 {
         match msg {
             WM_LBUTTONDOWN | WM_LBUTTONUP | WM_LBUTTONDBLCLK => 1, // BUTTON_PRIMARY
@@ -2219,7 +2317,15 @@ impl Ui {
                     LRESULT(0)
                 }
                 WM_ERASEBKGND => LRESULT(1),
-                WM_CLOSE => {
+                WM_CLOSE | WM_APP_CLOSE => {
+                    if self.shared.asking.load(Ordering::SeqCst) {
+                        // The ✕ again under its question waits for the answer;
+                        // this app closing the window takes the question down.
+                        if msg == WM_APP_CLOSE {
+                            self.hold(hwnd, msg);
+                        }
+                        return LRESULT(0);
+                    }
                     if self.shared.linux {
                         // Asked of the app, which may want to save first; the window
                         // goes when its X window does. A second ✕ soon after closes it
@@ -2232,11 +2338,17 @@ impl Ui {
                             self.shared.send(wire::json(&json!({"t": "close", "app": "ask"})));
                             return LRESULT(0);
                         }
+                    } else if msg == WM_CLOSE && self.shared.shows_app() {
+                        return self.ask_to_close(hwnd);
                     }
                     self.close(hwnd, true);
                     LRESULT(0)
                 }
                 WM_APP_GONE => {
+                    if self.shared.asking.load(Ordering::SeqCst) {
+                        self.hold(hwnd, msg);
+                        return LRESULT(0);
+                    }
                     self.close(hwnd, false);
                     LRESULT(0)
                 }
@@ -2395,5 +2507,22 @@ fn render_thread(shared: Arc<Shared>, rx: Receiver<RenderMsg>, icon: Option<Vec<
             on_screen.clear();
             stats_at = Instant::now();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// What came while the ✕'s question was up outranks its answer: the app
+    /// gone on the phone first, then this app quitting — never an OK.
+    #[test]
+    fn what_came_under_the_question_outranks_its_answer() {
+        assert_eq!(answered(0, true), Answered::End);
+        assert_eq!(answered(0, false), Answered::Keep);
+        assert_eq!(answered(WM_APP_CLOSE, true), Answered::HandBack);
+        assert_eq!(answered(WM_APP_CLOSE, false), Answered::HandBack);
+        assert_eq!(answered(WM_APP_GONE, true), Answered::Gone);
+        assert_eq!(answered(WM_APP_GONE, false), Answered::Gone);
     }
 }

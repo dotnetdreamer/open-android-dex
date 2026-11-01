@@ -6,8 +6,9 @@ with the real names and icons, and a click opens that one app in a native
 window on the computer: sized like a phone, sharp at the screen's scale, with
 the system's own window controls, its picture decoded by the computer's
 graphics hardware. No desktop is set up on the phone at all. Closing the
-window hands the app back to the phone, where it was. The phone's Linux apps
-are on the same page and open the same way.
+window closes the app on the phone too, once the person says so (a Mac's
+hands it back to the phone, where it was). The phone's Linux apps are on the
+same page and open the same way.
 
 It is lighter than the desktop because only the app's own pixels are
 composed, encoded, sent and decoded, and an app that is still costs nothing.
@@ -183,6 +184,30 @@ the app means it has gone. Each look is a binder call that unpacks every
 task's configuration; at a steady 400 ms it was the largest part of an idle
 window's cost. Only the person's own input counts as use: the clock's ping
 every two seconds once did, which kept the watcher fast for good.
+
+**Closing it.** Handed back, an app the person has finished with stays open
+on the phone, and the only way to close it from here was Back, over and over,
+to its last screen. So on Windows the person's ✕ — the title bar's, the
+full-screen bar's, Alt+F4, the taskbar's Close window — closes the app on the
+phone too, and asks first, in Windows' own message box ("Close Clock?"): OK,
+and `close` says `"app": "close"`, and the server removes the tasks on the
+window's display before it lets the display go, as swiping the app out of
+Recents does. It is not a force-stop, which would hold back the app's
+notifications until it is opened again. The rest is as after a swipe, and
+Android's and the app's to decide: whether its process ends, a service
+declared to stop with its task (`stopWithTask`) stopping, the app told
+(`onTaskRemoved`) and free to stop what it was doing — its music, say — or
+carry on. Its tasks on other displays are not touched. Cancel keeps both.
+
+A window closed while its connection is gone has the phone told over the
+first way back to it, tried as the keeper tries, every 0.7 s, until the phone
+has been told or has stopped waiting (`RECONNECT_FOR`, as the server's
+`AWAY_MS`). One whose phone stopped answering asks nothing: the phone has the
+app back already. This app quitting asks nothing and hands every app back, as
+a Mac's ✕ does. The question is a modal loop on the window's thread, as its
+menus are, and nothing destroys the window under it: the phone saying the
+app went, or this app quitting, takes the question down and has its way,
+whatever the answer.
 
 **Awake.** A display in its own power group (13+) has its own screen timeout,
 and a person reading a page moves nothing, so the server tells each display it

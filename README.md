@@ -190,8 +190,11 @@ half a second.
   windows only — it never clicks anything else on your computer. If your
   phone already lets Open Android DeX show notifications, it is in its
   notification shade too while a window is open
-- **Close the window and the app goes back to your phone,** right where you
-  left it. Whatever was on your phone's screen stays there
+- **Close the window and the app closes on your phone too,** as if you had
+  swiped it away from your recent apps, instead of staying open there. The
+  window asks first, in case the ✕ was a slip. Whatever was on your phone's
+  screen stays there. On a Mac, closing the window gives the app back to your
+  phone, right where you left it
 - **Unplug and carry on.** If your phone is on the same Wi‑Fi as your
   computer (Android 11 and newer), pulling the cable doesn't close anything:
   each window keeps going over Wi‑Fi, and moves back to the cable when you plug

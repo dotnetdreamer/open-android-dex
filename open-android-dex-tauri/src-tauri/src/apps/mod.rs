@@ -1332,17 +1332,25 @@ impl link::Host for WindowHost {
                     }
                 }
                 // Closed while its connection was gone: its app waits for this
-                // computer on the phone's server, and goes back to the phone
-                // now — over whichever way reaches the phone.
+                // computer on the phone's server, and goes back to the phone —
+                // or closes there, as its window asked — over whichever way
+                // reaches the phone first, tried as the keeper tries until the
+                // phone has been told or has stopped waiting (RECONNECT_FOR).
                 if let (Some(k), Some(w)) = (was, window) {
-                    if k.lost.is_some() {
+                    if let Some(lost) = k.lost {
                         let app = app.clone();
-                        std::thread::spawn(move || {
+                        std::thread::spawn(move || loop {
                             let devices = crate::adb::recent_devices(&app, Duration::from_secs(1));
                             if let Some(serial) = best_serial(&devices, &k.phone) {
-                                let route = link::Route { serial, ..w.route() };
-                                w.hand_back(&route);
+                                if w.hand_back(&link::Route { serial, ..w.route() }) {
+                                    return;
+                                }
                             }
+                            if lost.elapsed() >= RECONNECT_FOR {
+                                log::info!("apps [{}] {}: closed while its phone was away, which did not come back; the phone gives the app back itself", w.serial(), w.pkg);
+                                return;
+                            }
+                            std::thread::sleep(KEEP_LOST_EVERY);
                         });
                     }
                 }

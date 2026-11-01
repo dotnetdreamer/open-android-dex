@@ -151,8 +151,9 @@ impl Window {
     }
 
     /// Its app handed back to the phone over `route`, for a window closed while its connection was gone.
-    pub fn hand_back(&self, route: &Route) {
-        link::hand_back(&self.shared.link, route);
+    /// False if the phone could not be told that way (link::hand_back).
+    pub fn hand_back(&self, route: &Route) -> bool {
+        link::hand_back(&self.shared.link, route)
     }
 
     /// A short note in the strip under its title bar (Surface::note).
