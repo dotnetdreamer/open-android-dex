@@ -201,8 +201,10 @@ pub trait Host: Send + Sync {
     fn sound_menu(&self) -> Vec<sound::Item>;
     /// A choice from that menu; `window` hears how it went.
     fn pick_sound(&self, choice: sound::Choice, window: Arc<dyn Surface>);
-    /// Files dropped on the window, for the phone; `window` hears how they go.
-    fn dropped(&self, paths: Vec<PathBuf>, window: Arc<dyn Surface>);
+    /// Files dropped on the window, for the phone: `on` the app in it, where
+    /// they were let go there, else not on the app (its title bar). `window`
+    /// hears how they go.
+    fn dropped(&self, paths: Vec<PathBuf>, on: Option<super::drops::On>, window: Arc<dyn Surface>);
     /// More's "Use phone as touchpad": the phone's screen up as the touchpad
     /// of its windows here (apps/pad.rs); `window` hears how it went.
     fn touchpad(&self, window: Arc<dyn Surface>);
@@ -766,7 +768,7 @@ mod tests {
             Vec::new()
         }
         fn pick_sound(&self, _choice: sound::Choice, _window: Arc<dyn Surface>) {}
-        fn dropped(&self, _paths: Vec<PathBuf>, _window: Arc<dyn Surface>) {}
+        fn dropped(&self, _paths: Vec<PathBuf>, _on: Option<super::super::drops::On>, _window: Arc<dyn Surface>) {}
         fn touchpad(&self, _window: Arc<dyn Surface>) {}
         fn copying(&self, _window: Arc<dyn Surface>) {}
     }

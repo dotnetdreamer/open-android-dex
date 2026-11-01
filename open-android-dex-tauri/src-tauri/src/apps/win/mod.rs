@@ -82,9 +82,10 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     VK_F11, VK_F4, VK_LBUTTON, VK_LWIN, VK_MENU, VK_NUMLOCK, VK_RBUTTON, VK_RMENU, VK_RWIN, VK_SHIFT, VK_SPACE,
 };
 use windows::Win32::UI::Shell::PropertiesSystem::{IPropertyStore, SHGetPropertyStoreForWindow};
-use windows::Win32::UI::Shell::{DragAcceptFiles, DragFinish, DragQueryFileW, SHCreateDataObject, SHDoDragDrop, HDROP};
+use windows::Win32::UI::Shell::{DragAcceptFiles, DragFinish, DragQueryFileW, DragQueryPoint, SHCreateDataObject, SHDoDragDrop, HDROP};
 use windows::Win32::UI::WindowsAndMessaging::*;
 
+use super::drops;
 use super::fetch::{self, Offer, Taking};
 use super::keys::{self, Mods, Press};
 use super::link::{self, DisplaySize, Event, Host, Link, NetSpec, Refused, Route, Spec, Surface};
@@ -1399,10 +1400,14 @@ impl Ui {
         }
     }
 
-    /// Paths dropped from Explorer, for the phone.
+    /// Paths dropped from Explorer, for the phone: let go on the picture, for
+    /// the app there; on the title bar, for the phone's Download folder.
     fn dropped(&self, drop: HDROP) {
         let mut paths = Vec::new();
+        let mut at = POINT::default();
+        let in_client;
         unsafe {
+            in_client = DragQueryPoint(drop, &mut at).as_bool();
             let count = DragQueryFileW(drop, u32::MAX, None);
             for i in 0..count {
                 let len = DragQueryFileW(drop, i, None) as usize;
@@ -1412,9 +1417,15 @@ impl Ui {
             }
             DragFinish(drop);
         }
-        if !paths.is_empty() {
-            self.shared.link.host().dropped(paths, self.shared.clone());
+        if paths.is_empty() {
+            return;
         }
+        let on_app = in_client && at.y >= self.bar_height() && self.bar_hit(at.x, at.y) == Hit::None;
+        let on = on_app.then(|| {
+            let (x, y) = self.shared.to_display(at.x, at.y);
+            drops::On { key: self.shared.link.key().to_string(), x, y }
+        });
+        self.shared.link.host().dropped(paths, on, self.shared.clone());
     }
 
     fn toggle_full_screen(&mut self, hwnd: HWND) {

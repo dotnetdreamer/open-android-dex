@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { getVersion } from "@tauri-apps/api/app";
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { error as logError, info as logInfo, warn as logWarn } from "@tauri-apps/plugin-log";
 import { openUrl } from "@tauri-apps/plugin-opener";
@@ -701,13 +702,64 @@ export default function App() {
   const stalled =
     phase.kind === "ready" && sessions[`${phase.device.serial}|desktop`]?.status === "reconnecting";
 
+  // ── Files dropped on this window, or pasted in it: into the phone's Downloads ──
+  // The phone the page in front shows: the Desktop page's (its desktop's, else
+  // the one it offers to open), the Apps page's, or the Linux page's on the
+  // cable (RemotePanel) — so with two phones they never go to the one out of
+  // sight. Reachable now, or none. A drop on one of its apps' windows goes to
+  // that app instead (apps/drops.rs).
+  const shownPhone =
+    tab === "desktop"
+      ? "device" in phase
+        ? phase.device
+        : readyDevice
+      : tab === "apps"
+        ? readyDevice
+        : devices.find((d) => d.state === "device");
+  const dropPhone = devices.find((d) => d.state === "device" && d.serial === shownPhone?.serial);
+  const dropPhoneRef = useRef(dropPhone);
+  dropPhoneRef.current = dropPhone;
+  const [dropping, setDropping] = useState(false);
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    let live = true;
+    getCurrentWebview()
+      .onDragDropEvent(({ payload }) => {
+        if (payload.type === "enter") setDropping(true);
+        else if (payload.type === "leave") setDropping(false);
+        else if (payload.type === "drop") {
+          setDropping(false);
+          const phone = dropPhoneRef.current;
+          if (!phone) {
+            say("Connect your phone to send it files", "warn");
+            return;
+          }
+          logInfo(`drop: ${payload.paths.length} item(s) for ${phone.serial}`);
+          const events = new Channel<{ text: string; busy: boolean; failed: boolean }>(({ text, busy, failed }) =>
+            say(text, failed ? "bad" : busy ? "info" : "ok"),
+          );
+          invoke("apps_drop", { serial: phone.serial, paths: payload.paths, events }).catch((e) =>
+            say("Couldn't send them to your phone", "bad", String(e)),
+          );
+        }
+      })
+      .then((u) => {
+        if (live) unlisten = u;
+        else u();
+      });
+    return () => {
+      live = false;
+      unlisten?.();
+    };
+  }, [say]);
+
   /**
    * Right-click Paste: the files copied here — in Explorer, in Finder — to
-   * the phone, down the same path a drop on an app window takes them
-   * (apps_paste). The clipboard is asked as the menu opens, so Paste is live
-   * only when there is something to send.
+   * the phone a drop here goes to, into its Download folder as a drop takes
+   * them (apps_paste). The clipboard is asked as the menu opens, so Paste is
+   * live only when there is something to send.
    */
-  const pasteSerial = readyDevice?.serial;
+  const pasteSerial = dropPhone?.serial;
   const paste = useCallback(() => {
     if (!pasteSerial) return;
     const events = new Channel<{ text: string; busy: boolean; failed: boolean }>(({ text, busy, failed }) =>
@@ -841,6 +893,26 @@ export default function App() {
       </main>
       <ContextMenu actions={contextActions} />
       <Toast toast={toast} onDismiss={dismiss} />
+      {dropping && (
+        <div
+          className="pointer-events-none fixed inset-2 z-50 flex items-center justify-center rounded-[var(--item-radius)] border-2 border-dashed border-[var(--accent)]"
+          role="status"
+          aria-live="polite"
+        >
+          <div className="card-raised max-w-[320px] rounded-[var(--item-radius)] px-5 py-4 text-center">
+            {dropPhone ? (
+              <>
+                <p className="text-[var(--ink-1)]">Send to {deviceName(dropPhone)}</p>
+                <p className="mt-1 text-[12.5px] text-[var(--ink-3)]">
+                  Files go to its Downloads folder. An app (.apk) is installed.
+                </p>
+              </>
+            ) : (
+              <p className="text-[var(--ink-1)]">Connect your phone to send it files</p>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

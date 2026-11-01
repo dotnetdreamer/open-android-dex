@@ -70,6 +70,7 @@ use objc2_foundation::{
 use objc2_quartz_core::{CALayer, CATransaction};
 use serde_json::json;
 
+use super::drops;
 use super::fetch::{self, Offer, Taking};
 use super::keys::{self, mac as mk};
 use super::link::{self, DisplaySize, Event, Host, Link, NetSpec, Refused, Route, Spec, Surface};
@@ -1291,7 +1292,13 @@ define_class!(
             let taken = !paths.is_empty();
             if taken {
                 let shared = self.ivars().shared.clone();
-                shared.link.host().dropped(paths, shared.clone());
+                // Let go on the picture: for the app there.
+                let p = self.convertPoint_fromView(sender.draggingLocation(), None);
+                let on = self.on_picture(p).then(|| {
+                    let (x, y) = self.at_display(p);
+                    drops::On { key: shared.link.key().to_string(), x, y }
+                });
+                shared.link.host().dropped(paths, on, shared.clone());
             }
             taken
         }

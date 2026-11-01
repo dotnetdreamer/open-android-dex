@@ -36,7 +36,7 @@ arbitrary until you know what was measured, or what the platform refuses.
 | Linux apps | launcher `AppsProvider.java`, `LinuxWindows.java`, `LinuxWindowActivity.java` | the guest's apps and icons, starting one, its X window on an app window's display |
 | Sound | `scrcpy.rs` (the audio companion) | the phone's sound here while any of its apps has a window |
 | Where the sound plays | `apps/sound.rs`, `AppAudio.java`, `Audio.java`, launcher `AppsProvider.java` (`media.mode`) | the title bar's menu: this computer, both, or one of the phone's own outputs |
-| Dropped files | `apps/drops.rs`, `AppDrop.java` | a file dropped on a window: into the phone's Download folder, an APK installed |
+| Dropped files | `apps/drops.rs`, `AppDrop.java`, `AppDropIn.java`, launcher `DropsProvider.java`, `PcDrags.java`, `App.tsx` | a file dropped on a window's app: given to that app, as a drop from another app; on its title bar or the main window: into the phone's Download folder; an APK installed |
 | Dragging out | `AppDrags.java`, `LauncherOverlay.java`, launcher `PcDrags.java`, `apps/mac`, `apps/win` | a drag the app lets go of, carried out of its window: dropped on the launcher's pixel, then this computer's own drag |
 | What the phone hands over | `AppOffers.java`, `Content.java`, `apps/fetch.rs` | a drag's files and a copied picture's, read as the shell and taken here on connections of their own |
 | The phone's notifications | `notifications/`, `AppNotifications.java` | as this computer's own; a window opened at one (doc/phone-notifications.md) |
@@ -429,7 +429,14 @@ windows' touchpad — `padOn`, `padOff` and `pad`, in doc/phone-touchpad.md, §1
 A dropped file's connection is the one exception to the framing: its first
 message is `put` (the name, the size, the folder it goes in, whether it is an
 APK to install), and exactly that many bytes follow it, raw. The phone answers
-`got` as they land and `put` once, with how it went. A file this computer
+`got` as they land and `put` once, with how it went. A file dropped on the app
+in a window says `stage` (its drop's batch) and `i` too, and is answered
+`staged` instead of with a path; once the last is there, one more connection
+asks for the drop: `dropIn` (the window's key, the batch, the point, and the
+staged files by `i` and name), answered once by `dropIn` with `taken` (and
+`files`, each one the app has not opened, as `put` answers for one in
+Download), or `taken` false, `why` (`refused`, `cannot`) and each file so
+("Dropping files"). A file this computer
 takes from the phone is the same the other way: `get` (the offer's number and
 the item's), the phone's `get` with its name, type and size (-1 unknown), and
 its bytes, raw, until the connection closes.
@@ -596,6 +603,21 @@ such character. A key that does something — Enter, the arrows, Backspace — a
 any key held with Ctrl or the Windows key goes as Android's key code with its
 modifiers, a letter by the letter the layout types (Ctrl+A on AZERTY is select
 all). The computer's key repeat is the phone's.
+
+Ctrl, Alt and Shift reach the app as keys of their own as well, around the key
+they came with, as a keyboard's do: Ctrl+A is Ctrl down, A down, A up, Ctrl
+up (`AppInput.key`). Android reads what is held from each event's meta, so a
+text field's select-all worked without them, but not everything does. A text
+field's Shift+arrow reads Shift from Shift's own key, and selected nothing; an
+app that keeps its own count of the keys held — a remote desktop such as
+TeamViewer, passing keys on to a computer — saw an A alone. The phone makes
+these keys from the meta, and the computer sends no modifier keys, so none is
+ever pressed alone: Alt let go on its own would open the menus at the far end
+of such an app, and Shift alone switch an input method's language. They go up
+before a key that no longer has them, and with the last key held with them;
+typed text brings its own Shift, the virtual keyboard's. The Windows key stays
+in the meta only: the phone acts on it alone (the app drawer, the assistant),
+and the computer keeps almost every Windows-key shortcut for itself.
 
 ## The clipboard
 
@@ -856,14 +878,80 @@ none at all in full screen.
 
 ## Dropping files
 
-Files dropped on a window — from Explorer, or from Finder — go to the phone as
-a drop on the desktop does: into its Download folder, and an APK installed
-instead. A folder brings its files, in folders of the same names (links not
+Files dropped on the app in a window — from Explorer, or from Finder — go to
+that app, as a drop from another of the phone's apps would: a chat attaches
+them, a text field takes a text file's text. Dropped on a window's title bar
+(Windows), or on this app's main window, they go where a drop on the desktop
+goes: into the phone's Download folder. So do files dropped on an app that
+takes none at that point, and the window says so ("Settings didn't take
+report.pdf: it's in Downloads on your phone"). An APK is installed wherever it
+is dropped, and a folder, which no app takes, goes to Download with its files.
+
+In Download a folder brings its files, in folders of the same names (links not
 followed, at most 5000 files). Nothing is overwritten and nothing is asked: a
 name already there becomes "report (2).pdf", as wherever else files arrive on
 this phone (`WebFiles.uniqueIn`), and the window says the name it got. Names
 are made safe for shared storage, which may be FAT underneath, and none can
 climb out of Download.
+
+**Into the app.** The shell can leave no file anywhere an app may read, and
+the server, which is no app, can start no drag ("Dragging out"). So each file
+goes first into the launcher's cache: the server opens it for writing through
+the launcher's provider, as `content write` would (`stage`, AppDrop). Once the
+last is there, the window drops them all (`dropIn`, AppDropIn): the
+launcher's corner of the display is armed with them, the server presses on
+it, and the press starts a drag of them there. It is a global drag, and the
+right to read the files goes to whichever app takes it; the launcher's
+`DropsProvider` serves them, and nobody else may read them. The server carries
+the press to where the computer's pointer let go and lets go there. The app
+under that point takes the drop as it takes any, or does not, and how the drag
+ended says which. Taken, the files stay in the launcher's cache for a day, as
+the app may read them again while it sends them; not taken, they are copied
+to Download, and go. On a Galaxy A13 the drop took 0.4 to 1.4 s, from asking
+to the answer.
+
+Taken is said of the whole drop, not of each file: a chat may take a drop's
+photos and leave the PDF with them, and a text field takes any drop and reads
+only text. So the launcher keeps which files an app has opened (each open
+goes through `DropsProvider`), and once a drop is taken the server waits up
+to 5 s for the app to open them all (`drop.opened`). Each it has not is
+copied to Download as well, and stays the app's to read, as an app that reads
+nothing until it sends may still do. The window says so: "Dropped 2 of 3
+files into WhatsApp; report.pdf is in Downloads on your phone". An app that
+reads all it takes, as one showing what it was given does, answers no later
+than its last read.
+
+**The corner pressed.** It is an overlay of the launcher's, one pixel, put up
+for the press (PcDrags `arm`); the server lets the launcher draw over other
+apps while windows are open, as it does for Android 17's drag pixel
+(`LauncherOverlay`). The drag pixel itself, a presentation below Android 17,
+was not enough: on a Galaxy A13 an app's window sat above it while the app's
+opening was still being revealed (an animation leash, for seconds on end, and
+on some days nearly every time), and the press went to the app. The same is
+the likeliest cause of the A13's occasional missed drags out ("Dragging
+out"), which still land on that pixel. The launcher answers only once the
+overlay has drawn, and the server presses 400 ms after: 150 ms missed on the
+A13. An app that hides overlays (Files, Settings) hides that one too, so the
+pixel is pressed next; and Samsung's Settings search sat above both. A press
+neither took went to the app's own corner, where its Back arrow often is: it
+is cancelled, not let go, and the files go to Download. So do drops on
+Android 11 and older, which have no pixel, and on a Linux app's window, whose
+app is X's. While the drag is carried, the computer's own pointer goes
+nowhere, and the press is the drag's alone (`AppInput.carry`): the window
+losing the keyboard on the computer, or its connection going, lets go of
+every other key and button but not that one, which would drop the files
+short of where they were let go, and the carry's next step press the app.
+
+A text field asks a provider which types it can give before it takes a
+dropped file as its text (`getStreamTypes`); a provider that names none (the
+default) had its drop taken and nothing put in.
+
+**The main window.** A drop on this app's own window goes to the phone the
+page in front shows: the Desktop page's (its desktop's, else the one it
+offers to open), the Apps page's, or the Linux page's on the cable. With two
+phones connected, never the one out of sight. Into Download, an APK
+installed, its notes as the window's toast. While files are dragged over it,
+the window says where they will go.
 
 Not the desktop's way, scrcpy's `adb push`: a process per file, adb's own
 command line, `run_adb`'s 25-second limit, and no progress a window could
@@ -1118,7 +1206,78 @@ computer's side it leaves as it was), with no desktop running:
   `dumpsys`'s account while Settings shows (the pad itself says it is hidden),
   is the same with v0.3.27's dex.
 
+Shortcut keys and drops into the app (2026-10-31; the server by
+`test/apps-keys-test.mjs` and `test/apps-drop-in-test.mjs`, speaking the wire
+as the computer does; for drops, this launcher put on each phone by the
+desktop):
+
+- the keys on a Galaxy A13 (Android 12) and the Android 16 emulator: Shift+Left
+  selected nothing in Settings' search with the server from before this, and
+  selects the last word with this one; Ctrl+A and Ctrl+C copy the field's text
+  with both. The Android 15 emulator ran this one only. On a debuggable Android 15
+  emulator the order itself, as its input dispatcher dispatched it: Ctrl down,
+  A down, A up, Ctrl up; Ctrl let go first going up first; Ctrl+Alt+A
+  unwinding the other way round; typed text after them with only its own
+  Shift; a window losing the keyboard with Ctrl+Shift+Left held letting go of
+  all three, once each (11/11);
+- a text file dropped on Settings' search field on the A13, from the drag
+  pixel (before the overlay): the field took it and its text was the file's,
+  read through the drop's permission (Ctrl+A, Ctrl+C), in 0.37–0.61 s, three
+  runs (two earlier ones took it and put nothing in, before `getStreamTypes`);
+  a drop where nothing takes it refused and its file in Download byte for
+  byte;
+- with the overlay, the final build: the Android 17 and 15 emulators 6/6 each
+  (a drop nothing takes refused, in Download byte for byte, the app not
+  clicked on the way, the launcher's drawing over others given back with the
+  window); on the A13, two drops on Chrome dragged from the overlay at the
+  first press and were refused there (1.0–1.4 s). The same drops before the
+  overlay, and on Files and Settings' search, missed the pixel: the press was
+  cancelled, the app not clicked, the files in Download. The existing drag-out
+  test failed the same way that day on the A13 (the drop missed the pixel),
+  where it passed 14/14 before;
+- the computer's half: `drops.rs`'s sentences by its tests, and both computers
+  compiled (Windows built and run; the Mac type-checked for Apple silicon).
+
+A drop an app uses part of, and a drop carried while the window loses the
+keyboard (2026-11-01; `test/apps-drop-in-test.mjs` on a read-only Android 13
+emulator, this launcher put on it by the desktop):
+
+- Settings' search there is Compose too: 6/6, the field's cases not tried;
+- an activity of nothing but a plain text field instead (a scratch build, put
+  on that emulator only, as no app on the image has a text field that is a
+  View), named to the test: 16/16 in three runs, each drop pressed on the
+  overlay. A text file dropped on the field was taken and opened, its text
+  the field's, nothing put in Download (1.3–3.1 s). A text file and a picture
+  dropped together were taken; the picture, never opened, was in Download as
+  well, byte for byte, and the text file not, its text the field's (7.0–9.1 s,
+  the server waiting its 5 s for the picture). A text file dropped while
+  `blur` came every 20 ms, 45 to 140 of them during the drop, was taken where
+  it was let go, its text the field's;
+- the server from before these two, on the same emulator and app: 12/16. The
+  picture was taken with the text file and nothing said of it, in Download or
+  not; and under the blurs the press was let go before its drag had started,
+  so no drag was made, the file went to Download and the field stayed empty;
+- the main window choosing its phone by the page in front: compiled
+  (TypeScript), not run.
+
 Not yet:
+
+- **A drop from Explorer onto an app window, and onto the main window**: the
+  computer's half of both — the drop point, the title bar's way to Download,
+  the main window's own drop and its toast — compiled, and the phone's half
+  tested by the wire, but not one real drop made yet. Nor on a Mac.
+- **A real app taking a drop from the overlay**: only the scratch app's plain
+  text field has. Chrome's address bar refused one, and the apps here that
+  took drops hide overlays or are Compose; a chat app's attaching a file
+  (WhatsApp) not tried, none being on the test phones. So neither is how long
+  a chat takes to open what it attaches, which the 5 s wait for it assumes.
+- **The main window with two phones connected**: the drop following the page
+  in front is compiled, not run.
+- **TeamViewer itself**, whose missing Ctrl this was for: not on the test
+  phones. The keys it now gets are a keyboard's, as checked above.
+- **The drag pixel on the A13**: why an app's window rides above it on some
+  days, and whether dragging out should move to an overlay as dropping in did
+  (an overlay is hidden over Files and Settings, which the pixel is not).
 
 - **This change on a phone with Android 17**: a Galaxy S25 Ultra's logs with
   v0.3.27 were read, not this change run there; nor yet on One UI's own apps

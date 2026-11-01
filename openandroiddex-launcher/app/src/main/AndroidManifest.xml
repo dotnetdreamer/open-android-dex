@@ -169,6 +169,14 @@
             android:authorities="com.ccrstech.openandroiddex.launcher.apps"
             android:exported="true"
             android:permission="android.permission.DUMP" />
+        <!-- Files a computer dropped on one of those windows, for the app they
+             were dropped on: not exported, so only the app a drop grants a
+             file to may read it (DropsProvider). -->
+        <provider
+            android:name=".DropsProvider"
+            android:authorities="com.ccrstech.openandroiddex.launcher.drops"
+            android:exported="false"
+            android:grantUriPermissions="true" />
         <!-- Brings remote access back after a reboot, an update, and the
              desktop app's end-of-session force-stop (which sends RESUME over
              adb). DUMP for the same reason as the provider above: the system

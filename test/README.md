@@ -115,6 +115,29 @@ unknown window, the server stopping 30 s after its shell went with nobody
 back, and "stop" ending it at once. It opens the phone's Settings in windows
 of its own, and every one goes back to the phone by the end.
 
+Two more speak the same wire to a window of Settings' search, and end it
+after:
+
+```sh
+node test/apps-keys-test.mjs [serial]
+node test/apps-drop-in-test.mjs [serial] [package/activity]
+```
+
+The first sends keys as the computer sends them. Ctrl+A and Ctrl+C copy the
+field's text, and Shift+Left selects: a text field reads Shift from Shift's
+own key, which the phone now sends around the arrow. On a debuggable build
+(an emulator's google_apis image) it also reads the order of the keys the
+phone dispatched: Ctrl down, A, Ctrl up, and the rest. The second needs this
+build's launcher on the phone. It stages a text file and drops it on the
+search field, which takes it as its text. A text file and a picture dropped
+together are taken too, and the picture, which no text field opens, lands
+in Download as well, byte for byte: an app may use only part of a drop. A
+drop made while the window loses the keyboard every 20 ms still lands on the
+field. These three need the field to be a TextView, not Compose, as it is on
+newer Pixel images; name an activity with one, and its first text field
+stands in for search's. Last, it drops a file where nothing takes it, which
+lands in Download byte for byte, without clicking the app on the way.
+
 The phone's notifications on the computer (`doc/phone-notifications.md`) have
 their phone's half checked the same way:
 
