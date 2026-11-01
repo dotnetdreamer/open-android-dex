@@ -4104,7 +4104,7 @@ dependencies = [
 
 [[package]]
 name = "open-android-dex-tauri"
-version = "0.3.28"
+version = "0.3.29"
 dependencies = [
  "block2",
  "dispatch2",
