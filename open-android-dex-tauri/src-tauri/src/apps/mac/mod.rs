@@ -14,8 +14,9 @@
 //! type what they type (keys.rs, `mac`). Its title bar is macOS's, with a Back
 //! button beside the window's buttons, since an Android app needs one and a
 //! Mac keyboard has none; ⌘[ is Back too, as in Safari, and so is a mouse's
-//! side button. Beside Back is More (☰), the window's own menu: full screen.
-//! At the bar's other end, a speaker: where the phone's sound plays
+//! side button. Beside Back is More (☰), the window's own menu: a phone's or
+//! a tablet's size for the app — the window made that shape (shape.rs) — and
+//! full screen. At the bar's other end, a speaker: where the phone's sound plays
 //! (sound.rs), as a menu. A Mac pins apps to the Dock, not windows, so the
 //! windows are this app's, listed under its Dock icon and in its Window menu.
 //! Files dropped on one from Finder go to the phone (drops.rs), and a note
@@ -74,12 +75,16 @@ use super::drops;
 use super::fetch::{self, Offer, Taking};
 use super::keys::{self, mac as mk};
 use super::link::{self, DisplaySize, Event, Host, Link, NetSpec, Refused, Route, Spec, Surface};
+use super::shape;
 use super::sound;
 use super::wire;
 use video::{Fed, Feed};
 
 /// How long a note stays under the title bar once nothing is happening any more.
 const NOTE_MS: u64 = 4500;
+/// The title bar's height a window is fitted to its screen with, in points:
+/// macOS 26's (doc/sharp-desktop.md, "The fit").
+const TITLE_BAR: f64 = 32.0;
 /// A note's room in its strip: above and below its lines, and at their sides.
 const NOTE_PAD_Y: f64 = 6.0;
 const NOTE_PAD_X: f64 = 12.0;
@@ -250,9 +255,14 @@ impl Surface for Shared {
         self.label.lock().unwrap().clone()
     }
 
+    /// For an Android app, at the density that makes a wide window a tablet's size.
     fn wanted(&self) -> DisplaySize {
         let (w, h) = *self.area.lock().unwrap();
-        DisplaySize::for_area(w, h, self.scale() as f32)
+        if self.linux {
+            DisplaySize::for_area(w, h, self.scale() as f32)
+        } else {
+            DisplaySize::for_app(w, h, self.scale() as f32)
+        }
     }
 
     fn video(&self, flags: u8, pts: u64, data: Vec<u8>) {
@@ -539,6 +549,8 @@ struct Look {
     icon_png: Option<Vec<u8>>,
     cascade: u32,
     size: Option<(u32, u32)>,
+    /// How its app's last window closed (shape.rs).
+    shape: Option<shape::Shape>,
 }
 
 /// Open a window for `spec`; it runs until it is closed. The window shows at
@@ -569,6 +581,7 @@ pub fn open(spec: Spec, host: Arc<dyn Host>) -> Result<Arc<Window>, String> {
         icon_png: spec.icon_png.clone(),
         cascade: spec.cascade,
         size: spec.size,
+        shape: spec.shape,
     };
     let (tx, rx) = mpsc::channel::<()>();
     // Whichever comes first: the main thread starting on the window, or this
@@ -614,23 +627,25 @@ pub fn open(spec: Spec, host: Arc<dyn Host>) -> Result<Arc<Window>, String> {
 }
 
 /// The window, on the screen the pointer is on (the one the click was made
-/// on), phone-shaped or a Linux window's own size, cascaded from the windows
-/// already open.
+/// on), cascaded from the windows already open: as its app's last window
+/// closed (shape.rs), a phone's shape the first time, or a Linux window's own
+/// size.
 fn make(mtm: MainThreadMarker, look: &Look, shared: &Arc<Shared>) {
     let screen = screen_under_pointer(mtm);
     let (visible, scale) = screen
         .as_ref()
         .map(|s| (s.visibleFrame(), s.backingScaleFactor()))
         .unwrap_or((NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(1440.0, 900.0)), 2.0));
-    // 412 × 915 points: a current phone's own shape and size — or the size a
-    // Linux window asked for, which is in pixels.
-    let (mut w, mut h) = match look.size {
-        Some((pw, ph)) => ((pw.max(160) as f64) / scale, (ph.max(120) as f64) / scale),
-        None => (412.0, 915.0),
+    let room = (visible.size.width, visible.size.height);
+    let (w, h, zoomed) = match look.size {
+        // A Linux window asked for its size, in pixels.
+        Some((pw, ph)) => {
+            let (w, h) = shape::fit(((pw.max(160) as f64) / scale, (ph.max(120) as f64) / scale), room, TITLE_BAR);
+            (w, h, false)
+        }
+        None => shape::opening(look.shape, room, TITLE_BAR),
     };
-    let fit = ((visible.size.height * 0.9 - 32.0) / h).min(visible.size.width * 0.95 / w).min(1.0);
-    w = (w * fit).round();
-    h = (h * fit).round();
+    let (w, h) = (w.round(), h.round());
     let content = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(w, h));
 
     let style = NSWindowStyleMask::Titled
@@ -665,7 +680,10 @@ fn make(mtm: MainThreadMarker, look: &Look, shared: &Arc<Shared>) {
     let step = 28.0 * (look.cascade % 8) as f64;
     let x = visible.origin.x + (visible.size.width - frame.size.width) / 2.0 + step;
     let y = visible.origin.y + (visible.size.height - frame.size.height) / 2.0 - step / 2.0;
-    window.setFrameOrigin(NSPoint::new(x, y.max(visible.origin.y)));
+    // Cascaded, but kept on the screen: a window as large as it, kept so, is where it fits.
+    let x = x.min(visible.origin.x + visible.size.width - frame.size.width).max(visible.origin.x);
+    let y = y.min(visible.origin.y + visible.size.height - frame.size.height).max(visible.origin.y);
+    window.setFrameOrigin(NSPoint::new(x, y));
 
     // The content: the app's view, and a line over it until its picture comes.
     let container = NSView::initWithFrame(NSView::alloc(mtm), content);
@@ -712,7 +730,12 @@ fn make(mtm: MainThreadMarker, look: &Look, shared: &Arc<Shared>) {
 
     shared.scale_milli.store((window.backingScaleFactor() * 1000.0) as u32, Ordering::SeqCst);
     view.resized(false);
+    // The size it is zoomed from, and what its app's next window opens at until it is resized.
+    view.ivars().windowed.set(NSSize::new(w, h));
     window.makeKeyAndOrderFront(None);
+    if zoomed {
+        window.zoom(None);
+    }
     activate(mtm);
     OPEN.with(|o| o.borrow_mut().insert(look.id, Parts { window, view }));
 }
@@ -950,6 +973,14 @@ struct Ui {
     sound: RefCell<Vec<sound::Item>>,
     /// Full screen, from the moment the window starts to go there.
     full_screen: Cell<bool>,
+    /// The content's size as the window last held still neither zoomed nor
+    /// full screen, and whether it was zoomed as it went full screen: how its
+    /// app's next window opens (shape.rs).
+    windowed: Cell<NSSize>,
+    zoomed_before: Cell<bool>,
+    /// More's Phone size or Tablet size, picked full screen: done once the
+    /// window is out of it.
+    layout_after: Cell<Option<shape::Layout>>,
     /// The bar a full-screen window brings down from the top, and whether it
     /// is down; and the tab that shows where it is while it is up.
     bar: RefCell<Option<Bar>>,
@@ -1242,6 +1273,18 @@ define_class!(
             self.ivars().shared.link.send(wire::key(false, 0, keys::code::V, keys::meta::CTRL));
         }
 
+        /// More's Phone size: the window a phone's shape (shape.rs).
+        #[unsafe(method(phoneSize:))]
+        fn phone_size(&self, _sender: Option<&AnyObject>) {
+            self.lay_out_as(shape::Layout::Phone);
+        }
+
+        /// More's Tablet size: the window a tablet's shape, or zoomed (shape.rs).
+        #[unsafe(method(tabletSize:))]
+        fn tablet_size(&self, _sender: Option<&AnyObject>) {
+            self.lay_out_as(shape::Layout::Tablet);
+        }
+
         /// More's "Use phone as touchpad": the phone's screen up as the touchpad
         /// of its windows here (apps/pad.rs). A note under the title bar says how it went.
         #[unsafe(method(usePhoneTouchpad:))]
@@ -1424,6 +1467,7 @@ define_class!(
         #[unsafe(method(windowDidEndLiveResize:))]
         fn window_did_end_live_resize(&self, _notification: &NSNotification) {
             self.ivars().shared.ask_size();
+            self.held_still();
         }
 
         /// macOS's full screen, with the menu bar kept away — and the title bar,
@@ -1441,7 +1485,11 @@ define_class!(
 
         #[unsafe(method(windowWillEnterFullScreen:))]
         fn window_will_enter_full_screen(&self, _notification: &NSNotification) {
-            self.ivars().full_screen.set(true);
+            let ui = self.ivars();
+            ui.zoomed_before.set(self.window().is_some_and(|w| w.isZoomed()));
+            // A size asked for as an earlier full screen failed to end is no one's now.
+            ui.layout_after.set(None);
+            ui.full_screen.set(true);
         }
 
         #[unsafe(method(windowDidEnterFullScreen:))]
@@ -1459,6 +1507,21 @@ define_class!(
         #[unsafe(method(windowWillExitFullScreen:))]
         fn window_will_exit_full_screen(&self, _notification: &NSNotification) {
             self.out_of_full_screen();
+        }
+
+        /// Out of full screen: a size picked there is given now — whatever size
+        /// the window came back as, which may be that size already.
+        #[unsafe(method(windowDidExitFullScreen:))]
+        fn window_did_exit_full_screen(&self, _notification: &NSNotification) {
+            if let (Some(layout), Some(window)) = (self.ivars().layout_after.take(), self.window()) {
+                self.shape_to(&window, layout);
+            }
+        }
+
+        /// Full screen did not end: a size picked there waits for nothing.
+        #[unsafe(method(windowDidFailToExitFullScreen:))]
+        fn window_did_fail_to_exit_full_screen(&self, _window: &NSWindow) {
+            self.ivars().layout_after.set(None);
         }
 
         #[unsafe(method(windowDidFailToEnterFullScreen:))]
@@ -1489,6 +1552,9 @@ impl AppView {
             tracking: RefCell::new(None),
             sound: RefCell::new(Vec::new()),
             full_screen: Cell::new(false),
+            windowed: Cell::new(frame.size),
+            zoomed_before: Cell::new(false),
+            layout_after: Cell::new(None),
             bar: RefCell::new(None),
             handle: RefCell::new(None),
             bar_down: Cell::new(false),
@@ -1590,6 +1656,7 @@ impl AppView {
             let _ = DispatchQueue::main().after(when, move || {
                 if shared.resized_at.lock().unwrap().elapsed() >= Duration::from_millis(120) {
                     shared.ask_size();
+                    with_window(shared.id, |_, v| v.held_still());
                 }
             });
         }
@@ -1640,8 +1707,9 @@ impl AppView {
     }
 
     /// More's menu, under the button that opened it: Copy and Paste, which
-    /// the keyboard does too, then full screen, with the Mac's own keys for
-    /// each beside it, and the phone as the touchpad.
+    /// the keyboard does too, a phone's or a tablet's size for the app (a
+    /// tick on the one the window is now), then full screen, with the Mac's
+    /// own keys for each beside it, and the phone as the touchpad.
     fn more(&self, button: &NSView) {
         let ui = self.ivars();
         let mtm = self.mtm();
@@ -1689,9 +1757,111 @@ impl AppView {
         menu.addItem(&copy);
         menu.addItem(&paste);
         menu.addItem(&NSMenuItem::separatorItem(mtm));
+        // An Android app's: a Linux app's window is the size its app asks for.
+        if !ui.shared.linux {
+            let tablet = Surface::wanted(&*ui.shared).tablet();
+            for (title, action, on) in [
+                ("Phone size", sel!(phoneSize:), !tablet),
+                ("Tablet size", sel!(tabletSize:), tablet),
+            ] {
+                let layout = edit(title, action, "");
+                if on {
+                    layout.setState(NSControlStateValueOn);
+                }
+                menu.addItem(&layout);
+            }
+            menu.addItem(&NSMenuItem::separatorItem(mtm));
+        }
         menu.addItem(&item);
         menu.addItem(&pad);
         self.pop_up(&menu, button);
+    }
+
+    /// More's Phone size or Tablet size, picked where the window is not that
+    /// size already: the window made that shape ([`shape_to`](Self::shape_to)).
+    /// Full screen, it leaves first and is shaped once out, whatever size the
+    /// window it comes back as is — as on Windows.
+    fn lay_out_as(&self, layout: shape::Layout) {
+        let ui = self.ivars();
+        let Some(window) = self.window() else { return };
+        if Surface::wanted(&*ui.shared).tablet() == (layout == shape::Layout::Tablet) {
+            return;
+        }
+        if ui.full_screen.get() {
+            ui.layout_after.set(Some(layout));
+            window.toggleFullScreen(None);
+            return;
+        }
+        self.shape_to(&window, layout);
+    }
+
+    /// The window made the shape that gives its app `layout`'s size
+    /// (shape.rs) — a phone's; a tablet's where that is a tablet's size on
+    /// this screen, and zoomed where not — about where it was. A note under
+    /// the title bar says which, and that its app's next window opens so; or
+    /// that this screen has no room for a tablet's size.
+    fn shape_to(&self, window: &NSWindow, layout: shape::Layout) {
+        let ui = self.ivars();
+        let Some(screen) = window.screen() else { return };
+        let (visible, whole) = (screen.visibleFrame(), screen.frame());
+        let now = window.frame();
+        let bar = now.size.height - window.contentRectForFrameRect(now).size.height;
+        let room = (visible.size.width, visible.size.height);
+        let plan = shape::plan(layout, room, (whole.size.width, whole.size.height), bar);
+        let label = ui.shared.label();
+        log::info!("apps: {label}: {layout:?} size asked for: {plan:?}");
+        let said = match layout {
+            shape::Layout::Phone => "Phone size",
+            shape::Layout::Tablet => "Tablet size",
+        };
+        let note = match plan {
+            shape::Plan::Size(w, h) => {
+                let size = NSSize::new(w.round(), h.round() + bar);
+                // Centred where it was, and on its screen. AppKit counts up from the bottom.
+                let right = visible.origin.x + visible.size.width - size.width;
+                let top = visible.origin.y + visible.size.height - size.height;
+                let x = (now.origin.x + (now.size.width - size.width) / 2.0).min(right).max(visible.origin.x);
+                let y = (now.origin.y + (now.size.height - size.height) / 2.0).min(top).max(visible.origin.y);
+                window.setFrame_display_animate(NSRect::new(NSPoint::new(x, y), size), true, true);
+                format!("{said}. {label} opens like this next time")
+            }
+            shape::Plan::Maximize => {
+                if !window.isZoomed() {
+                    window.zoom(None);
+                }
+                format!("{said}. {label} opens like this next time")
+            }
+            shape::Plan::NoRoom { full_screen: true } => {
+                "This screen has room for a tablet's size only in full screen (\u{2303}\u{2318}F)".to_string()
+            }
+            shape::Plan::NoRoom { full_screen: false } => "This screen has no room for a tablet's size".to_string(),
+        };
+        ui.shared.note(Some(note), false);
+    }
+
+    /// The window held still: neither zoomed nor full screen, its size is what
+    /// it is zoomed back from, and what its app's next window opens at.
+    fn held_still(&self) {
+        let ui = self.ivars();
+        if ui.full_screen.get() {
+            return;
+        }
+        if let Some(w) = self.window() {
+            if !w.isZoomed() {
+                ui.windowed.set(self.bounds().size);
+            }
+        }
+    }
+
+    /// The window as it is, for its app's next (shape.rs): its content in
+    /// points as it was before it was zoomed or made full screen, and whether
+    /// it was zoomed.
+    fn shape(&self, window: &NSWindow) -> shape::Shape {
+        let ui = self.ivars();
+        let (full, zoomed) = (ui.full_screen.get(), window.isZoomed());
+        let size = if full || zoomed { ui.windowed.get() } else { self.bounds().size };
+        let max = if full { ui.zoomed_before.get() } else { zoomed };
+        shape::Shape { w: size.width, h: size.height, max }
     }
 
     // ── a drag of the app's, carried out of the window ──
@@ -2009,6 +2179,10 @@ impl AppView {
             return;
         }
         let shared = &ui.shared;
+        // An Android app's next window opens as this one closes.
+        if let (false, Some(w)) = (shared.linux, self.window()) {
+            shared.link.host().keep_shape(self.shape(&w));
+        }
         shared.link.close(!ui.gone.get());
         // The layer is let go of here, on the main thread, not by the link's reader.
         drop(shared.feed.lock().unwrap().set_layer(None));

@@ -31,6 +31,7 @@ arbitrary until you know what was measured, or what the platform refuses.
 | The wire | `Wire.java`, `apps/wire.rs` | the framing, both ends |
 | The phone's half, from here | `apps/host.rs`, `apps/adbsock.rs` | starting the server, the control connection, reaching a socket on the phone |
 | A window's link | `apps/link.rs` | one window's own socket to the server, its reader, writer and clock; what both windows share |
+| Phone or tablet | `apps/shape.rs`, `link.rs` (`layout_density`) | the size an app is given by its window's shape, More's Phone size and Tablet size, each app's window kept as it closed |
 | The window, Windows | `apps/win/mod.rs`, `apps/win/frame.rs`, `apps/keys.rs` | a Win32 window, its title bar, the mouse and keyboard as Android takes them |
 | The picture, Windows | `apps/win/render.rs` | decoding, drawing, presenting |
 | The window, Mac | `apps/mac/mod.rs`, `apps/mac/video.rs`, `apps/h264.rs`, `apps/keys.rs` (`mac`) | an AppKit window, its input, the display layer macOS decodes into |
@@ -506,11 +507,12 @@ has an AppUserModelID of its own and a relaunch command, `--phone-app <serial>
 <package>`: WhatsApp and Gmail are two taskbar buttons, either can be pinned,
 and a pinned one starts this app with just that window — no desktop.
 
-A window opens at a current phone's shape, 412 × 915 dp, fitted to 90 % of the
-screen's height, at that screen's scale; the phone's display gets the window's
-pixels and 160 dpi times the scale, so text is the size it would be on the
-phone and one pixel is one pixel. Resizing the window resizes the display (a
-new encoder at the new size; the app lays itself out again).
+An app's first window opens at a current phone's shape, 412 × 915 dp, fitted
+to 90 % of the screen's height, at that screen's scale; later ones as the last
+one closed ("Phone or tablet"). The phone's display gets the window's pixels
+and 160 dpi times the scale, so text is the size it would be on the phone and
+one pixel is one pixel. Resizing the window resizes the display (a new encoder
+at the new size; the app lays itself out again).
 
 Opening one waits 10 s for the window to be made, and a pinned app's start
 asks again every 1.5 s for 45 s. A window is made only if it is still wanted:
@@ -518,6 +520,95 @@ whichever comes first, its thread (the main thread, on a Mac) starting on it or
 the open giving up, wins — one made after would be no one's, and the open
 asked for again beside it (seen on a Mac swapping hard, 2026-10-29: four windows
 on "Opening…" behind the one that opened).
+
+## Phone or tablet
+
+An Android app lays itself out for the room it has. Most apps that have a
+tablet layout take it from 600 dp on the display's shorter side, Android's
+`sw600dp`. It is not every app's line: some go by their width, at sizes of
+their own (Material's window size classes change at 600 and at 840 dp wide),
+and some have only the one layout. It is also the size from which Android 16
+sets aside a fixed orientation in apps built for it. A window's display is the
+window's own size at one dp to the point ("The window"), so the window is the
+device the app thinks it is on: a phone-shaped window is a phone's size, and
+a window 600 × 600 points or more is a tablet's, which an app with a tablet
+layout lays itself out for again as the window is resized across. That was so
+before anything below. Everything here is about the size an app is given; what
+the app does with it is the app's, and nothing here looks.
+
+**Nothing on the phone changes for it.** The question that started this was
+whether the phone's density should be lowered while app windows are open, so
+that apps take their tablet layouts, and put back when the last window closes
+or the desktop starts. It need not be, and must not be. The phone's own screen
+(display 0) is never given a density by anything here, and the desktop's
+display has its own (doc/sharp-desktop.md, "Display size"). Each window's
+display is given its density as it is made and with each resize
+(`VirtualDisplay.resize(w, h, dpi)`; never `wm density`), so there is nothing
+to put back: the display goes with its window, and its density with it.
+
+**A wide window leans to a tablet's size.** Under 600 points tall, a window
+wider than it is tall was a phone on its side to its app: a portrait-only app
+letterboxed in the middle, the rest stretched sideways. On a laptop's short
+screen even a maximised window is: 1080p at 175 % leaves 537 points under
+Windows 11's 48-point taskbar and the 32-point bar. So an Android app's window
+wider than it is tall and under 600 points tall is given the density that
+makes it 600 dp tall (`link::layout_density`), where that is no lower than the
+desktop's Small display size, 0.875 of one dp to the point. The check is made
+on the whole dpi the display would be given, rounded down, so the window's
+text is never more than an eighth smaller than in a window a phone's shape.
+That makes it from about 525 points tall, a little more at some scales: at a
+custom 104 dpi on Windows, 568 pixels tall would be 151 dpi against 173, past
+the eighth, and is left at 173. A window taller than it is wide is left a
+phone's size until it is 600 points wide: that is a phone's shape. A Linux
+window's display is never leant.
+
+| Maximised, Windows 11 at 1920 × 1080 | The picture, points | The display | The size, to the app |
+| --- | --- | --- | --- |
+| 100 % | 1920 × 1000 | 1920 × 1000 dp, 160 dpi | a tablet's |
+| 125 % | 1536 × 784 | 1536 × 784 dp, 200 dpi | a tablet's |
+| 150 % | 1280 × 640 | 1280 × 640 dp, 240 dpi | a tablet's |
+| 175 % | 1097 × 537 | 1229 × 602 dp, 250 dpi rather than 280 | a tablet's, leant |
+| 200 % | 960 × 460 | 960 × 460 dp, 320 dpi | a phone's; full screen, 960 × 540 points, is a tablet's, leant |
+
+**More picks one.** More (☰) has Phone size and Tablet size, a radio pair on
+the one the window is now: a tablet's from 600 dp on its shorter side, a
+phone's under. It says what size the app is given, not which layout the app
+shows — hence sizes, not layouts: an app with no tablet layout is not promised
+one. Picking the other makes the window that shape, centred where it was and
+kept on its screen. Full screen, the window leaves first, and is then made
+that shape whatever size it comes back as (on a Mac, once macOS says it is out
+of full screen; a full screen that fails to end drops the request):
+
+- Phone size: a current phone's shape, 412 × 915 points, fitted to the screen
+  as a first window is. A maximised window is restored first.
+- Tablet size: a current tablet's, on its side, 1280 × 800 points (a Galaxy
+  Tab's or a Pixel Tablet's at its own density), fitted the same way. Where
+  that fitted shape is a phone's size (1080p at 175 %: 768 × 480 points), the
+  window is maximised instead. Where even that is a phone's, the window is
+  left as it is and a note says that the screen has no room for a tablet's
+  size, or has it only in full screen.
+
+A note under the bar says what was done, and that the app's next window opens
+so: "Tablet size. Gmail opens like this next time" — on the same screen, and
+unless the window is resized again before it closes. Nothing else changes for
+the app: it is resized as a window being dragged bigger is.
+
+**Each app's window opens as its last closed.** Closing a window keeps its
+size by app, in `app-windows.json` beside the app's other settings: its
+picture in points as it was before it was maximised, minimised or made full
+screen, and whether it was maximised. A window snapped to half the screen is
+kept the size it was snapped to, and comes back that size, not snapped. The
+app's next window opens at that size where it fits on the screen it opens on,
+and else as large as fits there — not the 90 % a first window is fitted to,
+which would shrink a window as tall as the screen each time it opened — kept
+on the screen however it is cascaded, and maximised if it was. One that was a
+tablet's size and would be a phone's on this screen (a tablet stood up, on a
+laptop's short screen) is maximised instead, where that makes it a tablet's;
+where it does not (1080p at 200 %), it opens as large as fits, a phone's size.
+A file that cannot be read is no sizes at all, and is written over by the next
+window to close; it is written beside itself and moved over, so a write cut
+short leaves the last one whole. A Linux window keeps nothing: its size is its
+app's.
 
 ## On a Mac
 
@@ -1307,7 +1398,37 @@ the rest in the app itself, driven over its page):
 - Paste in the main window's right-click menu, a file on this computer's
   clipboard: in the A13's Download byte for byte, the toast saying so.
 
+Phone or tablet (2026-11-01, on a Windows 11 computer, no phone attached). A
+review the same day found four things, all real, all since changed: on a Mac
+a size picked in full screen was looked at again once out, and skipped where
+the window came back that size already, with no note; the menu was said to
+show the app's layout, which it cannot know (its items were Phone layout and
+Tablet layout then); a kept window was fitted to 90 % of its own screen again,
+shrinking one as tall as the screen; and the rounding down of the dpi could
+take the lean past the eighth (12.7 % at a custom 104 dpi). After the changes:
+
+- the arithmetic, by the tests of `shape.rs` and of `link.rs`'s display size,
+  the files as they are built on their own (the app's own test binary does
+  not start on that computer, `STATUS_ENTRYPOINT_NOT_FOUND`, builds from before
+  the change too): the lean at 175 %, its stop at 525 points, the eighth held
+  to the dpi at every Windows scale from 96 to 288 dpi and every even height
+  from 200 to 2398 pixels, a window taller than wide left a phone's size, the
+  phone's shape fitted as before, Tablet size fitted, maximised or without
+  room from 100 % to 250 %, a window opening as it closed (one snapped to
+  half the screen as it was), and the file kept, written over when it was
+  broken, never left half written;
+- both computers compiled, no warnings in what changed: Windows built and
+  linted, the Mac type-checked and linted for Apple silicon (`--all-targets`,
+  a stand-in C compiler for the build scripts).
+
 Not yet:
+
+- **Phone or tablet with a phone**: the menu's pair and its notes, a window
+  opening at its kept size and maximised, and a density changing within one
+  screen's scale on a live window's display — the server takes a density
+  with every resize, but only a move to a screen of another scale had sent a
+  new one before. Which apps change their layout where: none was looked at.
+  Nor on a Mac at all, its full screen's way out included.
 
 - **A drop from Explorer onto an app window, and onto the main window**: the
   computer's half of both — the drop point, the title bar's way to Download,

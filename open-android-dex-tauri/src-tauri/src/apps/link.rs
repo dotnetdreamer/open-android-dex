@@ -30,7 +30,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
-use super::{adbsock, fetch, sound, wire};
+use super::{adbsock, fetch, shape, sound, wire};
 
 /// What a window is opened with.
 pub struct Spec {
@@ -54,6 +54,9 @@ pub struct Spec {
     pub linux: Option<i32>,
     /// The picture's size to open at, in pixels — a Linux window's own; else a phone's shape.
     pub size: Option<(u32, u32)>,
+    /// How the app's window last closed (shape.rs): it opens the same way.
+    /// None, the first time: a phone's shape.
+    pub shape: Option<shape::Shape>,
     /// The phone is on a cable: its display can draw straight into the encoder, unpaced.
     pub direct: bool,
     /// How the window reaches its phone, said in its title bar: "USB" or "Wi‑Fi".
@@ -134,12 +137,61 @@ impl DisplaySize {
     pub fn for_area(w: u32, h: u32, scale: f32) -> Self {
         DisplaySize { w: w.max(160) & !1, h: h.max(160) & !1, dpi: density(scale) }
     }
+
+    /// The display for an Android app's picture `w`×`h` pixels big at
+    /// `scale`: as [`for_area`](Self::for_area), at the density that makes a
+    /// wide window a tablet's size ([`layout_density`]).
+    pub fn for_app(w: u32, h: u32, scale: f32) -> Self {
+        let d = DisplaySize::for_area(w, h, scale);
+        DisplaySize { dpi: layout_density(d.w, d.h, scale), ..d }
+    }
+
+    /// It is a tablet's size: its shorter side is [`TABLET_DP`] or more. What
+    /// an app does with that room is the app's.
+    pub fn tablet(&self) -> bool {
+        self.w.min(self.h) as f64 * 160.0 >= TABLET_DP * self.dpi.max(1) as f64
+    }
 }
+
+/// From this many dp on its shorter side a display is a tablet's size:
+/// Android's `sw600dp`, where most apps that have a tablet layout change to
+/// it — not every app's line: some go by their width, at sizes of their own,
+/// and some have only the one layout — and the size from which Android 16
+/// sets aside a fixed orientation in apps built for it (doc/apps-on-pc.md,
+/// "Phone or tablet").
+pub const TABLET_DP: f64 = 600.0;
+
+/// How far a wide window's density may come down to make it a tablet's
+/// size: to the desktop's Small display size (doc/sharp-desktop.md), never
+/// further, so that its text is at most an eighth smaller.
+pub const SMALLEST: f64 = 0.875;
 
 /// The phone's density for a window at `scale`: one dp to one point of this
 /// computer's own interface, as on the desktop that fits its screen.
 pub fn density(scale: f32) -> u32 {
     ((160.0 * scale).round() as u32).clamp(72, 960)
+}
+
+/// The density of an Android app's display `w`×`h` pixels big at `scale`:
+/// [`density`] — except a window wider than it is tall and short of a
+/// tablet's [`TABLET_DP`] in height, which is given the density that makes it
+/// 600 dp tall where that is no lower than [`SMALLEST`] of its own. The check
+/// is on the whole dpi it would be given, rounded down, not on its height, so
+/// the bound holds to the dpi. A maximised window on a laptop's short screen is a
+/// tablet's shape a little smaller than a tablet; at one dp to the point it
+/// was a phone stretched sideways. A window as narrow as a phone is left a
+/// phone.
+pub fn layout_density(w: u32, h: u32, scale: f32) -> u32 {
+    let natural = density(scale);
+    if w <= h || h as f64 * 160.0 >= TABLET_DP * natural as f64 {
+        return natural;
+    }
+    let lean = (h as f64 * 160.0 / TABLET_DP).floor();
+    if lean >= natural as f64 * SMALLEST {
+        (lean as u32).clamp(72, natural)
+    } else {
+        natural
+    }
 }
 
 /// This computer's monotonic clock, in µs from a fixed moment.
@@ -212,6 +264,9 @@ pub trait Host: Send + Sync {
     /// copies next comes here as anything it copies does, and `window` says
     /// so — or that nothing was.
     fn copying(&self, window: Arc<dyn Surface>);
+    /// The window is closing as `shape`: its app's next window opens the same
+    /// way (shape.rs). A Linux window says nothing: its size is its app's.
+    fn keep_shape(&self, _shape: shape::Shape) {}
 }
 
 /// One window's link: what both its sides and its threads share.
@@ -819,6 +874,59 @@ mod tests {
         l.ask_size(want);
         l.ask_size(want);
         assert_eq!(rx.try_iter().count(), 1);
+    }
+
+    /// One dp to the point, but for a wide window a little short of a
+    /// tablet's height, which is made a tablet's size by a density no lower
+    /// than the desktop's Small.
+    #[test]
+    fn a_wide_window_short_of_a_tablet_leans_to_one() {
+        // A phone's shape stays a phone, at one dp to the point, at any scale.
+        let phone = DisplaySize::for_app(412, 915, 1.0);
+        assert_eq!((phone.dpi, phone.tablet()), (160, false));
+        assert_eq!(DisplaySize::for_app(824, 1830, 2.0).dpi, 320);
+        // Tall enough already: one dp to the point.
+        let tab = DisplaySize::for_app(1280, 800, 1.0);
+        assert_eq!((tab.dpi, tab.tablet()), (160, true));
+        // Maximised on a 1080p laptop at 175 %: 1097 × 537 points.
+        let laptop = DisplaySize::for_app(1920, 940, 1.75);
+        assert_eq!(laptop.dpi, 250);
+        assert!(laptop.tablet());
+        assert!(laptop.dpi as f64 >= density(1.75) as f64 * SMALLEST);
+        // The lean stops at the desktop's Small, 525 points tall (displays are even: 526 and 524).
+        assert!(DisplaySize::for_app(1000, 526, 1.0).tablet());
+        let short = DisplaySize::for_app(1000, 524, 1.0);
+        assert_eq!((short.dpi, short.tablet()), (160, false));
+        // Taller than wide is a phone until it is 600 points wide.
+        assert_eq!(DisplaySize::for_app(560, 900, 1.0).dpi, 160);
+        assert!(DisplaySize::for_app(600, 900, 1.0).tablet());
+        // A Linux window's display is never leant.
+        assert_eq!(DisplaySize::for_area(1920, 940, 1.75).dpi, density(1.75));
+        // Windows at a custom 104 dpi, 568 pixels tall: 151 would be 600 dp,
+        // under 0.875 of 173. Not leant (it was, 12.7 % smaller, before the
+        // check was made on the dpi rounded down).
+        assert_eq!(DisplaySize::for_app(1100, 568, 104.0 / 96.0).dpi, 173);
+    }
+
+    /// The bound holds to the dpi, at every Windows scale from 100 % to 300 %
+    /// in steps of one dpi and every even height: a window leant is a tablet's
+    /// size, never denser than [`SMALLEST`] of its own, and only a wide one.
+    #[test]
+    fn a_lean_is_never_more_than_an_eighth() {
+        for dpi in 96..=288u32 {
+            let scale = dpi as f32 / 96.0;
+            let natural = density(scale);
+            for h in (200..2400u32).step_by(2) {
+                for w in [h * 2, h + 2, h] {
+                    let d = DisplaySize::for_app(w, h, scale);
+                    if d.dpi != natural {
+                        assert!(w > h, "{w}×{h} at {dpi} leant");
+                        assert!(d.dpi as f64 >= natural as f64 * SMALLEST, "{w}×{h} at {dpi}: {} of {natural}", d.dpi);
+                        assert!(d.tablet(), "{w}×{h} at {dpi}: leant to {} and still not a tablet's size", d.dpi);
+                    }
+                }
+            }
+        }
     }
 
     #[test]

@@ -164,6 +164,14 @@ half a second.
 - **They behave like your computer's own windows.** Move them, resize them,
   snap them side by side, minimise them. Each app gets its own button on the
   taskbar, and you can pin it there to open that app straight away next time
+- **Phone or tablet, you choose.** A window opens the shape of a phone, and the
+  app looks the way it does on your phone. Make the window bigger and an app
+  that has a tablet look can change to it, with more room for what you are
+  doing. Many apps change, some at their own sizes, and some never do.
+  ☰ → **Tablet size** makes the window a tablet's size in one click, and
+  ☰ → **Phone size** goes back. Each app opens at the size you last left it,
+  or as big as fits if your screen is smaller. Your phone's own screen is not
+  changed
 - **Use your mouse and keyboard.** Click, scroll and type, in your own keyboard
   layout. Copy something on your computer and paste it into the phone app, or
   the other way round

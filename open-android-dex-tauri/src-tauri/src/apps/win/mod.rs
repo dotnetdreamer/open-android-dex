@@ -30,7 +30,8 @@
 //! first, then Windows' own drag carries them on from where the pointer is —
 //! the shell's data object, as Explorer drags files.
 //!
-//! The bar's More (☰) is the window's own menu: Copy and Paste, full screen
+//! The bar's More (☰) is the window's own menu: Copy and Paste, a phone's or
+//! a tablet's size for the app (the window made that shape, shape.rs), full screen
 //! (F11 as well), the phone as the touchpad. Full screen, the window covers its screen with no frame and no
 //! title bar, and a smaller bar comes down from the top of the screen while
 //! the pointer is up there, in the middle, drawn into the same surface as the
@@ -89,6 +90,7 @@ use super::drops;
 use super::fetch::{self, Offer, Taking};
 use super::keys::{self, Mods, Press};
 use super::link::{self, DisplaySize, Event, Host, Link, NetSpec, Refused, Route, Spec, Surface};
+use super::shape;
 use super::sound;
 use super::wire;
 use frame::Hit;
@@ -526,10 +528,15 @@ impl Shared {
         (w, h.saturating_sub(self.bar_height() as u32))
     }
 
-    /// What the display should be for the window as it is now.
+    /// What the display should be for the window as it is now: for an
+    /// Android app, at the density that makes a wide one a tablet's size.
     fn wanted(&self) -> DisplaySize {
         let (w, h) = self.area();
-        DisplaySize::for_area(w, h, self.scale())
+        if self.linux {
+            DisplaySize::for_area(w, h, self.scale())
+        } else {
+            DisplaySize::for_app(w, h, self.scale())
+        }
     }
 
     /// Ask the phone for the display the window wants, if it is not that already.
@@ -656,6 +663,9 @@ const MENU_TOUCHPAD: usize = 2;
 /// More's Copy and Paste: the app's own keys for them.
 const MENU_COPY: usize = 3;
 const MENU_PASTE: usize = 4;
+/// More's Phone size and Tablet size (shape.rs): one after the other, a radio pair.
+const MENU_PHONE: usize = 5;
+const MENU_TABLET: usize = 6;
 
 /// Open a window for `spec`; it runs until it is closed. The window shows
 /// at once, with the app's icon and name, and the picture follows.
@@ -690,12 +700,16 @@ struct Geometry {
     h: i32,
     scale: f32,
     client: (u32, u32),
+    /// It opens maximised: its app's last window closed so, or was a tablet's
+    /// size that this screen would make a phone's (shape::opening).
+    max: bool,
 }
 
-/// A phone-shaped window on the screen the pointer is on — the one the click
-/// that opened it was made on — at that screen's scale, cascaded from the
-/// windows already open.
-fn geometry(cascade: u32, size: Option<(u32, u32)>) -> Geometry {
+/// A window on the screen the pointer is on — the one the click that opened
+/// it was made on — at that screen's scale, cascaded from the windows already
+/// open: as its app's last window closed (shape.rs), a phone's shape the
+/// first time, or the size a Linux window asked for.
+fn geometry(cascade: u32, size: Option<(u32, u32)>, kept: Option<shape::Shape>) -> Geometry {
     unsafe {
         let mut pt = POINT::default();
         let _ = GetCursorPos(&mut pt);
@@ -708,38 +722,41 @@ fn geometry(cascade: u32, size: Option<(u32, u32)>) -> Geometry {
         let dpi = dx.max(96);
         let scale = dpi as f32 / 96.0;
         let bar = frame::height(scale);
-        // 412 × 915 dp: a current phone's own shape and size — or the size a
-        // Linux window asked for, which is already in pixels.
-        let (mut vw, mut vh) = match size {
-            Some((w, h)) => (w.max(160) as f32, h.max(120) as f32),
-            None => (412.0 * scale, 915.0 * scale),
+        // In points: the screen's free part, and the picture.
+        let s = scale as f64;
+        let room = ((work.right - work.left) as f64 / s, (work.bottom - work.top) as f64 / s);
+        let (vw, vh, max) = match size {
+            // A Linux window asked for its size, in pixels.
+            Some((w, h)) => {
+                let (w, h) = shape::fit((w.max(160) as f64 / s, h.max(120) as f64 / s), room, frame::HEIGHT_DIP as f64);
+                (w, h, false)
+            }
+            None => shape::opening(kept, room, frame::HEIGHT_DIP as f64),
         };
-        let max_h = (work.bottom - work.top) as f32 * 0.9 - bar as f32;
-        let max_w = (work.right - work.left) as f32 * 0.95;
-        if vh > max_h {
-            let k = max_h / vh;
-            vw *= k;
-            vh *= k;
-        }
-        if vw > max_w {
-            let k = max_w / vw;
-            vw *= k;
-            vh *= k;
-        }
-        let client_w = (vw.round() as i32) & !1;
-        let client_h = ((vh.round() as i32) & !1) + bar;
-        // The borders Windows will add around the client (our bar replaces its caption and top edge).
-        let mut r = RECT { left: 0, top: 0, right: client_w, bottom: client_h };
-        let _ = AdjustWindowRectExForDpi(&mut r, WS_OVERLAPPEDWINDOW, false, WS_EX_APPWINDOW, dpi);
-        let side = -r.left;
-        let bottom = r.bottom - client_h;
+        let client_w = ((vw * s).round() as i32) & !1;
+        let client_h = (((vh * s).round() as i32) & !1) + bar;
+        let (side, bottom) = borders(dpi);
         let w = client_w + 2 * side;
         let h = client_h + bottom;
         let step = ((28.0 * scale) as i32) * (cascade % 8) as i32;
         let x = work.left + ((work.right - work.left) - w) / 2 + step;
         let y = work.top + ((work.bottom - work.top) - h) / 2 + step / 2;
-        Geometry { x, y: y.max(work.top), w, h, scale, client: (client_w as u32, client_h as u32) }
+        // Cascaded, but kept on the screen: a window as large as it, kept so, is where it fits.
+        let x = x.min(work.right - w).max(work.left);
+        let y = y.min(work.bottom - h).max(work.top);
+        Geometry { x, y, w, h, scale, client: (client_w as u32, client_h as u32), max }
     }
+}
+
+/// The borders Windows adds around a window's client area at `dpi`: each
+/// side's and the bottom's. The bar replaces its caption and top edge
+/// (`WM_NCCALCSIZE`), so there is none at the top.
+fn borders(dpi: u32) -> (i32, i32) {
+    let mut r = RECT { left: 0, top: 0, right: 100, bottom: 100 };
+    unsafe {
+        let _ = AdjustWindowRectExForDpi(&mut r, WS_OVERLAPPEDWINDOW, false, WS_EX_APPWINDOW, dpi);
+    }
+    (-r.left, r.bottom - 100)
 }
 
 fn dark_mode() -> bool {
@@ -809,7 +826,7 @@ fn ui_thread(spec: Spec, host: Arc<dyn Host>, opened: Sender<Result<Arc<Window>,
         let _ = OleInitialize(None);
     }
     register_class();
-    let geo = geometry(spec.cascade, spec.size);
+    let geo = geometry(spec.cascade, spec.size, spec.shape);
     let (link, out_rx) = Link::new(spec.clicked, host);
     let shared = Arc::new(Shared {
         link,
@@ -919,6 +936,14 @@ fn ui_thread(spec: Spec, host: Arc<dyn Host>, opened: Sender<Result<Arc<Window>,
         unsafe { (*state_ptr).render_thread = t.ok() };
     }
 
+    // Maximised before the phone is asked for its display, which is then the
+    // maximised window's: one display, not a phone's shape and a resize after.
+    if geo.max {
+        unsafe {
+            let _ = ShowWindow(hwnd, SW_SHOWMAXIMIZED);
+        }
+    }
+
     // the phone
     let net = NetSpec {
         serial: spec.serial.clone(),
@@ -933,7 +958,9 @@ fn ui_thread(spec: Spec, host: Arc<dyn Host>, opened: Sender<Result<Arc<Window>,
     link::start(shared.link.clone(), shared.clone(), net, out_rx);
 
     unsafe {
-        let _ = ShowWindow(hwnd, SW_SHOWNORMAL);
+        if !geo.max {
+            let _ = ShowWindow(hwnd, SW_SHOWNORMAL);
+        }
         let _ = SetForegroundWindow(hwnd);
     }
     let window = Arc::new(Window {
@@ -1680,9 +1707,10 @@ impl Ui {
         }
     }
 
-    /// More's menu, under its button: Copy and Paste, full screen, each with
-    /// its key beside it, and the phone's own screen as the touchpad of its
-    /// windows here.
+    /// More's menu, under its button: Copy and Paste, a phone's or a tablet's
+    /// size for the app (a radio pair, on the one the window is now), full
+    /// screen, each with its key beside it, and the phone's own screen as the
+    /// touchpad of its windows here.
     fn more_menu(&mut self, hwnd: HWND) {
         let full = self.full_screen();
         let button = self.button_rect(Hit::More);
@@ -1692,6 +1720,14 @@ impl Ui {
             let _ = AppendMenuW(menu, MF_STRING, MENU_COPY, w!("Copy\tCtrl+C"));
             let _ = AppendMenuW(menu, MF_STRING, MENU_PASTE, w!("Paste\tCtrl+V"));
             let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
+            // An Android app's: a Linux app's window is the size its app asks for.
+            if !self.shared.linux {
+                let _ = AppendMenuW(menu, MF_STRING, MENU_PHONE, w!("Phone size"));
+                let _ = AppendMenuW(menu, MF_STRING, MENU_TABLET, w!("Tablet size"));
+                let now = if self.shared.wanted().tablet() { MENU_TABLET } else { MENU_PHONE };
+                let _ = CheckMenuRadioItem(menu, MENU_PHONE as u32, MENU_TABLET as u32, now as u32, MF_BYCOMMAND.0);
+                let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
+            }
             let _ = AppendMenuW(menu, MF_STRING, MENU_FULL_SCREEN, text);
             let _ = AppendMenuW(menu, MF_STRING, MENU_TOUCHPAD, w!("Use phone as touchpad"));
             dark_menus(hwnd, self.shared.dark.load(Ordering::SeqCst));
@@ -1715,6 +1751,8 @@ impl Ui {
                 self.toggle_full_screen(hwnd);
             } else {
                 match chosen.0 as usize {
+                    MENU_PHONE => self.lay_out_as(hwnd, shape::Layout::Phone),
+                    MENU_TABLET => self.lay_out_as(hwnd, shape::Layout::Tablet),
                     MENU_TOUCHPAD => self.shared.link.host().touchpad(self.shared.clone()),
                     MENU_COPY => {
                         // The app's own copy key: what it copies comes to this PC's
@@ -1735,9 +1773,99 @@ impl Ui {
         }
     }
 
+    /// More's Phone size or Tablet size, picked where the window is not that
+    /// size already: the window made the shape that gives its app that size
+    /// (shape.rs) — a phone's; a tablet's where that is a tablet's size on
+    /// this screen, and maximised where not — centred where it was. Full
+    /// screen, it leaves first, and is shaped whatever size it comes back as.
+    /// A note under the bar says which, and that its app's next window opens
+    /// so; or that this screen has no room for a tablet's size.
+    fn lay_out_as(&mut self, hwnd: HWND, layout: shape::Layout) {
+        if self.shared.wanted().tablet() == (layout == shape::Layout::Tablet) {
+            return;
+        }
+        if self.full_screen() {
+            self.leave_full_screen(hwnd);
+        }
+        let label = self.shared.label.lock().unwrap().clone();
+        let s = self.shared.scale() as f64;
+        unsafe {
+            let monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+            let mut info = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
+            if !GetMonitorInfoW(monitor, &mut info).as_bool() {
+                return;
+            }
+            let (work, whole) = (info.rcWork, info.rcMonitor);
+            let points = |r: &RECT| ((r.right - r.left) as f64 / s, (r.bottom - r.top) as f64 / s);
+            let plan = shape::plan(layout, points(&work), points(&whole), frame::HEIGHT_DIP as f64);
+            log::info!("apps: {label}: {layout:?} size asked for: {plan:?}");
+            let said = match layout {
+                shape::Layout::Phone => "Phone size",
+                shape::Layout::Tablet => "Tablet size",
+            };
+            let note = match plan {
+                shape::Plan::Size(w, h) => {
+                    if IsZoomed(hwnd).as_bool() {
+                        let _ = ShowWindow(hwnd, SW_RESTORE);
+                    }
+                    let mut was = RECT::default();
+                    let _ = GetWindowRect(hwnd, &mut was);
+                    let (side, bottom) = borders(GetDpiForWindow(hwnd));
+                    let ww = (((w * s).round() as i32) & !1) + 2 * side;
+                    let wh = (((h * s).round() as i32) & !1) + frame::height(self.shared.scale()) + bottom;
+                    // Centred where it was, and on its screen.
+                    let x = ((was.left + was.right) / 2 - ww / 2).min(work.right - ww).max(work.left);
+                    let y = ((was.top + was.bottom) / 2 - wh / 2).min(work.bottom - wh).max(work.top);
+                    let _ = SetWindowPos(hwnd, None, x, y, ww, wh, SWP_NOZORDER | SWP_NOACTIVATE);
+                    format!("{said}. {label} opens like this next time")
+                }
+                shape::Plan::Maximize => {
+                    let _ = ShowWindow(hwnd, SW_MAXIMIZE);
+                    format!("{said}. {label} opens like this next time")
+                }
+                shape::Plan::NoRoom { full_screen: true } => {
+                    "This screen has room for a tablet's size only in full screen (F11)".to_string()
+                }
+                shape::Plan::NoRoom { full_screen: false } => "This screen has no room for a tablet's size".to_string(),
+            };
+            Surface::note(&*self.shared, Some(note), false);
+        }
+    }
+
+    /// The window as it is, for its app's next (shape.rs): its picture in
+    /// points as it was before it was maximised, minimised or made full
+    /// screen — a window snapped to half the screen as it is — and whether it
+    /// was maximised.
+    fn shape(&self, hwnd: HWND) -> Option<shape::Shape> {
+        let scale = self.shared.scale();
+        let s = scale as f64;
+        unsafe {
+            let (outer, max) = if let Some(w) = self.shared.windowed.lock().unwrap().as_ref() {
+                (w.rect, w.maximized)
+            } else if IsZoomed(hwnd).as_bool() || IsIconic(hwnd).as_bool() {
+                let mut p = WINDOWPLACEMENT { length: std::mem::size_of::<WINDOWPLACEMENT>() as u32, ..Default::default() };
+                GetWindowPlacement(hwnd, &mut p).ok()?;
+                (p.rcNormalPosition, IsZoomed(hwnd).as_bool() || p.flags.0 & WPF_RESTORETOMAXIMIZED.0 != 0)
+            } else {
+                let (w, h) = self.shared.area();
+                return Some(shape::Shape { w: w as f64 / s, h: h as f64 / s, max: false });
+            };
+            let (side, bottom) = borders(GetDpiForWindow(hwnd));
+            let w = (outer.right - outer.left - 2 * side) as f64 / s;
+            let h = (outer.bottom - outer.top - bottom - frame::height(scale)) as f64 / s;
+            Some(shape::Shape { w, h, max })
+        }
+    }
+
     fn close(&mut self, hwnd: HWND, tell_phone: bool) {
         if !self.shared.link.close(tell_phone) {
             return;
+        }
+        // An Android app's next window opens as this one closes.
+        if !self.shared.linux {
+            if let Some(kept) = self.shape(hwnd) {
+                self.shared.link.host().keep_shape(kept);
+            }
         }
         if let Some(tx) = self.shared.render.lock().unwrap().take() {
             let _ = tx.send(RenderMsg::Quit);

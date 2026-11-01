@@ -15,6 +15,8 @@
 //! - `win`: the window on Windows (Win32, D3D11, Media Foundation).
 //! - `mac`: the window on a Mac (AppKit, and a display layer macOS decodes into).
 //! - `sound`: where the phone's sound plays, the windows' title-bar menu.
+//! - `shape`: phone or tablet — the size a window's shape gives its app, a
+//!   phone's or a tablet's, and each app's window kept as it closed.
 //! - `drops`: files dropped on a window, to the phone.
 //! - `fetch`: what the phone hands this computer — a drag carried out of a
 //!   window, a picture or file it copied.
@@ -40,6 +42,8 @@ mod link;
 mod mac;
 #[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
 mod pad;
+#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
+mod shape;
 #[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
 mod sound;
 #[cfg(windows)]
@@ -671,6 +675,8 @@ fn open_new(
         cascade,
         linux: None,
         size: None,
+        // As its last window closed: a tablet stays one.
+        shape: shape::kept(app, pkg),
         direct: on_cable(serial),
         via: via(serial),
         clicked,
@@ -1391,6 +1397,21 @@ impl link::Host for WindowHost {
         pad::open_now(&self.app, &self.serial(), &phone, window);
     }
 
+    fn keep_shape(&self, kept: shape::Shape) {
+        if self.pkg.starts_with("linux:") {
+            return;
+        }
+        log::info!(
+            "apps [{}] {}: closed at {:.0}×{:.0} points{}; its next window opens so",
+            self.serial(),
+            self.pkg,
+            kept.w,
+            kept.h,
+            if kept.max { ", maximised" } else { "" },
+        );
+        shape::keep(&self.app, &self.pkg, kept);
+    }
+
     fn copying(&self, window: Arc<dyn link::Surface>) {
         if let Some(phone) = self.phone() {
             copy_asked(&phone, window);
@@ -1805,6 +1826,7 @@ pub fn probe(serial: &str, socket: &str, pkg: &str, label: &str, icon_png: Optio
         cascade: 0,
         linux: None,
         size: None,
+        shape: None,
         direct: on_cable(serial),
         via: via(serial),
         clicked: Instant::now(),
@@ -1963,6 +1985,7 @@ fn open_linux_window(app: &tauri::AppHandle, serial: &str, xid: i32, title: &str
         cascade,
         linux: Some(xid),
         size: (w > 0 && h > 0).then_some((w, h)),
+        shape: None,
         direct: on_cable(serial),
         via: via(serial),
         clicked: mapped,
