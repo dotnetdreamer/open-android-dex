@@ -57,7 +57,6 @@ use win as native;
 pub(crate) use win::app_user_model_id;
 
 use std::collections::HashMap;
-#[cfg(any(windows, target_os = "macos"))]
 use std::path::PathBuf;
 #[cfg(any(windows, target_os = "macos"))]
 use std::sync::atomic::AtomicBool;
