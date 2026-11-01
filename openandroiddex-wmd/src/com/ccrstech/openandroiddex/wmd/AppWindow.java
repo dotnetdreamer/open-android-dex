@@ -6,9 +6,11 @@ import android.net.LocalSocket;
 import android.os.Build;
 import android.os.SystemClock;
 import android.view.KeyEvent;
+import android.view.MotionEvent;
 
 import com.ccrstech.openandroiddex.launcher.LinuxStreamEncoder;
 
+import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.io.IOException;
@@ -88,6 +90,20 @@ final class AppWindow implements LinuxStreamEncoder.Output, AppVideo.Gate {
     private static final long CATCH_READY_MS = 150;
     /** A drag handed over that has dropped nothing by now went somewhere else. */
     private static final long HAND_OVER_MS = 3000;
+    /**
+     * How long after the launcher's corner is armed it takes a press: its
+     * overlay drawn (the launcher waits for that), or the pixel made touchable,
+     * and the window manager's input caught up. 150 ms missed on a Galaxy A13;
+     * 600 ms did not.
+     */
+    private static final long DROP_IN_READY_MS = 400;
+    /** A press on the armed corner that has started no drag by now never reached it. */
+    private static final long DROP_IN_START_MS = 1000;
+    /** A drag of the computer's files let go of that has not ended by now: as if nothing took it. */
+    private static final long DROP_IN_END_MS = 3000;
+    /** The moves a drag of the computer's files makes on its way from the pixel to where it is let go. */
+    private static final int DROP_IN_STEPS = 8;
+    private static final long DROP_IN_STEP_MS = 12;
     /** A launch that has put nothing on the display after this long went somewhere else. */
     private static final long NEVER_CAME_MS = 12_000;
     /** A notification's own intent that has not put its app on the window's display by now went elsewhere, or nowhere. */
@@ -183,6 +199,12 @@ final class AppWindow implements LinuxStreamEncoder.Output, AppVideo.Gate {
     private int handOvers;
     /** The drag went to the computer: the press it began with is over here until the computer lets go. */
     private volatile boolean handedOver;
+
+    // files dropped on the window, carried to the app as a drag (AppDropIn)
+    /** The phone's pointer is carrying them: the computer's own goes nowhere until it is done. */
+    private volatile boolean droppingIn;
+    /** What the launcher's pixel said of that drag ("ours"), oldest first. */
+    private final ArrayDeque<JSONObject> dropInHeard = new ArrayDeque<>();
 
     AppWindow(AppServer server, LocalSocket sock, Wire wire, JSONObject open, int serial) {
         this.server = server;
@@ -850,10 +872,12 @@ final class AppWindow implements LinuxStreamEncoder.Output, AppVideo.Gate {
                         if ((d[0] & 0xff) == 0) handedOver = false;
                         break;
                     }
+                    // The phone's pointer is carrying a drop in: a move of the computer's would let go of it.
+                    if (droppingIn) break;
                     input.pointer(Wire.u16(d, 1), Wire.u16(d, 3), d[0] & 0xff, Wire.i32(d, 5));
                     break;
                 case Wire.SCROLL:
-                    if (d.length >= 16) {
+                    if (d.length >= 16 && !droppingIn) {
                         input.scroll(Wire.u16(d, 0), Wire.u16(d, 2), Float.intBitsToFloat(Wire.i32(d, 4)),
                                 Float.intBitsToFloat(Wire.i32(d, 8)), Wire.i32(d, 12));
                     }
@@ -978,6 +1002,15 @@ final class AppWindow implements LinuxStreamEncoder.Output, AppVideo.Gate {
 
     /** What a drag on the display did, as the launcher's pixel heard it. The drags' thread. */
     void dragEvent(JSONObject e) {
+        if (e.optBoolean("ours")) {
+            // The computer's own files on their way into the app: the window's
+            // to follow (dropIn), not a drag the computer may take out.
+            synchronized (dropInHeard) {
+                dropInHeard.addLast(e);
+                dropInHeard.notifyAll();
+            }
+            return;
+        }
         try {
             switch (e.optString("k")) {
                 case "started":
@@ -1016,6 +1049,114 @@ final class AppWindow implements LinuxStreamEncoder.Output, AppVideo.Gate {
         try {
             dragEvent(new JSONObject().put("k", "ended").put("display", displayId));
         } catch (org.json.JSONException ignored) {
+        }
+    }
+
+    // ── files dropped on the window, carried into the app (AppDropIn) ──
+
+    /**
+     * Files the computer dropped on this window at ({@code x}, {@code y}), in
+     * the display's pixels, staged in the launcher as {@code batch}: carried
+     * there as a drag of them, as one out of another app comes — the
+     * launcher's corner armed with them and pressed, the press moved there and
+     * let go — so the app under that point takes them as it takes any drop.
+     * Whether it took them; null when no drag could be made here at all. The
+     * drop's own connection's thread.
+     *
+     * <p>The press lands on an overlay of the launcher's where it may draw over
+     * others — let it, while windows are open, as for Android 17's pixel —
+     * since an app being revealed rides above the presentation pixel (PcDrags).
+     * An app that hides overlays hides that one too: the pixel is tried next.
+     * A press neither took went to the app at the display's corner instead,
+     * where its Back arrow often is: it is cancelled, never let go, so nothing
+     * there is clicked. The press is the drop's alone until it is let go
+     * ({@link AppInput#carry}): the window losing the keyboard on the
+     * computer meanwhile, or its connection going, lets go of everything else.
+     */
+    Boolean dropIn(String batch, JSONArray files, int x, int y) {
+        AppInput in = input;
+        if (in == null || xid != 0 || closing || displayId < 0) return null;
+        droppingIn = true;
+        in.carry();
+        try {
+            LauncherOverlay.need(AppDrags.OVERLAY_NEED);
+            String on = armDropIn(batch, files, false);
+            if (on == null) return null;
+            boolean started = pressStartsDrag(in);
+            if (!started && "overlay".equals(on)) {
+                AppServer.log("window " + serial + ": the launcher's overlay took no press (" + pkg + " hides overlays?): its pixel, then");
+                started = armDropIn(batch, files, true) != null && pressStartsDrag(in);
+            }
+            if (!started) {
+                try {
+                    Providers.call(AppServer.LINUX_PROVIDER, "drop.disarm", new JSONObject().put("display", displayId));
+                } catch (Exception ignored) {
+                    // the launcher went: its corner with it
+                }
+                AppServer.log("window " + serial + ": the launcher's corner started no drag (the press did not reach it)");
+                return null;
+            }
+            for (int i = 1; i <= DROP_IN_STEPS; i++) {
+                in.pointer(x * i / DROP_IN_STEPS, y * i / DROP_IN_STEPS, MotionEvent.BUTTON_PRIMARY, 0);
+                SystemClock.sleep(DROP_IN_STEP_MS);
+            }
+            in.pointer(x, y, 0, 0);
+            JSONObject ended = heardOfDropIn(DROP_IN_END_MS);
+            boolean taken = ended != null && ended.optBoolean("result");
+            AppServer.log("window " + serial + ": " + files.length() + " file(s) dropped on " + pkg + " at " + x + "," + y
+                    + (taken ? ": taken" : ended == null ? ": no end heard" : ": not taken"));
+            return taken;
+        } finally {
+            in.carried();
+            droppingIn = false;
+        }
+    }
+
+    /** The launcher's corner armed with {@code batch}: "overlay" or "pixel", what the press is to land on; null if not. */
+    private String armDropIn(String batch, JSONArray files, boolean pixel) {
+        try {
+            JSONObject r = Providers.call(AppServer.LINUX_PROVIDER, "drop.arm", new JSONObject().put("display", displayId)
+                    .put("batch", batch).put("files", files).put("pixel", pixel));
+            if (r.optBoolean("ok")) return r.optString("on", "pixel");
+            AppServer.log("window " + serial + ": no drop on " + pkg + " (" + r.optString("message") + ")");
+        } catch (Exception e) {
+            AppServer.log("window " + serial + ": no drop on " + pkg + " (" + e + ")");
+        }
+        return null;
+    }
+
+    /**
+     * A press on the armed corner, once its relayout has landed: whether it
+     * started the drag. One that did not is cancelled where it went.
+     */
+    private boolean pressStartsDrag(AppInput in) {
+        synchronized (dropInHeard) {
+            dropInHeard.clear();
+        }
+        SystemClock.sleep(DROP_IN_READY_MS);
+        in.pointer(0, 0, 0, 0);
+        in.pointer(0, 0, MotionEvent.BUTTON_PRIMARY, 0);
+        JSONObject started = heardOfDropIn(DROP_IN_START_MS);
+        if (started != null && "started".equals(started.optString("k"))) return true;
+        in.cancel();
+        return false;
+    }
+
+    /** The next thing the pixel says of a drop in, waiting up to {@code ms}; null for nothing. */
+    private JSONObject heardOfDropIn(long ms) {
+        long until = SystemClock.uptimeMillis() + ms;
+        synchronized (dropInHeard) {
+            while (dropInHeard.isEmpty()) {
+                long left = until - SystemClock.uptimeMillis();
+                if (left <= 0) return null;
+                try {
+                    dropInHeard.wait(left);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    return null;
+                }
+            }
+            return dropInHeard.pollFirst();
         }
     }
 

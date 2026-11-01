@@ -11,6 +11,7 @@ import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 
 /**
@@ -31,6 +32,11 @@ import java.nio.charset.StandardCharsets;
  * "report (2).pdf", as wherever else files arrive on this phone
  * (WebFiles.uniqueIn). The bytes go to a ".part" beside it, renamed once the
  * last one is there; on any failure the ".part" goes.
+ *
+ * <p>A file dropped on the app in a window rather than on its title bar says
+ * {@code "stage"} (its drop's batch) and {@code "i"}: it goes to the launcher's
+ * cache instead, and the answer says {@code "staged"}; the app is given the
+ * batch once the last of it is there ({@link AppDropIn}).
  */
 final class AppDrop {
 
@@ -86,7 +92,7 @@ final class AppDrop {
     void run() {
         JSONObject result;
         try {
-            result = put.optBoolean("install") ? install() : save();
+            result = put.optBoolean("install") ? install() : put.has("stage") ? stage() : save();
         } catch (Exception e) {
             String why = e.getMessage() == null ? e.toString() : e.getMessage();
             AppServer.log("a file from the computer, " + put.optString("name") + ": " + why);
@@ -105,17 +111,61 @@ final class AppDrop {
 
     private JSONObject save() throws Exception {
         long size = size();
-        File dir = new File(DOWNLOAD, safeDir(put.optString("dir")));
+        return saveToDownload(put.optString("name"), put.optString("dir"), part -> receive(part, size));
+    }
+
+    private JSONObject install() throws Exception {
+        long size = size();
+        return install(put.optString("name"), apk -> receive(apk, size));
+    }
+
+    /**
+     * Into the launcher's cache, for the app the file was dropped on, which is
+     * given it once the last of the drop is there (AppDropIn). A launcher from
+     * before this takes no file: the bytes on their way go to Download, as a
+     * drop's did, and the computer hears where.
+     */
+    private JSONObject stage() throws Exception {
+        long size = size();
+        int i = put.optInt("i", -1);
+        String name = safeName(put.optString("name"));
+        android.net.Uri uri = AppDropIn.staged(put.optString("stage"), i, name);
+        if (uri == null) throw new IOException("no such drop");
+        Content.Writing w;
+        try {
+            w = Content.write(uri);
+        } catch (IOException | RuntimeException e) {
+            AppServer.log("a file for an app: the launcher took none (" + e + "): to Download instead");
+            return save();
+        }
+        try (Content.Writing staged = w) {
+            receive(staged.out, size);
+        }
+        return new JSONObject().put("t", "put").put("ok", true).put("name", name).put("i", i).put("staged", true);
+    }
+
+    /** Where a file's bytes come from, written into {@code into}: off the computer's connection, or the launcher's cache. */
+    interface Bytes {
+        void into(File into) throws Exception;
+    }
+
+    /**
+     * Into Download, where a drop lands: a name nothing there has, claimed, the
+     * bytes into its ".part", and the name once they are whole. What the
+     * computer is told.
+     */
+    static JSONObject saveToDownload(String name, String subdir, Bytes bytes) throws Exception {
+        File dir = new File(DOWNLOAD, safeDir(subdir));
         if (!dir.isDirectory() && !dir.mkdirs()) throw new IOException("cannot make " + dir);
         File target;
         File part;
         // Chosen and claimed together: two windows dropping "photo.jpg" at once get one each.
         synchronized (AppDrop.class) {
-            target = unique(new File(dir, safeName(put.optString("name"))));
+            target = unique(new File(dir, safeName(name)));
             part = new File(target.getPath() + ".part");
             if (!part.createNewFile()) throw new IOException("cannot write in " + dir);
         }
-        receive(part, size);
+        bytes.into(part);
         if (!part.renameTo(target)) {
             part.delete();
             throw new IOException("cannot name it " + target.getName());
@@ -124,25 +174,25 @@ final class AppDrop {
         // the file closes; before it, a file written by path stays invisible
         // to the gallery and the file pickers until it is scanned.
         if (Build.VERSION.SDK_INT < 30) scan(target);
-        AppServer.log("a file from the computer: " + target.getPath() + " (" + size + " bytes)");
+        AppServer.log("a file from the computer: " + target.getPath() + " (" + target.length() + " bytes)");
         return new JSONObject().put("t", "put").put("ok", true)
                 .put("name", target.getName()).put("path", target.getPath());
     }
 
-    private JSONObject install() throws Exception {
-        long size = size();
+    /** An APK installed, as {@code adb install} would install it, and deleted. What the computer is told. */
+    static JSONObject install(String name, Bytes bytes) throws Exception {
         File apk = new File(STAGING, "oadx-drop-" + SystemClock.elapsedRealtimeNanos() + ".apk");
         try {
-            receive(apk, size);
+            bytes.into(apk);
             // pm is `cmd package` from Android 7: a binder call, not a JVM.
             String out = AppTasks.exec(INSTALL_TIMEOUT_S, "pm", "install", "-r", apk.getPath()).trim();
             if (!out.contains("Success")) {
                 String why = installerSaid(out);
-                AppServer.log("installing " + put.optString("name") + ": " + why);
+                AppServer.log("installing " + name + ": " + why);
                 return failed(why);
             }
-            AppServer.log("installed " + put.optString("name"));
-            return new JSONObject().put("t", "put").put("ok", true).put("name", put.optString("name"));
+            AppServer.log("installed " + name);
+            return new JSONObject().put("t", "put").put("ok", true).put("name", name);
         } finally {
             apk.delete();
         }
@@ -176,25 +226,9 @@ final class AppDrop {
 
     /** Exactly {@code size} bytes off the connection into {@code into}, the computer told as they land. */
     private void receive(File into, long size) throws Exception {
-        InputStream in = sock.getInputStream();
-        byte[] buf = new byte[256 * 1024];
-        long got = 0;
-        long saidBytes = 0;
-        long saidAt = SystemClock.uptimeMillis();
         boolean whole = false;
         try (FileOutputStream out = new FileOutputStream(into)) {
-            while (got < size) {
-                int n = in.read(buf, 0, (int) Math.min(buf.length, size - got));
-                if (n < 0) throw new IOException("the computer stopped sending");
-                out.write(buf, 0, n);
-                got += n;
-                long now = SystemClock.uptimeMillis();
-                if (got - saidBytes >= GOT_EVERY_BYTES || now - saidAt >= GOT_EVERY_MS) {
-                    wire.json(new JSONObject().put("t", "got").put("bytes", got));
-                    saidBytes = got;
-                    saidAt = now;
-                }
-            }
+            receive(out, size);
             // On the storage before it gets its name: a phone that dies now
             // leaves a ".part", never a file that looks whole and is not.
             out.getFD().sync();
@@ -202,7 +236,41 @@ final class AppDrop {
         } finally {
             if (!whole) into.delete();
         }
+    }
+
+    /** Exactly {@code size} bytes off the connection into {@code out}, the computer told as they land. */
+    private void receive(OutputStream out, long size) throws Exception {
+        InputStream in = sock.getInputStream();
+        byte[] buf = new byte[256 * 1024];
+        long got = 0;
+        long saidBytes = 0;
+        long saidAt = SystemClock.uptimeMillis();
+        while (got < size) {
+            int n = in.read(buf, 0, (int) Math.min(buf.length, size - got));
+            if (n < 0) throw new IOException("the computer stopped sending");
+            out.write(buf, 0, n);
+            got += n;
+            long now = SystemClock.uptimeMillis();
+            if (got - saidBytes >= GOT_EVERY_BYTES || now - saidAt >= GOT_EVERY_MS) {
+                wire.json(new JSONObject().put("t", "got").put("bytes", got));
+                saidBytes = got;
+                saidAt = now;
+            }
+        }
         wire.json(new JSONObject().put("t", "got").put("bytes", got));
+    }
+
+    /** All of {@code in} into {@code into}, made whole on the storage, or nothing left there. */
+    static void copy(InputStream in, File into) throws IOException {
+        boolean whole = false;
+        try (FileOutputStream out = new FileOutputStream(into)) {
+            byte[] buf = new byte[256 * 1024];
+            for (int n; (n = in.read(buf)) >= 0; ) out.write(buf, 0, n);
+            out.getFD().sync();
+            whole = true;
+        } finally {
+            if (!whole) into.delete();
+        }
     }
 
     private static JSONObject failed(String message) {

@@ -232,9 +232,11 @@ fn always_a_key(vk: u32) -> bool {
     )
 }
 
-/// Modifier keys: never sent on their own. Android reads what is held from
-/// each event's meta, and a lone Shift it is told of is a Shift some apps
-/// then believe is held.
+/// Modifier keys: never sent from here. Each key's meta says what is held,
+/// and the phone tells the app of Ctrl, Alt and Shift as keys of their own
+/// around the key they came with (AppInput.key), so none is ever pressed
+/// alone there: Alt let go on its own would open the menus of a computer an
+/// app is controlling.
 pub fn modifier(vk: u32) -> bool {
     matches!(
         vk,
@@ -380,7 +382,7 @@ pub mod mac {
         })
     }
 
-    /// Modifier keys: never sent on their own, as on Windows.
+    /// Modifier keys: never sent from here, as on Windows; the phone makes them from the meta.
     pub fn modifier(kvk: u16) -> bool {
         matches!(
             kvk,

@@ -552,9 +552,22 @@ public final class AppServer {
                 }
                 break;
             }
+            case "dropIn":
+                // The files of a drop on a window's app, staged: dropped on the app.
+                Thread.currentThread().setName("apps-drop-in");
+                new AppDropIn(this, s, wire, hello).run();
+                break;
             default:
                 closeQuietly(s);
         }
+    }
+
+    /** The window with {@code key}, or null. */
+    AppWindow window(String key) {
+        for (AppWindow w : running) {
+            if (!key.isEmpty() && key.equals(w.key)) return w;
+        }
+        return null;
     }
 
     /**

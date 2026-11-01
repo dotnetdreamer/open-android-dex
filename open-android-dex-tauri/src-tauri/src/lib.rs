@@ -122,6 +122,7 @@ pub fn run() {
             remote_desktop::remote_desktop_reveal,
             remote_usb::remote_desktop_usb,
             apps::apps_prepare,
+            apps::apps_drop,
             apps::apps_list,
             apps::apps_open,
             apps::apps_windows,

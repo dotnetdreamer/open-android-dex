@@ -11,6 +11,7 @@ import java.io.Closeable;
 import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.OutputStream;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 
@@ -82,6 +83,48 @@ final class Content {
             if (afd == null) afd = (AssetFileDescriptor) call(h.provider, "openTypedAssetFile", uri, "*/*");
             if (afd == null) throw notFound != null ? notFound : new FileNotFoundException("nothing at " + uri);
             return new Opened(afd, h);
+        } catch (IOException | RuntimeException e) {
+            h.close();
+            throw e;
+        }
+    }
+
+    /** A URI open for writing: its stream, and closing lets go of its provider. */
+    static final class Writing implements Closeable {
+        final OutputStream out;
+        private final AssetFileDescriptor afd;
+        private final Held held;
+
+        private Writing(AssetFileDescriptor afd, Held held) throws IOException {
+            this.afd = afd;
+            this.held = held;
+            this.out = afd.createOutputStream();
+        }
+
+        @Override
+        public void close() throws IOException {
+            try {
+                out.close();
+            } finally {
+                try {
+                    afd.close();
+                } catch (IOException ignored) {
+                }
+                held.close();
+            }
+        }
+    }
+
+    /**
+     * {@code uri} to write, as {@code content write} opens it: a file a dropped
+     * one is staged in, in the launcher's cache (AppDropIn).
+     */
+    static Writing write(Uri uri) throws IOException {
+        Held h = Held.acquire(uri);
+        try {
+            AssetFileDescriptor afd = (AssetFileDescriptor) call(h.provider, "openAssetFile", uri, "w");
+            if (afd == null) throw new FileNotFoundException("nothing at " + uri);
+            return new Writing(afd, h);
         } catch (IOException | RuntimeException e) {
             h.close();
             throw e;

@@ -360,6 +360,26 @@ pub fn apps_prepare(app: tauri::AppHandle, serial: String) -> Result<host::Hello
     Ok(host::ensure(&app, &way.serial, &way.phone)?.hello.clone())
 }
 
+/// Files dropped on this app's main window, for the phone it shows: into its
+/// Download folder, an APK installed — what a drop on an app window's title
+/// bar does (doc/apps-on-pc.md, "Dropping files"). `events` hears how it
+/// goes, line by line, as a paste's does.
+#[tauri::command(async)]
+pub fn apps_drop(app: tauri::AppHandle, serial: String, paths: Vec<String>, events: Channel<Note>) -> Result<(), String> {
+    to_download(&app, &serial, paths.into_iter().map(PathBuf::from).collect(), events)
+}
+
+/// `paths` to `serial`'s phone, into its Download folder, an APK installed
+/// instead: a drop on the main window, or a paste. `events` hears how it goes.
+fn to_download(app: &tauri::AppHandle, serial: &str, paths: Vec<PathBuf>, events: Channel<Note>) -> Result<(), String> {
+    let way = way_to(app, serial);
+    let server = host::ensure(app, &way.serial, &way.phone)?;
+    drops::send(way.serial, server.socket.clone(), paths, None, String::new(), move |note| {
+        let _ = events.send(note);
+    });
+    Ok(())
+}
+
 /// The phone's apps, in its own launcher's names, A to Z. Icons this
 /// computer already has come with them; the rest follow as `apps:icon`, for
 /// the `serial` the page asked with.
@@ -1351,9 +1371,12 @@ impl link::Host for WindowHost {
         sound::pick(&self.app, &self.serial(), choice, window);
     }
 
-    fn dropped(&self, paths: Vec<PathBuf>, window: Arc<dyn link::Surface>) {
+    fn dropped(&self, paths: Vec<PathBuf>, on: Option<drops::On>, window: Arc<dyn link::Surface>) {
         let Some(route) = self.route() else { return };
-        drops::send(route.serial, route.socket, paths, move |n| window.note(Some(n.text), n.busy));
+        // A Linux app's window: its app is X's, which hears no Android drop. To Download.
+        let on = on.filter(|_| !self.pkg.starts_with("linux:"));
+        let app = self.label.clone();
+        drops::send(route.serial, route.socket, paths, on, app, move |n| window.note(Some(n.text), n.busy));
     }
 
     fn touchpad(&self, window: Arc<dyn link::Surface>) {
@@ -1650,7 +1673,7 @@ pub fn apps_close(serial: Option<String>) {
     let _ = serial;
 }
 
-/// A line about a paste while it goes, as a window's strip says it of a drop:
+/// A line about a paste, or a drop on the main window, while it goes, as a window's strip says it of a drop:
 /// `busy` while more is coming, and `failed` when something did not land —
 /// none of it, or not all of it.
 #[derive(Debug, Clone, Serialize)]
@@ -1677,12 +1700,8 @@ pub fn apps_paste(app: tauri::AppHandle, serial: String, events: Channel<Note>) 
     if paths.is_empty() {
         return Err("Copy a file on this computer first".into());
     }
-    let way = way_to(&app, &serial);
-    let server = host::ensure(&app, &way.serial, &way.phone)?;
     let count = paths.len();
-    drops::send(way.serial, server.socket.clone(), paths, move |note| {
-        let _ = events.send(note);
-    });
+    to_download(&app, &serial, paths, events)?;
     Ok(count)
 }
 
@@ -1823,8 +1842,9 @@ impl link::Host for ProbeHost {
 
     fn pick_sound(&self, _choice: sound::Choice, _window: Arc<dyn link::Surface>) {}
 
-    fn dropped(&self, paths: Vec<PathBuf>, window: Arc<dyn link::Surface>) {
-        drops::send(self.serial.clone(), self.socket.clone(), paths, move |n| window.note(Some(n.text), n.busy));
+    fn dropped(&self, paths: Vec<PathBuf>, on: Option<drops::On>, window: Arc<dyn link::Surface>) {
+        let app = window.label();
+        drops::send(self.serial.clone(), self.socket.clone(), paths, on, app, move |n| window.note(Some(n.text), n.busy));
     }
 
     fn touchpad(&self, window: Arc<dyn link::Surface>) {

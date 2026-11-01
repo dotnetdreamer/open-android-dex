@@ -10,12 +10,15 @@ import android.os.Binder;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.ParcelFileDescriptor;
 import android.util.Base64;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.io.ByteArrayOutputStream;
+import java.io.File;
+import java.io.FileNotFoundException;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -62,10 +65,25 @@ import java.util.concurrent.TimeUnit;
  *     the last call (started, dropped here, ended), waiting up to {@code wait}
  *     ms for something to, as {@code linux.events} does, and the displays it
  *     has a window on ({@code watching}).</li>
+ * <li>{@code drop.arm} {@code {display, batch, files: [{i, name}], pixel?}} —
+ *     files a computer dropped on that display's app, staged here (below): the
+ *     next press on the display's corner starts a drag of them, which the app
+ *     server carries to where the computer's pointer let go. It lands on an
+ *     overlay put up for it where this app may draw over others, else (or
+ *     with {@code pixel}) on the drag pixel; {@code on} says which
+ *     ({@link PcDrags#arm}). {@code drop.disarm} {@code {display}} — no press
+ *     came. {@code drop.opened} {@code {batch, files, wait}} — the app took
+ *     them: which it has opened ({@code opened}, each one's {@code i}),
+ *     waiting up to {@code wait} ms for all of them. {@code drop.forget}
+ *     {@code {batch}} — the app did not take them: they go.</li>
  * </ul>
  *
  * <p>{@code linux.apps} also says how far the setup is ({@code phase},
  * {@code pct}): Linux.readStatus's reading of the guest's state.env.
+ *
+ * <p>A dropped file is staged by opening {@code drop/<batch>/<i>/<name>} here
+ * for writing, and read back for reading: a file in this app's cache, which
+ * {@link DropsProvider} serves to the app it is dropped on.
  *
  * <b>Only the shell may call this</b>, as {@link RemoteProvider}: the manifest
  * guards it with {@code android.permission.DUMP}, and {@link #call} checks the
@@ -235,6 +253,38 @@ public class AppsProvider extends ContentProvider {
                     out.put("events", drags.takeEvents(wait)).put("watching", drags.watching());
                     break;
                 }
+                case "drop.arm": {
+                    int display = in.optInt("display", -1);
+                    String batch = in.optString("batch");
+                    JSONArray files = in.optJSONArray("files");
+                    boolean pixel = in.optBoolean("pixel");
+                    DropsProvider.sweep(ctx);
+                    String[] on = new String[1];
+                    String[] why = new String[1];
+                    onMain(() -> on[0] = PcDrags.get(ctx).arm(display, batch, files, pixel, why));
+                    // A new window takes no touch before it has drawn: the answer waits for that.
+                    if ("overlay".equals(on[0])) PcDrags.get(ctx).sourceDrawn(display, 1000);
+                    out.put("ok", on[0] != null);
+                    if (on[0] != null) out.put("on", on[0]);
+                    else out.put("message", why[0]);
+                    break;
+                }
+                case "drop.disarm": {
+                    int display = in.optInt("display", -1);
+                    onMain(() -> PcDrags.get(ctx).disarm(display));
+                    out.put("ok", true);
+                    break;
+                }
+                case "drop.opened": {
+                    long wait = Math.max(0, Math.min(EVENTS_WAIT_MAX_MS, in.optLong("wait", 0)));
+                    out.put("ok", true).put("opened", DropsProvider.opened(in.optString("batch"), in.optJSONArray("files"), wait));
+                    break;
+                }
+                case "drop.forget": {
+                    DropsProvider.forget(ctx, in.optString("batch"));
+                    out.put("ok", true);
+                    break;
+                }
                 default:
                     out.put("ok", false).put("message", "no method " + method);
             }
@@ -285,6 +335,28 @@ public class AppsProvider extends ContentProvider {
         ByteArrayOutputStream out = new ByteArrayOutputStream();
         scaled.compress(Bitmap.CompressFormat.PNG, 100, out);
         return Base64.encodeToString(out.toByteArray(), Base64.NO_WRAP);
+    }
+
+    /**
+     * A dropped file being staged ({@code drop/<batch>/<i>/<name>}): opened for
+     * writing as its bytes come in, and for reading when the app it was dropped
+     * on did not take it and it goes to Download after all. The shell only.
+     */
+    @Override
+    public ParcelFileDescriptor openFile(Uri uri, String mode) throws FileNotFoundException {
+        int uid = Binder.getCallingUid();
+        if (uid != SHELL_UID && uid != ROOT_UID) {
+            throw new SecurityException("the phone's apps on a computer are for adb only");
+        }
+        List<String> path = uri.getPathSegments();
+        File f = path.size() == 4 && "drop".equals(path.get(0))
+                ? DropsProvider.file(getContext(), path.subList(1, 4)) : null;
+        if (f == null) throw new FileNotFoundException(uri.toString());
+        if ("r".equals(mode)) return ParcelFileDescriptor.open(f, ParcelFileDescriptor.MODE_READ_ONLY);
+        File dir = f.getParentFile();
+        if (dir == null || (!dir.isDirectory() && !dir.mkdirs())) throw new FileNotFoundException("no room for " + uri);
+        return ParcelFileDescriptor.open(f, ParcelFileDescriptor.MODE_WRITE_ONLY
+                | ParcelFileDescriptor.MODE_CREATE | ParcelFileDescriptor.MODE_TRUNCATE);
     }
 
     @Override

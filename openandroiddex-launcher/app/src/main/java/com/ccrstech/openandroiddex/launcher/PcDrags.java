@@ -16,6 +16,7 @@ import android.provider.OpenableColumns;
 import android.view.Display;
 import android.view.DragEvent;
 import android.view.Gravity;
+import android.view.MotionEvent;
 import android.view.View;
 import android.view.WindowManager;
 
@@ -67,6 +68,15 @@ import java.util.Map;
  * to the server as an event ({@link AppsProvider}'s {@code drag.events}).
  * Android 12 and later: the drop and its read permission come through the
  * platform's own content listener, no hidden call.
+ *
+ * <p>The same pixel carries files the other way, into the app (doc/apps-on-pc.md,
+ * "Dropping files"): a drop on the computer's window, its files staged in this
+ * app's cache ({@link DropsProvider}), arms it ({@link #arm}), and the server
+ * presses on it. That press starts a drag of them, as a drag out of another
+ * app would be — global, with the right to read them — which the server
+ * carries to where the computer's pointer let go and lets go of, so the app
+ * there takes them as it takes any drop. Its events say {@code ours}, and how
+ * it ended says whether the app took them.
  */
 final class PcDrags {
 
@@ -184,8 +194,92 @@ final class PcDrags {
     void unwatch(int displayId) {
         Catcher c = catchers.remove(displayId);
         if (c == null) return;
+        removeSource(c);
         try {
             c.wm.removeViewImmediate(c);
+        } catch (RuntimeException ignored) {
+            // the display, and the window with it, went first
+        }
+    }
+
+    /**
+     * Files the computer dropped on the app on {@code displayId}, staged as
+     * {@code batch}: the next press on this display's corner starts a drag of
+     * them. What it lands on is said: {@code "overlay"} or {@code "pixel"}.
+     * Main thread. Null and why not, in {@code why[0]}, when nothing is armed.
+     *
+     * <p>Where this app may draw over others, the press lands on an overlay of
+     * its own, put up for it: on Android 12 an app's window sat above the
+     * presentation pixel while its opening was still being revealed (an
+     * animation leash, seen on a Galaxy A13 for seconds on end), and a press
+     * meant for the pixel went to the app. An app that hides overlays (Files,
+     * Settings) hides that one too, so {@code pixel} asks for the pixel
+     * itself, which is touchable from now and shown, as for a drag's own drop.
+     */
+    String arm(int displayId, String batch, JSONArray files, boolean pixel, String[] why) {
+        Catcher c = catchers.get(displayId);
+        if (c == null) return refuse(why, "no window on display " + displayId);
+        if (c.dragging) return refuse(why, "a drag is under way there");
+        ClipData clip = DropsProvider.clip(app, batch, files);
+        if (clip == null) return refuse(why, "none of the files is here");
+        removeSource(c);
+        c.armed = clip;
+        boolean overlay = c.lp.type == WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY;
+        if (!pixel && !overlay && android.provider.Settings.canDrawOverlays(app) && putSource(c)) return "overlay";
+        c.lp.flags &= ~WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE;
+        c.lp.alpha = 1f;
+        relayout(c);
+        return "pixel";
+    }
+
+    private static String refuse(String[] why, String reason) {
+        why[0] = reason;
+        return null;
+    }
+
+    /** No press came, or no drag: the corner goes back to letting every touch through. Main thread. */
+    void disarm(int displayId) {
+        Catcher c = catchers.get(displayId);
+        if (c == null || c.armed == null) return;
+        c.armed = null;
+        removeSource(c);
+        if (c.dragging) return;
+        c.lp.flags |= WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE;
+        c.lp.alpha = 0f;
+        relayout(c);
+    }
+
+    /** One pixel's overlay at the corner of {@code c}'s display, touchable, for a drop in's press. Main thread. */
+    private boolean putSource(Catcher c) {
+        Display d = app.getSystemService(DisplayManager.class).getDisplay(c.display);
+        if (d == null) return false;
+        try {
+            int type = WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY;
+            Context window = app.createDisplayContext(d).createWindowContext(type, null);
+            WindowManager wm = window.getSystemService(WindowManager.class);
+            WindowManager.LayoutParams lp = new WindowManager.LayoutParams(1, 1, type,
+                    WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                            | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
+                            | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                    PixelFormat.TRANSLUCENT);
+            lp.gravity = Gravity.TOP | Gravity.START;
+            lp.setTitle("Open Android DeX drop in");
+            Source s = new Source(window, c, wm);
+            wm.addView(s, lp);
+            c.source = s;
+            return true;
+        } catch (RuntimeException e) {
+            DexLog.warn("drags", "no overlay for a drop in on display " + c.display + ": " + e);
+            return false;
+        }
+    }
+
+    private void removeSource(Catcher c) {
+        Source s = c.source;
+        if (s == null) return;
+        c.source = null;
+        try {
+            s.wm.removeViewImmediate(s);
         } catch (RuntimeException ignored) {
             // the display, and the window with it, went first
         }
@@ -243,6 +337,7 @@ final class PcDrags {
             for (int i = 0; desc != null && i < desc.getMimeTypeCount(); i++) mimes.put(desc.getMimeType(i));
             j.put("k", "started").put("display", c.display).put("mimes", mimes);
             if (desc != null && desc.getLabel() != null) j.put("label", desc.getLabel().toString());
+            if (c.ours) j.put("ours", true);
         } catch (Exception ignored) {
         }
         event(j);
@@ -251,12 +346,47 @@ final class PcDrags {
     private void ended(Catcher c, boolean result) {
         if (!c.dragging) return;
         c.dragging = false;
+        boolean ours = c.ours;
+        c.ours = false;
+        c.lp.flags |= WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE;
+        c.lp.alpha = 0f;
+        relayout(c);
+        if (ours) removeSource(c);
+        JSONObject j = new JSONObject();
+        try {
+            j.put("k", "ended").put("display", c.display).put("result", result);
+            if (ours) j.put("ours", true);
+        } catch (Exception ignored) {
+        }
+        event(j);
+    }
+
+    /**
+     * The server pressed on the armed corner, {@code from} — the pixel or the
+     * overlay put up for the press: the drag of the computer's files starts
+     * there. Global, so it may leave this app, and with the right to read them
+     * going to whichever app takes it. The pixel hears it start and end.
+     */
+    private void startDropIn(Catcher c, View from) {
+        ClipData clip = c.armed;
+        c.armed = null;
+        c.ours = true;
+        boolean started = false;
+        try {
+            started = from.startDragAndDrop(clip, new View.DragShadowBuilder(from), null,
+                    View.DRAG_FLAG_GLOBAL | View.DRAG_FLAG_GLOBAL_URI_READ);
+        } catch (RuntimeException e) {
+            DexLog.warn("drags", "no drag of the computer's files on display " + c.display + ": " + e);
+        }
+        if (started) return;
+        c.ours = false;
+        removeSource(c);
         c.lp.flags |= WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE;
         c.lp.alpha = 0f;
         relayout(c);
         JSONObject j = new JSONObject();
         try {
-            j.put("k", "ended").put("display", c.display).put("result", result);
+            j.put("k", "refused").put("display", c.display).put("ours", true);
         } catch (Exception ignored) {
         }
         event(j);
@@ -358,6 +488,12 @@ final class PcDrags {
         final WindowManager wm;
         final WindowManager.LayoutParams lp;
         boolean dragging;
+        /** The computer's files, for a drag the next press starts ({@link #arm}). */
+        ClipData armed;
+        /** The overlay put up for that press, if it is not on this pixel. */
+        Source source;
+        /** The drag under way is that one. */
+        boolean ours;
 
         Catcher(Context ctx, int display, WindowManager wm, WindowManager.LayoutParams lp) {
             super(ctx);
@@ -375,6 +511,13 @@ final class PcDrags {
         }
 
         @Override
+        public boolean onTouchEvent(MotionEvent e) {
+            if (armed == null || source != null || e.getActionMasked() != MotionEvent.ACTION_DOWN) return false;
+            startDropIn(this, this);
+            return true;
+        }
+
+        @Override
         public boolean onDragEvent(DragEvent e) {
             switch (e.getAction()) {
                 case DragEvent.ACTION_DRAG_STARTED:
@@ -386,6 +529,49 @@ final class PcDrags {
                 default:
             }
             return super.onDragEvent(e);
+        }
+    }
+
+    /**
+     * Whether the overlay armed on {@code displayId} has drawn, waiting up to
+     * {@code ms}: a window takes no touch before it has. True where the pixel
+     * itself was armed. Any thread but the main one.
+     */
+    boolean sourceDrawn(int displayId, long ms) {
+        Catcher c = catchers.get(displayId);
+        Source s = c == null ? null : c.source;
+        if (s == null) return true;
+        try {
+            return s.drawn.await(ms, java.util.concurrent.TimeUnit.MILLISECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return false;
+        }
+    }
+
+    /** The overlay put up at a display's corner for one drop in's press ({@link #arm}): the drag starts on it. */
+    private final class Source extends View {
+        final Catcher catcher;
+        final WindowManager wm;
+        final java.util.concurrent.CountDownLatch drawn = new java.util.concurrent.CountDownLatch(1);
+
+        Source(Context ctx, Catcher catcher, WindowManager wm) {
+            super(ctx);
+            this.catcher = catcher;
+            this.wm = wm;
+            setWillNotDraw(false);
+        }
+
+        @Override
+        protected void onDraw(android.graphics.Canvas canvas) {
+            drawn.countDown();
+        }
+
+        @Override
+        public boolean onTouchEvent(MotionEvent e) {
+            if (catcher.armed == null || catcher.source != this || e.getActionMasked() != MotionEvent.ACTION_DOWN) return false;
+            startDropIn(catcher, this);
+            return true;
         }
     }
 }

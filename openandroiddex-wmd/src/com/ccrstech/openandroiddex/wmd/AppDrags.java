@@ -41,8 +41,8 @@ final class AppDrags {
     private static final long WAIT_MS = 10_000;
     /** Android 17, by number: the first that hides the apps under a presentation. */
     private static final int OVERLAY_FROM = 37;
-    /** What the pixels are, to the launcher's overlay app-op they need from Android 17. */
-    private static final String OVERLAY_NEED = "the drag catchers";
+    /** What the pixels are, to the launcher's overlay app-op they need from Android 17 — and a drop in's press, on any (AppWindow.dropIn). */
+    static final String OVERLAY_NEED = "the drag catchers";
 
     private final Map<Integer, AppWindow> byDisplay = new ConcurrentHashMap<>();
     /** Displays the launcher would put no window on: not asked again. */
