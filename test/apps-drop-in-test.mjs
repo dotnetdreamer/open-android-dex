@@ -212,10 +212,15 @@ async function dropIn(server, key, batch, files, x, y) {
  * place on the display is its own plus every ancestor's. Null with `none` set
  * where the window's task is listed and its field is no TextView (Compose, on
  * a Pixel's Settings), which takes no drop of a file as text anyway; null
- * alone where the window's task is not listed (Android 12 leaves it out).
+ * alone where the window's task is not listed. Android 12 leaves it out of
+ * `top`, and lists it when asked for the package's activities.
  */
 function searchField(pkg, width, out) {
-  const dump = adb("shell", "dumpsys activity top");
+  return fieldIn("top", pkg, width, out) ?? (out.none ? null : fieldIn(pkg, pkg, width, out));
+}
+
+function fieldIn(what, pkg, width, out) {
+  const dump = adb("shell", `dumpsys activity ${what}`);
   for (const block of dump.split(/\n(?=TASK )/)) {
     if (!block.split("\n").some((l) => /^\s*ACTIVITY /.test(l) && l.includes(pkg + "/"))) continue;
     const ancestors = []; // [indent, left, top] of the views above the current line

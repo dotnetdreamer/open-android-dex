@@ -925,14 +925,20 @@ than its last read.
 for the press (PcDrags `arm`); the server lets the launcher draw over other
 apps while windows are open, as it does for Android 17's drag pixel
 (`LauncherOverlay`). The drag pixel itself, a presentation below Android 17,
-was not enough: on a Galaxy A13 an app's window sat above it while the app's
-opening was still being revealed (an animation leash, for seconds on end, and
-on some days nearly every time), and the press went to the app. The same is
-the likeliest cause of the A13's occasional missed drags out ("Dragging
-out"), which still land on that pixel. The launcher answers only once the
-overlay has drawn, and the server presses 400 ms after: 150 ms missed on the
-A13. An app that hides overlays (Files, Settings) hides that one too, so the
-pixel is pressed next; and Samsung's Settings search sat above both. A press
+was not enough: on a Galaxy A13 an app's window sat above it, and the press
+went to the app. Measured on 2026-11-01, on the A13 (One UI 4, Android 12):
+while the app on a window's display has a focused text field, One UI lifts
+that display's whole task area out of the window hierarchy's root and over it
+(a `RootWrapper` layer in SurfaceFlinger), so every app there is above every
+other window there — the overlay, the drag pixel, and accessibility overlays
+too (PadPointer, `overlaysBuried`). A drop on such an app finds no corner to
+press and goes to Download, and a drag out of one would miss the pixel the
+same way (the same layering; not run). With no text field focused (Clock, Files) the
+order is Android's own, and the pixel is on top; letting the overlay be the
+keyboard's target (`FLAG_ALT_FOCUSABLE_IM`) changed nothing. The launcher
+answers only once the overlay has drawn, and the server presses 400 ms after:
+150 ms missed on the A13. An app that hides overlays (Files, Settings) hides
+that one too, so the pixel is pressed next. A press
 neither took went to the app's own corner, where its Back arrow often is: it
 is cancelled, not let go, and the files go to Download. So do drops on
 Android 11 and older, which have no pixel, and on a Linux app's window, whose
@@ -1260,6 +1266,22 @@ emulator, this launcher put on it by the desktop):
 - the main window choosing its phone by the page in front: compiled
   (TypeScript), not run.
 
+On main after the merge, on the Galaxy A13 (2026-11-01; this launcher put on
+it by the desktop; the wire tests with nothing of the computer's app running,
+the rest in the app itself, driven over its page):
+
+- `test/apps-keys-test.mjs`: 5/5 (Settings' search, Ctrl+A, Ctrl+C, Shift+Left);
+- `test/apps-drag-test.mjs`: 14/14 (a picture dragged out of Files);
+- `test/apps-drop-in-test.mjs` with the scratch app's text field: 7/16. Every
+  drop found no corner to press — the field was focused, so One UI had lifted
+  the apps over the launcher's windows ("The corner pressed") — and went to
+  Download byte for byte, the app not clicked, no input refused;
+- the close prompt: with nothing open, ✕ closed the app at once; with Clock
+  in a window, it asked ("This closes with it: Clock"), Cancel kept both
+  running past the 3 s the app waits for an answer, and Close ended both;
+- Paste in the main window's right-click menu, a file on this computer's
+  clipboard: in the A13's Download byte for byte, the toast saying so.
+
 Not yet:
 
 - **A drop from Explorer onto an app window, and onto the main window**: the
@@ -1271,6 +1293,11 @@ Not yet:
   took drops hide overlays or are Compose; a chat app's attaching a file
   (WhatsApp) not tried, none being on the test phones. So neither is how long
   a chat takes to open what it attaches, which the 5 s wait for it assumes.
+- **A drop into an app with a focused text field on One UI 4** (a chat with
+  its message box open): it goes to Download ("The corner pressed"). A way
+  out, not tried: start the drag from a translucent activity of the
+  launcher's on that display, which is in the task area itself and so above
+  the app — at the cost of the app pausing for the second the drop takes.
 - **The main window with two phones connected**: the drop following the page
   in front is compiled, not run.
 - **TeamViewer itself**, whose missing Ctrl this was for: not on the test
