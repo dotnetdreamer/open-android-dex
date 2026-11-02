@@ -4,13 +4,14 @@
   (declared as bundle.macOS.infoPlist in tauri.macos.conf.json). macOS-only:
   nothing here reaches the Windows installer.
 
-  Everything below exists for ONE feature — finding a phone over Wi-Fi. The
-  three ADB routes in the connect panel (pair by QR, pair by code, reconnect to
-  a saved phone) all rest on mDNS, which adb performs on our behalf as a child
-  process. From macOS 15 on, the first multicast send raises the Local Network
-  prompt, and an app with no usage string is simply denied without one being
-  shown — so discovery comes back empty with nothing anywhere saying why. That
-  is the failure this file prevents.
+  Most of what is below exists for one feature — finding a phone over Wi-Fi.
+  The three ADB routes in the connect panel (pair by QR, pair by code,
+  reconnect to a saved phone) all rest on mDNS, which adb performs on our
+  behalf as a child process. From macOS 15 on, the first multicast send raises
+  the Local Network prompt, and an app with no usage string is simply denied
+  without one being shown — so discovery comes back empty with nothing
+  anywhere saying why. That is the failure this file prevents. The URL scheme
+  at the end is for the phone apps kept in the Dock.
 -->
 <plist version="1.0">
 <dict>
@@ -33,5 +34,23 @@
 
     <key>LSApplicationCategoryType</key>
     <string>public.app-category.utilities</string>
+
+    <!--
+      A phone app kept in the Dock (src/apps/pin.rs) is a small application of
+      its own that opens openandroiddex://app/<phone>/<pkg>: LaunchServices
+      hands the URL to this app, wherever it is, starting it if need be. Only
+      the apps kept in the Dock are opened by it.
+    -->
+    <key>CFBundleURLTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleURLName</key>
+            <string>com.ccrstech.openandroiddex</string>
+            <key>CFBundleURLSchemes</key>
+            <array>
+                <string>openandroiddex</string>
+            </array>
+        </dict>
+    </array>
 </dict>
 </plist>

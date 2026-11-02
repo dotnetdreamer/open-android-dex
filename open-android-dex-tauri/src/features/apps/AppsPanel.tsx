@@ -63,6 +63,12 @@ interface OpenWindow {
   label: string;
 }
 
+/** A pinned app on its way to a window: a taskbar or Dock click, waiting for its phone (src-tauri/src/apps/pin.rs). */
+interface Pending {
+  pkg: string;
+  label: string;
+}
+
 type Load =
   | { kind: "idle" }
   | { kind: "loading" }
@@ -168,6 +174,17 @@ export function AppsPanel({
     };
   }, [say]);
 
+  // Pinned apps clicked on the taskbar or in the Dock, opening as soon as their phone is here.
+  const [pending, setPending] = useState<Pending[]>([]);
+  useEffect(() => {
+    invoke<Pending[]>("apps_pending").then(setPending).catch(() => {});
+    const un = listen<Pending[]>("apps:pending", ({ payload }) => setPending(payload));
+    return () => {
+      un.then((f) => f());
+    };
+  }, []);
+  const pendingPkgs = useMemo(() => new Set(pending.map((p) => p.pkg)), [pending]);
+
   // Typing anywhere on the page searches — not while another field has the keys (the bell's own search).
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -227,10 +244,16 @@ export function AppsPanel({
   }, [phone]);
 
   if (!device) {
+    // A pinned app clicked with the phone away: it is named, and opens once the phone is here.
+    const waiting = pending.map((p) => p.label).join(", ");
     return (
-      <Centered icon="phone" title="Connect your phone to see its apps">
-        Plug it into {THIS_COMPUTER}, or connect over Wi‑Fi on the Desktop tab. Its apps appear here, and each one opens
-        in a window of its own.
+      <Centered icon="phone" title={waiting ? `Connect your phone to open ${waiting}` : "Connect your phone to see its apps"}>
+        Plug it into {THIS_COMPUTER}, or connect over Wi‑Fi on the Desktop tab.{" "}
+        {pending.length === 1
+          ? `${waiting} opens in a window of its own as soon as your phone is here.`
+          : pending.length > 1
+            ? "They open in windows of their own as soon as your phone is here."
+            : "Its apps appear here, and each one opens in a window of its own."}
       </Centered>
     );
   }
@@ -298,7 +321,9 @@ export function AppsPanel({
                     {counts[a.pkg] > 9 ? "9+" : counts[a.pkg]}
                   </span>
                 )}
-                {opening === a.pkg && <span className="spinner app-icon-spinner" aria-hidden="true" />}
+                {(opening === a.pkg || pendingPkgs.has(a.pkg)) && (
+                  <span className="spinner app-icon-spinner" aria-hidden="true" />
+                )}
               </span>
               <span className="app-label">{a.label}</span>
               <span className="app-dot" aria-hidden="true" />

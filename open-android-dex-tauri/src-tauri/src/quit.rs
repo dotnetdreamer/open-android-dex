@@ -161,7 +161,9 @@ fn open_now(app: &AppHandle) -> Open {
     Open { desktops, apps, linux_desktops }
 }
 
-fn quit(app: &AppHandle) {
+/// Quit, with nothing holding the main window's close: also what a run a
+/// pinned app started does once that app's window has gone (apps/pin.rs).
+pub(crate) fn quit(app: &AppHandle) {
     ask().quitting = true;
     app.exit(0);
 }

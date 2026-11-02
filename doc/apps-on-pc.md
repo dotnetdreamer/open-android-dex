@@ -43,12 +43,14 @@ arbitrary until you know what was measured, or what the platform refuses.
 | What the phone hands over | `AppOffers.java`, `Content.java`, `apps/fetch.rs` | a drag's files and a copied picture's, read as the shell and taken here on connections of their own |
 | The phone's notifications | `notifications/`, `AppNotifications.java` | as this computer's own; a window opened at one (doc/phone-notifications.md) |
 | The phone as their touchpad | `apps/pad.rs`, `AppPad.java`, launcher `Touchpad.java`, `HostPointer.java` | the phone's screen moving this computer's pointer over these windows (doc/phone-touchpad.md, §10) |
+| Pinned apps | `apps/pin.rs`, `lib.rs`, `Info.plist` | an app pinned to the taskbar or the Dock, opened from there again — this app started for it, wherever it now is ("Pinned apps") |
 | Probe | `src-tauri/examples/app_window.rs` | one window, without the rest of the app (Windows) |
 
 Windows and Mac have windows of this app's own. On a Linux computer a click
 opens an Android app in scrcpy's per-app window (`--new-display
 --start-app`), and the phone's Linux apps are not listed there: scrcpy can
-only start Android packages.
+only start Android packages. That window is known to the desktop as the app,
+so a dock shows it by the app's name and icon and can pin it ("Pinned apps").
 
 ## Why not scrcpy's per-app windows
 
@@ -503,9 +505,10 @@ the rest of what it gives a window:
 `WM_NCCALCSIZE` keeps the side and bottom resize borders, the maximise button
 answers `HTMAXBUTTON` so Windows 11's Snap layouts open on it, and the shadow,
 rounded corners, system menu and Alt+Tab are the system's. Each app's window
-has an AppUserModelID of its own and a relaunch command, `--phone-app <serial>
+has an AppUserModelID of its own and a relaunch command, `--phone-app <phone>
 <package>`: WhatsApp and Gmail are two taskbar buttons, either can be pinned,
-and a pinned one starts this app with just that window — no desktop.
+and a pinned one starts this app with just that window — no desktop ("Pinned
+apps").
 
 An app's first window opens at a current phone's shape, 412 × 915 dp, fitted
 to 90 % of the screen's height, at that screen's scale; later ones as the last
@@ -520,6 +523,129 @@ whichever comes first, its thread (the main thread, on a Mac) starting on it or
 the open giving up, wins — one made after would be no one's, and the open
 asked for again beside it (seen on a Mac swapping hard, 2026-10-29: four windows
 on "Opening…" behind the one that opened).
+
+## Pinned apps
+
+A person pins an app to the taskbar or the Dock so that a click there opens
+it, whatever else is running: after a restart, with this app closed. That
+click has to open the app's window from its phone, with this app started for
+it if need be, and nothing else of this app — the main window has nothing to
+add to it.
+
+**What a pin names.** The phone by its `ro.serialno` and the app by its
+package: `--phone-app <phone> <package>`. Not the adb serial the window
+happened to open over, as it was until 0.3.30: a Wi‑Fi one is an address
+whose port Android rolls every time wireless debugging is switched on, so a
+pin made from a window over Wi‑Fi opened nothing once the phone came back.
+Pins made so are read back — an mDNS name carries the serial, and a Wi‑Fi
+address is looked up among the phones this computer remembers. One whose
+address no remembered phone was at opens nothing, as another phone may have
+that address now: its click says to open the app once from the Apps page,
+which points the pin at the phone it opened from. And not, for
+long, where this app is: the portable build is a folder that is moved, or
+replaced by the next version's beside it, an AppImage is mounted somewhere new
+every run, and a Mac app runs from wherever it was unpacked.
+
+Each system pins in its own way, and this app keeps the pins it can reach
+pointing at itself:
+
+- **Windows** pins a window. A pin is a shortcut of the window's relaunch
+  command, with its AppUserModelID in it, under `%APPDATA%\Microsoft\Internet
+  Explorer\Quick Launch\User Pinned`: in `TaskBar`, or — as a window pinned
+  from its taskbar button is on Windows 11 — in `ImplicitAppShortcuts\<hash>\`,
+  where Windows keeps a shortcut of each app's windows, made from the first of
+  them it saw and never changed by a later window, even one of another copy of
+  this app. Every run looks in both (`heal`) and points each shortcut with a
+  phone app's AppUserModelID at its own executable, and the folder it starts
+  in; gives one whose icon has gone the icon this computer has; and reads an
+  older one's adb serial back to its phone. Squirrel and Chrome keep their
+  pins working through updates the same way. A portable copy moved or
+  replaced, its pins work again the first time the new copy runs. A window
+  opened by a pin, at start, is opened before its phone has named the app;
+  what a pin of it would be called follows the name when it comes.
+- **Linux** pins a desktop entry, and a dock matches a window to one by its
+  app id — its X11 class, its Wayland app id. scrcpy's window for a phone app
+  is started with `SDL_APP_ID=com.ccrstech.openandroiddex.app.<package>` (SDL
+  3's one name for both), and the entry of that name is written as the window
+  opens, in `~/.local/share/applications`: the app's name and icon — scrcpy's
+  window icon too, through `SCRCPY_ICON_DIR` — and how to start it. That is the
+  AppImage's own file (`$APPIMAGE`), not the mount it runs from, which is gone
+  when it exits; every run writes the entries again for wherever it is. They
+  stay out of the app menus (`NoDisplay`), and a dock pins them all the same.
+  Linux gives one app no way to bring another's window forward
+  (`embed::activate`), so an app asked for again while its window is open is
+  not opened twice: the person is told where it is.
+- **A Mac** pins applications, never windows, and these windows are this
+  app's, under its Dock icon. More's "Keep in Dock" makes the app an
+  application of its own, in `~/Applications/Open Android DeX Apps/<package>/`,
+  with the app's icon from the phone at a Dock's size (256 px, an `.icns`), and
+  adds it to the Dock as `dockutil` does: a tile in the Dock's preferences, and
+  the Dock started again to read it. Its executable is a script, `open -b
+  com.ccrstech.openandroiddex 'openandroiddex://app/<phone>/<package>' --args
+  --phone-app <phone> <package>`. LaunchServices finds this app wherever it
+  is; the URL reaches it if it is running, and the arguments start it for the
+  app if it is not — started so, it hears both, and opens the app once. The
+  scheme is declared in `Info.plist`, and opens only the apps kept in the
+  Dock, each from the phone its own script names, which is read back from it:
+  a web page could name any app, and any phone, in a URL.
+
+**A pin follows its app's phone.** It opens the app from the phone the app
+was last opened from here: the shortcut's arguments, the entry's command and
+the Dock app's script are written again when a window opens from another. A
+new phone takes each pin over the first time that app is opened from it, and
+a pin never opens its app on a phone it was not opened from, which may be
+someone else's. Until its phone names the app, a window opened by a pin is
+called what the pin calls it — the shortcut's name, the entry's, the Dock
+app's.
+
+**The click.** With this app running, the second start hands its command line
+to the running one (the single-instance plugin; on a Mac, the URL) and goes.
+Started by the pin, this app makes its main window hidden — it is made in
+`setup` rather than from the config (`create: false`), so that an ordinary
+start makes it shown, at once, as it always did — and opens the app as soon as
+its phone is there. adb's server may be starting after a restart, and a phone
+this computer reaches over Wi‑Fi is connected again — by its remembered
+address, or where it announces itself — every 10 s, as nothing else would.
+The app's window is then all there is to see. With no window after 4 s the
+main window comes up, on the Apps page, which names the app that is waiting
+("Connect your phone to open WhatsApp") and puts a spinner on its icon; after
+45 s the page says why the app could not open — the phone asking to allow USB
+debugging, or not there. One app asked for twice while it opens — a second
+click, a Mac's URL beside the command line it started this app with, its
+tile on the Apps page — opens once.
+
+A pinned button clicked while its app's window is open only brings the window
+forward: this app never hears of it. So a window waiting for its phone, or
+given up on it ("Click here to bring the app back"), takes being brought
+forward, or clicked, as its app being opened again (Windows).
+
+**The run ends with its window.** A run a pin started is its app's: when the
+last of its windows closes, the run quits, as closing the app would — on
+Windows and Linux, where nothing else of it would be left to see. A window
+that could not show its app (scrcpy's, on Linux; this app's own say so
+themselves) brings the main window up instead. Starting this app by hand
+meanwhile shows the main window — even while its webview is still starting,
+which is when the request had been lost before the window was made in `setup`
+— and from then on the run is an ordinary one. On a Mac the app stays in the
+Dock, and its icon there shows the main window.
+
+Not done, and why:
+
+- **A launcher of our own that never moves** — a URL protocol registered for
+  the user, the pin starting `explorer.exe` with the URL, or a small
+  executable copied somewhere fixed. Either works for a copy that has moved
+  only once the new copy has run, as re-pointing does; either puts a second
+  process in front of every click; and a protocol is one any web page can ask
+  for.
+- **Pinning for the person.** Windows gives an unpackaged app no way to pin
+  itself, by design. A dock's own "Pin to Dash" or "Pin to Task Manager" is
+  the person's to use.
+- **A Dock icon per window on a Mac.** The window would have to be another
+  process's, drawn there over a remote layer, as Chrome's app shims are.
+- **Development builds** change no pin — one pointed at a debug build would
+  outlive it — unless `OADX_PINS=1`; they log what they would have changed.
+  On Linux they write no desktop entry, and their windows match an installed
+  copy's all the same.
 
 ## Phone or tablet
 
@@ -639,7 +765,8 @@ no key for it. ⌘[ is Back as well, as in Safari and Finder, and so is a mouse'
 button. The app's name is the title and the phone's the subtitle; minimised,
 the window is the app's own icon in the Dock. A Mac pins applications to the
 Dock, not windows, so there is no relaunch command: the windows are this
-app's, under its Dock icon and in its Window menu.
+app's, under its Dock icon and in its Window menu. More's "Keep in Dock" gives
+the app an application of its own there instead ("Pinned apps").
 
 The keyboard (`keys.rs`, `mac`): text goes through AppKit's own input
 (`NSTextInputClient`), so dead keys and input methods type what they type,
@@ -1421,7 +1548,85 @@ take the lean past the eighth (12.7 % at a custom 104 dpi). After the changes:
   linted, the Mac type-checked and linted for Apple silicon (`--all-targets`,
   a stand-in C compiler for the build scripts).
 
+Pinned apps (2026-11-02, on a Windows 11 computer, no phone attached):
+
+- a taskbar shortcut made for real (`IShellLinkW`), as an older pin is — an
+  older portable folder's executable, a phone's Wi‑Fi address, an icon in that
+  folder, a phone app's AppUserModelID — and the folder then deleted. Healed,
+  it starts this copy from its folder, for the phone the address was, with an
+  icon that is there, read back as Windows reads it when the pin is clicked;
+  healed again, nothing changes; another program's shortcut is left alone. The
+  test binary started with Common Controls 6 from a manifest beside it, as it
+  does not start otherwise (`STATUS_ENTRYPOINT_NOT_FOUND`, above);
+- the app itself, a debug build, its main window watched by its class: started
+  plainly, made shown (1.3 s after the start); started as a pin with a phone
+  that never came, made hidden, and shown 4.9 s after it was
+  made; started by hand while a pin's run waited, the second start handing
+  over and going, and the main window shown 0.4 s after — and, started so
+  while its webview was still starting, shown as it finished, where before
+  the window was made in `setup` the request was lost;
+- what a pin reads and writes, by the tests of `pin.rs`: the command line and
+  the URL, and what they refuse (no package, a quote, a Linux app); a Windows
+  command line split as Windows does; a desktop entry, its `Exec` with a path
+  holding spaces, `$` and `%`, read back; the Dock app's `Info.plist`, script
+  and tile, the tile found however the Dock wrote it, and its `.icns`;
+- Windows built and linted, and all 225 of the app's tests run; the Mac (Apple
+  silicon) and Linux (x86_64) type-checked and linted, `--all-targets`, with
+  stand-in C tools — and for Linux a stand-in `pkg-config` that has every
+  library. No warnings in what changed, on any of the three.
+
+A review the same day, by a second model with the phones and the files around
+the code stood in for, found four things, all real, all since changed: an
+older pin's Wi‑Fi address that no remembered phone was at was matched against
+the phones attached now, so another phone given that address would have been
+opened; a Mac's URL was held to the Dock's apps by package alone, so one could
+name another phone for an app kept there, and opening it pointed that Dock app
+at the other phone; a Linux development build wrote its own path into an
+app's desktop entry, breaking the pin once the build had gone; and on Linux an
+app already open was brought forward by a call that always fails there, and
+the click reported as done. After the changes: the first two by the tests of
+`pin.rs` (an older pin's serial read back, a Dock app's script read back);
+all 227 tests run on Windows; the three computers built or type-checked, and
+linted, again, with no warnings in what changed. The two Linux changes were
+type-checked, not run.
+
+On the Galaxy S25 Ultra (Android 17, on the cable and over Wi‑Fi), a release
+build of this in a copy of v0.3.30's portable folder (its phone half is this
+one's), Windows 11, 2026-11-02 — the pin made, and clicked, by the person:
+
+- started as a pin starts it: Calculator on screen 2.2–2.6 s after the run
+  began, the main window never shown, the window's relaunch command naming the
+  phone's own serial and this copy;
+- the person's pin was an implicit app shortcut, made by v0.3.30's Calculator
+  window and pointing at v0.3.30's folder — this copy's windows changed nothing
+  in it, and its click started v0.3.30. That is why `heal` reads
+  `ImplicitAppShortcuts` now: the first run of this copy after the change
+  pointed the pin at it, and its click started this copy (2.6 s to the
+  picture); a copy replacing another, as a portable one is, with the pin
+  following;
+- what the pin is called: the package, from a window opened at start, until
+  the phone's name for the app took its place ("Calculator");
+- a click with the cable out and Wi‑Fi on: the app over Wi‑Fi, 2.4 s; with
+  the phone away: the main window after 4 s, and the app 1.5 s after the cable
+  went in; the cable pulled from a window: on over Wi‑Fi, nothing lost;
+- a pinned run quitting as its window closed, four times;
+- v0.3.30, clicked with the phone away, opened the app twice once it came —
+  from its page and from the pin — and the second never reached its display;
+  the page now leaves an app to its pin while that waits;
+- UI Automation could not press a taskbar button (no Invoke on Windows 11's
+  taskbar, and injected clicks were not taken), so the person's own hands did.
+
 Not yet:
+
+- **A window that gave up, clicked**: the phone never went for the 30 s that
+  takes — Wi‑Fi kept it — so "Click here to bring the app back" has not run.
+  Nor has the Apps page's deferring to a waiting pin, nor a click after a
+  restart of the computer itself (stopping adb's server stood in for one in
+  the plan, and did not run either).
+- **Linux and the Mac**, at all: not a GNOME or a KDE dock, on X11 or Wayland,
+  showing scrcpy's window as the app and pinning it; not More's "Keep in
+  Dock", nor a click on its tile, nor `RunEvent::Opened`. Both have only been
+  type-checked: their parts that need no system are among the tests above.
 
 - **Phone or tablet with a phone**: the menu's pair and its notes, a window
   opening at its kept size and maximised, and a density changing within one

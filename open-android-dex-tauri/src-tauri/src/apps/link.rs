@@ -267,6 +267,16 @@ pub trait Host: Send + Sync {
     /// The window is closing as `shape`: its app's next window opens the same
     /// way (shape.rs). A Linux window says nothing: its size is its app's.
     fn keep_shape(&self, _shape: shape::Shape) {}
+    /// More's "Keep in Dock" (a Mac's): the app as an application of its own
+    /// in the Dock, which opens it here again from there — this app started
+    /// for it if need be (apps/pin.rs). `window` hears how it went.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    fn keep_in_dock(&self, _window: Arc<dyn Surface>) {}
+    /// The person brought the window to the front or clicked in it: one
+    /// waiting for its phone, or given up on it, is asked for again, as
+    /// opening its app from the page does. Nothing for one showing its app.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    fn activated(&self) {}
 }
 
 /// One window's link: what both its sides and its threads share.

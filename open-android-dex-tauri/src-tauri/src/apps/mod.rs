@@ -20,6 +20,8 @@
 //! - `drops`: files dropped on a window, to the phone.
 //! - `fetch`: what the phone hands this computer — a drag carried out of a
 //!   window, a picture or file it copied.
+//! - `pin`: an app pinned to the taskbar or the Dock, opened from there again —
+//!   this app started for it if it is not running, wherever this app now is.
 //! - `icons`, `clipboard`, `keys`, `h264`, `wire`, `adbsock`: what those share.
 //!
 //! A Linux computer has no window of ours yet: an Android app opens in
@@ -42,6 +44,7 @@ mod link;
 mod mac;
 #[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
 mod pad;
+pub(crate) mod pin;
 #[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
 mod shape;
 #[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
@@ -488,6 +491,11 @@ pub fn apps_list(app: tauri::AppHandle, serial: String) -> Result<Vec<PhoneApp>,
 /// Open `pkg` in a window of its own — or bring its window forward if it is open already.
 #[tauri::command(async)]
 pub fn apps_open(app: tauri::AppHandle, serial: String, pkg: String, device: Option<String>) -> Result<(), String> {
+    // On its way by its pin already, waiting for its phone: that one opens it,
+    // once — two at once would fight over the app (apps/pin.rs).
+    if pin::is_pending(&way_to(&app, &serial).phone, &pkg) {
+        return Ok(());
+    }
     open(&app, &serial, &pkg, device.unwrap_or_default(), Instant::now(), "the click")
 }
 
@@ -516,23 +524,7 @@ fn open(
         .cloned();
     if let Some(w) = existing {
         w.focus();
-        // Waiting for its phone, or given up on it: asked for now, it is made
-        // again from now — and its app taken back from the phone if need be.
-        let stalled = match kept().lock().unwrap().get_mut(&w.id) {
-            Some(k) if k.lost.is_some() || k.failed.is_some() => {
-                k.lost = Some(Instant::now());
-                k.failed = None;
-                k.said_waiting = false;
-                k.asked = true;
-                true
-            }
-            _ => false,
-        };
-        if stalled {
-            w.say(None);
-            note(&w, Some(format!("Reconnecting to {}…", phone_name(&device))), true);
-            wake_keeper();
-        }
+        revive(&w, &device);
         return Ok(());
     }
     open_new(app, &way, pkg, device, clicked, since, None)
@@ -563,6 +555,27 @@ fn window_of(phone: &str, pkg: &str) -> Option<Arc<native::Window>> {
         .values()
         .find(|w| w.pkg == pkg && w.linux.is_none() && phones.get(&w.id).map(String::as_str) == Some(phone))
         .cloned()
+}
+
+/// Whether `pkg` from `phone` has a window here now.
+#[cfg(any(windows, target_os = "macos"))]
+pub(crate) fn has_window(_app: &tauri::AppHandle, phone: &str, pkg: &str) -> bool {
+    window_of(phone, pkg).is_some()
+}
+
+/// Whether `pkg` from `phone` has a window here now: scrcpy's, on Linux.
+#[cfg(not(any(windows, target_os = "macos")))]
+pub(crate) fn has_window(app: &tauri::AppHandle, phone: &str, pkg: &str) -> bool {
+    app_session(app, phone, pkg).is_some()
+}
+
+/// `pkg`'s scrcpy window from `phone`, if one is open, whichever way the phone was reached.
+#[cfg(not(any(windows, target_os = "macos")))]
+fn app_session(app: &tauri::AppHandle, phone: &str, pkg: &str) -> Option<crate::scrcpy::SessionInfo> {
+    let devices = crate::adb::recent_devices(app, Duration::from_secs(3));
+    crate::scrcpy::list_mirror_sessions(app.clone())
+        .into_iter()
+        .find(|s| s.app_package.as_deref() == Some(pkg) && phone_of(&devices, &s.serial) == phone)
 }
 
 /// The key of `pkg`'s window from `phone`, if one is open: where a button of
@@ -625,8 +638,8 @@ fn open_new(
         }
         // Opened before the page listed anything (a pinned taskbar button, at
         // start): not worth waiting for the whole list. The phone names the app
-        // as its window opens, and its icon here is the last one this computer
-        // was given; the list follows for the page.
+        // as its window opens — until then, its pin does — and its icon here is
+        // the last one this computer was given; the list follows for the page.
         None => {
             let (app2, serial2) = (app.clone(), serial.to_string());
             std::thread::spawn(move || {
@@ -638,7 +651,7 @@ fn open_new(
                 Some((updated, png)) => (updated, Some(png)),
                 None => (0, None),
             };
-            (Row { label: pkg.to_string(), activity: String::new(), updated, class: String::new() }, icon)
+            (Row { label: pin::label_of(app, pkg), activity: String::new(), updated, class: String::new() }, icon)
         }
     };
     if icon.is_none() {
@@ -647,11 +660,12 @@ fn open_new(
             icons::store(app, phone, pkg, row.updated, png);
         }
     }
+    // The phone by its own serial, never by the way it is attached now: a
+    // Wi-Fi address is another one next time (apps/pin.rs).
+    let pinned = pin::Pin::new(phone, pkg);
     #[cfg(windows)]
     let (relaunch, relaunch_icon) = (
-        std::env::current_exe()
-            .ok()
-            .map(|exe| format!("\"{}\" --phone-app \"{serial}\" \"{pkg}\"", exe.display())),
+        pinned.as_ref().and_then(pin::relaunch_command),
         icon.as_ref()
             .and_then(|png| icons::ico_file(app, phone, pkg, row.updated, png))
             .map(|p| format!("{},0", p.display())),
@@ -682,7 +696,12 @@ fn open_new(
         clicked,
         notif,
     };
-    open_window(app, serial, phone, pkg, &row.label, spec, since, opening)
+    open_window(app, serial, phone, pkg, &row.label, spec, since, opening)?;
+    // Its pin, if it has one, opens it from this phone from now on.
+    if let Some(p) = &pinned {
+        pin::opened(app, p);
+    }
+    Ok(())
 }
 
 /// What the keeper (`keep`) knows of each window.
@@ -1134,9 +1153,38 @@ fn give_up(w: &native::Window) {
         k.failed = Some(Instant::now());
     }
     log::info!("apps [{}] {}: its phone did not come back", w.serial(), w.pkg);
-    let text = "Your phone stopped answering. Open the app again to bring it back.";
+    // On Windows a click on the window, or on its taskbar button — a pin's
+    // click finds the window there, and never starts this app — is that.
+    let text = if cfg!(windows) {
+        "Your phone stopped answering. Click here to bring the app back."
+    } else {
+        "Your phone stopped answering. Open the app again to bring it back."
+    };
     note(w, Some(text.into()), true);
     w.say(Some(text.into()));
+}
+
+/// A window waiting for its phone, or given up on it, asked for again: made
+/// again from now — and its app taken back from the phone if need be. Nothing
+/// for one showing its app.
+#[cfg(any(windows, target_os = "macos"))]
+fn revive(w: &native::Window, device: &str) {
+    let stalled = match kept().lock().unwrap().get_mut(&w.id) {
+        Some(k) if k.lost.is_some() || k.failed.is_some() => {
+            k.lost = Some(Instant::now());
+            k.failed = None;
+            k.said_waiting = false;
+            k.asked = true;
+            true
+        }
+        _ => false,
+    };
+    if stalled {
+        log::info!("apps [{}] {}: asked for again", w.serial(), w.pkg);
+        w.say(None);
+        note(w, Some(format!("Reconnecting to {}…", phone_name(device))), true);
+        wake_keeper();
+    }
 }
 
 /// A window for `spec`, kept in the list until it closes, with the app's sound following it here
@@ -1361,6 +1409,8 @@ impl link::Host for WindowHost {
                     }
                 }
                 emit_windows(app);
+                // The last window of a run a pin started ends the run.
+                pin::window_gone(app, false);
             }
         }
     }
@@ -1395,6 +1445,31 @@ impl link::Host for WindowHost {
     fn touchpad(&self, window: Arc<dyn link::Surface>) {
         let Some(phone) = self.phone() else { return };
         pad::open_now(&self.app, &self.serial(), &phone, window);
+    }
+
+    fn activated(&self) {
+        let Some(w) = self.window() else { return };
+        let device = self.device.clone();
+        // Off the window's thread, which the keeper waits on.
+        std::thread::spawn(move || revive(&w, &device));
+    }
+
+    /// The app as an application of its own in the Dock (apps/pin.rs), with
+    /// its icon at the Dock's size from the phone: the window's is a title bar's.
+    #[cfg(target_os = "macos")]
+    fn keep_in_dock(&self, window: Arc<dyn link::Surface>) {
+        let Some(want) = self.phone().and_then(|phone| pin::Pin::new(&phone, &self.pkg)) else { return };
+        let (app, serial) = (self.app.clone(), self.serial());
+        std::thread::spawn(move || {
+            let label = window.label();
+            window.note(Some(format!("Putting {label} in the Dock\u{2026}")), true);
+            let mut icon = None;
+            if let Some(server) = host::running(&serial) {
+                let _ = server.icons(std::slice::from_ref(&want.pkg), 256, |_, png| icon = Some(png));
+            }
+            let said = pin::keep_in_dock(&app, &want, &label, icon.as_deref()).unwrap_or_else(|e| e);
+            window.note(Some(said), false);
+        });
     }
 
     fn keep_shape(&self, kept: shape::Shape) {
@@ -1639,8 +1714,17 @@ fn open(
     }
     let way = way_to(app, serial);
     let row = rows().lock().unwrap().get(&way.phone).and_then(|t| t.get(pkg).cloned());
-    let label = row.map(|r| r.label).unwrap_or_else(|| pkg.to_string());
-    let options: crate::scrcpy::MirrorOptions = serde_json::from_value(serde_json::json!({
+    let label = row.map(|r| r.label).unwrap_or_else(|| pin::label_of(app, pkg));
+    // Its window open already, whichever way the phone was reached: brought
+    // forward where this computer lets one app raise another's window. Linux
+    // does not (embed::activate), and the person is told where it is instead
+    // of nothing happening.
+    if let Some(session) = app_session(app, &way.phone, pkg) {
+        return crate::scrcpy::focus_session(app.clone(), session.session_key).map_err(|_| {
+            format!("{label} is open already, in a window of its own. Switch to it from your dock, or with Alt+Tab")
+        });
+    }
+    let mut options: crate::scrcpy::MirrorOptions = serde_json::from_value(serde_json::json!({
         "serial": way.serial,
         "appPackage": pkg,
         "newDisplay": "412x915/160",
@@ -1650,6 +1734,13 @@ fn open(
         "keepActive": true,
     }))
     .map_err(|e| e.to_string())?;
+    // A desktop entry for the window, which a dock shows it as, by name and
+    // icon, and pins: the window's app id is the entry's (apps/pin.rs).
+    if let Some(p) = pin::Pin::new(&way.phone, pkg) {
+        let entry = pin::entry(app, &p, &label);
+        options.app_id = Some(entry.app_id);
+        options.icon_dir = entry.icon_dir;
+    }
     crate::scrcpy::start_mirror(app.clone(), options).map(|_| ())
 }
 
@@ -1742,18 +1833,14 @@ pub fn shutdown(app: &tauri::AppHandle) {
     crate::wireless::let_wifi_go(app);
 }
 
-/// An app asked for on the command line: `--phone-app <serial> <pkg>`, which
-/// is what a phone app pinned to the taskbar runs.
+/// An app asked for on the command line: `--phone-app <phone> <pkg>`, which
+/// is what a phone app pinned to the taskbar or the Dock runs (apps/pin.rs).
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StartupApp {
+    /// The phone's `ro.serialno` — an older pin's adb serial.
     pub serial: String,
     pub pkg: String,
-}
-
-pub fn app_in_args(argv: &[String]) -> Option<StartupApp> {
-    let i = argv.iter().position(|a| a == "--phone-app")?;
-    Some(StartupApp { serial: argv.get(i + 1)?.clone(), pkg: argv.get(i + 2)?.clone() })
 }
 
 fn startup() -> &'static Mutex<Option<StartupApp>> {
@@ -1771,38 +1858,40 @@ pub fn apps_startup() -> Option<StartupApp> {
 /// This run was started for one phone app: open it as soon as its phone is
 /// there — adb may still be starting, a Wi-Fi phone still on its way back.
 pub fn open_at_startup(app: &tauri::AppHandle, argv: &[String]) {
-    let Some(want) = app_in_args(argv) else { return };
-    *startup().lock().unwrap() = Some(want.clone());
-    open_when_ready(app, want, process_start(), "this run started");
+    let Some(want) = pin::Pin::from_args(argv) else { return };
+    *startup().lock().unwrap() = Some(StartupApp { serial: want.phone.clone(), pkg: want.pkg.clone() });
+    pin::open(app, want, process_start(), "this run started");
 }
 
 /// `--phone-app` handed to the running app by a second start (a pinned
 /// taskbar button clicked while the app is open). True if it was that.
 pub fn open_from_args(app: &tauri::AppHandle, argv: &[String]) -> bool {
-    let Some(want) = app_in_args(argv) else { return false };
-    open_when_ready(app, want, Instant::now(), "the taskbar click");
+    let Some(want) = pin::Pin::from_args(argv) else { return false };
+    pin::open(app, want, Instant::now(), "the taskbar click");
     true
 }
 
-fn open_when_ready(app: &tauri::AppHandle, want: StartupApp, clicked: Instant, since: &'static str) {
-    let app = app.clone();
-    std::thread::spawn(move || {
-        let StartupApp { serial, pkg } = want;
-        let until = std::time::Instant::now() + std::time::Duration::from_secs(45);
-        let mut last = String::new();
-        while std::time::Instant::now() < until {
-            match open(&app, &serial, &pkg, String::new(), clicked, since) {
-                Ok(()) => return,
-                Err(e) => last = e,
-            }
-            std::thread::sleep(std::time::Duration::from_millis(1500));
+/// URLs this app was asked to open (macOS): a phone app kept in the Dock,
+/// clicked there while this app runs — or as it starts, beside the command
+/// line that asks for the same app, which is then opened once. A URL only
+/// says which of those apps: each opens from the phone it was kept for, and
+/// one naming another phone is no Dock app's.
+#[cfg(target_os = "macos")]
+pub fn open_from_urls<'a>(app: &tauri::AppHandle, urls: impl IntoIterator<Item = &'a str>) {
+    for url in urls {
+        let asked = pin::Pin::from_url(url);
+        match asked.as_ref().and_then(|a| pin::kept(app, &a.pkg).filter(|kept| kept == a)) {
+            Some(want) => pin::open(app, want, Instant::now(), "the Dock click"),
+            None => log::warn!("pin: {url} is not a phone app kept in the Dock, from the phone it was kept for; not opened"),
         }
-        log::warn!("apps [{serial}] {pkg} from the taskbar: {last}");
-        let _ = app.emit(
-            "apps:problem",
-            serde_json::json!({"serial": serial, "pkg": pkg, "label": pkg, "message": last}),
-        );
-    });
+    }
+}
+
+/// The pinned apps on their way to a window (apps/pin.rs): the page's
+/// spinner, and the app it names while the phone is not here.
+#[tauri::command]
+pub fn apps_pending() -> Vec<pin::Pending> {
+    pin::pending_now()
 }
 
 /// One app window with nothing else of the app around it — for trying the

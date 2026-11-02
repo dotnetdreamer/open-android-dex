@@ -163,7 +163,13 @@ half a second.
 
 - **They behave like your computer's own windows.** Move them, resize them,
   snap them side by side, minimise them. Each app gets its own button on the
-  taskbar, and you can pin it there to open that app straight away next time
+  taskbar
+- **Pin an app and it opens from there, like any other.** Click it on your
+  taskbar or in your Dock, even after a restart, even with Open Android DeX
+  closed: it starts by itself and you get just that app's window. If your phone
+  takes a moment to connect, Open Android DeX shows you what it is waiting for.
+  Pins keep working when you move the portable version or swap it for a newer
+  one: run the new copy once and they follow it
 - **Phone or tablet, you choose.** A window opens the shape of a phone, and the
   app looks the way it does on your phone. Make the window bigger and an app
   that has a tablet look can change to it, with more room for what you are
@@ -227,9 +233,11 @@ phone in. The desktop is still one click away.
 On a Mac the apps open in proper Mac windows too, with a Back button at the
 top (⌘[ works as well) and the speaker at the other end, and ⌘C and ⌘V copy
 and paste as you would expect.
-Pinning an app on its own is a Windows thing: on a Mac they all sit under this
-app's icon in the Dock. On a Linux computer an Android app opens in a simpler
-window, and Linux apps are not offered there.
+A Mac keeps windows under the app they belong to, so the phone's apps sit under
+this app's icon in the Dock: ☰ → **Keep in Dock** gives one an icon of its own
+there. On a Linux computer an Android app opens in a simpler window, which your
+dock shows by the app's own name and icon and lets you pin. Linux apps are not
+offered there.
 
 ### Your phone's notifications, on your computer
 

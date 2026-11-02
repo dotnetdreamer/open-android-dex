@@ -43,15 +43,13 @@ pub fn run() {
         // note: no window-state plugin — the launcher window is a fixed-size
         // status surface; tauri.conf.json is the single source of truth.
         builder = builder.plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
-            use tauri::Manager;
             // A phone app pinned to the taskbar, clicked: its window, not this one.
             if apps::open_from_args(app, &argv) {
                 return;
             }
-            if let Some(win) = app.get_webview_window("main") {
-                let _ = win.unminimize();
-                let _ = win.set_focus();
-            }
+            // This app started again by hand: its window — shown, if a pinned
+            // app started this run without it (apps/pin.rs).
+            apps::pin::show_main(app);
         }));
     }
 
@@ -129,6 +127,7 @@ pub fn run() {
             apps::apps_windows,
             apps::apps_close,
             apps::apps_startup,
+            apps::apps_pending,
             apps::apps_clipboard_files,
             apps::apps_paste,
             notifications::notifications_state,
@@ -150,6 +149,11 @@ pub fn run() {
             _ => {}
         })
         .setup(|app| {
+            let argv: Vec<String> = std::env::args().collect();
+            // The window, made first and shown at once — unless a pinned phone
+            // app started this run: then that app's window is all there is to
+            // see, and this one waits until it is wanted (apps/pin.rs).
+            apps::pin::start(&app.handle().clone(), &argv)?;
             diag::log_startup(&app.handle().clone());
             // The desktop's window is opened at the exact size of its content,
             // which on a Mac means knowing the title bar above it — and AppKit
@@ -163,8 +167,7 @@ pub fn run() {
             // killed mid-session it left the host's own touchpad gestures
             // stood down, and this is the pass that gives them back.
             gestures::restore_host_settings(&app.handle().clone());
-            // Started from a phone app pinned to the taskbar: that app's window.
-            let argv: Vec<String> = std::env::args().collect();
+            // Started from a phone app pinned to the taskbar or the Dock: that app's window.
             apps::open_at_startup(&app.handle().clone(), &argv);
             // The phone's notifications as this computer's own, for every phone
             // that is attached while they are on.
@@ -173,9 +176,17 @@ pub fn run() {
         })
         .build(tauri::generate_context!())
         .expect("error while running tauri application")
-        .run(|app, event| {
-            if let tauri::RunEvent::Exit = event {
+        .run(|app, event| match event {
+            // A phone app kept in the Dock, clicked: the URL it hands this app (apps/pin.rs).
+            #[cfg(target_os = "macos")]
+            tauri::RunEvent::Opened { urls } => apps::open_from_urls(app, urls.iter().map(|u| u.as_str())),
+            // This app's own Dock icon: its window, if a pinned app started this run without it.
+            #[cfg(target_os = "macos")]
+            tauri::RunEvent::Reopen { .. } => apps::pin::reopened(app),
+            tauri::RunEvent::Exit => {
                 log::info!("── application exiting ──");
+                // Nothing ends the run a second time as its windows close below.
+                apps::pin::exiting();
                 // The phone's toasts first: nothing can act on them once this has gone.
                 notifications::stop();
                 // Every phone app's window closes first, each app back on its
@@ -197,5 +208,6 @@ pub fn run() {
                 // Each open desktop window holds the phone awake; say goodbye.
                 remote_desktop::close_all();
             }
+            _ => {}
         });
 }

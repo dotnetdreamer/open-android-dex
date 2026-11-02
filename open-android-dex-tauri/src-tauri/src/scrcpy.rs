@@ -128,6 +128,14 @@ pub struct MirrorOptions {
     /// window coordinate (display::flex_geometry). None: fitted once.
     #[serde(skip)]
     pub flex: Option<f64>,
+    /// A phone app's window where this app has none of its own (Linux): what
+    /// the desktop knows it by — the app id its desktop entry is named after,
+    /// so a dock shows it as that app and can pin it — and the directory its
+    /// icon is in (apps/pin.rs). Never sent by the frontend.
+    #[serde(skip)]
+    pub app_id: Option<String>,
+    #[serde(skip)]
+    pub icon_dir: Option<std::path::PathBuf>,
 }
 
 fn default_true() -> bool {
@@ -520,6 +528,16 @@ fn spawn_scrcpy(app: &AppHandle, opts: &MirrorOptions) -> Result<Child, String> 
         if dir.join("scrcpy.png").is_file() {
             cmd.env("SCRCPY_ICON_DIR", &dir);
         }
+    }
+    // A phone app's window (Linux, apps/pin.rs): the app's own icon rather
+    // than our logo, and an app id of its own — SDL 3's one name for the X11
+    // class and the Wayland app id — which a dock matches to the app's desktop
+    // entry, to show the window as that app and to pin it.
+    if let Some(dir) = opts.icon_dir.as_ref().filter(|d| d.join("scrcpy.png").is_file()) {
+        cmd.env("SCRCPY_ICON_DIR", dir);
+    }
+    if let Some(id) = &opts.app_id {
+        cmd.env("SDL_APP_ID", id);
     }
     #[allow(unused_mut)] // only Windows adds to it
     let mut args = build_args(opts);
@@ -1788,6 +1806,8 @@ fn audio_companion_options(serial: &str, dup: bool) -> MirrorOptions {
         base_dpi: None,
         fitted: false,
         flex: None,
+        app_id: None,
+        icon_dir: None,
     }
 }
 
@@ -4248,6 +4268,7 @@ fn monitor(
         if opts.new_display.is_some() && opts.app_package.is_none() && !opts.audio_only {
             stop_audio_companion(&app, &opts.serial);
         }
+        let app_window = opts.app_package.is_some();
         emit_status(
             &app,
             MirrorEvent {
@@ -4260,6 +4281,11 @@ fn monitor(
                 intentional,
             },
         );
+        // A phone app's window gone: the last of a run a pin started ends it —
+        // or, gone because the app could not be shown, shows why (apps/pin.rs).
+        if app_window {
+            crate::apps::pin::window_gone(&app, !intentional && !success);
+        }
         break;
     }
 }

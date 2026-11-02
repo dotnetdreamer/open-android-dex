@@ -509,6 +509,8 @@ impl Shared {
         let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
         unsafe {
             let _ = SetWindowTextW(self.hwnd(), PCWSTR(wide.as_ptr()));
+            // The taskbar's properties are the window thread's to change.
+            let _ = PostMessageW(Some(self.hwnd()), WM_APP_NAMED, WPARAM(0), LPARAM(0));
         }
         self.repaint();
     }
@@ -634,6 +636,8 @@ const WM_APP_DRAGGED: u32 = WM_APP + 3;
 const WM_APP_TAKEN: u32 = WM_APP + 4;
 /// This app closes the window (Window::close), as it quits: nothing is asked, and the app goes back to the phone.
 const WM_APP_CLOSE: u32 = WM_APP + 5;
+/// The phone named the app (Shared::retitle): what a pin of the window is called follows.
+const WM_APP_NAMED: u32 = WM_APP + 6;
 const RESIZE_TIMER: usize = 1;
 const NOTE_TIMER: usize = 2;
 /// How long a resize must hold before the phone is asked for it: the phone
@@ -871,6 +875,7 @@ fn ui_thread(spec: Spec, host: Arc<dyn Host>, opened: Sender<Result<Arc<Window>,
         esc_held: false,
         render_thread: None,
         props: None,
+        pinnable: false,
         note_fades: 0,
         out: Out::No,
         taking: None,
@@ -916,6 +921,7 @@ fn ui_thread(spec: Spec, host: Arc<dyn Host>, opened: Sender<Result<Arc<Window>,
             set_icons(hwnd, png);
         }
         (*state_ptr).props = taskbar_identity(hwnd, &spec);
+        (*state_ptr).pinnable = spec.relaunch.is_some();
         // Files from Explorer go to the phone. Let through even to an app run
         // as administrator, which Windows would otherwise keep Explorer's drop from.
         DragAcceptFiles(hwnd, true);
@@ -1027,6 +1033,15 @@ fn taskbar_identity(hwnd: HWND, spec: &Spec) -> Option<IPropertyStore> {
     }
 }
 
+/// What a pin of the window is called: the app's name, once its phone has said it.
+fn set_relaunch_name(store: &IPropertyStore, label: &str) {
+    use windows::Win32::Storage::EnhancedStorage::PKEY_AppUserModel_RelaunchDisplayNameResource;
+    unsafe {
+        let _ = store.SetValue(&PKEY_AppUserModel_RelaunchDisplayNameResource, &lpwstr(label));
+        let _ = store.Commit();
+    }
+}
+
 /// Windows asks that a window's AppUserModel properties be cleared before it goes.
 fn clear_identity(store: &IPropertyStore) {
     use windows::Win32::Storage::EnhancedStorage::{
@@ -1095,6 +1110,8 @@ struct Ui {
     esc_held: bool,
     render_thread: Option<thread::JoinHandle<()>>,
     props: Option<IPropertyStore>,
+    /// It can be pinned (it has a relaunch command): its relaunch name follows the app's.
+    pinnable: bool,
     /// The note the fade timer is running for, by its number.
     note_fades: u64,
     /// A drag of the app's carried out of the window, as far as it has got.
@@ -2119,6 +2136,10 @@ impl Ui {
                 WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN | WM_LBUTTONDBLCLK | WM_RBUTTONDBLCLK
                 | WM_MBUTTONDBLCLK => {
                     let (x, y) = (lo(lp), hi(lp));
+                    // "Click here to bring the app back", on a window in front already.
+                    if msg == WM_LBUTTONDOWN {
+                        self.shared.link.host().activated();
+                    }
                     if self.out == Out::Refused {
                         self.out = Out::No;
                     }
@@ -2311,6 +2332,10 @@ impl Ui {
                     self.shared.active.store(active, Ordering::SeqCst);
                     self.shared.repaint();
                     if active {
+                        // A pinned button clicked finds this window and only
+                        // brings it forward: one that lost its phone takes that
+                        // as being opened again.
+                        self.shared.link.host().activated();
                         self.hand_clipboard_over();
                         self.shared.send(wire::json(&json!({"t": "focus"})));
                     } else {
@@ -2445,6 +2470,17 @@ impl Ui {
                     LRESULT(0)
                 }
                 WM_ERASEBKGND => LRESULT(1),
+                WM_APP_NAMED => {
+                    // Opened before its phone named it (a pin, at start), the window
+                    // gave the taskbar its package for a name: a pin of it would be
+                    // called that, and Windows keeps a pin's name as it was made.
+                    if self.pinnable {
+                        if let Some(store) = &self.props {
+                            set_relaunch_name(store, &self.shared.label.lock().unwrap());
+                        }
+                    }
+                    LRESULT(0)
+                }
                 WM_CLOSE | WM_APP_CLOSE => {
                     if self.shared.asking.load(Ordering::SeqCst) {
                         // The ✕ again under its question waits for the answer;

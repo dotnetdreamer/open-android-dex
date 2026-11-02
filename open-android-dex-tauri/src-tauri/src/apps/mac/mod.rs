@@ -1293,6 +1293,15 @@ define_class!(
             shared.link.host().touchpad(shared.clone());
         }
 
+        /// More's "Keep in Dock": the app as an application of its own in the
+        /// Dock, which opens it here again from there, this app started for it
+        /// if need be (apps/pin.rs). A note under the title bar says how it went.
+        #[unsafe(method(keepInDock:))]
+        fn keep_in_dock(&self, _sender: Option<&AnyObject>) {
+            let shared = self.ivars().shared.clone();
+            shared.link.host().keep_in_dock(shared.clone());
+        }
+
         /// More's Full screen, and the full-screen bar's way out of it. Not
         /// `toggleFullScreen:`, which would take the menu bar's ⌃⌘F from the window.
         #[unsafe(method(switchFullScreen:))]
@@ -1709,7 +1718,8 @@ impl AppView {
     /// More's menu, under the button that opened it: Copy and Paste, which
     /// the keyboard does too, a phone's or a tablet's size for the app (a
     /// tick on the one the window is now), then full screen, with the Mac's
-    /// own keys for each beside it, and the phone as the touchpad.
+    /// own keys for each beside it, the phone as the touchpad, and the app
+    /// kept in the Dock — a Mac pins applications, not windows.
     fn more(&self, button: &NSView) {
         let ui = self.ivars();
         let mtm = self.mtm();
@@ -1774,6 +1784,11 @@ impl AppView {
         }
         menu.addItem(&item);
         menu.addItem(&pad);
+        // An Android app's: a Linux app is the phone's Linux, not an app of its own.
+        if !ui.shared.linux {
+            menu.addItem(&NSMenuItem::separatorItem(mtm));
+            menu.addItem(&edit("Keep in Dock", sel!(keepInDock:), ""));
+        }
         self.pop_up(&menu, button);
     }
 
