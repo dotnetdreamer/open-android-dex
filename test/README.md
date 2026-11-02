@@ -96,6 +96,28 @@ and icons found through links that name guest paths, and through links proot
 wrote with this side's. The window manager against a real Xvnc needs a guest
 and is recorded in the design record.
 
+The Linux setup script's helpers (`openandroiddex-linux/README.md`, "Skip,
+Restart and a line that moves") are checked on a phone, under its own
+`/system/bin/sh` — mksh, the shell the app runs the script with, whose
+arithmetic is 32-bit:
+
+```sh
+node test/linux-setup-test.mjs [serial]
+```
+
+It pushes the script and `test/linux-setup/checks.sh` to a directory of its own
+in `/data/local/tmp` and runs, as the shell user, the functions cut out of the
+real script by name, every guest command handed to a stand-in — no rootfs, and
+nothing of the app touched: a step's line (apt's status lines read from the
+end, a tarball's percent with no 32-bit overflow, the ticker publishing within
+5 s and gone after), dpkg left half way and the repair that finishes a wanted
+package and removes a skipped one, Restart's clean-up, what an app no longer
+wanted leaves behind, a half-extracted VS Code or IntelliJ never taken for an
+install, an extract that lands whole or leaves the old tree, a download kept
+through a timeout and started over only for curl 33 or HTTP 416, and the setsid
+re-exec keeping the pid while one group kill takes the whole run. It removes
+what it pushed. What needs a guest is listed as unverified in the design record.
+
 The phone apps' windows (`doc/apps-on-pc.md`) keep their app when their
 connection goes — the cable pulled with Wi‑Fi still there — and the phone's
 half of that is checked on a phone or an emulator, with the Android SDK and

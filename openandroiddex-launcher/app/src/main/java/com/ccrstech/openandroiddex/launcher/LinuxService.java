@@ -32,10 +32,12 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * the background.
  *
  * Driven by start intents, never bound: PROVISION (idempotent, safe to fire on
- * every launcher start), START w h, STOP. When the app is force-stopped (e.g.
- * the PC ends a DeX session) Android kills every process of this uid, which
- * takes the runtime down with it; the rootfs, living in private storage,
- * survives for next time.
+ * every launcher start), RERUN (the install screen's Skip and Restart: stop
+ * the run in flight and start the next), START w h, STOP. When the app is
+ * force-stopped (e.g. the PC ends a DeX session) Android kills every process
+ * of this uid, which takes the runtime down with it; the rootfs, living in
+ * private storage, survives for next time — and an install it cut off picks
+ * itself up again from RemoteResumeReceiver.
  */
 public class LinuxService extends Service {
 
@@ -46,6 +48,13 @@ public class LinuxService extends Service {
     static final String ACTION_RESET = "com.ccrstech.openandroiddex.launcher.linux.RESET";
     /** Wipe the container and leave it gone, with the storage free. */
     static final String ACTION_UNINSTALL = "com.ccrstech.openandroiddex.launcher.linux.UNINSTALL";
+    /**
+     * Stop the setup run in flight, if there is one, and start a fresh run:
+     * what Skip and Restart on the install screen send, after recording what
+     * the next run should do differently. See {@link #skipStep} and
+     * {@link #restartStep}.
+     */
+    static final String ACTION_RERUN = "com.ccrstech.openandroiddex.launcher.linux.RERUN";
     /** Remote access on: the tunnel and the guest's sshd. See {@link RemoteHost}. */
     static final String ACTION_REMOTE_ON = "com.ccrstech.openandroiddex.launcher.linux.REMOTE_ON";
     static final String ACTION_REMOTE_OFF = "com.ccrstech.openandroiddex.launcher.linux.REMOTE_OFF";
@@ -76,6 +85,13 @@ public class LinuxService extends Service {
 
     /** One provisioning run at a time, across every intent that asks for one. */
     private static final AtomicBoolean provisioning = new AtomicBoolean(false);
+    /**
+     * A Skip or Restart stopped the run in flight so a new one can take over:
+     * provision() goes straight into the next run instead of finishing.
+     */
+    private static final AtomicBoolean rerun = new AtomicBoolean(false);
+    /** linux-setup.sh while it runs, for {@link #stopSetup}. One per process, like provisioning. */
+    private static volatile Process setupProc;
 
     private final ExecutorService io = Executors.newSingleThreadExecutor();
     private final android.os.Handler mainHandler = new android.os.Handler(android.os.Looper.getMainLooper());
@@ -154,6 +170,19 @@ public class LinuxService extends Service {
         }, "linux-provision-check").start();
     }
 
+    /**
+     * Pick up an install that was cut off — see RemoteResumeReceiver.
+     * Synchronous, unlike {@link #provision(Context)}: it is called from inside
+     * a broadcast, and a thread spawned there can be frozen along with the
+     * process the moment onReceive returns. Every test that decides whether
+     * there is work is the service's own, in provision().
+     *
+     * @return false when Android refused the start from where we are
+     */
+    static boolean resumeInstall(Context ctx) {
+        return send(ctx, ACTION_PROVISION, 0, 0);
+    }
+
     static void start(Context ctx, int w, int h) {
         send(ctx, ACTION_START, w, h);
     }
@@ -170,6 +199,34 @@ public class LinuxService extends Service {
     /** Throw the container away and leave the storage free. Not reversible. */
     static void uninstall(Context ctx) {
         send(ctx, ACTION_UNINSTALL, 0, 0);
+    }
+
+    /**
+     * The install screen's Skip: {@code app} comes off the tick list — just as
+     * if the chooser had been answered without it, which is also how it comes
+     * back — and the setup runs again without it. A run in flight is stopped
+     * first, and the next one repairs whatever dpkg was in the middle of and
+     * clears what the app left behind (linux-setup.sh's repair_if_dirty and
+     * drop_unwanted).
+     */
+    static void skipStep(Context ctx, String app) {
+        java.util.LinkedHashSet<String> keep = new java.util.LinkedHashSet<>();
+        for (String id : Linux.OPTIONAL_APPS) {
+            if (!id.equals(app) && Linux.wantsApp(ctx, id)) keep.add(id);
+        }
+        Linux.setApps(ctx, keep);
+        DexLog.step("linux", "skipping " + app + " — asked on the install screen");
+        send(ctx, ACTION_RERUN, 0, 0);
+    }
+
+    /**
+     * The install screen's Restart: stop the run, and have the next one start
+     * {@code step} over from its beginning, without what it had half-fetched.
+     */
+    static void restartStep(Context ctx, String step) {
+        Linux.requestStepRestart(ctx, step);
+        DexLog.step("linux", "restarting the " + step + " step — asked on the install screen");
+        send(ctx, ACTION_RERUN, 0, 0);
     }
 
     /**
@@ -460,6 +517,17 @@ public class LinuxService extends Service {
                 uninstall();
                 idleStop(); // nothing left to be foreground for
             });
+        } else if (ACTION_RERUN.equals(action)) {
+            // NOT on io: io is the thread blocked in runSetup on the very run
+            // this replaces. The flag goes up before the kill, so provision()
+            // reads it as that run ends and goes straight into the next one.
+            if (provisioning.get()) {
+                rerun.set(true);
+                final File dir = Linux.root(this);
+                new Thread(() -> stopSetup(dir), "linux-setup-stop").start();
+            } else {
+                io.execute(this::provision);
+            }
         } else { // PROVISION (default)
             io.execute(this::provision);
         }
@@ -543,7 +611,16 @@ public class LinuxService extends Service {
         try {
             File dir = Linux.root(this);
             dir.mkdirs();
-            writeState("pushing", 0, "preparing");
+            // A run taking over from one that was stopped — Skip, Restart, or an
+            // install picking itself back up — keeps the bar where it was:
+            // "preparing" at 0 % would read as the whole install starting over,
+            // when the stamps carry it straight back to the step it was on.
+            Linux.Status before = Linux.readStatus(this);
+            if (Linux.isInstallPhase(before.phase) && before.pct > 0) {
+                writeState(before.phase, before.pct, "resuming");
+            } else {
+                writeState("pushing", 0, "preparing");
+            }
             copyAsset("linux/linux-setup.sh", Linux.setupScript(this));
             copyAsset("linux/linux-rt.sh", Linux.rtScript(this));
             if (!ensureRootfs()) {
@@ -556,7 +633,18 @@ public class LinuxService extends Service {
             writeError("provision-failed");
         } finally {
             provisioning.set(false);
-            idleStop();
+            // Skip or Restart stopped the run above so a fresh one could take
+            // over: straight into it, and not by way of idleStop, which could
+            // stop the service in between the two.
+            if (rerun.getAndSet(false)) {
+                try {
+                    io.execute(this::provision);
+                } catch (java.util.concurrent.RejectedExecutionException destroyed) {
+                    // onDestroy has run; the next start provisions instead.
+                }
+            } else {
+                idleStop();
+            }
         }
     }
 
@@ -728,6 +816,10 @@ public class LinuxService extends Service {
     /** Run linux-setup.sh to completion, its output tee'd to setup.log. */
     private void runSetup() throws Exception {
         File dir = Linux.root(this);
+        // A pid left behind by a run that died with its process names nothing
+        // any more, and stopSetup must never group-kill whatever has that
+        // number now. The run below writes its own.
+        new File(dir, "setup.pid").delete();
         ProcessBuilder pb = new ProcessBuilder(
                 "/system/bin/sh",
                 Linux.setupScript(this).getAbsolutePath(),
@@ -739,9 +831,73 @@ public class LinuxService extends Service {
         pb.redirectOutput(new File(dir, "setup.log"));
         DexLog.step("linux", "running setup (v" + Linux.PAYLOAD_VERSION
                 + " f" + Linux.FEATURE_LEVEL + ")");
-        Process p = pb.start();
-        int rc = p.waitFor();
+        // The CPU stays up for the length of a run. Leaving the desktop no
+        // longer ends an install — RemoteResumeReceiver picks it straight back
+        // up — so a run goes on with nobody watching and, soon, the screen off,
+        // where a phone holding no wake lock sleeps and the download sleeps
+        // with it. Doze disables partial wake locks only for apps below
+        // foreground-service state, which this service never is while it runs.
+        android.os.PowerManager.WakeLock wake = null;
+        int rc;
+        try {
+            wake = setupWake();
+            Process p = pb.start();
+            setupProc = p;
+            rc = p.waitFor();
+        } finally {
+            setupProc = null;
+            if (wake != null && wake.isHeld()) wake.release();
+        }
         DexLog.step("linux", "setup exited " + rc + " — " + Linux.installedApps(this));
+    }
+
+    /**
+     * A partial wake lock for one setup run, or null when the platform will
+     * not give one — the run goes ahead either way. Timed, as the backstop
+     * for a run that hangs: three hours is a whole install on a slow line.
+     */
+    private android.os.PowerManager.WakeLock setupWake() {
+        try {
+            android.os.PowerManager pm = getSystemService(android.os.PowerManager.class);
+            if (pm == null) return null;
+            android.os.PowerManager.WakeLock w = pm.newWakeLock(
+                    android.os.PowerManager.PARTIAL_WAKE_LOCK, "OpenDeX:linux-setup");
+            w.setReferenceCounted(false);
+            w.acquire(3 * 60 * 60 * 1000L);
+            return w;
+        } catch (Exception e) {
+            DexLog.warn("linux", "setup wake lock", e);
+            return null;
+        }
+    }
+
+    /**
+     * Stop the setup run in flight: the script, proot, and every guest process
+     * under it, in one call. linux-setup.sh makes itself a session leader for
+     * exactly this — its pid, in setup.pid, is also its process group's id —
+     * so this is stopRuntime's group kill. destroyForcibly is the belt for a
+     * script that could not setsid: it takes the script, and the run that
+     * replaces this one repairs whatever dpkg was in the middle of.
+     *
+     * Only while this process's own run is alive: setup.pid by itself could be
+     * a leftover naming nothing, or, recycled, something else of ours.
+     */
+    private static void stopSetup(File dir) {
+        Process p = setupProc;
+        if (p == null || !p.isAlive()) return;
+        String script = "P=$(cat " + q(dir) + "/setup.pid 2>/dev/null); "
+                + "if [ -n \"$P\" ]; then /system/bin/kill -9 -\"$P\" 2>/dev/null; fi; true";
+        try {
+            new ProcessBuilder("/system/bin/sh", "-c", script)
+                    .redirectErrorStream(true).start().waitFor();
+        } catch (Exception e) {
+            DexLog.step("linux", "setup stop error: " + e);
+        }
+        try {
+            p.destroyForcibly();
+        } catch (Throwable ignored) {
+        }
+        DexLog.step("linux", "setup run stopped, to be replaced");
     }
 
     // ── runtime ──

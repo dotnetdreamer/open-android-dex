@@ -12,7 +12,8 @@ import android.content.Intent;
  * Brings remote access back after the three things that end every process of
  * this app without asking it: a reboot, an update, and the desktop app's own
  * clean-up at the end of a DeX session, which force-stops the launcher to give
- * the phone its home screen back.
+ * the phone its home screen back. An install any of them cut off is picked up
+ * here too, whatever remote access is doing.
  *
  * That last one is why {@link #ACTION_RESUME} exists and why this receiver is
  * exported at all: the desktop app sends it over adb right after the
@@ -42,6 +43,20 @@ public class RemoteResumeReceiver extends BroadcastReceiver {
                 && !Intent.ACTION_MY_PACKAGE_REPLACED.equals(action)
                 && !ACTION_RESUME.equals(action)) {
             return;
+        }
+        // The install first. Its long steps outlast many desktop sessions, and
+        // every session's clean-up killed whatever step was running, which the
+        // next session then began again — "installing browsers" for ever. Picked
+        // up right here instead, it runs on in the background. The start is
+        // allowed for the reasons remote access's is (see above); the desktop
+        // app takes its battery exemption back only after this broadcast.
+        if (Linux.installInterrupted(ctx)) {
+            if (LinuxService.resumeInstall(ctx)) {
+                DexLog.step("linux", "the install was cut off — resuming it after " + action);
+            } else {
+                DexLog.step("linux", "the install was cut off and Android refused to resume it from "
+                        + action + " — it carries on when Linux opens next");
+            }
         }
         if (!LinuxRemote.isEnabled(ctx) || !LinuxRemote.available(ctx)) return;
         DexLog.step("remote", "resuming remote access after " + action);

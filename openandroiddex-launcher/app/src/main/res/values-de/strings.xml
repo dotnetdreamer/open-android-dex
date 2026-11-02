@@ -453,6 +453,16 @@
     <string name="ln_apps_menu">Linux-Apps auswählen…</string>
     <string name="ln_installing">Ubuntu wird installiert…</string>
     <string name="ln_waiting">Warten, bis die Desktop-App die Installation startet…</string>
+    <string name="ln_step_skip">%1$s überspringen</string>
+    <string name="ln_step_restart">Schritt neu starten</string>
+    <string name="ln_step_skip_title">%1$s überspringen?</string>
+    <string name="ln_step_skip_body">Es wird nicht installiert, und der Rest von Linux wird ohne es eingerichtet. Um es später hinzuzufügen, klicke mit der rechten Maustaste auf Linux und wähle %1$s</string>
+    <string name="ln_step_skip_go">Überspringen</string>
+    <string name="ln_step_restart_title">Schritt neu starten?</string>
+    <string name="ln_step_restart_body">Der Schritt wird angehalten und beginnt noch einmal von vorn. Nutze das, wenn er festzuhängen scheint.</string>
+    <string name="ln_step_restart_go">Neu starten</string>
+    <string name="ln_step_skipping">%1$s wird übersprungen…</string>
+    <string name="ln_step_restarting">Schritt wird neu gestartet…</string>
     <string name="ln_starting">Linux-Desktop wird gestartet…</string>
     <string name="ln_stage_display">Anzeigeserver wird gestartet…</string>
     <string name="ln_stage_services">Desktop-Dienste werden gestartet…</string>

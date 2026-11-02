@@ -571,6 +571,19 @@
     <string name="ln_apps_menu">Choose Linux apps…</string>
     <string name="ln_installing">Installing Ubuntu…</string>
     <string name="ln_waiting">Waiting for the desktop app to start the install…</string>
+    <!-- The install screen's controls for the step it is on, and the error screen's Skip
+         (LinuxActivity.updateStepRow). %1$s is the app's name as the chooser shows it. -->
+    <string name="ln_step_skip">Skip %1$s</string>
+    <string name="ln_step_restart">Restart this step</string>
+    <string name="ln_step_skip_title">Skip %1$s?</string>
+    <!-- %1$s is ln_apps_menu, the Linux tile's menu entry, which already ends in an ellipsis. -->
+    <string name="ln_step_skip_body">It will not be installed, and the rest of Linux goes ahead without it. To add it later, right-click Linux and choose %1$s</string>
+    <string name="ln_step_skip_go">Skip</string>
+    <string name="ln_step_restart_title">Restart this step?</string>
+    <string name="ln_step_restart_body">The step stops and runs again from the beginning. Use this when it seems stuck.</string>
+    <string name="ln_step_restart_go">Restart</string>
+    <string name="ln_step_skipping">Skipping %1$s…</string>
+    <string name="ln_step_restarting">Restarting the step…</string>
     <string name="ln_starting">Starting Linux desktop…</string>
     <string name="ln_stage_display">Starting the display server…</string>
     <string name="ln_stage_services">Starting desktop services…</string>

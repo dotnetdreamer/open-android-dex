@@ -78,6 +78,11 @@ public class LinuxActivity extends Activity {
     private static final int MAX_LOAD_TRIES = 40;
     /** requestPermissions tag. Nothing reads the result — see askForNotifications. */
     private static final int REQ_NOTIFICATIONS = 1;
+    /**
+     * How long the line Skip or Restart put up outlasts a poll that still shows
+     * the step it was for — a Restart's new run comes back to the same step.
+     */
+    private static final long STEP_ACTION_MS = 8_000;
 
     private static final String UI_NONE = "";
     private static final String UI_APPS = "apps";
@@ -104,6 +109,19 @@ public class LinuxActivity extends Activity {
     private String uiState = UI_NONE;
     private ProgressBar installBar;
     private TextView installMsg;
+    /** Skip and Restart under the install line, for the step the script is on. */
+    private LinearLayout stepRow;
+    /** The step stepRow was built for, so a poll only rebuilds it on a change. */
+    private String shownStep;
+    /**
+     * The step a Skip or Restart was just sent for, when, and what the line
+     * says meanwhile — see {@link #stepActionPending}. Null when none is.
+     */
+    private String actedStep;
+    private long actedAt;
+    private String actedText;
+    /** The Skip / Restart question, so a second tap does not stack another one. */
+    private Dialog stepDialog;
     private WebView webView;
     /**
      * The opaque "starting / connecting" card. It sits ON TOP of the WebView
@@ -301,6 +319,10 @@ public class LinuxActivity extends Activity {
             closeDialog.dismiss();
             closeDialog = null;
         }
+        if (stepDialog != null) {
+            stepDialog.dismiss();
+            stepDialog = null;
+        }
         try {
             unregisterReceiver(closeReceiver);
         } catch (Exception ignored) {
@@ -382,7 +404,7 @@ public class LinuxActivity extends Activity {
         }
 
         if ("error".equals(st.phase) && !retryPending) {
-            showError(s(R.string.ln_error), msgWords(st));
+            showError(s(R.string.ln_error), msgWords(st), st.step);
             return;
         }
 
@@ -646,6 +668,15 @@ public class LinuxActivity extends Activity {
             return;
         }
         LinuxService.provision(this);
+        leaveErrorForInstall();
+    }
+
+    /**
+     * From the error screen to the install screen, for a run that is on its
+     * way: the latch keeps the error the last run left in state.env from
+     * putting this screen straight back. Retry, and Skip on the error screen.
+     */
+    private void leaveErrorForInstall() {
         retryPending = true;
         kicked = true;          // the none-timer must not enqueue a second one
         noneSince = 0;
@@ -997,7 +1028,8 @@ public class LinuxActivity extends Activity {
     private void showInstalling(Linux.Status st) {
         if (UI_INSTALL.equals(uiState)) {
             installBar.setProgress(st.pct);
-            installMsg.setText(installText(st));
+            installMsg.setText(stepActionPending(st) ? actedText : installText(st));
+            updateStepRow(st);
             return;
         }
         uiState = UI_INSTALL;
@@ -1015,8 +1047,176 @@ public class LinuxActivity extends Activity {
         barLp.topMargin = dp(20);
         column.addView(installBar, barLp);
 
-        installMsg = subtext(column, installText(st));
+        installMsg = subtext(column, stepActionPending(st) ? actedText : installText(st));
+        // Stacked on the phone, side by side on the desktop, as in the close
+        // question: "Skip IntelliJ IDEA Community" beside "Restart this step"
+        // is wider than a phone held upright.
+        stepRow = new LinearLayout(this);
+        stepRow.setOrientation(onPhone() ? LinearLayout.VERTICAL : LinearLayout.HORIZONTAL);
+        stepRow.setGravity(Gravity.CENTER_HORIZONTAL);
+        LinearLayout.LayoutParams rowLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        rowLp.topMargin = dp(18);
+        rowLp.gravity = Gravity.CENTER_HORIZONTAL;
+        column.addView(stepRow, rowLp);
+        shownStep = null;
+        updateStepRow(st);
         present(column);
+    }
+
+    /**
+     * Skip and Restart, for the step the setup script says it is on: Skip only
+     * for one of the chooser's apps, Restart for those and the desktop itself.
+     * A long step with no way out but closing the desktop is what made people
+     * close it — which killed the step and started it over. Rebuilt only when
+     * the step changes, and away while a Skip or Restart is still being carried
+     * out, so a second tap cannot land on the run that is replacing this one.
+     */
+    private void updateStepRow(Linux.Status st) {
+        if (stepRow == null) return;
+        final String step = st.step == null ? "" : st.step;
+        if (stepActionPending(st) || !Linux.isRestartableStep(step)) {
+            stepRow.setVisibility(android.view.View.GONE);
+            return;
+        }
+        if (!step.equals(shownStep)) {
+            shownStep = step;
+            stepRow.removeAllViews();
+            if (Linux.isSkippableStep(step)) {
+                stepRow.addView(dialogButton(getString(R.string.ln_step_skip, stepName(step)),
+                        theme.hover, theme.text, () -> askSkip(step, false)));
+            }
+            stepRow.addView(dialogButton(s(R.string.ln_step_restart), theme.hover, theme.text,
+                    () -> askRestart(step)));
+            boolean stacked = stepRow.getOrientation() == LinearLayout.VERTICAL;
+            for (int i = 0; i < stepRow.getChildCount(); i++) {
+                LinearLayout.LayoutParams lp =
+                        (LinearLayout.LayoutParams) stepRow.getChildAt(i).getLayoutParams();
+                lp.leftMargin = stacked || i == 0 ? 0 : dp(8);
+                lp.topMargin = stacked && i > 0 ? dp(8) : 0;
+                lp.gravity = Gravity.CENTER_HORIZONTAL;
+            }
+            // present() styled what was there when the screen went up; a row
+            // rebuilt for a later step has to be styled on its own.
+            DexFonts.applyTo(this, stepRow);
+            DexCursors.decorate(stepRow);
+        }
+        stepRow.setVisibility(android.view.View.VISIBLE);
+    }
+
+    /**
+     * Is a Skip or Restart still being carried out? Over the moment the screen
+     * shows anything but the step it was for — the service's own "resuming"
+     * line names no step at all — or, since a Restart's new run comes straight
+     * back to the same step, once that run has had a few seconds to begin.
+     */
+    private boolean stepActionPending(Linux.Status st) {
+        if (actedStep == null) return false;
+        boolean over = !actedStep.equals(st.step)
+                || SystemClock.uptimeMillis() - actedAt > STEP_ACTION_MS;
+        if (over) actedStep = null;
+        return !over;
+    }
+
+    /** Say what was just asked for, in place of the line it replaces, and put the buttons away. */
+    private void markStepAction(String step, String text) {
+        actedStep = step;
+        actedAt = SystemClock.uptimeMillis();
+        actedText = text;
+        if (UI_INSTALL.equals(uiState) && installMsg != null) installMsg.setText(text);
+        if (stepRow != null) stepRow.setVisibility(android.view.View.GONE);
+    }
+
+    /** Skip, asked first: the step's app comes off the list, and the install goes on without it. */
+    private void askSkip(String step, boolean fromError) {
+        final String name = stepName(step);
+        confirmStep(getString(R.string.ln_step_skip_title, name),
+                getString(R.string.ln_step_skip_body, s(R.string.ln_apps_menu)),
+                s(R.string.ln_step_skip_go), () -> {
+                    LinuxService.skipStep(this, step);
+                    if (fromError) leaveErrorForInstall();
+                    markStepAction(step, getString(R.string.ln_step_skipping, name));
+                });
+    }
+
+    /** Restart, asked first: the step stops and runs again from its beginning. */
+    private void askRestart(String step) {
+        confirmStep(s(R.string.ln_step_restart_title), s(R.string.ln_step_restart_body),
+                s(R.string.ln_step_restart_go), () -> {
+                    LinuxService.restartStep(this, step);
+                    markStepAction(step, s(R.string.ln_step_restarting));
+                });
+    }
+
+    /** The name the chooser gives a step's app, for the buttons and the questions. */
+    private String stepName(String step) {
+        switch (step) {
+            case "firefox": return s(R.string.ln_apps_firefox);
+            case "chromium": return s(R.string.ln_apps_chromium);
+            case "code": return s(R.string.ln_apps_code);
+            case "git": return s(R.string.ln_apps_git);
+            case "nodejs": return s(R.string.ln_apps_node);
+            case "gimp": return s(R.string.ln_apps_gimp);
+            case "intellij": return s(R.string.ln_apps_intellij);
+            default: return step;
+        }
+    }
+
+    /**
+     * The one question behind Skip and Restart: what happens, and a way out.
+     * Built like the close question, and asked for the same reason — both
+     * throw away what the step has done so far.
+     */
+    private void confirmStep(String titleText, String bodyText, String goLabel, Runnable go) {
+        if (isFinishing()) return;
+        if (stepDialog != null && stepDialog.isShowing()) return;
+
+        Dialog dialog = new Dialog(this);
+        dialog.requestWindowFeature(android.view.Window.FEATURE_NO_TITLE);
+        if (dialog.getWindow() != null) {
+            dialog.getWindow().setBackgroundDrawable(new ColorDrawable(0x00000000));
+        }
+
+        LinearLayout panel = new LinearLayout(this);
+        panel.setOrientation(LinearLayout.VERTICAL);
+        panel.setBackground(plainFill(theme.windowBg(), 16));
+        panel.setPadding(dp(22), dp(20), dp(22), dp(14));
+
+        TextView head = new TextView(this);
+        head.setText(titleText);
+        head.setTextColor(theme.text);
+        head.setTextSize(TypedValue.COMPLEX_UNIT_PX, sp(16));
+        head.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        panel.addView(head);
+
+        TextView body = new TextView(this);
+        body.setText(bodyText);
+        body.setTextColor(theme.textDim);
+        body.setTextSize(TypedValue.COMPLEX_UNIT_PX, sp(12.5f));
+        LinearLayout.LayoutParams bodyLp = new LinearLayout.LayoutParams(
+                dp(300), ViewGroup.LayoutParams.WRAP_CONTENT);
+        bodyLp.topMargin = dp(8);
+        panel.addView(body, bodyLp);
+
+        LinearLayout buttons = new LinearLayout(this);
+        buttons.setOrientation(LinearLayout.HORIZONTAL);
+        buttons.setGravity(Gravity.END);
+        buttons.addView(dialogButton(s(R.string.ln_close_cancel), theme.hover, theme.text,
+                dialog::dismiss));
+        buttons.addView(dialogButton(goLabel, theme.accent, 0xFFFFFFFF, () -> {
+            dialog.dismiss();
+            go.run();
+        }));
+        LinearLayout.LayoutParams rowLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        rowLp.topMargin = dp(18);
+        panel.addView(buttons, rowLp);
+
+        DexFonts.applyTo(this, panel);
+        DexCursors.decorate(panel);
+        dialog.setContentView(panel);
+        stepDialog = dialog;
+        dialog.show();
     }
 
     /** Runtime not up yet: our card only, no WebView behind it. */
@@ -1274,7 +1474,19 @@ public class LinuxActivity extends Activity {
     }
 
     private void showError(String titleText, String detail) {
-        showAction(titleText, detail, s(R.string.ln_retry));
+        showError(titleText, detail, null);
+    }
+
+    /**
+     * The error screen. When what failed is a step the user can do without —
+     * one of the chooser's apps — Skip sits beside Retry: an app that will not
+     * install here must not stand between someone and the rest of Linux. In
+     * practice that is a browser, the only optional step whose failure ends
+     * the run; the others note theirs in the log and carry on.
+     */
+    private void showError(String titleText, String detail, String failedStep) {
+        showAction(titleText, detail, s(R.string.ln_retry),
+                Linux.isSkippableStep(failedStep) ? failedStep : null);
     }
 
     /**
@@ -1284,6 +1496,12 @@ public class LinuxActivity extends Activity {
      * the rebuild check is on the TITLE, not just on being in this state.
      */
     private void showAction(String titleText, String detail, String buttonLabel) {
+        showAction(titleText, detail, buttonLabel, null);
+    }
+
+    /** ...and, for a failed step that can be done without, Skip beside the button. */
+    private void showAction(String titleText, String detail, String buttonLabel,
+                            String skipStep) {
         if (UI_ERROR.equals(uiState) && titleText.equals(shownActionTitle)) return;
         uiState = UI_ERROR;
         shownActionTitle = titleText;
@@ -1297,7 +1515,23 @@ public class LinuxActivity extends Activity {
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         lp.topMargin = dp(20);
         lp.gravity = Gravity.CENTER_HORIZONTAL;
-        column.addView(retry, lp);
+        if (skipStep == null) {
+            column.addView(retry, lp);
+        } else {
+            boolean stacked = onPhone();
+            LinearLayout row = new LinearLayout(this);
+            row.setOrientation(stacked ? LinearLayout.VERTICAL : LinearLayout.HORIZONTAL);
+            row.setGravity(Gravity.CENTER);
+            row.addView(retry);
+            TextView skip = dialogButton(getString(R.string.ln_step_skip, stepName(skipStep)),
+                    theme.hover, theme.text, () -> askSkip(skipStep, true));
+            LinearLayout.LayoutParams skipLp = (LinearLayout.LayoutParams) skip.getLayoutParams();
+            skipLp.leftMargin = stacked ? 0 : dp(10);
+            skipLp.topMargin = stacked ? dp(10) : 0;
+            skipLp.gravity = Gravity.CENTER_HORIZONTAL;
+            row.addView(skip);
+            column.addView(row, lp);
+        }
         present(column);
     }
 
@@ -1424,7 +1658,10 @@ public class LinuxActivity extends Activity {
         if ("none".equals(st.phase) || "error".equals(st.phase)) {
             return s(R.string.ln_waiting);
         }
-        return msgWords(st);
+        // How far through its step, when the script can tell: a line that
+        // moves is the difference between a long step and one that looks hung.
+        String words = msgWords(st);
+        return st.stepPct >= 0 ? words + " · " + st.stepPct + "%" : words;
     }
 
     /**

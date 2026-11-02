@@ -453,6 +453,16 @@
     <string name="ln_apps_menu">Escolher aplicações Linux…</string>
     <string name="ln_installing">Instalando o Ubuntu…</string>
     <string name="ln_waiting">Aguardando o aplicativo do computador iniciar a instalação…</string>
+    <string name="ln_step_skip">Ignorar %1$s</string>
+    <string name="ln_step_restart">Reiniciar este passo</string>
+    <string name="ln_step_skip_title">Ignorar %1$s?</string>
+    <string name="ln_step_skip_body">Não será instalado, e o resto do Linux continua sem ele. Para o acrescentar mais tarde, clique com o botão direito em Linux e escolha %1$s</string>
+    <string name="ln_step_skip_go">Ignorar</string>
+    <string name="ln_step_restart_title">Reiniciar este passo?</string>
+    <string name="ln_step_restart_body">O passo para e recomeça do início. Use quando parecer encravado.</string>
+    <string name="ln_step_restart_go">Reiniciar</string>
+    <string name="ln_step_skipping">A ignorar %1$s…</string>
+    <string name="ln_step_restarting">A reiniciar o passo…</string>
     <string name="ln_starting">Iniciando o desktop Linux…</string>
     <string name="ln_stage_display">Iniciando o servidor de exibição…</string>
     <string name="ln_stage_services">Iniciando os serviços do desktop…</string>

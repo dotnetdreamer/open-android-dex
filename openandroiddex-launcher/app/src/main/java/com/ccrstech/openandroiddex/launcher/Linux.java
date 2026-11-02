@@ -619,6 +619,16 @@ final class Linux {
         String phase = "none";
         int pct;
         String msg = "-";
+        /**
+         * The step the setup script is on — a chooser app id, or
+         * {@code desktop} — and "" when it is between steps or not running.
+         * What the install screen hangs Skip and Restart off; see
+         * {@link #isSkippableStep} and {@link #isRestartableStep}. On an
+         * error it names the step that failed.
+         */
+        String step = "";
+        /** How far through {@link #step} it is, 0-100, or -1 when nothing says. */
+        int stepPct = -1;
         boolean running;
         /**
          * pid of the live runtime — linux-rt.sh's session leader, which is
@@ -706,6 +716,75 @@ final class Linux {
                 < FEATURE_LEVEL;
     }
 
+    /** The phases of an install that is still on its way (state.env's PHASE). */
+    static boolean isInstallPhase(String phase) {
+        switch (phase == null ? "" : phase) {
+            case "pushing":
+            case "extracting":
+            case "configuring":
+            case "apt-update":
+            case "installing-desktop":
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    /**
+     * Was an install running when this app's processes last died?
+     *
+     * state.env says so by still naming a phase on the way: nothing that dies
+     * to SIGKILL gets to write anything else. Asked right after the three
+     * things that end every process of the app without asking it — the
+     * desktop app's clean-up, a reboot, an update (RemoteResumeReceiver) — so
+     * that an install they cut off picks itself up there and then instead of
+     * at the next desktop, which is what turned a long step into one that
+     * never finished: every session that ended killed it, and every one that
+     * started began it again.
+     */
+    static boolean installInterrupted(Context ctx) {
+        if (isUninstalled(ctx) || needsAppChoice(ctx)) return false;
+        return isInstallPhase(readStatus(ctx).phase);
+    }
+
+    /**
+     * A step the install screen can Skip: one of the chooser's own apps.
+     * Skipping one is unticking it (LinuxService.skipStep), so the chooser is
+     * also how it comes back.
+     */
+    static boolean isSkippableStep(String step) {
+        if (step == null) return false;
+        for (String id : OPTIONAL_APPS) {
+            if (id.equals(step)) return true;
+        }
+        return false;
+    }
+
+    /**
+     * A step the install screen can Restart: every one Skip can drop, and the
+     * desktop itself, which can be started over but never done without.
+     */
+    static boolean isRestartableStep(String step) {
+        return isSkippableStep(step) || "desktop".equals(step);
+    }
+
+    /**
+     * Ask the next setup run to start {@code step} over. linux-setup.sh reads
+     * this, deletes it, and drops the step's unfinished downloads (redo_clean)
+     * before running it again.
+     *
+     * Inside the container rather than beside it like the tick list: a reset
+     * wipes it together with everything it could have applied to.
+     */
+    static void requestStepRestart(Context ctx, String step) {
+        try (java.io.FileOutputStream out =
+                     new java.io.FileOutputStream(new File(root(ctx), "step.redo"))) {
+            out.write(step.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        } catch (Exception e) {
+            DexLog.warn("linux", "could not record the step restart", e);
+        }
+    }
+
     /** Marker linux-rt.sh drops when a session ends by itself; see Status. */
     static File rtExit(Context ctx) {
         return new File(root(ctx), "rt.exit");
@@ -736,6 +815,8 @@ final class Linux {
                 case "PHASE": st.phase = val; break;
                 case "PCT": st.pct = parseInt(val); break;
                 case "MSG": st.msg = val; break;
+                case "STEP": st.step = val; break;
+                case "STEPPCT": st.stepPct = parseInt(val); break;
                 default: break;
             }
         }

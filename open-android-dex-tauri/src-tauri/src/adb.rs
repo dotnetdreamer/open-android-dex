@@ -1524,8 +1524,10 @@ pub fn restore_phone(app: &tauri::AppHandle, serial: &str) {
     //     SURVIVES A REBOOT — left behind, it would keep a package the phone
     //     no longer runs permanently exempt. The standby bucket is not reset:
     //     the platform re-evaluates it on its own and there is no "unset".
+    //     Collected here but run LAST, after step 5's broadcast — see there.
+    let mut power_undo = String::new();
     for op in BACKGROUND_OPS {
-        script.push_str(&format!("appops set {LAUNCHER_PACKAGE} {op} default; "));
+        power_undo.push_str(&format!("appops set {LAUNCHER_PACKAGE} {op} default; "));
     }
     // …but only when it was ours to remove. "Unrestricted" battery that the
     // user chose on the phone is what keeps Remote access alive with no PC
@@ -1539,7 +1541,7 @@ pub fn restore_phone(app: &tauri::AppHandle, serial: &str) {
     } else if crate::remote::phone_remote_enabled(app, serial) {
         log::info!("{serial}: remote access is on — keeping the battery exemption it needs");
     } else {
-        script.push_str(&format!(
+        power_undo.push_str(&format!(
             "dumpsys deviceidle whitelist -{LAUNCHER_PACKAGE}; "
         ));
     }
@@ -1579,12 +1581,25 @@ pub fn restore_phone(app: &tauri::AppHandle, serial: &str) {
     //    broadcasts otherwise), 0x10000000 FLAG_RECEIVER_FOREGROUND. A launcher
     //    from before Remote access has no such receiver, and the broadcast is
     //    then simply delivered to no one.
+    //
+    //    The same broadcast picks up a Linux install the force-stop (or the
+    //    POST_NOTIFICATIONS revoke in 3a, which kills the app as well) cut off:
+    //    its long steps outlast many sessions, and this used to kill whichever
+    //    one was running, for the next session to begin it again. Starting it
+    //    from a broadcast means starting a foreground service from the
+    //    background, which Android allows a battery-exempt app — so 3b's undo
+    //    runs only after this. `am broadcast` returns once the receiver has run,
+    //    and a service started by then is not stopped by the exemption going.
+    //    Nor does the run need the exemption after its start: LinuxService
+    //    holds a partial wake lock while the setup runs, and Doze leaves those
+    //    alone for an app in foreground-service state.
     script.push_str(&format!(
         "am force-stop {LAUNCHER_PACKAGE}; \
          am broadcast -n {LAUNCHER_PACKAGE}/.RemoteResumeReceiver \
          -a {REMOTE_RESUME_ACTION} -f 0x10000020 >/dev/null 2>&1; \
-         input keyevent KEYCODE_HOME"
+         input keyevent KEYCODE_HOME; "
     ));
+    script.push_str(&power_undo);
 
     let undone = match run_adb_timeout(app, &["-s", serial, "shell", &script], RESTORE_TIMEOUT) {
         Ok(_) => {

@@ -453,6 +453,16 @@
     <string name="ln_apps_menu">选择 Linux 应用…</string>
     <string name="ln_installing">正在安装 Ubuntu…</string>
     <string name="ln_waiting">正在等待桌面应用开始安装…</string>
+    <string name="ln_step_skip">跳过 %1$s</string>
+    <string name="ln_step_restart">重新开始此步骤</string>
+    <string name="ln_step_skip_title">跳过 %1$s？</string>
+    <string name="ln_step_skip_body">它不会被安装，Linux 的其余部分会在没有它的情况下继续。以后要添加，请右键点击 Linux 并选择%1$s</string>
+    <string name="ln_step_skip_go">跳过</string>
+    <string name="ln_step_restart_title">重新开始此步骤？</string>
+    <string name="ln_step_restart_body">此步骤会停止，并从头重新运行。看起来卡住时可以使用。</string>
+    <string name="ln_step_restart_go">重新开始</string>
+    <string name="ln_step_skipping">正在跳过 %1$s…</string>
+    <string name="ln_step_restarting">正在重新开始此步骤…</string>
     <string name="ln_starting">正在启动 Linux 桌面…</string>
     <string name="ln_stage_display">正在启动显示服务器…</string>
     <string name="ln_stage_services">正在启动桌面服务…</string>

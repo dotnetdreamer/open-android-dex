@@ -18,8 +18,10 @@
 # LINUXSTATUS verb never read a torn file:
 #
 #   VERSION=<int>  FEATURES=<int>  PHASE=<phase>  PCT=<0-100>  MSG=<no-whitespace>
+#   STEP=<step, or empty>  STEPPCT=<0-100, or -1>
 #
-# MSG may also be <verb>:<name> — see apt_msg.
+# MSG may also be <verb>:<name> — see apt_msg. STEP and STEPPCT come from
+# step_begin.
 #   phases: pushing (written by the caller) extracting configuring apt-update
 #           installing-desktop ready error
 #
@@ -32,6 +34,23 @@
 # filesDir and proot from the APK's native-lib dir; a bare shell falls back to
 # the legacy /data/local/tmp layout with proot extracted from a tarball.
 ROOT=${LINUX_ROOT:-/data/local/tmp/linux}
+
+# A session of its own, so one run — this script, proot and every guest process
+# under it — can be stopped with a single `kill -9 -<pid>`: that is how the
+# install screen's Skip and Restart stop a step (LinuxService.stopSetup). It is
+# linux-rt.sh's idiom exactly, measured there: `setsid sh "$0"`, never
+# `setsid "$0"` (this script lives in storage that is not, and may not be,
+# executable), and an env flag so the second pass does not loop. setsid execs
+# in place, so the pid the app is waiting on stays this script's. Dying WITH
+# the app is unchanged: a force-stop takes the app's processes whatever session
+# they are in, which is how linux-rt.sh, a session leader too, goes down with
+# the desktop.
+if [ -z "$LINUX_SETUP_SETSID" ] && [ -x /system/bin/setsid ]; then
+  LINUX_SETUP_SETSID=1
+  export LINUX_SETUP_SETSID
+  exec /system/bin/setsid /system/bin/sh "$0" "$@"
+fi
+
 VER=$1
 [ -n "$VER" ] || VER=1
 # Feature level: what this payload installs INSIDE an already-provisioned
@@ -55,10 +74,16 @@ wants() { case " $APPS_SEL " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
 
 # ── state.env / failure plumbing ──────────────────────────────────────────
 
-state() { # phase pct msg
-  printf 'VERSION=%s\nFEATURES=%s\nPHASE=%s\nPCT=%s\nMSG=%s\n' \
-    "$VER" "$FEAT" "$1" "$2" "$3" > "$ROOT/state.env.tmp"
-  mv "$ROOT/state.env.tmp" "$ROOT/state.env"
+# STEP names the step this run is on — a chooser app id, or `desktop` — which is
+# what puts Skip and Restart on the install screen; STEPPCT is how far through
+# it is, -1 when nothing says. Both are step_begin's. STATE_TMP is set only in
+# the ticker, so its write and the script's own can never interleave in one
+# scratch file.
+STEP=
+state() { # phase pct msg [step-pct]
+  printf 'VERSION=%s\nFEATURES=%s\nPHASE=%s\nPCT=%s\nMSG=%s\nSTEP=%s\nSTEPPCT=%s\n' \
+    "$VER" "$FEAT" "$1" "$2" "$3" "$STEP" "${4:--1}" > "$ROOT/state.env.tmp$STATE_TMP"
+  mv "$ROOT/state.env.tmp$STATE_TMP" "$ROOT/state.env"
 }
 
 # Milestones go to logcat as well as to setup.log. The PC folds
@@ -144,6 +169,33 @@ repair_dpkg() {
   run_guest "dpkg --configure -a; apt-get -y --fix-broken install; b=\$(dpkg -l | awk '\$1 ~ /^i[FHU]/ { print \$2 }'); [ -n \"\$b\" ] || exit 0; apt-get install -y \$b || apt-get install -y --reinstall \$b; true" || true
 }
 
+# Was a run cut short inside dpkg? The desktop app's clean-up force-stops the
+# launcher mid-install, and Skip and Restart stop a run the same way — so the
+# next apt-get may find dpkg interrupted and refuse to do anything at all, Retry
+# after Retry. Two host-side reads and no proot: a journal with entries in it
+# (apt's "dpkg was interrupted"), or a package left in a half state (what
+# repair_dpkg's last rung is for). The usual clean pass costs nothing.
+dpkg_dirty() {
+  [ -n "$(ls -A rootfs/var/lib/dpkg/updates 2>/dev/null)" ] && return 0
+  grep -qE '^Status: [a-z]+ [a-z]+ (half-installed|unpacked|half-configured|triggers-awaited|triggers-pending)$' \
+    rootfs/var/lib/dpkg/status 2>/dev/null
+}
+
+repair_if_dirty() {
+  dpkg_dirty || return 0
+  note "dpkg: an earlier run was cut short - repairing before the next install"
+  # An app that was Skipped in the middle of its own unpack is taken back out
+  # rather than finished: repair_dpkg's last rung re-unpacks every half-done
+  # package, which would install the very app the user just declined. ONLY a
+  # package in a half state — one that is properly installed stays, whatever
+  # the tick list says, because nothing here ever uninstalls.
+  for _ri in firefox chromium gimp nodejs git; do
+    wants "$_ri" && continue
+    run_guest "case \"\$(dpkg-query -W -f='\${Status}' $_ri 2>/dev/null)\" in *half-installed|*unpacked|*half-configured) dpkg --remove --force-remove-reinstreq $_ri ;; esac" >/dev/null 2>&1
+  done
+  repair_dpkg
+}
+
 # What the desktop install is doing RIGHT NOW, as one state.env-safe token.
 # apt is a firehose and MSG holds a single whitespace-free word, so this reduces
 # the log tail to the last thing worth naming: which package is downloading,
@@ -184,8 +236,26 @@ apt_msg() { # log-offset
 }
 
 TICKER=
-fail() { # phase-name — kill the ticker FIRST or it overwrites the error state
-  [ -n "$TICKER" ] && kill "$TICKER" 2>/dev/null
+# Stop the ticker and make sure it is gone. SIGKILL, and through
+# /system/bin/kill: with this script a session leader (the setsid re-exec
+# above), a CATCHABLE signal to the ticker made mksh run the script's own TERM
+# trap once the ticker's sleep ended — every step "interrupted" five seconds
+# in. Measured on the S25: kill and /system/bin/kill both did it under setsid,
+# neither did without it, and kill -9 never did. Waited for, too: the kill
+# returns before the signal has landed, and a ticker caught mid-write would
+# put its line straight back over whatever the script says next.
+ticker_stop() {
+  [ -n "$TICKER" ] || return 0
+  /system/bin/kill -9 "$TICKER" 2>/dev/null
+  wait "$TICKER" 2>/dev/null
+  TICKER=
+}
+
+fail() { # phase-name — kill the ticker FIRST or it overwrites the error state.
+  # STEP stays as it is, for the error screen's Skip. In practice that is a
+  # browser: the only optional step whose failure ends the run — the others
+  # note theirs and carry on (VS Code retrying on later launches).
+  ticker_stop
   state error 0 "$1"
   note "FAILED: $1"
   share_log "$ROOT/setup.log"
@@ -194,14 +264,249 @@ fail() { # phase-name — kill the ticker FIRST or it overwrites the error state
 
 # setup.pid comes off on every exit path — fail(), plain exit, or success.
 cleanup() {
-  [ -n "$TICKER" ] && kill "$TICKER" 2>/dev/null
+  # -9, as in ticker_stop and for the same reason.
+  [ -n "$TICKER" ] && /system/bin/kill -9 "$TICKER" 2>/dev/null
   rm -f "$ROOT/setup.pid"
 }
 trap cleanup EXIT
 # A trappable signal (someone aborting the install) must surface as an error
 # state, not vanish — and must take the ticker down with it. SIGKILL is
 # untrappable; the ticker's parent-liveness check covers that hole.
-trap 'fail interrupted' TERM INT HUP
+# STEP cleared first: a run stopped from outside is no failure of the step it
+# happened to be on, and the error screen must not offer to Skip that step.
+trap 'STEP=; fail interrupted' TERM INT HUP
+
+# -- a step's live line ----------------------------------------------------
+# The long steps after the desktop — Git, Node.js, GIMP, each browser, VS Code,
+# IntelliJ — keep state.env moving while they work: what they are on and how
+# far through it, every 5 s. The browsers used to publish "install-browsers"
+# once and then nothing for the ~8 minutes the pair takes on a phone, and a line
+# that never moves reads as a hang: people left the desktop on it, which killed
+# the install, which started it over. STEP is also what the install screen
+# hangs Skip and Restart off.
+#
+# Two sources, by what the step is waiting on:
+#   apt   APT::Status-Fd, wired up by apt_in: "dlstatus:<n>:<pct>:..." while
+#         it downloads, "pmstatus:<pkg>:<pct>:..." while dpkg works. apt-get
+#         prints no progress of its own when stdout is not a terminal, and most
+#         steps capture their output (guest_or_note), so setup.log has none.
+#   file  a tarball curl is filling (fetch_tarball): its size against the
+#         Content-Length the server announced.
+# Called again for each part of a step: the ticker is a subshell, so it knows
+# the arguments it was started with and nothing set after.
+STEP_STATUS=$ROOT/tmp/.oadx-apt-status
+step_begin() { # step pct verb:name [file size]
+  ticker_stop
+  STEP=$1
+  _sb_pct=$2 _sb_word=$3 _sb_file=$4 _sb_size=$5
+  rm -f "$STEP_STATUS"
+  state installing-desktop "$_sb_pct" "$_sb_word"
+  _sb_main=$$
+  (
+    STATE_TMP=.tick
+    while sleep 5; do
+      # Belt: the group kill and the app's own death take this with them, but
+      # a ticker outliving its script would pin the screen to a dead step.
+      kill -0 "$_sb_main" 2>/dev/null || exit 0
+      step_progress
+      state installing-desktop "$_sb_pct" "$_sp_msg" "$_sp_pct"
+    done
+  ) &
+  TICKER=$!
+}
+
+step_end() {
+  ticker_stop
+  STEP=
+}
+
+# What a step is doing right now, for the ticker: _sp_msg, a state.env MSG, and
+# _sp_pct, 0-100 or -1. apt's status lines are matched from the END: the
+# package field can carry a :arch of its own. A line at 100 % is an apt call
+# that has finished, and says nothing about whatever the step does next.
+step_progress() {
+  _sp_msg=$_sb_word
+  _sp_pct=-1
+  if [ -n "$_sb_file" ]; then
+    # Bytes over (size / 100), never bytes * 100 / size: mksh's arithmetic is
+    # 32-bit, and 330 MB times a hundred is far past 2^31.
+    [ "${_sb_size:-0}" -ge 100 ] 2>/dev/null || return 0
+    _sp_pct=$(( $(fsize "$_sb_file") / (_sb_size / 100) ))
+    [ "$_sp_pct" -le 100 ] || _sp_pct=100
+    return 0
+  fi
+  _sp_f=$(tail -n 1 "$STEP_STATUS" 2>/dev/null \
+    | sed -n 's/^\([a-z]*\):\(.*\):\([0-9][0-9]*\)\.[0-9]*:.*$/\1 \2 \3/p')
+  [ -n "$_sp_f" ] || return 0
+  _sp_p=${_sp_f##* }
+  [ "$_sp_p" -lt 100 ] 2>/dev/null || return 0
+  _sp_name=${_sp_f#* }; _sp_name=${_sp_name% *}; _sp_name=${_sp_name%%:*}
+  case "$_sp_name" in ''|dpkg-exec) _sp_name=${_sb_word#*:} ;; esac
+  case "$_sp_f" in
+    dlstatus\ *) _sp_msg=downloading:${_sb_word#*:} ;;
+    pmstatus\ *) _sp_msg=installing:$_sp_name ;;
+    *) return 0 ;;
+  esac
+  _sp_pct=$_sp_p
+}
+
+# Bytes in a file, 0 when there is none. Some wc builds pad the number; the
+# padding is cut off as text, not by arithmetic, which is 32-bit here.
+fsize() {
+  [ -f "$1" ] || { echo 0; return 0; }
+  _fs=$(wc -c < "$1" 2>/dev/null)
+  _fs=${_fs##* }
+  echo "${_fs:-0}"
+}
+
+# An apt-get install line for a step, with apt's machine-readable progress on
+# fd 3. /tmp in the guest is $ROOT/tmp out here, which is where step_progress
+# reads it; truncated per call (>, never >>).
+apt_in() { # packages...
+  printf 'apt-get -o APT::Status-Fd=3 install -y --no-install-recommends %s 3>/tmp/.oadx-apt-status' "$*"
+}
+
+# Fetch a big tarball into the guest's /tmp: resumable, and with its progress
+# on the install screen. A run cut short — Skip, Restart, the desktop app's
+# clean-up — used to throw away everything downloaded so far, 330 MB for VS
+# Code and about 1 GB for IntelliJ, because `curl -o` starts the file over.
+#
+# Resumed only onto the SAME build. The URLs are "latest" redirects, so the one
+# a partial file came from is recorded beside it (<file>.url, with the size the
+# server gave in <file>.size), and a different answer now starts clean instead
+# of grafting a newer build's bytes onto an older one's half.
+#
+# And never thrown away for less than a server that will not resume it. A
+# probe that fails is a blip, not news about the build: the half already here
+# carries on from the build it came from. A download that fails — a timeout,
+# a dropped connection, the stall limit — keeps every byte for the next attempt
+# to resume from. Only curl 33 (no ranges) or 416 (a range past the file's end)
+# makes the half worthless, and then that file starts over, once.
+fetch_tarball() { # step pct name url file-in-/tmp
+  _ft_dst=$ROOT/tmp/$5
+  _ft_head=$(run_guest "curl -fsIL --connect-timeout 30 --max-time 60 -o /dev/null -w '%{url_effective} %header{content-length}' '$4'" 2>/dev/null)
+  _ft_url=${_ft_head%% *}
+  _ft_size=${_ft_head##* }
+  case "$_ft_url" in https://*) ;; *) _ft_url= ;; esac
+  case "$_ft_size" in ''|*[!0-9]*) _ft_size= ;; esac
+  _ft_was=$(cat "$_ft_dst.url" 2>/dev/null)
+  if [ -n "$_ft_url" ]; then
+    if [ "$_ft_url" != "$_ft_was" ]; then
+      rm -f "$_ft_dst"
+      printf '%s\n' "$_ft_url" > "$_ft_dst.url"
+    fi
+    printf '%s\n' "$_ft_size" > "$_ft_dst.size"
+  elif [ -n "$_ft_was" ] && [ -f "$_ft_dst" ]; then
+    _ft_url=$_ft_was
+    _ft_size=$(cat "$_ft_dst.size" 2>/dev/null)
+    case "$_ft_size" in ''|*[!0-9]*) _ft_size= ;; esac
+  else
+    # No build known to resume onto: "latest" from the start, with nothing
+    # recorded, so the next probe that works decides afresh.
+    rm -f "$_ft_dst" "$_ft_dst.url" "$_ft_dst.size"
+    _ft_url=$4
+  fi
+  step_begin "$1" "$2" "downloading:$3" "$_ft_dst" "$_ft_size"
+  # Already whole: a run that stopped between the download and the extract.
+  [ -n "$_ft_size" ] && [ "$(fsize "$_ft_dst")" = "$_ft_size" ] && return 0
+  # Under 1 KB/s for two minutes is a stalled connection, not a slow one: curl
+  # gives up on it and --retry picks the file up where it stopped. With no
+  # limit a dead connection held the step for ever.
+  _ft_opt="-fL --retry 3 --connect-timeout 30 --speed-limit 1024 --speed-time 120"
+  _ft_out=$(run_guest "curl $_ft_opt -C - -o '/tmp/$5' -w 'http=%{http_code}' '$_ft_url'" 2>&1)
+  _ft_rc=$?
+  [ "$_ft_rc" -eq 0 ] && return 0
+  case "$_ft_rc $_ft_out" in
+    "33 "*|*http=416*)
+      rm -f "$_ft_dst"
+      guest_or_note "$3-download" "curl $_ft_opt -o '/tmp/$5' '$_ft_url'"
+      return
+      ;;
+  esac
+  note "$3-download FAILED (curl $_ft_rc) - keeping $(fsize "$_ft_dst") bytes to resume: $(echo "$_ft_out" | tail -2 | tr '\n' ' ' | cut -c1-300)"
+  return 1
+}
+
+# Unpack a fetched tarball into /opt/<tree>, whole or not at all: into a staging
+# directory first, renamed into place only once tar has finished. Straight into
+# place, a run killed half way (Skip, Restart, the desktop app's clean-up) left
+# a half tree whose launcher could already be there, and the "installed?"
+# guards ask the launcher alone — so the half tree passed for an install from
+# then on, Restart included. The tarball goes whatever happened, as it always
+# did: extracted, or one that would not extract and must not be resumed onto.
+# --strip-components=1 drops the tarball's own top-level directory.
+extract_tarball() { # name file-in-/tmp tree-in-/opt
+  guest_or_note "$1-extract" \
+    "rm -rf /opt/.$3-new && mkdir -p /opt/.$3-new \
+     && tar -xzf /tmp/$2 -C /opt/.$3-new --strip-components=1 \
+     && rm -rf /opt/$3 && mv /opt/.$3-new /opt/$3; \
+     rc=\$?; rm -rf /opt/.$3-new; rm -f /tmp/$2 /tmp/$2.url /tmp/$2.size; exit \$rc"
+}
+
+# A tree an extract never finished, from before extracts were staged: a run
+# killed half way through one left its half in place. The tarball still waiting
+# in /tmp is the tell — every extract that ends, ends by deleting it — so a
+# tree with its tarball beside it is taken back out, before anything (Restart's
+# clean-up included) can delete the tell or ask the launcher whether it is
+# installed. At worst, a run killed between the rename and the delete, it costs
+# a whole tree one more extract from the tarball still beside it.
+drop_half_tree() { # tree-in-/opt file-in-/tmp
+  [ -e "rootfs/opt/$1" ] && [ -e "$ROOT/tmp/$2" ] || return 0
+  note "$1: an extract that never finished was left in place - removing it"
+  rm -rf "rootfs/opt/$1"
+}
+
+# The start of a step Restart asked to begin again: its unfinished downloads
+# go, so it really does start over. apt's finished .debs stay — apt checks each
+# one against its hash before use. A restart the user asked for is a fresh
+# attempt, too, not one of VS Code's three.
+redo_clean() { # step
+  [ "$REDO" = "$1" ] || return 0
+  REDO=
+  note "$1: starting the step over, as asked"
+  rm -f rootfs/var/cache/apt/archives/partial/* 2>/dev/null
+  case "$1" in
+    code)
+      rm -f "$ROOT/tmp/vscode.tar.gz" "$ROOT/tmp/vscode.tar.gz.url" "$ROOT/tmp/vscode.tar.gz.size" .vscode-attempts
+      rm -rf rootfs/opt/.vscode-new ;;
+    intellij)
+      rm -f "$ROOT/tmp/intellij.tar.gz" "$ROOT/tmp/intellij.tar.gz.url" "$ROOT/tmp/intellij.tar.gz.size"
+      rm -rf rootfs/opt/.intellij-new ;;
+  esac
+  return 0
+}
+
+# What an app that is no longer asked for left behind: Skip on the install
+# screen, or the chooser unticking it before it ever finished. Only while it is
+# NOT installed — an installed app keeps its repo or it would never get another
+# update, and nothing here uninstalls anything.
+#   repos     apt-get update would go on polling them for nothing; the xtradeb
+#             PPA is the slowest source in the guest
+#   tarballs  half a VS Code or IntelliJ download is up to a gigabyte
+#   .debs     a browser that finished downloading but never unpacked
+drop_unwanted() {
+  if ! wants firefox && [ ! -x rootfs/usr/bin/firefox ]; then
+    rm -f rootfs/etc/apt/sources.list.d/mozilla.sources rootfs/etc/apt/preferences.d/mozilla \
+      rootfs/etc/apt/keyrings/packages.mozilla.org.asc rootfs/var/cache/apt/archives/firefox_*.deb
+  fi
+  if ! wants chromium && [ ! -x rootfs/usr/bin/chromium ]; then
+    rm -f rootfs/etc/apt/sources.list.d/xtradeb.sources rootfs/etc/apt/keyrings/xtradeb.asc \
+      rootfs/var/cache/apt/archives/chromium_*.deb
+  fi
+  if ! wants nodejs && [ ! -x rootfs/usr/bin/node ]; then
+    rm -f rootfs/etc/apt/sources.list.d/nodesource.sources rootfs/etc/apt/preferences.d/nodesource \
+      rootfs/etc/apt/keyrings/nodesource.asc
+  fi
+  if ! wants code; then
+    rm -f "$ROOT/tmp/vscode.tar.gz" "$ROOT/tmp/vscode.tar.gz.url" "$ROOT/tmp/vscode.tar.gz.size"
+    rm -rf rootfs/opt/.vscode-new
+  fi
+  if ! wants intellij; then
+    rm -f "$ROOT/tmp/intellij.tar.gz" "$ROOT/tmp/intellij.tar.gz.url" "$ROOT/tmp/intellij.tar.gz.size"
+    rm -rf rootfs/opt/.intellij-new
+  fi
+  return 0
+}
 
 # ── double-run guard ──────────────────────────────────────────────────────
 # The PC kicks this on every desktop session start; only one instance may
@@ -229,6 +534,12 @@ if [ ! -f .stamp-version ] || [ "$(cat .stamp-version)" != "$VER" ]; then
   rm -f .stamp-*
   echo "$VER" > .stamp-version
 fi
+
+# Restart, from the install screen: the app names the step in step.redo and
+# stops the run, and this is the next run picking it up — see redo_clean. Read
+# and cleared at once, so one request applies to one run and never outlives it.
+REDO=$(cat step.redo 2>/dev/null)
+rm -f step.redo
 
 # ── guest exec helper ─────────────────────────────────────────────────────
 # --kill-on-exit is load-bearing: killing proot reaps every guest process,
@@ -382,6 +693,10 @@ fi
 # the difference between "installing desktop" for ten minutes and something a
 # person can watch.
 if [ ! -f .stamp-desktop ]; then
+  redo_clean desktop
+  # Restart can be had here, Skip never: this step IS the desktop. Its ticker
+  # stays its own (the bar is the rootfs growing), with STEP beside it.
+  STEP=desktop
   state installing-desktop 35 apt-install
   base=$(du -sm rootfs 2>/dev/null | cut -f1)
   [ -n "$base" ] || base=0
@@ -390,6 +705,7 @@ if [ ! -f .stamp-desktop ]; then
   [ -n "$logoff" ] || logoff=0
   MAIN=$$
   (
+    STATE_TMP=.tick
     while :; do
       # If the main script died to SIGKILL (untrappable — nothing ran the
       # traps), an orphaned ticker would pin state.env at installing-desktop
@@ -443,8 +759,7 @@ if [ ! -f .stamp-desktop ]; then
   #                      heavier at the small sizes this desktop runs at.
   run_guest "apt-get install -y --no-install-recommends xfce4 xfce4-terminal dbus-x11 x11-xserver-utils xfonts-base tigervnc-standalone-server tigervnc-tools novnc websockify sudo ca-certificates librsvg2-common arc-theme adwaita-icon-theme gtk-update-icon-cache fonts-cantarell" \
     || { apt_note installing-desktop; fail installing-desktop; }
-  kill "$TICKER" 2>/dev/null
-  TICKER=
+  step_end
   touch .stamp-desktop
 fi
 
@@ -481,8 +796,16 @@ fi
 # guest with Firefox in it is a working guest. Firefox failing is a real
 # failure.
 install_browsers() {
+  redo_clean firefox
+  redo_clean chromium
+  # The step on screen, and the one Skip drops: the browser still to come.
+  if wants firefox && [ ! -x rootfs/usr/bin/firefox ]; then
+    step_begin firefox 93 preparing:firefox
+  else
+    step_begin chromium 94 preparing:chromium
+  fi
   # The base image has no downloader at all, and apt needs two signing keys.
-  run_guest "apt-get install -y --no-install-recommends curl ca-certificates" || return 1
+  run_guest "$(apt_in curl ca-certificates)" || return 1
   run_guest "install -d -m 0755 /etc/apt/keyrings" || return 1
 
   # Each browser's repo goes in only when that browser was asked for: an
@@ -491,7 +814,9 @@ install_browsers() {
   if wants firefox; then
     # apt 2.4+ (noble has 2.7) reads ASCII-armoured keys straight from
     # Signed-By, so nothing has to be dearmoured and gpg is never needed.
-    run_guest "curl -fsSL https://packages.mozilla.org/apt/repo-signing-key.gpg -o /etc/apt/keyrings/packages.mozilla.org.asc" || return 1
+    # Bounded, like the other key fetch: a server that takes the connection and
+    # then sends nothing would otherwise hold the step for ever.
+    run_guest "curl -fsSL --connect-timeout 30 --max-time 120 https://packages.mozilla.org/apt/repo-signing-key.gpg -o /etc/apt/keyrings/packages.mozilla.org.asc" || return 1
     mkdir -p rootfs/etc/apt/preferences.d || return 1
     cat > rootfs/etc/apt/sources.list.d/mozilla.sources <<'EOF' || return 1
 Types: deb
@@ -509,7 +834,7 @@ EOF
 
   if wants chromium; then
     # Launchpad serves PPA keys by fingerprint from the Ubuntu keyserver.
-    run_guest "curl -fsSL 'https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x5301FA4FD93244FBC6F6149982BB6851C64F6880' -o /etc/apt/keyrings/xtradeb.asc" || true
+    run_guest "curl -fsSL --connect-timeout 30 --max-time 120 'https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x5301FA4FD93244FBC6F6149982BB6851C64F6880' -o /etc/apt/keyrings/xtradeb.asc" || true
     cat > rootfs/etc/apt/sources.list.d/xtradeb.sources <<'EOF' || return 1
 Types: deb
 URIs: https://ppa.launchpadcontent.net/xtradeb/apps/ubuntu
@@ -523,14 +848,20 @@ EOF
   # which says nothing about whether the package we want is installable. Let
   # the install be the judge.
   run_guest "apt-get update" || true
-  if wants firefox; then
-    run_guest "apt-get install -y --no-install-recommends firefox" || return 1
+  # Each only while it is missing: a run picking up after one that was cut off
+  # must not pay for Firefox again — or, with the lists just refreshed, fetch a
+  # newer one nobody asked for — on its way to the Chromium it never reached.
+  if wants firefox && [ ! -x rootfs/usr/bin/firefox ]; then
+    run_guest "$(apt_in firefox)" || return 1
   fi
-  if wants chromium && run_guest "apt-get install -y --no-install-recommends chromium"; then
-    CHROMIUM_OK=1
-  else
-    CHROMIUM_OK=
-    ! wants chromium || echo "WARNING: chromium install failed" >&2
+  CHROMIUM_OK=
+  if wants chromium && [ ! -x rootfs/usr/bin/chromium ]; then
+    step_begin chromium 94 preparing:chromium
+    if run_guest "$(apt_in chromium)"; then
+      CHROMIUM_OK=1
+    else
+      echo "WARNING: chromium install failed" >&2
+    fi
   fi
 
   # Point the installed menu entries at the wrappers. /usr/local/bin comes
@@ -684,6 +1015,7 @@ EOF
 #
 # Non-fatal, like Chromium: a guest without VS Code is still a usable guest.
 install_vscode() {
+  step_begin code 98 preparing:vscode
   case "$(uname -m)" in
     aarch64|arm64) VS_ARCH=linux-arm64 ;;
     x86_64)        VS_ARCH=linux-x64 ;;
@@ -705,23 +1037,19 @@ install_vscode() {
   # GTK / NSS pieces, and they install without trouble -- it was only code's
   # own archive that dpkg could not unpack.
   note "vscode: installing runtime libraries"
-  guest_or_note "vscode-deps" "apt-get install -y --no-install-recommends \
+  guest_or_note "vscode-deps" "$(apt_in \
     ca-certificates curl xdg-utils libgtk-3-0t64 libnss3 libnspr4 libasound2t64 \
     libxkbfile1 libsecret-1-0 libgbm1 libdrm2 libxss1 libxtst6 libxcomposite1 \
     libxdamage1 libxfixes3 libxrandr2 libcups2t64 libpango-1.0-0 libcairo2 \
-    libatk1.0-0t64 libatk-bridge2.0-0t64 libatspi2.0-0t64" || return 1
+    libatk1.0-0t64 libatk-bridge2.0-0t64 libatspi2.0-0t64)" || return 1
 
   note "vscode: downloading (about 330 MB)"
-  guest_or_note "vscode-download" \
-    "curl -fL --retry 3 -o /tmp/vscode.tar.gz https://update.code.visualstudio.com/latest/$VS_ARCH/stable" \
-    || return 1
+  fetch_tarball code 98 vscode "https://update.code.visualstudio.com/latest/$VS_ARCH/stable" \
+    vscode.tar.gz || return 1
 
   note "vscode: extracting"
-  # --strip-components=1 drops the tarball's VSCode-linux-<arch>/ wrapper dir.
-  # The rm is outside the && chain so a partial extraction still frees 330 MB.
-  guest_or_note "vscode-extract" \
-    "rm -rf /opt/vscode && mkdir -p /opt/vscode && tar -xzf /tmp/vscode.tar.gz -C /opt/vscode --strip-components=1; rm -f /tmp/vscode.tar.gz" \
-    || return 1
+  step_begin code 98 extracting:vscode
+  extract_tarball vscode vscode.tar.gz vscode || return 1
   if [ ! -x rootfs/opt/vscode/bin/code ]; then
     note "vscode-extract FAILED: /opt/vscode/bin/code missing after extraction"
     return 1
@@ -790,9 +1118,7 @@ setup_git() {
   if [ -x rootfs/usr/bin/git ]; then
     note "git: already installed"
   else
-    guest_or_note "git" \
-      "apt-get install -y --no-install-recommends git openssh-client ca-certificates" \
-      || return 1
+    guest_or_note "git" "$(apt_in git openssh-client ca-certificates)" || return 1
   fi
 
   # Two settings that stop git refusing to work, rather than preferences.
@@ -853,11 +1179,10 @@ setup_node() {
     note "nodejs: already installed"
     return 0
   fi
-  guest_or_note "nodejs-prereqs" \
-    "apt-get install -y --no-install-recommends curl ca-certificates" || return 1
+  guest_or_note "nodejs-prereqs" "$(apt_in curl ca-certificates)" || return 1
   run_guest "install -d -m 0755 /etc/apt/keyrings" || return 1
   guest_or_note "nodejs-key" \
-    "curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key -o /etc/apt/keyrings/nodesource.asc" \
+    "curl -fsSL --connect-timeout 30 --max-time 120 https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key -o /etc/apt/keyrings/nodesource.asc" \
     || return 1
   cat > rootfs/etc/apt/sources.list.d/nodesource.sources <<EOF || return 1
 Types: deb
@@ -883,8 +1208,7 @@ EOF
     note "nodejs: NodeSource repo unavailable — refusing the archive's 18.x"
     return 1
   fi
-  guest_or_note "nodejs" \
-    "apt-get install -y --no-install-recommends nodejs" || return 1
+  guest_or_note "nodejs" "$(apt_in nodejs)" || return 1
   if ! node_current; then
     note "nodejs: wrong version or npm missing after install"
     return 1
@@ -893,19 +1217,36 @@ EOF
   return 0
 }
 
+# Ahead of every optional app. A run cut short inside dpkg — the desktop app's
+# clean-up force-stops the launcher mid-install, and Skip and Restart stop a run
+# the same way — leaves the next apt-get refusing to work at all. The desktop
+# phase repairs for itself; this is every apt step after it, the browsers'
+# included, and two file reads when there is nothing to repair. Then a half
+# tree an old-style extract left (drop_half_tree) — ahead of drop_unwanted,
+# which deletes the tarball that tells one — and whatever an app that is no
+# longer wanted left behind.
+repair_if_dirty
+drop_half_tree vscode vscode.tar.gz
+drop_half_tree intellij intellij.tar.gz
+drop_unwanted
+
 # Before the browsers on purpose: git is one small package and the browsers are
 # the slowest phase in the script. An editor that can open a repository should
 # not be waiting on a 400 MB download to get there.
 if wants git; then
-  state installing-desktop 92 git
+  redo_clean git
+  step_begin git 92 preparing:git
   setup_git || note "git: phase failed, continuing"
+  step_end
 fi
 
 # Ahead of the browsers for the same reason git is: one small download that
 # should not queue behind two big ones.
 if wants nodejs; then
-  state installing-desktop 92 nodejs
+  redo_clean nodejs
+  step_begin nodejs 92 preparing:nodejs
   setup_node || note "nodejs: phase failed, continuing"
+  step_end
 fi
 
 # -- phase: GIMP -----------------------------------------------------------
@@ -922,8 +1263,7 @@ setup_gimp() {
     note "gimp: already installed"
     return 0
   fi
-  guest_or_note "gimp" \
-    "apt-get install -y --no-install-recommends gimp" || return 1
+  guest_or_note "gimp" "$(apt_in gimp)" || return 1
   if [ ! -x rootfs/usr/bin/gimp ]; then
     note "gimp: MISSING after install"
     return 1
@@ -933,8 +1273,10 @@ setup_gimp() {
 }
 
 if wants gimp; then
-  state installing-desktop 93 gimp
+  redo_clean gimp
+  step_begin gimp 93 preparing:gimp
   setup_gimp || note "gimp: phase failed, continuing"
+  step_end
 fi
 
 # -- phase: sound ----------------------------------------------------------
@@ -1179,8 +1521,9 @@ browsers_pending() {
 
 BROWSERS_RAN=
 if browsers_pending; then
-  state installing-desktop 93 install-browsers
+  # A failure leaves STEP naming the browser it was on, for the error screen.
   install_browsers || fail install-browsers
+  step_end
   BROWSERS_RAN=1
 fi
 
@@ -1707,9 +2050,9 @@ vscode_settled() {
 # for; it is rewritten at the end of this run.
 prev_wants() { case " $(cat apps.done 2>/dev/null) " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
 if wants code && ! prev_wants code; then rm -f .stamp-vscode .vscode-attempts; fi
+wants code && redo_clean code
 
 if wants code && ! vscode_settled; then
-  state installing-desktop 98 install-vscode
   if install_vscode; then
     echo "$FEAT" > .stamp-vscode
     rm -f .vscode-attempts
@@ -1726,6 +2069,7 @@ if wants code && ! vscode_settled; then
       note "vscode: attempt $tries failed, will retry on the next launch"
     fi
   fi
+  step_end
 fi
 
 # -- phase: the vscode:// URL handler --------------------------------------
@@ -1816,21 +2160,18 @@ setup_intellij() {
     *) note "intellij: no build for $(uname -m)"; return 1 ;;
   esac
 
-  guest_or_note "intellij-deps" "apt-get install -y --no-install-recommends \
+  guest_or_note "intellij-deps" "$(apt_in \
     curl ca-certificates fontconfig libfreetype6 libxext6 libxrender1 \
-    libxtst6 libxi6" || return 1
+    libxtst6 libxi6)" || return 1
 
   note "intellij: downloading (about 1 GB)"
-  guest_or_note "intellij-download" \
-    "curl -fL --retry 3 -o /tmp/intellij.tar.gz 'https://data.services.jetbrains.com/products/download?code=IIC&platform=$IJ_PLATFORM&type=release'" \
-    || return 1
+  fetch_tarball intellij 98 intellij \
+    "https://data.services.jetbrains.com/products/download?code=IIC&platform=$IJ_PLATFORM&type=release" \
+    intellij.tar.gz || return 1
 
   note "intellij: extracting"
-  # --strip-components=1 drops the tarball's idea-IC-<build>/ wrapper dir.
-  # The rm is outside the && chain so a partial extraction still frees 1 GB.
-  guest_or_note "intellij-extract" \
-    "rm -rf /opt/intellij && mkdir -p /opt/intellij && tar -xzf /tmp/intellij.tar.gz -C /opt/intellij --strip-components=1; rm -f /tmp/intellij.tar.gz" \
-    || return 1
+  step_begin intellij 98 extracting:intellij
+  extract_tarball intellij intellij.tar.gz intellij || return 1
   if [ ! -x rootfs/opt/intellij/bin/idea.sh ]; then
     note "intellij-extract FAILED: /opt/intellij/bin/idea.sh missing after extraction"
     return 1
@@ -1856,8 +2197,10 @@ EOF
 }
 
 if wants intellij; then
-  state installing-desktop 98 intellij
+  redo_clean intellij
+  step_begin intellij 98 preparing:intellij
   setup_intellij || note "intellij: phase failed, continuing"
+  step_end
 fi
 
 # -- VS Code settings ------------------------------------------------------

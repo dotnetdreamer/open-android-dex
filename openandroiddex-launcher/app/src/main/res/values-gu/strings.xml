@@ -453,6 +453,16 @@
     <string name="ln_apps_menu">લિનક્સ એપ પસંદ કરો…</string>
     <string name="ln_installing">Ubuntu ઇન્સ્ટૉલ થઈ રહ્યું છે…</string>
     <string name="ln_waiting">ડેસ્કટોપ ઍપ ઇન્સ્ટૉલ શરૂ કરે તેની રાહ જોવાય છે…</string>
+    <string name="ln_step_skip">%1$s છોડો</string>
+    <string name="ln_step_restart">આ પગલું ફરી શરૂ કરો</string>
+    <string name="ln_step_skip_title">%1$s છોડવું છે?</string>
+    <string name="ln_step_skip_body">તે ઇન્સ્ટોલ થશે નહીં, અને બાકીનું લિનક્સ તેના વગર આગળ વધશે. પછીથી ઉમેરવા માટે લિનક્સ પર રાઇટ-ક્લિક કરો અને %1$s પસંદ કરો</string>
+    <string name="ln_step_skip_go">છોડો</string>
+    <string name="ln_step_restart_title">આ પગલું ફરી શરૂ કરવું છે?</string>
+    <string name="ln_step_restart_body">પગલું અટકીને શરૂઆતથી ફરી ચાલશે. જ્યારે તે અટકેલું લાગે ત્યારે આનો ઉપયોગ કરો.</string>
+    <string name="ln_step_restart_go">ફરી શરૂ કરો</string>
+    <string name="ln_step_skipping">%1$s છોડી રહ્યા છીએ…</string>
+    <string name="ln_step_restarting">પગલું ફરી શરૂ થઈ રહ્યું છે…</string>
     <string name="ln_starting">Linux ડેસ્કટોપ શરૂ થઈ રહ્યું છે…</string>
     <string name="ln_stage_display">ડિસ્પ્લે સર્વર શરૂ થઈ રહ્યું છે…</string>
     <string name="ln_stage_services">ડેસ્કટોપ સેવાઓ શરૂ થઈ રહી છે…</string>

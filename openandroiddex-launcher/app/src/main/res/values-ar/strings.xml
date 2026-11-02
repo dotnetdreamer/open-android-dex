@@ -453,6 +453,16 @@
     <string name="ln_apps_menu">اختيار تطبيقات لينكس…</string>
     <string name="ln_installing">جارٍ تثبيت Ubuntu…</string>
     <string name="ln_waiting">في انتظار أن يبدأ تطبيق سطح المكتب التثبيت…</string>
+    <string name="ln_step_skip">تخطي %1$s</string>
+    <string name="ln_step_restart">إعادة بدء هذه الخطوة</string>
+    <string name="ln_step_skip_title">تخطي %1$s؟</string>
+    <string name="ln_step_skip_body">لن يُثبَّت، وسيكتمل باقي لينكس بدونه. لإضافته لاحقًا، انقر بزر الماوس الأيمن على لينكس واختر %1$s</string>
+    <string name="ln_step_skip_go">تخطي</string>
+    <string name="ln_step_restart_title">إعادة بدء هذه الخطوة؟</string>
+    <string name="ln_step_restart_body">تتوقف الخطوة وتبدأ من جديد من أولها. استخدم هذا عندما تبدو عالقة.</string>
+    <string name="ln_step_restart_go">إعادة البدء</string>
+    <string name="ln_step_skipping">جارٍ تخطي %1$s…</string>
+    <string name="ln_step_restarting">جارٍ إعادة بدء الخطوة…</string>
     <string name="ln_starting">جارٍ تشغيل سطح مكتب Linux…</string>
     <string name="ln_stage_display">جارٍ تشغيل خادم العرض…</string>
     <string name="ln_stage_services">جارٍ تشغيل خدمات سطح المكتب…</string>

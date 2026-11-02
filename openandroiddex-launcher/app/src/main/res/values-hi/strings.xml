@@ -453,6 +453,16 @@
     <string name="ln_apps_menu">लिनक्स ऐप चुनें…</string>
     <string name="ln_installing">Ubuntu इंस्टॉल हो रहा है…</string>
     <string name="ln_waiting">डेस्कटॉप ऐप के इंस्टॉल शुरू करने की प्रतीक्षा है…</string>
+    <string name="ln_step_skip">%1$s छोड़ें</string>
+    <string name="ln_step_restart">यह चरण फिर से शुरू करें</string>
+    <string name="ln_step_skip_title">%1$s छोड़ें?</string>
+    <string name="ln_step_skip_body">यह इंस्टॉल नहीं होगा, और बाकी लिनक्स इसके बिना आगे बढ़ेगा. बाद में जोड़ने के लिए लिनक्स पर राइट-क्लिक करें और %1$s चुनें</string>
+    <string name="ln_step_skip_go">छोड़ें</string>
+    <string name="ln_step_restart_title">यह चरण फिर से शुरू करें?</string>
+    <string name="ln_step_restart_body">चरण रुककर शुरू से फिर चलेगा. जब यह अटका हुआ लगे, तब इसका इस्तेमाल करें.</string>
+    <string name="ln_step_restart_go">फिर से शुरू करें</string>
+    <string name="ln_step_skipping">%1$s छोड़ा जा रहा है…</string>
+    <string name="ln_step_restarting">चरण फिर से शुरू हो रहा है…</string>
     <string name="ln_starting">Linux डेस्कटॉप शुरू हो रहा है…</string>
     <string name="ln_stage_display">डिस्प्ले सर्वर शुरू हो रहा है…</string>
     <string name="ln_stage_services">डेस्कटॉप सेवाएँ शुरू हो रही हैं…</string>

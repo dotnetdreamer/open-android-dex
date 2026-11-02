@@ -453,6 +453,16 @@
     <string name="ln_apps_menu">Choisir les applis Linux…</string>
     <string name="ln_installing">Installation d\'Ubuntu…</string>
     <string name="ln_waiting">En attente du lancement de l\'installation par l\'application de bureau…</string>
+    <string name="ln_step_skip">Ignorer %1$s</string>
+    <string name="ln_step_restart">Relancer cette étape</string>
+    <string name="ln_step_skip_title">Ignorer %1$s ?</string>
+    <string name="ln_step_skip_body">Il ne sera pas installé, et le reste de Linux continue sans lui. Pour l\'ajouter plus tard, faites un clic droit sur Linux et choisissez %1$s</string>
+    <string name="ln_step_skip_go">Ignorer</string>
+    <string name="ln_step_restart_title">Relancer cette étape ?</string>
+    <string name="ln_step_restart_body">L\'étape s\'arrête et reprend depuis le début. Utile quand elle semble bloquée.</string>
+    <string name="ln_step_restart_go">Relancer</string>
+    <string name="ln_step_skipping">%1$s est ignoré…</string>
+    <string name="ln_step_restarting">Relance de l\'étape…</string>
     <string name="ln_starting">Démarrage du bureau Linux…</string>
     <string name="ln_stage_display">Démarrage du serveur d’affichage…</string>
     <string name="ln_stage_services">Démarrage des services du bureau…</string>

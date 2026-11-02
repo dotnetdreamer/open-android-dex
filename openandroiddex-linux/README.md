@@ -316,12 +316,19 @@ because an app installed later still has to get one.
 atomically (`state.env.tmp` + `mv`):
 
     VERSION=<int>  PHASE=<phase>  PCT=<0-100>  MSG=<no-whitespace, dash-separated>
+    STEP=<step, or empty>  STEPPCT=<0-100, or -1>
 
 `MSG` may also carry `<verb>:<name>` — `setting-up:libgtk-3-0t64` — when the
 tail half is a name the script did not invent. `LinuxActivity.msgWords`
 de-dashes only the verb, so the package keeps the dashes that belong to it. The
 desktop phase publishes this every 5 s from apt's own transcript (`apt_msg`);
-every other phase sends a plain dash-separated token and reads unchanged.
+the optional steps publish every 5 s too (`step_begin`, see **Skip, Restart and
+a line that moves**); every other phase sends a plain dash-separated token and
+reads unchanged.
+
+`STEP` names the step a run is on — a chooser app id, or `desktop` — and
+`STEPPCT` how far through it is. After a failure `STEP` still names the step
+that failed, which is how the error screen knows to offer Skip.
     phases: pushing extracting configuring apt-update installing-desktop ready error
 
 ## Ports (guest, loopback only)
@@ -416,10 +423,113 @@ A guest already wedged this way heals on the next run, because a guest in
 `error` never takes the "already provisioned" early-out and so always re-copies
 the script.
 
-Worth knowing: the setup child is **not** `setsid`'d, unlike `linux-rt.sh`. That
-is what makes an install killable by an app restart at all, and it is a
-lifecycle decision, not an accident — recovery is handled above rather than by
-making the install outlive its process.
+Worth knowing: the setup run **is** a session of its own now, like
+`linux-rt.sh` (the same `exec /system/bin/setsid /system/bin/sh "$0"` re-exec),
+so that Skip and Restart can stop one run — script, proot and every guest
+process — with one group kill. That changes nothing about dying *with* the app:
+a force-stop takes the app's processes whatever session they are in, which is
+how `linux-rt.sh` goes down with the desktop too. Recovery is still handled
+above rather than by making the install outlive its process — and the install
+now picks itself up straight after the kill; see **Picking up after the
+desktop ends**.
+
+## Skip, Restart and a line that moves
+
+Measured on the S25 (2026-11-02): the browsers step — Firefox, then the 86 MB
+Chromium from the xtradeb PPA — takes about 8 minutes on a phone, and it used to
+publish `install-browsers` at 93 % once and nothing after. A line that never
+moves reads as a hang, so people left the desktop on it — which killed the
+step (below), which the next desktop began again. Three things answer that:
+
+- **A live line.** `step_begin <step> <pct> <verb:name> [file size]` starts a
+  ticker that re-publishes `state.env` every 5 s. For apt it reads apt's own
+  machine-readable progress: `apt_in` adds `-o APT::Status-Fd=3` and points fd 3
+  at `/tmp/.oadx-apt-status` (`dlstatus:<n>:<pct>:…` while downloading,
+  `pmstatus:<pkg>:<pct>:…` while dpkg works) — apt-get prints no progress of its
+  own when stdout is not a terminal, and most steps capture their output
+  anyway. For a tarball (`fetch_tarball`, VS Code and IntelliJ) it is the
+  partial file's size against the Content-Length. The window shows it as
+  `downloading chromium · 45%`. Percentages are `bytes / (size / 100)`, never
+  `bytes * 100 / size`: `/system/bin/sh` is mksh, whose arithmetic is 32-bit.
+- **Skip** (the chooser's apps only). `LinuxService.skipStep` takes the app off
+  the tick list — exactly as if the chooser had been answered without it, so
+  the chooser is also how it comes back — and sends `RERUN`. The run in flight
+  is stopped with one group kill (`stopSetup`: `kill -9 -<setup.pid>`) and a
+  fresh one starts; the stamps carry it straight back. The error screen puts
+  Skip beside Retry when the step that failed is one of the chooser's apps,
+  which in practice means a browser: `install_browsers` is the only optional
+  step whose failure ends the run. Git, Node.js, GIMP, VS Code and IntelliJ
+  note a failure in the log and carry on — VS Code retrying on later
+  launches, three times a feature level — so they never reach that screen.
+- **Restart** (those, and `desktop`). `LinuxService.restartStep` writes the
+  step's id to `step.redo` and sends `RERUN`. The next run reads and deletes it,
+  and `redo_clean` drops the step's unfinished downloads (apt's `partial/`, the
+  step's tarball) before the step runs again.
+
+A run cut short anywhere inside dpkg — by Skip, Restart or the app being killed
+— leaves the next apt-get refusing to work ("dpkg was interrupted"), and only
+the desktop phase used to repair for itself. `repair_if_dirty` now runs before
+the first optional step of every run: two host-side reads (a non-empty
+`/var/lib/dpkg/updates`, or a package in a half state in `status`) and
+`repair_dpkg` only when one is true. A package half-unpacked for an app that is
+no longer wanted is removed instead of finished, or Skip would install the app
+anyway. `drop_unwanted` then clears what a no-longer-wanted app left behind —
+its repo (only while the app is not installed: an installed one keeps its
+updates), its half-downloaded tarball, a browser `.deb` that never unpacked.
+
+Tarballs resume (`curl -C -`) instead of starting over, but only onto the same
+build: the URLs are "latest" redirects, so the build a partial file came from
+is recorded beside it (`<file>.url`, its size in `<file>.size`) and a different
+answer starts clean. Nothing else throws a partial file away: a probe that
+fails resumes onto the recorded build, and a download that fails — a timeout,
+a dropped connection, under 1 KB/s for two minutes — keeps every byte for the
+next attempt. Only curl 33 (no ranges) or HTTP 416 (a range past the end)
+starts the file over.
+
+Tarballs unpack into `/opt/.<tree>-new` and are renamed into place only once
+tar has finished (`extract_tarball`). Unpacked straight into place, a run
+killed half way left a half tree whose launcher could already be there, and
+the "installed?" guards (`vscode_settled`, `setup_intellij`) ask the launcher
+alone: the half tree passed for an install, and Restart could not undo it.
+`drop_half_tree` takes out such a tree left by the old way — one with its
+tarball still beside it, since every extract that ends deletes the tarball —
+before Restart's clean-up or the guards ever see it.
+
+Checked (2026-11-02, S25): the helpers themselves, on the phone's own shell —
+`node test/linux-setup-test.mjs`, which says what it covers — and a dev build
+on the phone: the new launcher installed over the old one in place with the
+guest kept, and its first GIMP install found the fault below (fixed, with a
+check that fails without the fix). Not yet run with the fix, against a real
+guest: apt's status-fd lines under proot (the format is apt's documented one;
+the ticker falls back to the step's own word when it reads nothing), Skip and
+Restart pressed in the window, a real interrupted unpack being repaired, and
+the pickup after leaving the desktop, a reboot and an update.
+
+The ticker is stopped with SIGKILL (`/system/bin/kill -9`). With the script a
+session leader, a catchable signal to it made mksh run the script's own TERM
+trap once the ticker's sleep ended: "FAILED: interrupted" five seconds into
+every run, in its first step. Measured: `kill` and `/system/bin/kill` both did
+it under setsid, neither did without it, and `kill -9` never did.
+
+## Picking up after the desktop ends
+
+Leaving the desktop ends every process of the launcher: the desktop app's
+`restore_phone` revokes POST_NOTIFICATIONS (Android kills an app whose runtime
+permission is revoked — `am_kill … permissions revoked` in the events log) and
+then force-stops it, to release display focus. That took the install with it
+every time, mid-step. Now `RemoteResumeReceiver`, which the desktop app
+broadcasts to right after the force-stop (and which also runs after a reboot
+and an app update), checks `Linux.installInterrupted` — `state.env` still
+naming a phase on the way, since nothing killed by SIGKILL gets to write
+anything else — and starts provisioning again then and there, in the
+background. Starting a foreground service from a broadcast is allowed for a
+battery-exempt app, so `restore_phone` takes its own exemption back only after
+the broadcast; `am broadcast` returns once the receiver has run. From then on
+the run holds a partial wake lock (`LinuxService.setupWake`, three hours at
+most), so it goes on with the screen off: Doze disables partial wake locks only
+for apps below foreground-service state. Not yet measured on a device —
+screen off, on battery, after leaving the desktop — and worth doing before
+anything here is called finished.
 
 ## Script rules
 
