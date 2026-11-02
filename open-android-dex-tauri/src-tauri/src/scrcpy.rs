@@ -459,6 +459,9 @@ fn spawn_scrcpy(app: &AppHandle, opts: &MirrorOptions) -> Result<Child, String> 
     if let Some(scale) = opts.flex {
         write_display_scale(app, &opts.serial, scale);
     }
+    if opts.session_key().ends_with("|desktop") {
+        request_desktop_splash(app, &opts.serial);
+    }
     let bin = adb::bin_dir(app)?;
     let exe = bin.join(adb::exe_name("scrcpy"));
     adb::warn_if_not_executable(&exe);
@@ -862,6 +865,23 @@ fn write_display_scale(app: &AppHandle, serial: &str, scale: f64) {
     let cmd = format!("echo {scale} > {DISPLAY_SCALE_FILE}");
     if let Err(e) = adb::run_adb(app, &["-s", serial, "shell", &cmd]) {
         log::warn!("{serial}: could not write the display scale: {e}");
+    }
+}
+
+/// Where the patched scrcpy server looks for a desktop's request for its
+/// splash (DesktopSplash.FILE in openandroiddex-scrcpy).
+const DESKTOP_SPLASH_FILE: &str = "/data/local/tmp/oadx-desktop-splash";
+
+/// Ask the server about to start for the desktop's splash: the stream carries
+/// it from its first frame instead of the empty display the launcher is only
+/// started on seconds later, and it opens onto the desktop once the launcher
+/// has drawn (doc/desktop-splash.md). Before the server starts, which takes
+/// the file as it makes the display and removes it, so the display of an app
+/// window started after this one never plays it.
+fn request_desktop_splash(app: &AppHandle, serial: &str) {
+    let cmd = format!("echo 1 > {DESKTOP_SPLASH_FILE}");
+    if let Err(e) = adb::run_adb(app, &["-s", serial, "shell", &cmd]) {
+        log::warn!("{serial}: could not ask for the desktop's splash: {e}");
     }
 }
 

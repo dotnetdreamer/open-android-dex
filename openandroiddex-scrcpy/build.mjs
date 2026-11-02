@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // Build scrcpy's server — the part that runs on the phone — from scrcpy's own
-// source at the release the desktop app bundles, with one change of ours:
-// display-scale.patch (see doc/sharp-desktop.md, "Following the window").
+// source at the release the desktop app bundles, with two changes of ours,
+// applied in this order: display-scale.patch (see doc/sharp-desktop.md,
+// "Following the window") and desktop-splash.patch (doc/desktop-splash.md).
 //
 //   node openandroiddex-scrcpy/build.mjs     →  openandroiddex-scrcpy/build/scrcpy-server
 //
@@ -18,7 +19,7 @@
 // than changing what ships.
 
 import { execFileSync } from 'node:child_process'
-import { copyFileSync, existsSync, mkdirSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -63,10 +64,11 @@ if (head() !== SCRCPY_COMMIT) {
   console.log(`[1/4] scrcpy v${SCRCPY_VERSION} already in ${relative(process.cwd(), src)}`)
 }
 
-console.log('[2/4] apply display-scale.patch')
+console.log('[2/4] apply display-scale.patch, desktop-splash.patch')
 run('git', ['-C', src, 'checkout', '--quiet', '--', '.'])
 run('git', ['-C', src, 'clean', '--quiet', '-fd'])
 run('git', ['-C', src, 'apply', join(here, 'display-scale.patch')])
+run('git', ['-C', src, 'apply', join(here, 'desktop-splash.patch')])
 
 // ── the toolchain ─────────────────────────────────────────────────────────
 
@@ -112,6 +114,26 @@ writeFileSync(
 public final class BuildConfig {
   public static final boolean DEBUG = false;
   public static final String VERSION_NAME = "${SCRCPY_VERSION}";
+}
+`,
+)
+
+// The desktop splash's name (desktop-splash.patch) is a picture, because the
+// server is not an app and cannot set type on every phone. It travels inside
+// the server as base64, in pieces: a class file holds no string over 64 KB.
+const wordmark = readFileSync(join(here, 'desktop-splash-wordmark.png')).toString('base64').match(/.{1,60000}/g)
+mkdirSync(join(gen, 'com', 'genymobile', 'scrcpy', 'video'), { recursive: true })
+writeFileSync(
+  join(gen, 'com', 'genymobile', 'scrcpy', 'video', 'DesktopSplashWordmark.java'),
+  `package com.genymobile.scrcpy.video;
+
+final class DesktopSplashWordmark {
+  static final String[] PNG_BASE64 = {
+${wordmark.map((part) => `    "${part}",`).join('\n')}
+  };
+
+  private DesktopSplashWordmark() {
+  }
 }
 `,
 )

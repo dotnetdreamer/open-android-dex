@@ -1,0 +1,1012 @@
+diff --git a/server/src/main/java/com/genymobile/scrcpy/opengl/AnimatedOpenGLFilter.java b/server/src/main/java/com/genymobile/scrcpy/opengl/AnimatedOpenGLFilter.java
+new file mode 100644
+index 0000000..fdb8d10
+--- /dev/null
++++ b/server/src/main/java/com/genymobile/scrcpy/opengl/AnimatedOpenGLFilter.java
+@@ -0,0 +1,17 @@
++package com.genymobile.scrcpy.opengl;
++
++/**
++ * A filter that moves by itself (Open Android DeX: the desktop's splash).
++ *
++ * <p>{@link OpenGLRunner} draws an ordinary filter when its input has a new frame, which on an idle
++ * display is never. While this one {@link #isAnimating() is animating}, the runner draws it on a clock
++ * of its own instead, whether the input has a new frame or not.
++ */
++public interface AnimatedOpenGLFilter extends OpenGLFilter {
++
++    /** Whether the next frame differs even if the input does not. */
++    boolean isAnimating();
++
++    /** The input has delivered its first frame: until then, its texture holds nothing to read. */
++    void onFirstFrame();
++}
+diff --git a/server/src/main/java/com/genymobile/scrcpy/opengl/OpenGLRunner.java b/server/src/main/java/com/genymobile/scrcpy/opengl/OpenGLRunner.java
+index 232f68d..b308b84 100644
+--- a/server/src/main/java/com/genymobile/scrcpy/opengl/OpenGLRunner.java
++++ b/server/src/main/java/com/genymobile/scrcpy/opengl/OpenGLRunner.java
+@@ -14,6 +14,7 @@ import android.opengl.GLES11Ext;
+ import android.opengl.GLES20;
+ import android.os.Handler;
+ import android.os.HandlerThread;
++import android.os.SystemClock;
+ import android.view.Surface;
+ 
+ import java.util.concurrent.Callable;
+@@ -37,6 +38,14 @@ public final class OpenGLRunner {
+ 
+     private boolean stopped;
+ 
++    // Open Android DeX: an AnimatedOpenGLFilter is drawn on a clock, not only on new input frames
++    private static final long FRAME_MS = 16;
++    private Size outputSize;
++    private boolean frameAvailable;
++    private boolean firstFrame = true;
++    private long lastPts;
++    private final Runnable tick = this::onTick;
++
+     public OpenGLRunner(OpenGLFilter filter, float[] overrideTransformMatrix) {
+         this.filter = filter;
+         this.overrideTransformMatrix = overrideTransformMatrix;
+@@ -167,21 +176,52 @@ public final class OpenGLRunner {
+ 
+         filter.init();
+ 
++        this.outputSize = outputSize;
+         surfaceTexture.setOnFrameAvailableListener(surfaceTexture -> {
+             if (stopped) {
+                 // Make sure to never render after resources have been released
+                 return;
+             }
+ 
+-            render(outputSize);
++            frameAvailable = true;
++            if (!isAnimating()) {
++                // An animating filter takes the new frame on its next tick
++                render(outputSize);
++            }
+         }, handler);
++
++        if (isAnimating()) {
++            handler.post(tick);
++        }
++    }
++
++    private boolean isAnimating() {
++        return filter instanceof AnimatedOpenGLFilter && ((AnimatedOpenGLFilter) filter).isAnimating();
++    }
++
++    private void onTick() {
++        if (stopped || !isAnimating()) {
++            return;
++        }
++        long next = SystemClock.uptimeMillis() + FRAME_MS;
++        render(outputSize);
++        handler.postAtTime(tick, next);
+     }
+ 
+     private void render(Size outputSize) {
+         GLES20.glViewport(0, 0, outputSize.getWidth(), outputSize.getHeight());
+         GLUtils.checkGlError();
+ 
+-        surfaceTexture.updateTexImage();
++        if (frameAvailable) {
++            frameAvailable = false;
++            surfaceTexture.updateTexImage();
++            if (firstFrame) {
++                firstFrame = false;
++                if (filter instanceof AnimatedOpenGLFilter) {
++                    ((AnimatedOpenGLFilter) filter).onFirstFrame();
++                }
++            }
++        }
+ 
+         float[] matrix;
+         if (overrideTransformMatrix != null) {
+@@ -193,7 +233,14 @@ public final class OpenGLRunner {
+ 
+         filter.draw(textureId, matrix);
+ 
+-        EGLExt.eglPresentationTimeANDROID(eglDisplay, eglSurface, surfaceTexture.getTimestamp());
++        long pts = surfaceTexture.getTimestamp();
++        if (filter instanceof AnimatedOpenGLFilter) {
++            // Most of its frames have no input frame to take a time from, and the encoder needs
++            // them in order
++            pts = Math.max(System.nanoTime(), lastPts + 1);
++            lastPts = pts;
++        }
++        EGLExt.eglPresentationTimeANDROID(eglDisplay, eglSurface, pts);
+         EGL14.eglSwapBuffers(eglDisplay, eglSurface);
+     }
+ 
+@@ -202,6 +249,7 @@ public final class OpenGLRunner {
+ 
+         handler.post(() -> {
+             stopped = true;
++            handler.removeCallbacks(tick);
+             surfaceTexture.setOnFrameAvailableListener(null, handler);
+ 
+             filter.release();
+diff --git a/server/src/main/java/com/genymobile/scrcpy/video/CaptureControl.java b/server/src/main/java/com/genymobile/scrcpy/video/CaptureControl.java
+index 7933ea7..5e50737 100644
+--- a/server/src/main/java/com/genymobile/scrcpy/video/CaptureControl.java
++++ b/server/src/main/java/com/genymobile/scrcpy/video/CaptureControl.java
+@@ -8,6 +8,8 @@ public class CaptureControl {
+     public static final int RESET_REASON_DISPLAY_PROPERTIES_CHANGED = 1 << 1;
+     public static final int RESET_REASON_CLIENT_RESET = 1 << 2;
+     public static final int RESET_REASON_CLIENT_RESIZED = 1 << 3;
++    // Open Android DeX: the desktop's splash is over, and the capture goes back to the display alone
++    public static final int RESET_REASON_SPLASH_DONE = 1 << 4;
+ 
+     private int reset = 0;
+ 
+diff --git a/server/src/main/java/com/genymobile/scrcpy/video/DesktopSplash.java b/server/src/main/java/com/genymobile/scrcpy/video/DesktopSplash.java
+new file mode 100644
+index 0000000..2604257
+--- /dev/null
++++ b/server/src/main/java/com/genymobile/scrcpy/video/DesktopSplash.java
+@@ -0,0 +1,114 @@
++package com.genymobile.scrcpy.video;
++
++import com.genymobile.scrcpy.util.Ln;
++
++import java.io.File;
++
++/**
++ * The desktop's splash (Open Android DeX): what the stream shows while the desktop is not there yet.
++ *
++ * <p>A desktop starts as an empty display. The computer's window opens as soon as the stream does, and
++ * the launcher is only started on the display seconds later, once the computer has installed it and
++ * granted it everything it needs (adb.rs, adb_start_launcher). That wait used to be a black window.
++ * The stream carries this splash instead, from its very first frame: the mark draws itself and waits
++ * with the user, and once the launcher has drawn the desktop, the laptop's screen in the mark becomes
++ * a window onto it and the view dives through it, landing on the desktop one pixel for one.
++ * {@link DesktopSplashFilter} draws it.
++ *
++ * <p>Painted here, in the server, because the server is the one thing on the phone that is there for
++ * the whole wait: the launcher is force-stopped and often reinstalled during it.
++ *
++ * <p>Only a desktop asks for it. The computer writes {@link #FILE} just before it starts the desktop's
++ * client, and the server that makes the next display takes it and removes it, so the phone's app
++ * windows, which are displays of their own, never play it.
++ *
++ * <p>Nothing tells the server that the launcher has drawn, and nothing has to: an empty display is a
++ * single colour, and so is the starting window Android puts up while the launcher starts, everywhere
++ * but its centre. The first frame that is not is the desktop.
++ */
++public final class DesktopSplash {
++
++    public static final String FILE = "/data/local/tmp/oadx-desktop-splash";
++
++    /** Older than this, the file is a desktop that never started, not a request. */
++    private static final long FRESH_MS = 60_000;
++
++    /** The desktop never opens before the mark and its name have been seen whole. */
++    private static final long MIN_REVEAL_AT_NS = 2_300_000_000L;
++    /** The launcher's first frame is not quite its last: the taskbar is a window of its own. */
++    private static final long SETTLE_NS = 300_000_000L;
++    private static final long REVEAL_NS = 1_000_000_000L;
++    /**
++     * A launcher that never draws, or a desktop the probe cannot tell from a fill, must not keep the
++     * splash over the display for long: a minute, well past the slowest start measured (about 15 s,
++     * with a reinstall of the launcher).
++     */
++    private static final long GIVE_UP_NS = 60_000_000_000L;
++
++    private long startNs = -1;
++    private long readyNs = -1;
++    private long revealNs = -1;
++    private boolean done;
++
++    private DesktopSplash() {
++        // see claim()
++    }
++
++    /** The splash, if the computer asked for one for the display about to be made; else null. */
++    public static DesktopSplash claim() {
++        File file = new File(FILE);
++        if (!file.exists()) {
++            return null;
++        }
++        boolean fresh = System.currentTimeMillis() - file.lastModified() < FRESH_MS;
++        if (!file.delete()) {
++            Ln.w("Desktop splash: could not remove " + FILE);
++        }
++        return fresh ? new DesktopSplash() : null;
++    }
++
++    /** Seconds since the splash's first frame, which is the first call. */
++    public synchronized float time(long nowNs) {
++        if (startNs < 0) {
++            startNs = nowNs;
++            Ln.i("Desktop splash: playing");
++        }
++        return (nowNs - startNs) / 1e9f;
++    }
++
++    /** The launcher has drawn the desktop. */
++    public synchronized void ready(long nowNs) {
++        if (readyNs < 0) {
++            readyNs = nowNs;
++            Ln.i("Desktop splash: the desktop drew after " + (nowNs - startNs) / 1_000_000 + " ms");
++        }
++    }
++
++    public synchronized boolean isReady() {
++        return readyNs >= 0;
++    }
++
++    /** How far the desktop has opened: 0 until it may, then up to 1 at one pixel for one. */
++    public synchronized float reveal(long nowNs) {
++        if (revealNs < 0) {
++            if (readyNs >= 0) {
++                revealNs = Math.max(readyNs + SETTLE_NS, startNs + MIN_REVEAL_AT_NS);
++            } else if (startNs >= 0 && nowNs - startNs >= GIVE_UP_NS) {
++                Ln.w("Desktop splash: nothing drew in " + GIVE_UP_NS / 1_000_000_000L + " s, opening the display as it is");
++                revealNs = nowNs;
++            } else {
++                return 0f;
++            }
++        }
++        return nowNs <= revealNs ? 0f : Math.min(1f, (nowNs - revealNs) / (float) REVEAL_NS);
++    }
++
++    public synchronized boolean isDone() {
++        return done;
++    }
++
++    /** Over, whether the desktop opened or the splash could not be drawn at all. */
++    public synchronized void finish() {
++        done = true;
++    }
++}
+diff --git a/server/src/main/java/com/genymobile/scrcpy/video/DesktopSplashFilter.java b/server/src/main/java/com/genymobile/scrcpy/video/DesktopSplashFilter.java
+new file mode 100644
+index 0000000..1415d72
+--- /dev/null
++++ b/server/src/main/java/com/genymobile/scrcpy/video/DesktopSplashFilter.java
+@@ -0,0 +1,673 @@
++package com.genymobile.scrcpy.video;
++
++import com.genymobile.scrcpy.model.Size;
++import com.genymobile.scrcpy.opengl.AnimatedOpenGLFilter;
++import com.genymobile.scrcpy.opengl.GLUtils;
++import com.genymobile.scrcpy.opengl.OpenGLException;
++import com.genymobile.scrcpy.util.Ln;
++
++import android.graphics.Bitmap;
++import android.graphics.BitmapFactory;
++import android.opengl.GLES11Ext;
++import android.opengl.GLES20;
++import android.util.Base64;
++
++import java.nio.ByteBuffer;
++import java.nio.ByteOrder;
++import java.nio.FloatBuffer;
++
++/**
++ * Draws the {@link DesktopSplash} over the display it is waiting for (Open Android DeX).
++ *
++ * <p>The whole splash is one fragment shader on the splash's clock. The mark is the launcher icon's
++ * drawing (open-android-dex-tauri/scripts/brand.py), as rounded boxes in the icon's own 1024 canvas,
++ * so it stays sharp while the view dives into the laptop's screen. Only the name is not drawn in the
++ * shader: it is a picture, desktop-splash-wordmark.png, which build.mjs puts in the server as
++ * {@link DesktopSplashWordmark}. Not type set here, because this process is not an app, and on a
++ * Samsung phone it cannot get a working Typeface at all (see doc/desktop-splash.md).
++ *
++ * <p>The filter also watches the display it draws over, through a {@value #PROBE_W}x{@value #PROBE_H}
++ * copy read back every few frames, for the moment it is no longer one colour outside its centre.
++ *
++ * <p>Anything here that cannot be had on a phone (a shader its GPU refuses, a framebuffer to read
++ * back from) ends the splash rather than the desktop: the display is then drawn as it is.
++ */
++public final class DesktopSplashFilter implements AnimatedOpenGLFilter {
++
++    private static final int PROBE_W = 32;
++    private static final int PROBE_H = 18;
++    /** Watch about ten times a second, until the desktop has drawn. */
++    private static final int PROBE_EVERY = 6;
++    /** A channel this far apart between two places outside the centre is a desktop, not a fill. */
++    private static final int PROBE_SPREAD = 8;
++    /** Where the starting window's icon sits, in probe pixels: not looked at. */
++    private static final int ICON_X0 = 9;
++    private static final int ICON_X1 = 23;
++    private static final int ICON_Y0 = 5;
++    private static final int ICON_Y1 = 13;
++    /** The name's text size, as a share of the display's height; its picture is 1.45 of that tall. */
++    private static final float WORD_TEXT_SIZE = 0.040f;
++    private static final float WORD_PICTURE_HEIGHT = 1.45f;
++
++    // @formatter:off
++    private static final String COPY_VERTEX = "#version 100\n"
++            + "attribute vec4 vertex_pos;\n"
++            + "varying vec2 tex_coords;\n"
++            + "uniform mat4 tex_matrix;\n"
++            + "void main() {\n"
++            + "    gl_Position = vertex_pos;\n"
++            + "    tex_coords = (tex_matrix * vec4(vertex_pos.xy * 0.5 + 0.5, 0.0, 1.0)).xy;\n"
++            + "}";
++
++    private static final String COPY_FRAGMENT = "#version 100\n"
++            + "#extension GL_OES_EGL_image_external : require\n"
++            + "precision highp float;\n"
++            + "uniform samplerExternalOES tex;\n"
++            + "varying vec2 tex_coords;\n"
++            + "void main() {\n"
++            + "    gl_FragColor = texture2D(tex, tex_coords);\n"
++            + "}";
++
++    private static final String SPLASH_VERTEX = "#version 100\n"
++            + "attribute vec4 vertex_pos;\n"
++            + "void main() {\n"
++            + "    gl_Position = vertex_pos;\n"
++            + "}";
++
++    private static final String SPLASH_FRAGMENT = "#version 100\n"
++            + "#extension GL_OES_EGL_image_external : require\n"
++            + "#ifdef GL_FRAGMENT_PRECISION_HIGH\n"
++            + "precision highp float;\n"
++            + "#else\n"
++            + "precision mediump float;\n"
++            + "#endif\n"
++            + "#define DESK_SAMPLER samplerExternalOES\n"
++            + "uniform vec2 uRes;\n"
++            + "uniform float uTime;\n"
++            + "uniform float uReveal;\n"
++            + "uniform mat4 uTexMatrix;\n"
++            + "uniform DESK_SAMPLER uDesk;\n"
++            + "uniform sampler2D uWord;\n"
++            + "uniform vec2 uWordSize;\n"
++            + "\n"
++            + "const vec3 SKY_IN = vec3(0.050, 0.094, 0.180);\n"
++            + "const vec3 SKY_OUT = vec3(0.008, 0.016, 0.035);\n"
++            + "const vec3 BLOOM = vec3(0.137, 0.314, 0.847);\n"
++            + "const vec3 SCR_A = vec3(0.525, 0.784, 1.000);\n"
++            + "const vec3 SCR_B = vec3(0.302, 0.624, 1.000);\n"
++            + "const vec3 SCR_C = vec3(0.169, 0.345, 0.910);\n"
++            + "const vec3 BEZ_T = vec3(0.102, 0.137, 0.220);\n"
++            + "const vec3 BEZ_B = vec3(0.043, 0.067, 0.122);\n"
++            + "const vec3 INK = vec3(0.043, 0.067, 0.122);\n"
++            + "const vec3 WIN_B = vec3(0.886, 0.914, 0.957);\n"
++            + "const vec3 TITLE = vec3(0.875, 0.906, 0.953);\n"
++            + "const vec3 RED = vec3(1.000, 0.420, 0.420);\n"
++            + "const vec3 GREY = vec3(0.722, 0.769, 0.839);\n"
++            + "const vec3 MINT = vec3(0.525, 0.961, 0.753);\n"
++            + "const vec3 GREEN = vec3(0.133, 0.710, 0.451);\n"
++            + "const vec3 STRIP = vec3(0.027, 0.067, 0.173);\n"
++            + "const vec3 DECK_T = vec3(0.914, 0.933, 0.965);\n"
++            + "const vec3 DECK_B = vec3(0.682, 0.725, 0.796);\n"
++            + "const vec3 BODY_T = vec3(0.118, 0.165, 0.278);\n"
++            + "const vec3 BODY_B = vec3(0.039, 0.059, 0.114);\n"
++            + "const vec3 HOT = vec3(0.880, 0.950, 1.000);\n"
++            + "const vec3 CYAN = vec3(0.302, 0.820, 1.000);\n"
++            + "const vec3 VIOLET = vec3(0.545, 0.361, 0.965);\n"
++            + "const vec3 UNLIT = vec3(0.055, 0.086, 0.149);\n"
++            + "\n"
++            + "// The mark, in the 1024 canvas brand.py draws it in.\n"
++            + "const vec2 LOGO_C = vec2(500.72, 523.06);\n"
++            + "const vec2 LOGO_H = vec2(356.26, 210.34);\n"
++            + "const vec2 SCR_O = vec2(575.92, 495.08);\n"
++            + "const vec2 SCR_H = vec2(226.54, 163.56);\n"
++            + "const vec2 PH_O = vec2(259.14, 539.98);\n"
++            + "\n"
++            + "float sat(float x) { return clamp(x, 0.0, 1.0); }\n"
++            + "float prog(float t, float a, float b) { return sat((t - a) / (b - a)); }\n"
++            + "float outCubic(float x) { float y = 1.0 - x; return 1.0 - y * y * y; }\n"
++            + "float outExpo(float x) { return x >= 1.0 ? 1.0 : 1.0 - exp2(-10.0 * x); }\n"
++            + "float inOutCubic(float x) { return x < 0.5 ? 4.0 * x * x * x : 1.0 - pow(2.0 - 2.0 * x, 3.0) * 0.5; }\n"
++            + "float outBack(float x) { float y = x - 1.0; return 1.0 + 2.70158 * y * y * y + 1.70158 * y * y; }\n"
++            + "\n"
++            + "float sdBox(vec2 p, vec2 b, float r) {\n"
++            + "    vec2 q = abs(p) - b + r;\n"
++            + "    return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;\n"
++            + "}\n"
++            + "\n"
++            + "float cover(float d, float aa) { return sat(0.5 - d / aa); }\n"
++            + "\n"
++            + "vec3 desk(vec2 uv) {\n"
++            + "    vec2 st = (uTexMatrix * vec4(uv.x, 1.0 - uv.y, 0.0, 1.0)).xy;\n"
++            + "    return texture2D(uDesk, st).rgb;\n"
++            + "}\n"
++            + "\n"
++            + "void main() {\n"
++            + "    vec2 res = uRes;\n"
++            + "    vec2 p = vec2(gl_FragCoord.x, res.y - gl_FragCoord.y);\n"
++            + "    float t = uTime;\n"
++            + "    float rv = uReveal;\n"
++            + "\n"
++            + "    // Where the mark sits, and the camera that dives into its screen.\n"
++            + "    float S = min(0.29 * res.y / (2.0 * LOGO_H.y), 0.44 * res.x / (2.0 * LOGO_H.x));\n"
++            + "    vec2 C = vec2(0.5 * res.x, 0.44 * res.y);\n"
++            + "    float dive = inOutCubic(prog(rv, 0.10, 1.0));\n"
++            + "    // Contain, not cover: the desktop inside the screen only ever grows towards one to one.\n"
++            + "    float kEnd = min(res.x / (2.0 * SCR_H.x), res.y / (2.0 * SCR_H.y));\n"
++            + "    float K = S * pow(kEnd / S, dive);\n"
++            + "    vec2 A = mix(LOGO_C, SCR_O, dive);\n"
++            + "    vec2 T = mix(C, 0.5 * res, dive);\n"
++            + "    vec2 q = A + (p - T) / K;\n"
++            + "    float aa = 1.2 / K;\n"
++            + "\n"
++            + "    float amb = outCubic(prog(t, 0.0, 1.1));\n"
++            + "    float waitT = max(t - 2.2, 0.0);\n"
++            + "    float logoFade = 1.0 - smoothstep(0.30, 0.80, rv);\n"
++            + "    float deskMix = smoothstep(0.02, 0.32, rv);\n"
++            + "\n"
++            + "    // Night sky: a navy room lit from the mark, and a few slow lights.\n"
++            + "    float dc = length((p - C) / res.y);\n"
++            + "    vec3 col = mix(SKY_IN, SKY_OUT, smoothstep(0.0, 1.05, dc));\n"
++            + "    float breath = 1.0 + 0.12 * sin(waitT * 1.3) * sat(waitT);\n"
++            + "    col += BLOOM * exp(-dc * dc / 0.07) * 0.34 * breath;\n"
++            + "    for (int i = 0; i < 5; i++) {\n"
++            + "        float fi = float(i);\n"
++            + "        vec2 bc = vec2(0.5 + 0.42 * sin(fi * 2.39 + 0.9 + t * 0.045),\n"
++            + "                       0.5 + 0.36 * sin(fi * 1.71 + 2.2 + t * 0.037)) * res;\n"
++            + "        float bs = res.y * (0.10 + 0.04 * fi);\n"
++            + "        vec2 dv = p - bc;\n"
++            + "        col += mix(CYAN, VIOLET, fract(fi * 0.47)) * exp(-dot(dv, dv) / (bs * bs)) * 0.04;\n"
++            + "    }\n"
++            + "    col *= amb * (1.0 - 0.6 * dive);\n"
++            + "\n"
++            + "    // Ignition: a line of light that opens into the laptop's screen.\n"
++            + "    float grow = outExpo(prog(t, 0.10, 0.55));\n"
++            + "    float open = outExpo(prog(t, 0.48, 0.98));\n"
++            + "    float hot = 1.0 - outCubic(prog(t, 0.72, 1.40));\n"
++            + "    vec2 sh = vec2(SCR_H.x * grow, mix(0.9, SCR_H.y, open));\n"
++            + "    float sr = min(18.8, sh.y);\n"
++            + "    float dS = sdBox(q - SCR_O, sh, sr);\n"
++            + "    float lit = step(0.0001, grow);\n"
++            + "\n"
++            + "    float halo = exp(-max(dS, 0.0) / mix(9.0, 34.0, open)) * (0.10 + 1.1 * hot) * lit;\n"
++            + "    col += mix(SCR_B, HOT, hot * 0.7) * halo * logoFade;\n"
++            + "\n"
++            + "    // One sweep of light across the whole mark, then again now and then while it waits.\n"
++            + "    float band = 0.0;\n"
++            + "    if (t > 1.75) {\n"
++            + "        float k = mod(t - 1.75, 4.6);\n"
++            + "        if (k < 0.75) {\n"
++            + "            float u = (q.x - 144.46) / 712.52 + (q.y - 312.72) / 420.68 * 0.45;\n"
++            + "            float c = mix(-0.3, 1.6, k / 0.75);\n"
++            + "            band = exp(-(u - c) * (u - c) / 0.0035) * (1.0 - deskMix);\n"
++            + "        }\n"
++            + "    }\n"
++            + "\n"
++            + "    // Contact shadow under the laptop.\n"
++            + "    float deckP = outCubic(prog(t, 0.82, 1.24));\n"
++            + "    float deckA = deckP * (1.0 - smoothstep(0.15, 0.55, rv));\n"
++            + "    vec2 ds = (q - vec2(575.92, 718.0)) / vec2(330.0, 22.0);\n"
++            + "    col *= 1.0 - 0.6 * exp(-dot(ds, ds)) * deckA;\n"
++            + "\n"
++            + "    // Bezel.\n"
++            + "    float bezA = sat(open * 1.6) * logoFade;\n"
++            + "    vec2 bh = sh + 18.8 * open;\n"
++            + "    float br = mix(sr, 35.72, open);\n"
++            + "    vec3 bez = mix(BEZ_T, BEZ_B, sat((q.y - 312.72) / 364.72));\n"
++            + "    col = mix(col, bez + band * 0.10, cover(sdBox(q - SCR_O, bh, br), aa) * bezA);\n"
++            + "\n"
++            + "    // Screen, and the desktop drawn on it.\n"
++            + "    float cS = cover(dS, aa) * lit;\n"
++            + "    if (cS > 0.0) {\n"
++            + "        vec2 D = vec2(460.60, 338.40);\n"
++            + "        float g = sat(dot(q - vec2(349.38, 312.72), D) / dot(D, D));\n"
++            + "        vec3 sc = g < 0.5 ? mix(SCR_A, SCR_B, g * 2.0) : mix(SCR_B, SCR_C, g * 2.0 - 1.0);\n"
++            + "\n"
++            + "        float content = 1.0 - deskMix;\n"
++            + "        float stripA = prog(t, 0.95, 1.25) * 0.5 * content;\n"
++            + "        sc = mix(sc, STRIP, sat((q.y - 615.40) / aa + 0.5) * stripA);\n"
++            + "        for (int i = 0; i < 3; i++) {\n"
++            + "            float fi = float(i);\n"
++            + "            float pop = outBack(prog(t, 1.30 + 0.07 * fi, 1.52 + 0.07 * fi));\n"
++            + "            if (pop > 0.001) {\n"
++            + "                vec2 dq = (q - vec2(544.90 + 31.96 * fi, 637.02)) / pop;\n"
++            + "                float dd = sdBox(dq, vec2(11.28), 7.52) * pop;\n"
++            + "                vec3 dcol = i == 2 ? MINT : vec3(1.0);\n"
++            + "                float da = i == 1 ? 0.5 : 1.0;\n"
++            + "                sc = mix(sc, dcol, cover(dd, aa) * da * content);\n"
++            + "            }\n"
++            + "        }\n"
++            + "\n"
++            + "        float winA = outCubic(prog(t, 1.00, 1.22)) * content;\n"
++            + "        if (winA > 0.0) {\n"
++            + "            float ws = mix(0.80, 1.0, outBack(prog(t, 1.00, 1.42)));\n"
++            + "            vec2 wl = (q - vec2(603.18, 477.22)) / ws;\n"
++            + "            float wa = aa / ws;\n"
++            + "            vec3 wc = mix(vec3(1.0), WIN_B, sat((wl.y + 96.82) / 193.64));\n"
++            + "            wc = mix(wc, TITLE, sat((-61.10 - wl.y) / wa + 0.5));\n"
++            + "            float gp = outBack(prog(t, 1.18, 1.36));\n"
++            + "            float rp = outBack(prog(t, 1.24, 1.42));\n"
++            + "            wc = mix(wc, GREY, cover(length(wl - vec2(92.12, -78.96)) - 7.52 * gp, wa) * step(0.001, gp));\n"
++            + "            wc = mix(wc, RED, cover(length(wl - vec2(116.56, -78.96)) - 7.52 * rp, wa) * step(0.001, rp));\n"
++            + "\n"
++            + "            float tp = outBack(prog(t, 1.12, 1.46));\n"
++            + "            if (tp > 0.001) {\n"
++            + "                vec2 tl = wl - vec2(-73.32, 15.98);\n"
++            + "                vec2 tq = vec2(tl.x / mix(0.7, 1.0, tp), (tl.y - 56.40) / tp + 56.40);\n"
++            + "                float tg = mix(0.153, 0.506, sat((tq.y + 56.40) / 112.80));\n"
++            + "                wc = mix(wc, mix(MINT, GREEN, tg), cover(sdBox(tq, vec2(45.12, 56.40), 13.16), wa));\n"
++            + "            }\n"
++            + "            for (int i = 0; i < 3; i++) {\n"
++            + "                float fi = float(i);\n"
++            + "                float lp = outCubic(prog(t, 1.22 + 0.07 * fi, 1.52 + 0.07 * fi));\n"
++            + "                if (lp > 0.001) {\n"
++            + "                    float w = i == 0 ? 124.08 : (i == 1 ? 97.76 : 110.92);\n"
++            + "                    float hh = i == 0 ? 6.58 : 5.17;\n"
++            + "                    float y = i == 0 ? -28.20 : (i == 1 ? -1.41 : 21.15);\n"
++            + "                    float la = i == 0 ? 0.70 : 0.22;\n"
++            + "                    float hw = max(0.5 * w * lp, hh);\n"
++            + "                    float dl = sdBox(wl - vec2(-11.28 + hw, y), vec2(hw, hh), hh);\n"
++            + "                    wc = mix(wc, INK, cover(dl, wa) * la);\n"
++            + "                }\n"
++            + "            }\n"
++            + "            sc = mix(sc, wc, cover(sdBox(wl, vec2(141.0, 96.82), 20.68) * ws, aa) * winA);\n"
++            + "        }\n"
++            + "\n"
++            + "        sc += exp(-(t - 1.80) * (t - 1.80) / 0.012) * 0.16 * content;\n"
++            + "        sc = mix(sc, HOT, hot);\n"
++            + "        sc += band * 0.30;\n"
++            + "        col = mix(col, sc, cS);\n"
++            + "    }\n"
++            + "\n"
++            + "    // Through the screen: the real desktop, once the phone has drawn it.\n"
++            + "    if (rv > 0.0) {\n"
++            + "        float f = smoothstep(0.58, 1.0, rv);\n"
++            + "        vec2 pc = mix(T + (SCR_O - A) * K, 0.5 * res, f);\n"
++            + "        vec2 ph = mix(SCR_H * K, 0.5 * res, f);\n"
++            + "        float pr = mix(18.8 * K, 0.0, f);\n"
++            + "        float dP = sdBox(p - pc, ph, min(pr, min(ph.x, ph.y)));\n"
++            + "        float pm = cover(dP, 1.0);\n"
++            + "        if (pm > 0.0) {\n"
++            + "            float s = max(ph.x / (0.5 * res.x), ph.y / (0.5 * res.y));\n"
++            + "            vec3 dk = desk(0.5 + (p - pc) / (res * s));\n"
++            + "            float light = mix(0.80, 1.0, smoothstep(0.35, 1.0, rv));\n"
++            + "            float vig = mix(1.0, 0.62 + 0.38 * smoothstep(0.0, 0.22 * min(ph.x, ph.y), -dP), 1.0 - f);\n"
++            + "            col = mix(col, dk * light * vig, pm * deskMix);\n"
++            + "        }\n"
++            + "    }\n"
++            + "\n"
++            + "    // Highlight along the bezel.\n"
++            + "    float dB = abs(sdBox(q - SCR_O, bh - 1.41, br - 1.41)) - 1.41;\n"
++            + "    col = mix(col, vec3(1.0), cover(dB, aa) * (0.20 + band * 0.6) * bezA);\n"
++            + "\n"
++            + "    // The laptop's deck.\n"
++            + "    if (deckA > 0.0) {\n"
++            + "        vec2 dl = q - vec2(575.92, 694.36 + 18.0 * (1.0 - deckP));\n"
++            + "        dl.x /= mix(0.72, 1.0, deckP);\n"
++            + "        float rr = dl.y > 0.0 ? 26.32 : 0.0;\n"
++            + "        vec2 qq = abs(dl) - vec2(281.06, 16.92) + rr;\n"
++            + "        float dd = length(max(qq, 0.0)) + min(max(qq.x, qq.y), 0.0) - rr;\n"
++            + "        vec3 dcol = mix(DECK_T, DECK_B, sat((dl.y + 16.92) / 33.84));\n"
++            + "        dcol = mix(dcol, INK, cover(sdBox(dl - vec2(0.0, -12.22), vec2(42.30, 4.70), 4.70), aa) * 0.18);\n"
++            + "        col = mix(col, dcol + band * 0.22, cover(dd, aa) * deckA);\n"
++            + "    }\n"
++            + "\n"
++            + "    // Connected: light ripples out from behind the phone as it lands.\n"
++            + "    for (int i = 0; i < 2; i++) {\n"
++            + "        float fi = float(i);\n"
++            + "        float rT = prog(t, 1.48 + 0.18 * fi, 2.35 + 0.18 * fi);\n"
++            + "        if (rT > 0.0 && rT < 1.0) {\n"
++            + "            float dR = abs(sdBox(q - PH_O, vec2(114.68, 193.42), 69.56) - mix(4.0, 170.0, outCubic(rT)))\n"
++            + "                    - mix(3.0, 0.8, rT);\n"
++            + "            float ra = (1.0 - rT) * (1.0 - rT) * (0.60 - 0.25 * fi) * logoFade;\n"
++            + "            col += mix(MINT, CYAN, rT) * (cover(dR, aa) + exp(-max(dR, 0.0) / 14.0) * 0.5) * ra;\n"
++            + "        }\n"
++            + "    }\n"
++            + "\n"
++            + "    // The phone: it swings in, lands in front of the laptop and lights up, and\n"
++            + "    // is the first thing out of the way when the desktop opens.\n"
++            + "    float phP = prog(t, 0.98, 1.62);\n"
++            + "    float phOut = prog(rv, 0.0, 0.55);\n"
++            + "    float phA = outCubic(prog(t, 0.98, 1.24)) * (1.0 - smoothstep(0.05, 0.45, rv));\n"
++            + "    if (phA > 0.0) {\n"
++            + "        float rot = 0.22 * (1.0 - outCubic(phP)) + 0.30 * phOut * phOut;\n"
++            + "        vec2 off = vec2(-150.0 * (1.0 - outBack(phP)) - 420.0 * phOut * phOut * phOut, 60.0 * phOut * phOut);\n"
++            + "        vec2 pq0 = q - PH_O - off;\n"
++            + "        float cr = cos(rot), sr2 = sin(rot);\n"
++            + "        vec2 pq = vec2(cr * pq0.x - sr2 * pq0.y, sr2 * pq0.x + cr * pq0.y);\n"
++            + "\n"
++            + "        float shd = 1.0 - smoothstep(-24.0, 40.0, sdBox(pq - vec2(18.0, 16.0), vec2(114.68, 193.42), 69.56));\n"
++            + "        col *= 1.0 - 0.42 * shd * phA;\n"
++            + "        vec2 fs = (q - PH_O - off - vec2(12.0, 202.0)) / vec2(135.0, 16.0);\n"
++            + "        col *= 1.0 - 0.5 * exp(-dot(fs, fs)) * phA;\n"
++            + "\n"
++            + "        float yy = pq.y + PH_O.y;\n"
++            + "        vec3 body = mix(BODY_T, BODY_B, sat((yy + 175.06) / 1396.68));\n"
++            + "        col = mix(col, body + band * 0.12, cover(sdBox(pq, vec2(114.68, 193.42), 69.56), aa) * phA);\n"
++            + "        vec3 pb = mix(BEZ_T, BEZ_B, sat((yy - 369.12) / 342.16));\n"
++            + "        col = mix(col, pb, cover(sdBox(pq - vec2(0.0, 0.22), vec2(92.12, 171.08), 47.0), aa) * phA);\n"
++            + "\n"
++            + "        float on = outCubic(prog(t, 1.30, 1.72));\n"
++            + "        float front = 382.28 + 380.0 * on;\n"
++            + "        float litM = 1.0 - smoothstep(front - 46.0, front, yy);\n"
++            + "        vec3 ps = mix(UNLIT, mix(MINT, GREEN, sat((yy - 387.92) / 319.6)), litM) + band * 0.22;\n"
++            + "        col = mix(col, ps, cover(sdBox(pq - vec2(0.0, 0.09), vec2(78.96, 157.79), 34.78), aa) * phA);\n"
++            + "        col = mix(col, INK, cover(length(pq - vec2(0.0, -135.14)) - 7.52, aa) * 0.75 * phA * sat(on * 2.0));\n"
++            + "        float dps = abs(sdBox(pq - vec2(0.0, 0.22), vec2(90.71, 169.67), 45.59)) - 1.41;\n"
++            + "        col = mix(col, vec3(1.0), cover(dps, aa) * 0.20 * phA);\n"
++            + "    }\n"
++            + "\n"
++            + "    // The name, and while the phone is still busy, a quiet sign that it is.\n"
++            + "    if (uWordSize.x > 0.0) {\n"
++            + "        float top = C.y + LOGO_H.y * S + 0.068 * res.y;\n"
++            + "        float wA = prog(t, 1.45, 1.80) * (1.0 - smoothstep(0.0, 0.22, rv));\n"
++            + "        if (wA > 0.0) {\n"
++            + "            float drift = 12.0 * (1.0 - outCubic(prog(t, 1.45, 2.10))) + 16.0 * smoothstep(0.0, 0.22, rv);\n"
++            + "            vec2 wuv = (p - vec2(0.5 * (res.x - uWordSize.x), top + drift)) / uWordSize;\n"
++            + "            if (wuv.x >= 0.0 && wuv.x <= 1.0 && wuv.y >= 0.0 && wuv.y <= 1.0) {\n"
++            + "                vec4 tx = texture2D(uWord, wuv);\n"
++            + "                float e = mix(-0.2, 1.25, outCubic(prog(t, 1.45, 2.20)));\n"
++            + "                float k = wA * (1.0 - smoothstep(e - 0.2, e, wuv.x));\n"
++            + "                float sz = (wuv.x - mix(-0.3, 1.3, prog(t, 2.20, 2.95))) / 0.07;\n"
++            + "                float shim = exp(-sz * sz) * step(2.20, t);\n"
++            + "                col = col * (1.0 - tx.a * k) + (tx.rgb + shim * 0.55 * tx.a) * k;\n"
++            + "            }\n"
++            + "        }\n"
++            + "        float pa = smoothstep(2.6, 3.1, t) * (1.0 - smoothstep(0.0, 0.15, rv));\n"
++            + "        if (pa > 0.0) {\n"
++            + "            float L = min(0.10 * res.x, 0.30 * uWordSize.x + 60.0);\n"
++            + "            float cy = top + uWordSize.y + 0.040 * res.y;\n"
++            + "            float u = (p.x - 0.5 * (res.x - L)) / L;\n"
++            + "            float dy = abs(p.y - cy);\n"
++            + "            if (u > 0.0 && u < 1.0 && dy < 4.0) {\n"
++            + "                float line = sat(1.25 - dy);\n"
++            + "                float ends = smoothstep(0.0, 0.15, u) * (1.0 - smoothstep(0.85, 1.0, u));\n"
++            + "                float hx = mix(-0.3, 1.3, fract((t - 2.6) / 1.7));\n"
++            + "                float glow = exp(-(u - hx) * (u - hx) / 0.012);\n"
++            + "                col += (vec3(0.07) + SCR_A * glow * 0.85) * line * ends * pa;\n"
++            + "            }\n"
++            + "        }\n"
++            + "    }\n"
++            + "\n"
++            + "    // A breath of noise, so the gradients survive the encoder without bands.\n"
++            + "    float n = fract(52.9829189 * fract(dot(p, vec2(0.06711056, 0.00583715))));\n"
++            + "    col += (n - 0.5) * (1.5 / 255.0) * amb * (1.0 - smoothstep(0.55, 1.0, rv));\n"
++            + "    gl_FragColor = vec4(col, 1.0);\n"
++            + "}\n";
++    // @formatter:on
++
++    private final DesktopSplash splash;
++    private final Size size;
++    private final Runnable onDone;
++
++    private FloatBuffer vertexBuffer;
++
++    private int copyProgram;
++    private int copyVertexPosLoc;
++    private int copyTexLoc;
++    private int copyTexMatrixLoc;
++
++    private int program; // 0 when the splash could not be built: the display is then copied as it is
++    private int vertexPosLoc;
++    private int resLoc;
++    private int timeLoc;
++    private int revealLoc;
++    private int texMatrixLoc;
++    private int deskLoc;
++    private int wordLoc;
++    private int wordSizeLoc;
++
++    private int wordTexture;
++    private float wordWidth; // on the display; 0 without the name
++    private float wordHeight;
++
++    private int probeFramebuffer;
++    private int probeTexture;
++    private ByteBuffer probePixels;
++
++    private boolean hasFrame;
++    private int frames;
++    private int drawnProbes;
++    private boolean doneSignalled;
++
++    /**
++     * @param size   the size drawn at, the encoder's
++     * @param onDone run once the splash is over and the filter only copies the display: the capture
++     *               may then go back to the display alone
++     */
++    public DesktopSplashFilter(DesktopSplash splash, Size size, Runnable onDone) {
++        this.splash = splash;
++        this.size = size;
++        this.onDone = onDone;
++    }
++
++    @Override
++    public void init() throws OpenGLException {
++        vertexBuffer = GLUtils.createFloatBuffer(new float[] {
++                -1, -1, // Bottom-left
++                1, -1, // Bottom-right
++                -1, 1, // Top-left
++                1, 1, // Top-right
++        });
++
++        copyProgram = GLUtils.createProgram(COPY_VERTEX, COPY_FRAGMENT);
++        if (copyProgram == 0) {
++            throw new OpenGLException("Cannot create OpenGL program");
++        }
++        copyVertexPosLoc = GLES20.glGetAttribLocation(copyProgram, "vertex_pos");
++        copyTexLoc = GLES20.glGetUniformLocation(copyProgram, "tex");
++        copyTexMatrixLoc = GLES20.glGetUniformLocation(copyProgram, "tex_matrix");
++
++        if (!initProbe()) {
++            Ln.w("Desktop splash: cannot watch the display on this GPU, it shows as it is");
++            splash.finish();
++            return;
++        }
++
++        program = GLUtils.createProgram(SPLASH_VERTEX, SPLASH_FRAGMENT);
++        if (program == 0) {
++            Ln.w("Desktop splash: this GPU does not build its shader, the display shows as it is");
++            splash.finish();
++            return;
++        }
++        vertexPosLoc = GLES20.glGetAttribLocation(program, "vertex_pos");
++        resLoc = GLES20.glGetUniformLocation(program, "uRes");
++        timeLoc = GLES20.glGetUniformLocation(program, "uTime");
++        revealLoc = GLES20.glGetUniformLocation(program, "uReveal");
++        texMatrixLoc = GLES20.glGetUniformLocation(program, "uTexMatrix");
++        deskLoc = GLES20.glGetUniformLocation(program, "uDesk");
++        wordLoc = GLES20.glGetUniformLocation(program, "uWord");
++        wordSizeLoc = GLES20.glGetUniformLocation(program, "uWordSize");
++
++        initWordmark();
++    }
++
++    private boolean initProbe() {
++        int[] ids = new int[1];
++        GLES20.glGenTextures(1, ids, 0);
++        probeTexture = ids[0];
++        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, probeTexture);
++        GLES20.glTexImage2D(GLES20.GL_TEXTURE_2D, 0, GLES20.GL_RGBA, PROBE_W, PROBE_H, 0, GLES20.GL_RGBA,
++                GLES20.GL_UNSIGNED_BYTE, null);
++        setLinearClamp();
++
++        GLES20.glGenFramebuffers(1, ids, 0);
++        probeFramebuffer = ids[0];
++        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, probeFramebuffer);
++        GLES20.glFramebufferTexture2D(GLES20.GL_FRAMEBUFFER, GLES20.GL_COLOR_ATTACHMENT0, GLES20.GL_TEXTURE_2D,
++                probeTexture, 0);
++        int status = GLES20.glCheckFramebufferStatus(GLES20.GL_FRAMEBUFFER);
++        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
++
++        probePixels = ByteBuffer.allocateDirect(PROBE_W * PROBE_H * 4).order(ByteOrder.nativeOrder());
++        return status == GLES20.GL_FRAMEBUFFER_COMPLETE;
++    }
++
++    /**
++     * The name, from its picture. Power-of-two sized, so it can have mipmaps, which is what keeps it
++     * smooth at the size it is drawn at: about a third of the picture's on a 1080p desktop. Without
++     * it, the splash is the mark alone.
++     */
++    private void initWordmark() {
++        Bitmap bitmap = null;
++        try {
++            StringBuilder png = new StringBuilder();
++            for (String part : DesktopSplashWordmark.PNG_BASE64) {
++                png.append(part);
++            }
++            byte[] bytes = Base64.decode(png.toString(), Base64.DEFAULT);
++            bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.length);
++        } catch (IllegalArgumentException e) {
++            // reported below
++        }
++        if (bitmap == null) {
++            Ln.w("Desktop splash: its name does not decode, the mark plays without it");
++            return;
++        }
++        int[] ids = new int[1];
++        GLES20.glGenTextures(1, ids, 0);
++        wordTexture = ids[0];
++        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, wordTexture);
++        setLinearClamp();
++        android.opengl.GLUtils.texImage2D(GLES20.GL_TEXTURE_2D, 0, bitmap, 0);
++        GLES20.glGenerateMipmap(GLES20.GL_TEXTURE_2D);
++        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR_MIPMAP_LINEAR);
++        wordHeight = WORD_TEXT_SIZE * WORD_PICTURE_HEIGHT * size.getHeight();
++        wordWidth = wordHeight * bitmap.getWidth() / bitmap.getHeight();
++        bitmap.recycle();
++    }
++
++    private static void setLinearClamp() {
++        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR);
++        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR);
++        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE);
++        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE);
++    }
++
++    @Override
++    public boolean isAnimating() {
++        return program != 0 && !splash.isDone();
++    }
++
++    @Override
++    public void onFirstFrame() {
++        hasFrame = true;
++    }
++
++    @Override
++    public void draw(int textureId, float[] texMatrix) {
++        if (program == 0 || splash.isDone()) {
++            copy(textureId, texMatrix);
++            signalDone();
++            return;
++        }
++
++        long now = System.nanoTime();
++        float time = splash.time(now);
++        if (hasFrame && !splash.isReady() && ++frames % PROBE_EVERY == 0) {
++            // Twice in a row, a tenth of a second apart: drawn, and staying drawn
++            drawnProbes = probe(textureId, texMatrix) ? drawnProbes + 1 : 0;
++            if (drawnProbes >= 2) {
++                splash.ready(now);
++            }
++        }
++        float reveal = splash.reveal(now);
++
++        GLES20.glUseProgram(program);
++        GLES20.glEnableVertexAttribArray(vertexPosLoc);
++        GLES20.glVertexAttribPointer(vertexPosLoc, 2, GLES20.GL_FLOAT, false, 0, vertexBuffer);
++
++        GLES20.glActiveTexture(GLES20.GL_TEXTURE1);
++        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, wordTexture);
++        GLES20.glUniform1i(wordLoc, 1);
++        GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
++        GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, textureId);
++        GLES20.glUniform1i(deskLoc, 0);
++
++        GLES20.glUniform2f(wordSizeLoc, wordWidth, wordHeight);
++        GLES20.glUniform2f(resLoc, size.getWidth(), size.getHeight());
++        GLES20.glUniform1f(timeLoc, time);
++        GLES20.glUniform1f(revealLoc, reveal);
++        GLES20.glUniformMatrix4fv(texMatrixLoc, 1, false, texMatrix, 0);
++
++        GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4);
++        GLUtils.checkGlError();
++
++        if (reveal >= 1f) {
++            // This frame was the display one pixel for one: nothing of the splash is left in it
++            splash.finish();
++            Ln.i("Desktop splash: the desktop is open");
++            signalDone();
++        }
++    }
++
++    /** The display as it is. */
++    private void copy(int textureId, float[] texMatrix) {
++        GLES20.glUseProgram(copyProgram);
++        GLES20.glEnableVertexAttribArray(copyVertexPosLoc);
++        GLES20.glVertexAttribPointer(copyVertexPosLoc, 2, GLES20.GL_FLOAT, false, 0, vertexBuffer);
++        GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
++        GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, textureId);
++        GLES20.glUniform1i(copyTexLoc, 0);
++        GLES20.glUniformMatrix4fv(copyTexMatrixLoc, 1, false, texMatrix, 0);
++        GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4);
++        GLUtils.checkGlError();
++    }
++
++    /**
++     * Has the display stopped being a fill? An empty display is black, and the starting window
++     * Android shows while the launcher starts is its splash colour with the icon in the middle:
++     * outside the middle, both are a single colour to the last bit. The desktop is not: wallpaper,
++     * icons and the taskbar along the bottom edge.
++     */
++    private boolean probe(int textureId, float[] texMatrix) {
++        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, probeFramebuffer);
++        GLES20.glViewport(0, 0, PROBE_W, PROBE_H);
++        copy(textureId, texMatrix);
++        probePixels.clear();
++        GLES20.glReadPixels(0, 0, PROBE_W, PROBE_H, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, probePixels);
++        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
++        GLES20.glViewport(0, 0, size.getWidth(), size.getHeight());
++
++        int[] min = {255, 255, 255};
++        int[] max = {0, 0, 0};
++        for (int y = 0; y < PROBE_H; ++y) {
++            for (int x = 0; x < PROBE_W; ++x) {
++                if (x >= ICON_X0 && x < ICON_X1 && y >= ICON_Y0 && y < ICON_Y1) {
++                    continue;
++                }
++                int i = (y * PROBE_W + x) * 4;
++                for (int c = 0; c < 3; ++c) {
++                    int v = probePixels.get(i + c) & 0xFF;
++                    min[c] = Math.min(min[c], v);
++                    max[c] = Math.max(max[c], v);
++                }
++            }
++        }
++        for (int c = 0; c < 3; ++c) {
++            if (max[c] - min[c] >= PROBE_SPREAD) {
++                return true;
++            }
++        }
++        return false;
++    }
++
++    private void signalDone() {
++        if (!doneSignalled) {
++            doneSignalled = true;
++            onDone.run();
++        }
++    }
++
++    @Override
++    public void release() {
++        GLES20.glDeleteProgram(copyProgram);
++        if (program != 0) {
++            GLES20.glDeleteProgram(program);
++        }
++        int[] textures = {probeTexture, wordTexture};
++        GLES20.glDeleteTextures(2, textures, 0);
++        int[] framebuffers = {probeFramebuffer};
++        GLES20.glDeleteFramebuffers(1, framebuffers, 0);
++        GLUtils.checkGlError();
++    }
++}
+diff --git a/server/src/main/java/com/genymobile/scrcpy/video/NewDisplayCapture.java b/server/src/main/java/com/genymobile/scrcpy/video/NewDisplayCapture.java
+index 2c5d03e..37ba5ab 100644
+--- a/server/src/main/java/com/genymobile/scrcpy/video/NewDisplayCapture.java
++++ b/server/src/main/java/com/genymobile/scrcpy/video/NewDisplayCapture.java
+@@ -12,6 +12,7 @@ import com.genymobile.scrcpy.model.NewDisplay;
+ import com.genymobile.scrcpy.model.Orientation;
+ import com.genymobile.scrcpy.model.Size;
+ import com.genymobile.scrcpy.opengl.AffineOpenGLFilter;
++import com.genymobile.scrcpy.opengl.OpenGLException;
+ import com.genymobile.scrcpy.opengl.OpenGLFilter;
+ import com.genymobile.scrcpy.opengl.OpenGLRunner;
+ import com.genymobile.scrcpy.util.AffineMatrix;
+@@ -80,6 +81,9 @@ public class NewDisplayCapture extends SurfaceCapture {
+     private Size windowSize; // the last size the client asked for, in its window coordinates
+     private Thread scaleWatcher;
+ 
++    // Open Android DeX: what the stream shows until the launcher has drawn, see DesktopSplash
++    private DesktopSplash splash;
++
+     public NewDisplayCapture(VirtualDisplayListener vdListener, Options options) {
+         this.vdListener = vdListener;
+         this.newDisplay = options.getNewDisplay();
+@@ -99,6 +103,7 @@ public class NewDisplayCapture extends SurfaceCapture {
+     @Override
+     protected void init(VideoConstraints videoConstraints) {
+         setVideoConstraints(videoConstraints); // synchronized
++        splash = DesktopSplash.claim();
+ 
+         displaySize = newDisplay.getSize();
+         dpi = newDisplay.getDpi();
+@@ -286,6 +291,14 @@ public class NewDisplayCapture extends SurfaceCapture {
+             OpenGLFilter glFilter = new AffineOpenGLFilter(displayTransform);
+             glRunner = new OpenGLRunner(glFilter);
+             surface = glRunner.start(physicalSize, videoSize, surface);
++            if (splash != null && !splash.isDone()) {
++                // Open Android DeX: the splash is the first look at a desktop or nothing. Not drawn over
++                // this display, it must not begin over the desktop at a later reset either.
++                Ln.i("Desktop splash: the display is transformed (crop, angle or orientation), it shows as it is");
++                splash.finish();
++            }
++        } else if (splash != null && !splash.isDone()) {
++            surface = startSplash(surface);
+         }
+ 
+         if (virtualDisplay == null) {
+@@ -300,6 +313,25 @@ public class NewDisplayCapture extends SurfaceCapture {
+         }
+     }
+ 
++    /**
++     * Open Android DeX: the display, drawn through the desktop's splash. Once the desktop is open the
++     * capture is reset and comes back without it, so the rest of the session has no GL in its path,
++     * exactly as if there had never been a splash.
++     */
++    private Surface startSplash(Surface surface) {
++        try {
++            DesktopSplashFilter filter = new DesktopSplashFilter(splash, videoSize,
++                    () -> getCaptureControl().reset(CaptureControl.RESET_REASON_SPLASH_DONE));
++            glRunner = new OpenGLRunner(filter);
++            return glRunner.start(physicalSize, videoSize, surface);
++        } catch (OpenGLException e) {
++            Ln.w("Desktop splash: cannot be drawn here, the display shows as it is", e);
++            glRunner = null;
++            splash.finish();
++            return surface;
++        }
++    }
++
+     @Override
+     public void stop() {
+         if (glRunner != null) {
