@@ -23,13 +23,12 @@ access it through the built-in Web viewer in a browser.
 **Free. Open source. No account. No subscription. No root**
 
 
-https://github.com/user-attachments/assets/9b44d8f4-8e9b-47b5-bd44-3ef486eb8e60
-
-
-
-<img src="doc/img/windows.png" alt="Chrome and Google Maps open side by side on the desktop" width="100%">
-
-<sub>Chrome snapped to the left, Google Maps snapped to the right, both running on the phone.</sub>
+<a href="https://youtu.be/oD22eESSDv4" title="Watch the demo on YouTube">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="doc/img/demo-video-dark.jpg">
+    <img src="doc/img/demo-video.jpg" alt="Play the Open Android DeX demo video on YouTube (4:09)" width="100%">
+  </picture>
+</a>
 
 </div>
 
