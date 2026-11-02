@@ -1,106 +1,87 @@
-### Which download
+<!-- The release job in .github/workflows/desktop.yml fills in the version and repository placeholders, so every file name and link below is exact. -->
 
-| Your machine | File |
+### Download for your computer
+
+The computer app sets up your phone for you, so this is the only file you need.
+
+| Your computer | Download |
 | --- | --- |
-| Windows | `..._x64-setup.exe` (installer) or `..._x64_portable.zip` |
-| Mac, Apple Silicon (M1–M4) | `..._aarch64.dmg` |
-| Mac, Intel | `..._x64.dmg` |
-| Linux — Ubuntu, Debian, Mint | `..._amd64.deb` |
-| Linux — Fedora, openSUSE | `..._x86_64.rpm` |
-| Any other Linux | `..._amd64.AppImage` |
+| Windows | [`Open.Android.DeX_<version>_windows_x64-setup.exe`][windows] |
+| Windows, without installing | [`Open.Android.DeX_<version>_windows_x64_portable.zip`][windows-portable] |
+| Mac with an Apple chip (M1 or newer) | [`Open.Android.DeX_<version>_macos_apple-silicon.dmg`][macos-apple-silicon] |
+| Mac with an Intel chip | [`Open.Android.DeX_<version>_macos_intel.dmg`][macos-intel] |
+| Linux: Ubuntu, Debian, Mint | [`Open.Android.DeX_<version>_linux_amd64.deb`][linux-deb] |
+| Linux: Fedora, openSUSE | [`Open.Android.DeX_<version>_linux_x86_64.rpm`][linux-rpm] |
+| Linux: any other | [`Open.Android.DeX_<version>_linux_amd64.AppImage`][linux-appimage] |
 
-Not sure which Mac you have?  → About This Mac, and read the "Chip" line.
+- **Not sure which Mac?** Apple menu → **About This Mac**. "Apple M1", "M2" and so on mean an Apple chip.
+- **Linux** runs on 64-bit Intel and AMD computers only, for now.
 
-Linux is 64-bit Intel/AMD only for now. It is the one machine scrcpy publishes
-a ready-made build for, and shipping a version of this that could not talk to
-your phone would not be worth the download.
+### No computer? Install it on your phone
 
-### No computer? The phone apps are here too
+Download one of these on the phone and open it. If Android asks, allow **Install unknown apps**.
 
-Both install straight onto the phone and need no PC at all.
-
-| What you want | File |
+| You want | Download |
 | --- | --- |
-| The DeX desktop on a monitor over HDMI, or in Samsung DeX | `OpenAndroidDeX-Launcher-v<version>.apk` |
-| Just Ubuntu, on the phone | `LinuxOnDroid-v<version>.apk` |
+| The desktop, on the phone's screen, a monitor or Samsung DeX | [`OpenAndroidDeX-Launcher-v<version>.apk`][android-launcher] |
+| Just Ubuntu Linux on the phone | [`LinuxOnDroid-v<version>.apk`][android-linuxondroid] |
 
-The launcher APK is the same one the desktop app installs for you, so having
-one does not stop you using the other. Custom titlebars are the one thing that
-wants the computer — without it, your phone's own window chrome is used
-instead.
+### Get started with a computer
 
-### Linux: installing it
+1. Install (or unzip) the app and open it.
+2. On your phone, turn on **USB debugging**: Settings → About phone → tap **Build number** 7 times, go back, open **Developer options** and switch on **USB debugging**.
+3. Plug the phone in and tap **Allow** on it. The desktop opens by itself.
 
-Pick the file that matches what you run:
+### Mac: if it won't open the first time
 
-- **Ubuntu, Debian, Mint** — `sudo apt install ./Open.Android.DeX_<version>_amd64.deb`
-- **Fedora, openSUSE** — `sudo dnf install ./Open.Android.DeX_<version>_x86_64.rpm`
-- **Anything else** — the AppImage. A downloaded file arrives without permission
-  to run, so give it that permission once and then start it:
-
-  ```
-  chmod +x Open.Android.DeX_<version>_amd64.AppImage
-  ./Open.Android.DeX_<version>_amd64.AppImage
-  ```
-
-### Linux: the phone appears but says it is not allowed
-
-This is the one thing that catches nearly everyone, and it is not your phone's
-fault. Linux only lets a program open a USB device when a rule says it may, and
-a fresh install has no rule for a phone. Add the rules:
-
-```
-sudo apt install android-sdk-platform-tools-common
-```
-
-Then unplug the phone and plug it back in. The replug matters — the rules are
-applied at the moment the phone appears, so one that was already connected keeps
-the permissions it was given.
-
-### Linux: what is not there yet
-
-Connecting, the desktop, the launcher, and Ubuntu and Docker on the phone all
-work the same as everywhere else. Four smaller things are Windows-and-Mac only
-for now, and none of them stop the desktop working:
-
-- the fullscreen (⛶) button on the phone-side taskbar
-- Escape to leave fullscreen
-- three-finger touchpad gestures
-- "Project to PC", which is a Windows feature and is hidden here
-
-### macOS: opening it the first time
-
-Open Android DeX is not notarized — that needs a paid Apple Developer account
-— so macOS will not open it until you say so once.
+macOS blocks apps that Apple has not checked (that needs a paid developer account). Allow this one once:
 
 1. Open the `.dmg` and drag the app into **Applications**.
-2. Open Terminal and run:
+2. Open **Terminal**, paste this and press Return:
 
    ```
    xattr -dr com.apple.quarantine "/Applications/Open Android DeX.app"
    ```
 
-   The `-r` matters: the app ships `adb` and `scrcpy` inside it, and those are
-   quarantined separately. Without it the app opens and then fails to talk to
-   your phone.
-3. Open it normally.
+3. Open the app as usual.
 
-If you would rather not use Terminal: double-click the app, dismiss the
-warning, then go to **System Settings → Privacy & Security**, scroll down to
-**Security**, and press **Open Anyway**. (The old right-click → Open trick
-stopped working in macOS 15.)
+If macOS asks for **Local Network** (finds your phone over Wi-Fi) or **Accessibility** (full screen only), allow it. If full screen stops working after an update, switch Open Android DeX off and on again in **System Settings → Privacy & Security → Accessibility**.
 
-### macOS: two permissions it will ask for
+### Linux
 
-- **Local Network** — needed to find phones over Wi-Fi. macOS asks the first
-  time you use a wireless connect option. Without it the Wi-Fi routes find
-  nothing; the USB cable is unaffected.
-- **Accessibility** — only for the fullscreen (⛶) button on the phone-side
-  taskbar, which has to resize a window belonging to `scrcpy`. Everything else
-  works without it. Grant it under **System Settings → Privacy & Security →
-  Accessibility**.
+Open a terminal in the folder you saved the file to, and run the commands for your system.
 
-  Because the app is signed ad-hoc rather than with a developer certificate,
-  macOS ties this permission to that exact build — after installing a new
-  version you may have to switch Open Android DeX off and on again in that
-  list.
+**Ubuntu, Debian, Mint**
+
+```
+sudo apt install ./Open.Android.DeX_<version>_linux_amd64.deb
+```
+
+**Fedora, openSUSE** (on openSUSE, type `zypper` instead of `dnf`)
+
+```
+sudo dnf install ./Open.Android.DeX_<version>_linux_x86_64.rpm
+```
+
+**Any other Linux**
+
+```
+chmod +x Open.Android.DeX_<version>_linux_amd64.AppImage
+./Open.Android.DeX_<version>_linux_amd64.AppImage
+```
+
+**Phone shows up but is not allowed to connect?** On Ubuntu, Debian or Mint, run this, then unplug the phone and plug it back in:
+
+```
+sudo apt install android-sdk-platform-tools-common
+```
+
+[windows]: https://github.com/<repo>/releases/download/v<version>/Open.Android.DeX_<version>_windows_x64-setup.exe
+[windows-portable]: https://github.com/<repo>/releases/download/v<version>/Open.Android.DeX_<version>_windows_x64_portable.zip
+[macos-apple-silicon]: https://github.com/<repo>/releases/download/v<version>/Open.Android.DeX_<version>_macos_apple-silicon.dmg
+[macos-intel]: https://github.com/<repo>/releases/download/v<version>/Open.Android.DeX_<version>_macos_intel.dmg
+[linux-deb]: https://github.com/<repo>/releases/download/v<version>/Open.Android.DeX_<version>_linux_amd64.deb
+[linux-rpm]: https://github.com/<repo>/releases/download/v<version>/Open.Android.DeX_<version>_linux_x86_64.rpm
+[linux-appimage]: https://github.com/<repo>/releases/download/v<version>/Open.Android.DeX_<version>_linux_amd64.AppImage
+[android-launcher]: https://github.com/<repo>/releases/download/v<version>/OpenAndroidDeX-Launcher-v<version>.apk
+[android-linuxondroid]: https://github.com/<repo>/releases/download/v<version>/LinuxOnDroid-v<version>.apk

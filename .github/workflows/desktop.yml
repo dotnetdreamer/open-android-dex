@@ -460,7 +460,7 @@ jobs:
         run: |
           $version = "${{ needs.version.outputs.label }}"
           $exe_path = "open-android-dex-tauri/src-tauri/target/release/open-android-dex-tauri.exe"
-          $zip_name = "Open.Android.DeX_${version}_x64_portable.zip"
+          $zip_name = "Open.Android.DeX_${version}_windows_x64_portable.zip"
 
           New-Item -ItemType Directory -Path portable -Force
           Copy-Item $exe_path portable/
@@ -479,8 +479,19 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
+          $version = "${{ needs.version.outputs.label }}"
           New-Item -ItemType Directory -Path dist -Force | Out-Null
-          Copy-Item open-android-dex-tauri/src-tauri/target/release/bundle/nsis/*.exe dist/
+          # Every file on the releases page is named
+          # Open.Android.DeX_<version>_<system>_<arch>, so the right one can be
+          # picked from the list by name alone, and .github/release-notes.md
+          # links to each by exactly that name. The installer is the bundler's
+          # ..._x64-setup.exe renamed to fit — and if there is ever not exactly
+          # one, the job fails rather than guess which to publish.
+          $setup = @(Get-ChildItem open-android-dex-tauri/src-tauri/target/release/bundle/nsis/*.exe)
+          if ($setup.Count -ne 1) {
+            throw "expected one NSIS installer, found $($setup.Count): $($setup.Name -join ', ')"
+          }
+          Copy-Item $setup[0].FullName "dist/Open.Android.DeX_${version}_windows_x64-setup.exe"
           Copy-Item Open.Android.DeX_*.zip dist/
           Get-ChildItem dist | Select-Object Name, Length | Format-Table -AutoSize
 
@@ -499,7 +510,7 @@ jobs:
         if: ${{ inputs.windows_portable_only }}
         with:
           name: windows-portable
-          path: Open.Android.DeX_*_x64_portable.zip
+          path: Open.Android.DeX_*_windows_x64_portable.zip
           if-no-files-found: error
           retention-days: 14
 
@@ -517,14 +528,16 @@ jobs:
       matrix:
         include:
           - target: aarch64-apple-darwin
-            label: aarch64
+            # The download's name for these Macs: Apple's words, not the
+            # CPU's, so nobody has to know aarch64 to pick the right file.
+            label: apple-silicon
             scrcpy_arch: aarch64
             # `lipo -archs` spells the same architecture differently from the
             # scrcpy asset name. Both are needed, so both are written down.
             lipo_arch: arm64
             scrcpy_sha256: "33611e51977a8289e2e124b220f727895181ef2eb9060e0987a4dc2db9cf0d6b"
           - target: x86_64-apple-darwin
-            label: x64
+            label: intel
             scrcpy_arch: x86_64
             lipo_arch: x86_64
             scrcpy_sha256: "31a5467a9e907f162b093267cbbab1276b15c6e709c2ea8159566a8d165beb50"
@@ -684,13 +697,16 @@ jobs:
           # `--target` moves the whole tree under the triple.
           B="open-android-dex-tauri/src-tauri/target/${{ matrix.target }}/release/bundle"
           mkdir -p dist
-          cp "$B"/dmg/*.dmg dist/
+          # Renamed from the bundler's own ..._aarch64.dmg to the shape every
+          # platform publishes (see the Windows job). cp refuses two sources
+          # for one file name, so a stray second .dmg fails here.
+          cp "$B"/dmg/*.dmg "dist/Open.Android.DeX_${V}_macos_${{ matrix.label }}.dmg"
           # ditto, never `zip -r`: it is the only archiver that round-trips a
           # .app with its symlinks, resource forks and code signature intact.
           # (The .dmg needs no such care — it is an opaque filesystem image.)
           ditto -c -k --keepParent --sequesterRsrc \
             "$B/macos/Open Android DeX.app" \
-            "dist/Open.Android.DeX_${V}_${{ matrix.label }}.app.zip"
+            "dist/Open.Android.DeX_${V}_macos_${{ matrix.label }}.app.zip"
           ls -l dist
 
       - uses: actions/upload-artifact@v4
@@ -937,14 +953,15 @@ jobs:
           B="open-android-dex-tauri/src-tauri/target/release/bundle"
           mkdir -p dist
 
-          # Renamed to the Open.Android.DeX_<version>_<arch>.<ext> shape the
-          # other platforms publish. The bundler's own names differ per format —
-          # deb is lower-case-and-hyphens, rpm carries a release number, the
-          # AppImage keeps the product name — and a releases page listing three
-          # spellings of one product reads as three different things.
-          cp "$B"/deb/*.deb           "dist/Open.Android.DeX_${V}_amd64.deb"
-          cp "$B"/rpm/*.rpm           "dist/Open.Android.DeX_${V}_x86_64.rpm"
-          cp "$B"/appimage/*.AppImage "dist/Open.Android.DeX_${V}_amd64.AppImage"
+          # Renamed to the Open.Android.DeX_<version>_<system>_<arch>.<ext> shape
+          # every platform publishes (see the Windows job). The bundler's own
+          # names differ per format — deb is lower-case-and-hyphens, rpm carries
+          # a release number, the AppImage keeps the product name — and a
+          # releases page listing three spellings of one product reads as three
+          # different things.
+          cp "$B"/deb/*.deb           "dist/Open.Android.DeX_${V}_linux_amd64.deb"
+          cp "$B"/rpm/*.rpm           "dist/Open.Android.DeX_${V}_linux_x86_64.rpm"
+          cp "$B"/appimage/*.AppImage "dist/Open.Android.DeX_${V}_linux_amd64.AppImage"
           ls -l dist
 
       # The AppImage's own execute bit does not survive this — upload-artifact
@@ -973,10 +990,10 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: dist
-          # release-windows, release-macos-aarch64, release-macos-x64 and
-          # release-android (the two sideloadable phone APKs). merge-multiple
-          # flattens them into dist/ rather than one directory each; the file
-          # names do not collide.
+          # release-windows, release-macos-apple-silicon, release-macos-intel,
+          # release-linux and release-android (the two sideloadable phone
+          # APKs). merge-multiple flattens them into dist/ rather than one
+          # directory each; the file names do not collide.
           pattern: release-*
           merge-multiple: true
 
@@ -989,11 +1006,26 @@ jobs:
           VERSION="${{ needs.version.outputs.version }}"
           ls -l dist
 
+          # The notes name every download in full and link straight to it, so
+          # their <version> and <repo> placeholders are filled in here.
+          NOTES="$RUNNER_TEMP/release-notes.md"
+          sed -e "s|<version>|$VERSION|g" -e "s|<repo>|$GITHUB_REPOSITORY|g" \
+            .github/release-notes.md > "$NOTES"
+
+          # A link to a file this release does not have is a dead end in the
+          # one place a reader is told to click. A warning, not a failure: the
+          # version is already tagged by now, and notes can be corrected on the
+          # release page afterwards.
+          { grep -o "releases/download/v$VERSION/[^)[:space:]]*" "$NOTES" || true; } \
+            | sed 's|.*/||' | sort -u | while read -r f; do
+                [ -f "dist/$f" ] || echo "::warning title=Dead link in release notes::$f is not one of this release's files"
+              done
+
           # --notes-file AND --generate-notes: GitHub appends the generated
           # changelog after the body, which puts the macOS first-launch
           # instructions where someone will actually read them.
           gh release create "v$VERSION" \
             --title "Open Android DeX v$VERSION" \
-            --notes-file .github/release-notes.md \
+            --notes-file "$NOTES" \
             --generate-notes \
             dist/*

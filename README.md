@@ -443,12 +443,12 @@ screen already in front of you, for nothing.
 
 | Your machine | File |
 | --- | --- |
-| Windows | `..._x64-setup.exe` (installer) or `..._x64_portable.zip` |
-| Mac, Apple Silicon (M1 to M4) | `..._aarch64.dmg` |
-| Mac, Intel | `..._x64.dmg` |
-| Linux — Ubuntu, Debian, Mint | `..._amd64.deb` |
-| Linux — Fedora, openSUSE | `..._x86_64.rpm` |
-| Any other Linux | `..._amd64.AppImage` |
+| Windows | `..._windows_x64-setup.exe` (installer) or `..._windows_x64_portable.zip` |
+| Mac, Apple Silicon (M1 or newer) | `..._macos_apple-silicon.dmg` |
+| Mac, Intel | `..._macos_intel.dmg` |
+| Linux — Ubuntu, Debian, Mint | `..._linux_amd64.deb` |
+| Linux — Fedora, openSUSE | `..._linux_x86_64.rpm` |
+| Any other Linux | `..._linux_amd64.AppImage` |
 | **Android — standalone launcher** (phone screen, compatible monitor or Samsung DeX) | `OpenAndroidDeX-Launcher-v<version>.apk` |
 | **Just Ubuntu, phone only** | `LinuxOnDroid-v<version>.apk` |
 
