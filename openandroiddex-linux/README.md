@@ -321,13 +321,17 @@ guest after a warm-up start:
 "Managed" is xfwm4's `_NET_CLIENT_LIST` reaching its final count, read with
 `xprop` from a second proot. That is the script's share of a start and nothing
 more. Between the tile and a picture in the window there is also the app's
-side — the service spawning the script, `LinuxActivity`'s 1.5 s status poll,
-the page load and its 1 s retries, noVNC's connect and first paint, and the
-1.5 s health probe that takes the card down — and none of it changed, so the
-window gains less than the script does, and nothing like the same ratio (**In
-the app**). `LinuxService` copies the script from the APK at every spawn now
-(**Flow**, step 3), so the change reaches every existing guest without a
-`FEATURE_LEVEL` bump.
+side — the service spawning the script, `LinuxActivity`'s status poll, the page
+load and its retries, noVNC's connect and first paint, and the health probe
+that takes the card down — and the two builds in **In the app** differ in none
+of it, so there the window gains less than the script does, and nothing like
+the same ratio. That side has a change of its own in this tree: while the card
+is up, the window polls and probes every 250 ms rather than every 1.5 s, and
+its first eight page loads come 250 ms apart rather than 1 s.
+`doc/linux-viewer.md` has its measurement on the S25: the card down at
+1.7–2.0 s from the launch instead of 3.3–3.4 s. `LinuxService` copies the
+script from the APK at every spawn now (**Flow**, step 3), so the change
+reaches every existing guest without a `FEATURE_LEVEL` bump.
 
 **In the app.** LinuxOnDroid's debug build — not debuggable, as it ships —
 installed beside the launcher on the same phone, twice: once as this tree, once
