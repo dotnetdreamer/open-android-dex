@@ -62,6 +62,25 @@ public class LinuxActivity extends Activity {
     /** Status-poll cadence. Cheap: it stats a few files in private storage. */
     private static final long POLL_MS = 1500;
     /**
+     * The cadence while the starting card is up. A start is a chain of steps
+     * that each wait for a poll to notice the one before — the runtime asked
+     * for, then up, then its page loaded, then noVNC painting — so at POLL_MS
+     * every start also sat out a share of each tick on top of the work. Fast
+     * only for those few seconds: the card comes down and the poll is back to
+     * POLL_MS, and a start still not done after CONNECT_FAST_FOR_MS is not one
+     * that 4 Hz will rescue, so it goes back to POLL_MS too.
+     *
+     * Measured on the S25 (2026-11-07, LinuxOnDroid, cold starts): the card
+     * comes down at 1.7-2.0 s from the launch instead of 3.3-3.4 s, onto the
+     * desktop's backdrop with its panels still arriving, and the desktop is
+     * whole at 3.05-3.3 s instead of 3.3-3.4 s. The rest of a start is XFCE
+     * drawing itself inside the guest, which no poll can hurry. linux-rt.sh
+     * paints the X root in the backdrop colour so that the earlier card never
+     * comes down on black.
+     */
+    private static final long CONNECT_POLL_MS = 250;
+    private static final long CONNECT_FAST_FOR_MS = 30_000;
+    /**
      * phase=none for this long means provisioning never started (state.env
      * absent), so ask the service once.
      */
@@ -74,8 +93,20 @@ public class LinuxActivity extends Activity {
      * long as the window stays open.
      */
     private static final long START_RETRY_MS = 10_000;
-    /** noVNC page loads attempted, one second apart, before giving up. */
+    /**
+     * noVNC page loads attempted before giving up: the first FAST_LOAD_TRIES
+     * CONNECT_POLL_MS apart, the rest one second apart.
+     */
     private static final int MAX_LOAD_TRIES = 40;
+    /**
+     * The first load of a start usually lands before websockify is listening
+     * and is refused at once. A second's wait for the next try was a second
+     * of every start; eight quick ones cover the couple of seconds websockify
+     * can take on a slow phone, and a page still refused after them is back
+     * on the old one-second ladder. The ceiling for a page that never loads
+     * is 34 s rather than 40.
+     */
+    private static final int FAST_LOAD_TRIES = 8;
     /** requestPermissions tag. Nothing reads the result — see askForNotifications. */
     private static final int REQ_NOTIFICATIONS = 1;
     /**
@@ -102,6 +133,13 @@ public class LinuxActivity extends Activity {
     /** Off-main thread for the status poll (it reads files, not a socket). */
     private android.os.HandlerThread pollThread;
     private Handler pollHandler;
+    /**
+     * The starting card is up, and since when — written on the main thread
+     * after every apply, read by the poll thread to pick its cadence. See
+     * CONNECT_POLL_MS.
+     */
+    private volatile boolean connecting;
+    private volatile long connectingSince;
     private final Handler main = new Handler(Looper.getMainLooper());
 
     private FrameLayout root;
@@ -184,8 +222,12 @@ public class LinuxActivity extends Activity {
     /** The viewer URL without its ctx parameter — see {@link #vncUrl}. */
     private String vncBase;
     private int loadTries;
-    /** Consecutive polls the noVNC page reported itself disconnected. */
-    private int deadPagePolls;
+    /**
+     * When the noVNC page was first seen reporting itself disconnected, 0
+     * while it is not. Time rather than a count of polls, so that the faster
+     * cadence under the card does not shorten the grace a dead page gets.
+     */
+    private long deadSince;
     private boolean destroyed;
     /**
      * Latched when the user restarts an ended session, until the marker
@@ -354,8 +396,16 @@ public class LinuxActivity extends Activity {
             // Read the runtime log here (off-main) so the connecting screen can
             // name the real startup stage.
             final String rtLog = st.running ? Linux.rtLog(LinuxActivity.this) : "";
-            main.post(() -> apply(st, rtLog));
-            pollHandler.postDelayed(this, POLL_MS);
+            main.post(() -> {
+                apply(st, rtLog);
+                setConnecting(startCard != null);
+            });
+            // One chain only: setConnecting may have queued this from the main
+            // thread while it was running.
+            pollHandler.removeCallbacks(this);
+            boolean fast = connecting
+                    && SystemClock.uptimeMillis() - connectingSince < CONNECT_FAST_FOR_MS;
+            pollHandler.postDelayed(this, fast ? CONNECT_POLL_MS : POLL_MS);
         }
     };
 
@@ -373,6 +423,24 @@ public class LinuxActivity extends Activity {
         if (intent == null || !intent.getBooleanExtra(EXTRA_CHOOSE_APPS, false)) return;
         chooserForced = true;
         showAppChooser();
+    }
+
+    /**
+     * Whether the starting card is up, for the poll's cadence. Every screen but
+     * the card goes through present(), which drops it, so the card being there
+     * is exactly "a start is on its way". On the way in, the slow poll already
+     * queued is brought forward — the first step of a start would otherwise
+     * still wait out a whole POLL_MS for it.
+     */
+    private void setConnecting(boolean now) {
+        if (now == connecting) return;
+        connecting = now;
+        if (!now) return;
+        connectingSince = SystemClock.uptimeMillis();
+        if (pollHandler != null) {
+            pollHandler.removeCallbacks(poll);
+            pollHandler.postDelayed(poll, CONNECT_POLL_MS);
+        }
     }
 
     /** One status → UI step. Main thread. */
@@ -1240,7 +1308,8 @@ public class LinuxActivity extends Activity {
             return s(R.string.ln_stage_services);
         }
         String msg = s(R.string.ln_stage_connecting);
-        if (loadTries > 3) msg = msg + "  (" + loadTries + ")";
+        // About three seconds in, as before the first tries came faster.
+        if (loadTries > FAST_LOAD_TRIES + 1) msg = msg + "  (" + loadTries + ")";
         return msg;
     }
 
@@ -1359,7 +1428,7 @@ public class LinuxActivity extends Activity {
                 }
                 main.postDelayed(() -> {
                     if (!destroyed && UI_VNC.equals(uiState)) view.loadUrl(vncUrl());
-                }, 1000);
+                }, loadTries <= FAST_LOAD_TRIES ? CONNECT_POLL_MS : 1000);
             }
 
             @Override
@@ -1447,7 +1516,7 @@ public class LinuxActivity extends Activity {
                         // The desktop is actually on screen — take the card down
                         // and keep it down for this runtime.
                         vncConnected = true;
-                        deadPagePolls = 0;
+                        deadSince = 0;
                         loadTries = 0;
                         hideStartCard();
                         return;
@@ -1455,11 +1524,14 @@ public class LinuxActivity extends Activity {
                     boolean dead = text.contains("closed") || text.contains("Failed")
                             || text.contains("went wrong");
                     if (!dead) {
-                        deadPagePolls = 0;
+                        deadSince = 0;
                         return; // still connecting — the card stays up with its stage message
                     }
-                    if (++deadPagePolls < 2) return;   // one poll of grace
-                    deadPagePolls = 0;
+                    // A POLL_MS of grace, as one poll of it always was.
+                    long now = SystemClock.uptimeMillis();
+                    if (deadSince == 0) deadSince = now;
+                    if (now - deadSince < POLL_MS) return;
+                    deadSince = 0;
                     vncConnected = false;
                     if (++loadTries > MAX_LOAD_TRIES) {
                         connectFailed = true;

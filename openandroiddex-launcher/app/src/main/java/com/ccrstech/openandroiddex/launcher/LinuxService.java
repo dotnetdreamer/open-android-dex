@@ -948,6 +948,19 @@ public class LinuxService extends Service {
                 // reason to abandon the container.
                 DexLog.step("linux", "viewer stage failed: " + e);
             }
+            // The runtime script as well, for the same reason. provision()
+            // copies it only on its way to running setup, so a guest that was
+            // already set up kept the script it was built with until a
+            // FEATURE_LEVEL bump re-ran the whole setup for everyone — and a
+            // change to how the desktop STARTS never reached it. startWin does
+            // the same for linux-win.sh. The script guards everything it needs
+            // from the guest, so it is safe on one built by an older setup.
+            try {
+                copyAsset("linux/linux-rt.sh", Linux.rtScript(this));
+            } catch (Exception e) {
+                // The copy the last provision left still starts the desktop.
+                DexLog.step("linux", "runtime script refresh failed: " + e);
+            }
             // The ceiling is the daemon's too: a computer's screen may ask for
             // a desktop, and every pixel of it is drawn by this phone's CPU.
             writeFile(new File(dir, "geometry"),

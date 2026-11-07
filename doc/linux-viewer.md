@@ -60,8 +60,9 @@ with a Retry on it.
 
 ## The contract with the health probe
 
-`LinuxActivity.probeVncHealth()` runs every 1500 ms for the life of the window
-and is the only thing that ever takes the "connecting" card down. It reads:
+`LinuxActivity.probeVncHealth()` runs with every status poll for the life of
+the window — every 1500 ms, and every 250 ms while the card is up — and is the
+only thing that ever takes the "connecting" card down. It reads:
 
 ```js
 var s = document.getElementById('status') || document.getElementById('noVNC_status');
@@ -70,7 +71,19 @@ return (c && c.width>0 && c.height>0 ? 1 : 0) + '|' + (s ? s.textContent : '');
 ```
 
 and treats a status containing `closed`, `Failed` or `went wrong` as a dead
-session worth reloading, on a 40-try budget shared with its load retries.
+session worth reloading, on a 40-try budget shared with its load retries. The
+grace a dead page gets before that reload is 1.5 s of time, not a count of
+polls, so the faster cadence under the card does not shorten it; the first
+eight load retries come 250 ms apart and the rest a second apart, as they all
+used to.
+
+The faster cadence takes the card down about 1.5 s sooner — 1.7–2.0 s from the
+launch instead of 3.3–3.4 s, measured on the S25 — and onto a desktop that is
+still arriving: XFCE has its backdrop up by then and its panels about 1.3 s
+later, whole at 3.05–3.3 s against 3.3–3.4 s before. So the card no longer
+hides the guest drawing itself, and `linux-rt.sh` paints the X root in the
+backdrop colour the moment Xvnc answers: before that, the earlier card came
+down on the bare root window, which is black, for 0.75 s of every start.
 
 Four rules follow, and **nothing errors when one of them is broken**:
 

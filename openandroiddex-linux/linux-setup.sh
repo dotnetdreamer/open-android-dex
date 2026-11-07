@@ -196,6 +196,83 @@ repair_if_dirty() {
   repair_dpkg
 }
 
+# Is a package properly installed? One host-side read of dpkg's status file, as
+# dpkg_dirty does it, and no apt: an apt-get with nothing to do still loads the
+# whole package cache through proot before it says so. sed and grep, no awk —
+# see apt_msg.
+pkg_ok() { # package
+  sed -n "/^Package: $1\$/,/^\$/p" rootfs/var/lib/dpkg/status 2>/dev/null \
+    | grep -qx 'Status: install ok installed'
+}
+
+# noVNC and websockify go in as FILES, not as packages. The viewer needs
+# noVNC's web root (1.2 MB of JS and HTML, which LinuxService.stageViewer puts
+# our own page beside) and websockify's few Python modules — and the packages
+# bring far more, because they are written for their other life as OpenStack's
+# console proxy: novnc Depends on nodejs, numpy and python3-novnc, which pulls
+# in oslo.config, babel and its locale data, PIL, eventlet and docutils, and
+# websockify Depends on numpy and jwcrypto. Measured in a scratch guest on the
+# S25 (2026-11-07): 70 packages, 139 MB installed and 5,208 paths that exist
+# for those two names alone — a seventh of the container, every file of it
+# unpacked through proot. It also put the archive's nodejs 18 into every guest,
+# the very version setup_node refuses. Neither dependency is needed at run
+# time, which is how websockify itself treats them: numpy only speeds up the
+# unmasking of frames coming IN (keys and pointer moves — the picture going
+# out is never masked), and jwcrypto is imported only by a token plugin
+# nothing here uses.
+#
+# apt-get download fetches exactly the three .debs, with no dependency
+# resolution. Their trees are unpacked into a FRESH directory and moved into
+# place, never unpacked over / — under this proot on a 6.6 kernel, tar setting
+# the mode of a directory that already exists goes through fchmodat2, a
+# syscall proot predates, so it reaches the kernel with the guest path and
+# fails (measured: ENOENT on every directory and link, exit status 2).
+#
+# The files belong to no package, so `apt upgrade` in the guest never touches
+# them — which makes their updates the app's job, done on purpose, the way it
+# already ships proot and pins the rootfs. NOVNC_SYNC is that policy. Bump it,
+# with FEATURE_LEVEL so that every guest runs a setup pass, when Ubuntu
+# publishes a noVNC or websockify for noble worth having — a security notice
+# for websockify above all, the one of the two that listens, on the phone's
+# loopback. That pass refreshes the package lists and takes the archive's
+# versions of the day, which for a stable release keep upstream's version:
+# dex.js is written against noVNC 1.3.0. What a guest holds is written beside
+# it in novnc-files, the sync level on the first line and each package's
+# version after it. A guest from before any of this has the packages
+# themselves, which apt owns and updates, and is left to apt.
+#
+# Called on every setup pass (below the desktop phase), and free when there is
+# nothing to do: host-side reads only.
+NOVNC_SYNC=1
+novnc_files() {
+  pkg_ok novnc && pkg_ok websockify && return 0
+  if [ -x rootfs/usr/bin/websockify ] && [ -f rootfs/usr/share/novnc/core/rfb.js ]; then
+    [ "$(head -n 1 rootfs/usr/local/share/openandroiddex/novnc-files 2>/dev/null)" = "sync=$NOVNC_SYNC" ] \
+      && return 0
+    # A refresh: the lists may be as old as the guest, and the point of one is
+    # the archive's versions of today. Not fatal, like every update here.
+    run_guest "apt-get update" || true
+  fi
+  # Fetched, unpacked and checked before anything in place is touched, so a
+  # refresh that fails part way keeps the files that were there.
+  run_guest "rm -rf /tmp/.oadx-novnc && mkdir -p /tmp/.oadx-novnc/x && cd /tmp/.oadx-novnc \
+    && apt-get download novnc websockify python3-websockify \
+    && for d in *.deb; do dpkg-deb --fsys-tarfile \$d | tar -x -C x || exit 1; done \
+    && [ -f x/usr/share/novnc/core/rfb.js ] && [ -x x/usr/bin/websockify ] \
+    && rm -rf /usr/share/novnc /usr/lib/python3/dist-packages/websockify \
+         /usr/lib/python3/dist-packages/websockify-*-info \
+    && mv x/usr/share/novnc /usr/share/novnc \
+    && mv x/usr/lib/python3/dist-packages/websockify x/usr/lib/python3/dist-packages/websockify-*-info \
+         /usr/lib/python3/dist-packages/ \
+    && mv x/usr/bin/websockify /usr/bin/websockify \
+    && python3 -m compileall -q /usr/lib/python3/dist-packages/websockify >/dev/null \
+    && mkdir -p /usr/local/share/openandroiddex \
+    && { echo sync=$NOVNC_SYNC; for d in *.deb; do dpkg-deb -f \$d Package Version | tr '\n' ' '; echo; done; } \
+         > /usr/local/share/openandroiddex/novnc-files; \
+    rc=\$?; cd / && rm -rf /tmp/.oadx-novnc; exit \$rc" || return 1
+  [ -x rootfs/usr/bin/websockify ] && [ -f rootfs/usr/share/novnc/core/rfb.js ]
+}
+
 # What the desktop install is doing RIGHT NOW, as one state.env-safe token.
 # apt is a firehose and MSG holds a single whitespace-free word, so this reduces
 # the log tail to the last thing worth naming: which package is downloading,
@@ -674,6 +751,16 @@ if [ ! -f .stamp-configure ]; then
   touch .stamp-configure
 fi
 
+# No translated package descriptions: an English guest never reads them, and
+# Ubuntu's own Packages indexes already carry every Description (all 5,977
+# stanzas of noble main, checked), so Translation-en only repeats them — 9 MB
+# of a fresh update's 37 MB download and 67 MB of its 215 MB of lists, parsed
+# into apt's cache by every update after. Outside the stamp, so a guest built
+# before this gets it too: apt deletes the files it stops fetching at its next
+# update, and nothing else changes.
+grep -q '^Acquire::Languages' rootfs/etc/apt/apt.conf.d/99dex 2>/dev/null \
+  || echo 'Acquire::Languages "none";' >> rootfs/etc/apt/apt.conf.d/99dex
+
 # Decide proot's seccomp mode now that a guest binary exists — every run_guest
 # below (and linux-rt.sh) depends on it.
 pick_seccomp
@@ -683,6 +770,9 @@ if [ ! -f .stamp-apt-update ]; then
   state apt-update 32 apt-update
   run_guest "apt-get update" || fail apt-update
   touch .stamp-apt-update
+  # Lists this run fetched itself: a step later in the SAME run has no stale
+  # lists to refresh (see setup_ssh).
+  LISTS_FRESH=1
 fi
 
 # ── phase: install the desktop ────────────────────────────────────────────
@@ -757,10 +847,43 @@ if [ ! -f .stamp-desktop ]; then
   #                      path syscalls is ptrace-mediated.
   #   fonts-cantarell    0.6 MB — GNOME's UI face. DejaVu reads noticeably
   #                      heavier at the small sizes this desktop runs at.
-  run_guest "apt-get install -y --no-install-recommends xfce4 xfce4-terminal dbus-x11 x11-xserver-utils xfonts-base tigervnc-standalone-server tigervnc-tools novnc websockify sudo ca-certificates librsvg2-common arc-theme adwaita-icon-theme gtk-update-icon-cache fonts-cantarell" \
+  #   python3            websockify is a Python program, and novnc_files below
+  #                      takes it without the packages that used to bring
+  #                      python3 in. dock.py and theme.py need it too.
+  #
+  # And two icon themes are left on the shelf. noble's adwaita-icon-theme
+  # Depends on ubuntu-mono, which Depends on humanity-icon-theme: 11,390 paths
+  # between them — more than a quarter of every path in the guest — for
+  # themes nothing selects. The guest wears Adwaita, which inherits hicolor
+  # alone, so GTK never looks in either. A dpkg path-exclude keeps the
+  # packages installed, every dependency satisfied, and their files off the
+  # disk: the same mechanism the base image already uses for man pages, docs
+  # and translations (/etc/dpkg/dpkg.cfg.d/excludes), and their icon-cache
+  # triggers skip a theme directory with no index.theme. Fresh desktops only:
+  # this is the phase that has not run yet, so no guest that already wears one
+  # of these themes can lose it.
+  #
+  # Measured on the S25 (2026-11-07), apt's own transaction time for this
+  # line: 123 s for 314 packages before (one run), 49 s and 63 s for 235 with
+  # noVNC as files and these themes excluded (two runs). No optional apps in
+  # either. See the README, "What a start and an install cost".
+  mkdir -p rootfs/etc/dpkg/dpkg.cfg.d
+  printf '%s\n' '# Open Android DeX: icon themes nothing in the guest selects. See linux-setup.sh.' \
+    'path-exclude=/usr/share/icons/Humanity/*' 'path-exclude=/usr/share/icons/Humanity-Dark/*' \
+    'path-exclude=/usr/share/icons/LoginIcons/*' 'path-exclude=/usr/share/icons/ubuntu-mono-dark/*' \
+    'path-exclude=/usr/share/icons/ubuntu-mono-light/*' > rootfs/etc/dpkg/dpkg.cfg.d/oadx-icons
+  run_guest "apt-get install -y --no-install-recommends xfce4 xfce4-terminal dbus-x11 x11-xserver-utils xfonts-base tigervnc-standalone-server tigervnc-tools sudo ca-certificates librsvg2-common arc-theme adwaita-icon-theme gtk-update-icon-cache fonts-cantarell python3" \
     || { apt_note installing-desktop; fail installing-desktop; }
+  novnc_files || { note "novnc: could not fetch and place noVNC and websockify"; fail installing-desktop; }
   step_end
   touch .stamp-desktop
+fi
+# Every pass, not only the one that installs the desktop: this is how a
+# NOVNC_SYNC bump reaches a guest that already has one. Never fatal here — a
+# refresh that fails keeps the files that were there, and the next pass tries
+# again.
+if [ -f .stamp-desktop ]; then
+  novnc_files || note "novnc: refresh failed - keeping what is there"
 fi
 
 # ── phase: VNC password + xstartup ────────────────────────────────────────
@@ -1485,8 +1608,9 @@ setup_ssh() {
     # built a while ago they name versions the mirror has since replaced: an
     # install off them fails on 404s. Not fatal, like every update here — a
     # hiccup in one repo fails the whole command and says nothing about this
-    # package. The install is the judge.
-    run_guest "apt-get update" || true
+    # package. The install is the judge. Skipped when this very run fetched the
+    # lists minutes ago — a fresh install — where it can only fetch them again.
+    [ "$LISTS_FRESH" = 1 ] || run_guest "apt-get update" || true
     if ! guest_or_note "ssh" "apt-get install -y --no-install-recommends openssh-server openssh-sftp-server" \
         || ! ssh_package_ok; then
       ssh_attempt_failed
@@ -1702,7 +1826,9 @@ setup_dock() {
   # hand someone an empty panel, and python3 is a rounding error next to the
   # browsers already in here. NOT python3-minimal: it ships without shutil and
   # without ElementTree, so the edit would have failed silently (measured).
-  run_guest "apt-get install -y --no-install-recommends python3" || true
+  # Asked of dpkg's status file first: python3 is in every guest by now, and an
+  # apt-get with nothing to do still loads the package cache through proot.
+  pkg_ok python3 || run_guest "apt-get install -y --no-install-recommends python3" || true
   [ -x rootfs/usr/bin/python3 ] || return 0
 
   cat > rootfs/usr/local/share/openandroiddex/dock.py <<'PYEOF'

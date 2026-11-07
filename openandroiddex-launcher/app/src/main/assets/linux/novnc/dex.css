@@ -15,6 +15,12 @@
  *   and its own idea of the scale does not.
  *   Nothing that spans the picture carries a backdrop-filter. A blur over a
  *   continuously repainting canvas forces a full readback every frame.
+ *   Nothing animates forever. An endless animation keeps the page producing
+ *   frames on a desktop that is standing still, and box-shadow, which the
+ *   status dot's pulse animates, is not a compositor property: every one of
+ *   those frames is a style, paint and raster pass on the main thread that
+ *   noVNC decodes the desktop on. Opacity does not pause an animation either,
+ *   so the collapsed bar's dot kept pulsing where no one could see it.
  */
 
 :root {
@@ -248,7 +254,8 @@ body:not([data-chrome="docked"]) #bar {
   background: var(--faint);
   transition: background var(--fast), box-shadow var(--fast);
 }
-.dot.live { background: var(--ok); box-shadow: 0 0 0 4px rgba(55, 211, 155, .16); animation: pulse 2.4s var(--ease) infinite; }
+/* Three pulses as the session goes live, then the glow holds still. */
+.dot.live { background: var(--ok); box-shadow: 0 0 0 4px rgba(55, 211, 155, .16); animation: pulse 2.4s var(--ease) 3; }
 .dot.bad { background: var(--danger); box-shadow: 0 0 0 4px var(--danger-soft); }
 
 .key {

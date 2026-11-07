@@ -23,7 +23,8 @@ lines() { wc -l | tr -d ' '; }
 if /system/bin/sh -n "$S"; then check "the whole script parses" ok ok; else check "the whole script parses" no ok; fi
 
 FUNCS="state ticker_stop step_begin step_end step_progress fsize apt_in fetch_tarball extract_tarball
-  drop_half_tree dpkg_dirty repair_if_dirty redo_clean drop_unwanted guest_or_note vscode_settled"
+  drop_half_tree dpkg_dirty repair_if_dirty redo_clean drop_unwanted guest_or_note vscode_settled
+  pkg_ok novnc_files"
 : > funcs.sh
 for f in $FUNCS; do
   check "linux-setup.sh still has $f()" "$(grep -c "^$f() {" "$S")" 1
@@ -105,6 +106,56 @@ printf 'Package: perl-base\nStatus: install reinstreq half-installed\n' >> rootf
 dpkg_dirty && d=yes || d=no; check "dpkg: half-installed is dirty" "$d" yes
 printf 'Package: a\nStatus: install ok unpacked\n' > rootfs/var/lib/dpkg/status
 dpkg_dirty && d=yes || d=no; check "dpkg: unpacked is dirty" "$d" yes
+
+# -- one package, asked of the status file (no apt) --------------------------
+printf 'Package: python3-minimal\nStatus: install ok installed\n\nPackage: python3\nStatus: install ok half-configured\n\nPackage: sudo\nStatus: install ok installed\n' \
+  > rootfs/var/lib/dpkg/status
+pkg_ok python3 && d=yes || d=no; check "pkg_ok: half-configured is not installed" "$d" no
+pkg_ok sudo && d=yes || d=no; check "pkg_ok: installed, in the last stanza" "$d" yes
+pkg_ok python && d=yes || d=no; check "pkg_ok: a name another one only begins with" "$d" no
+printf 'Package: python3\nStatus: install ok installed\nPriority: important\n\nPackage: python3-minimal\nStatus: install ok half-installed\n' \
+  > rootfs/var/lib/dpkg/status
+pkg_ok python3 && d=yes || d=no; check "pkg_ok: installed, beside a half-installed neighbour" "$d" yes
+pkg_ok git && d=yes || d=no; check "pkg_ok: absent" "$d" no
+printf 'Package: a\nStatus: install ok unpacked\n' > rootfs/var/lib/dpkg/status
+
+# -- noVNC and websockify as files, and NOVNC_SYNC ---------------------------
+# The stand-in guest logs which of the two commands it was handed, and a
+# download places the files and the record the way the real one does. What it
+# cannot show is the real command's order -- nothing in place removed before
+# the new trees are unpacked and checked -- which is on device.
+run_guest() {
+  case "$1" in
+    "apt-get update") echo update >> novnc.calls ;;
+    *"apt-get download"*)
+      echo download >> novnc.calls
+      [ "$NOVNC_FAIL" = 1 ] && return 1
+      mkdir -p rootfs/usr/bin rootfs/usr/share/novnc/core rootfs/usr/local/share/openandroiddex
+      : > rootfs/usr/share/novnc/core/rfb.js; : > rootfs/usr/bin/websockify; chmod 755 rootfs/usr/bin/websockify
+      echo "sync=$NOVNC_SYNC" > rootfs/usr/local/share/openandroiddex/novnc-files ;;
+  esac
+  return 0
+}
+novnc_try() {
+  rm -f novnc.calls
+  novnc_files && _r=ok || _r=failed
+  echo "$_r|$(cat novnc.calls 2>/dev/null | tr '\n' ' ')"
+}
+NOVNC_SYNC=2 NOVNC_FAIL=
+rm -rf rootfs/usr/share/novnc rootfs/usr/bin/websockify rootfs/usr/local/share/openandroiddex
+printf 'Package: novnc\nStatus: install ok installed\n\nPackage: websockify\nStatus: install ok installed\n' \
+  > rootfs/var/lib/dpkg/status
+check "novnc: a guest with the packages is left to apt" "$(novnc_try)" "ok|"
+: > rootfs/var/lib/dpkg/status
+check "novnc: a fresh desktop takes the files, with no second update" "$(novnc_try)" "ok|download "
+check "novnc: at the same sync level, nothing runs" "$(novnc_try)" "ok|"
+NOVNC_SYNC=3
+check "novnc: a sync bump refreshes the lists, then the files" "$(novnc_try)" "ok|update download "
+NOVNC_SYNC=4 NOVNC_FAIL=1
+check "novnc: a refresh that cannot fetch is a failure" "$(novnc_try)" "failed|update download "
+NOVNC_FAIL=
+rm -rf rootfs/usr/share/novnc rootfs/usr/bin/websockify rootfs/usr/local/share/openandroiddex novnc.calls
+printf 'Package: a\nStatus: install ok unpacked\n' > rootfs/var/lib/dpkg/status
 
 STUB=$ROOT/stub; mkdir -p "$STUB"
 cat > "$STUB/dpkg-query" <<'EOF'

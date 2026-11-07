@@ -150,43 +150,30 @@ fi
 # MOZ_CRASHREPORTER_DISABLE keeps a crash from stacking a modal reporter window
 # on top of the desktop. The env reaches the browsers because every menu launch
 # inherits xfce4-session's environment, which is this one.
-SESSION='rm -f /tmp/.X1-lock /tmp/.X11-unix/X1
+SESSION='rm -f /tmp/.X1-lock /tmp/.X11-unix/X1 /tmp/.oadx-bus
 mkdir -p /tmp/runtime-root && chmod 700 /tmp/runtime-root
 Xvnc :1 -geometry GEOMETRY -depth 24 -rfbport 5901 -localhost \
   -rfbauth /root/.vnc/passwd -SecurityTypes VncAuth &
 XVNC=$!
-sleep 2
-dbus-daemon --session --address=unix:abstract=dex-session-bus --nofork &
-DBUS=$!
-sleep 1
-# The dock, applied while NO panel is running. xfce4-panel writes its config out
-# when it EXITS, so an edit made during a live session is discarded on the way
-# out -- which is why the launchers added at provision time never appeared.
-# Doing it here, a moment before the session starts, is what makes them stick.
-# Idempotent: it adds only what is not already on the panel.
-# The geometry is passed because the LENGTH of the dock is computed from it:
-# the panel stops exactly where the top bar ends, which needs the screen height
-# and is knowable only here. Substituted by the same sed that fills the one on
-# the Xvnc line -- that sed rewrites the first match on each line, and these
-# are two separate lines.
+# NOTHING BELOW WAITS ON A CLOCK. This used to be Xvnc, sleep 2, the bus,
+# sleep 1, two python3 starts one after the other, the sound server, sleep 1,
+# and only then XFCE: four seconds of fixed sleeps on every launch whether the
+# phone needed them or not, and no check at all that they had been enough. Now
+# everything that needs neither X nor the bus starts beside Xvnc, and each
+# thing XFCE needs is waited for by asking it -- the way linux-win.sh already
+# waits for its own display and sound server.
 #
 # NO APOSTROPHES ANYWHERE IN THIS STRING -- not even in prose. It is
 # single-quoted shell, so a lone one closes it early and every $VAR after that
 # expands on the HOST instead of inside the guest, silently. sh -n does not
 # catch it, because the quotes still balance overall.
-[ -f /usr/local/share/openandroiddex/dock.py ] && \
-  python3 /usr/local/share/openandroiddex/dock.py GEOMETRY >/dev/null 2>&1
-# The theme, for the same reason and in the same window. Our defaults live in
-# /etc/xdg and cannot be clobbered, but a guest provisioned before that existed
-# already has the whole xfwm4 defaults block written into its OWN channel, and
-# the user file is merged after the system one -- so a stale Default theme and
-# use_compositing=true would win forever. This rewrites those, and only those:
-# a setting the user actually chose is left alone. It has to happen with no
-# xfconfd alive, because xfconfd caches a channel on first read and never
-# re-reads it, so an edit under a live session is erased wholesale the next
-# time anything dirties the channel. No-op on a guest that has no user file.
-[ -f /usr/local/share/openandroiddex/theme.py ] && \
-  python3 /usr/local/share/openandroiddex/theme.py >/dev/null 2>&1
+#
+# --print-address is the bus saying it is ready: dbus-daemon writes its address
+# only once the socket is bound, so a file with anything in it means listening.
+# The file is removed above, because a killed session leaves the last one.
+dbus-daemon --session --address=unix:abstract=dex-session-bus --nofork \
+  --print-address=5 5>/tmp/.oadx-bus &
+DBUS=$!
 # Sound, when the guest has been through a setup pass that installs it -- an
 # older container simply has no audio, exactly as before. There is no audio
 # device in here: the desktop plays into a null sink and the APP reads that
@@ -209,7 +196,93 @@ if [ -x /usr/bin/pulseaudio ] && [ -f /etc/pulse/dex.pa ]; then
   XDG_RUNTIME_DIR=/tmp/runtime-root pulseaudio -n --file=/etc/pulse/dex.pa \
     --exit-idle-time=-1 --disallow-exit=1 --disable-shm=1 &
   PULSE=$!
-  sleep 1
+fi
+# The dock, applied while NO panel is running. xfce4-panel writes its config out
+# when it EXITS, so an edit made during a live session is discarded on the way
+# out -- which is why the launchers added at provision time never appeared.
+# Doing it here, a moment before the session starts, is what makes them stick.
+# Idempotent: it adds only what is not already on the panel.
+# The geometry is passed because the LENGTH of the dock is computed from it:
+# the panel stops exactly where the top bar ends, which needs the screen height
+# and is knowable only here. Substituted by the same sed that fills the one on
+# the Xvnc line -- that sed rewrites the first match on each line, and these
+# are two separate lines.
+#
+# In the background, beside Xvnc: it only edits files, and all that matters is
+# that it has finished before the panel starts, which the wait further down
+# makes certain. It and theme.py write disjoint files, so they run together.
+DOCK=
+if [ -f /usr/local/share/openandroiddex/dock.py ]; then
+  python3 /usr/local/share/openandroiddex/dock.py GEOMETRY >/dev/null 2>&1 &
+  DOCK=$!
+fi
+# The theme, for the same reason and in the same window. Our defaults live in
+# /etc/xdg and cannot be clobbered, but a guest provisioned before that existed
+# already has the whole xfwm4 defaults block written into its OWN channel, and
+# the user file is merged after the system one -- so a stale Default theme and
+# use_compositing=true would win forever. This rewrites those, and only those:
+# a setting the user actually chose is left alone. It has to happen with no
+# xfconfd alive, because xfconfd caches a channel on first read and never
+# re-reads it, so an edit under a live session is erased wholesale the next
+# time anything dirties the channel. No-op on a guest that has no user file.
+#
+# It runs ONCE per guest and drops a marker when it has, after which it would
+# only start python3 to exit again -- a cold interpreter start through proot on
+# every launch, for nothing. So the marker is read here, where it costs a stat.
+# The path is the DONE constant in theme.py.
+THEME=
+if [ -f /usr/local/share/openandroiddex/theme.py ] && \
+    [ ! -f /root/.config/openandroiddex/theme-migrated ]; then
+  python3 /usr/local/share/openandroiddex/theme.py >/dev/null 2>&1 &
+  THEME=$!
+fi
+# Now the waits, each one asking the thing itself. The display: Xvnc answers
+# a client once it is up, and xset is the client linux-win.sh asks with too.
+# Thirty seconds at most, and no more polls once Xvnc has died -- XFCE then
+# fails exactly as it would have after the old fixed sleep. Every desktop has
+# had xset since the first one (x11-xserver-utils), but a guest someone has
+# taken it out of gets the old two seconds rather than thirty of failed asks.
+n=0
+until DISPLAY=:1 xset q >/dev/null 2>&1; do
+  n=$((n + 1))
+  [ $n -gt 150 ] && break
+  kill -0 $XVNC 2>/dev/null || break
+  [ -x /usr/bin/xset ] || { sleep 2; break; }
+  sleep 0.2
+done
+# The root window in the backdrop colour from the moment X answers. The app
+# takes its card down once noVNC is connected, and XFCE paints its backdrop
+# the better part of a second after that -- for which the picture was the bare
+# X root, and that is black (measured on the S25 with the window checking at
+# 4 Hz: card down at 1.8 s, black until 2.6 s, every start). xfdesktop covers
+# the root the moment it draws; until then the screen is already the colour of
+# the desktop it is about to be. 0.129 0.141 0.169 is the rgba1 linux-setup.sh
+# writes for the backdrop; a guest whose user changed it sees this colour for
+# that moment before theirs. In the background: nothing waits on it.
+DISPLAY=:1 xsetroot -solid "#21242b" >/dev/null 2>&1 &
+# The bus: see --print-address above. It has had the whole Xvnc start to come
+# up in, so this almost never goes round even once.
+n=0
+until [ -s /tmp/.oadx-bus ]; do
+  n=$((n + 1))
+  [ $n -gt 50 ] && break
+  kill -0 $DBUS 2>/dev/null || break
+  sleep 0.1
+done
+# Both config edits on disk before xfce4-panel and xfconfd first read them.
+[ -n "$DOCK" ] && wait $DOCK
+[ -n "$THEME" ] && wait $THEME
+# Sound: the volume plugin and every app that starts with the session pick
+# their audio output once, at start, so they get the server or nothing -- the
+# reason linux-win.sh waits for its own. A few seconds at most.
+if [ -n "$PULSE" ] && [ -x /usr/bin/pactl ]; then
+  n=0
+  until PULSE_SERVER=tcp:127.0.0.1:4713 pactl info >/dev/null 2>&1; do
+    n=$((n + 1))
+    [ $n -gt 25 ] && break
+    kill -0 $PULSE 2>/dev/null || break
+    sleep 0.2
+  done
 fi
 env DISPLAY=:1 DBUS_SESSION_BUS_ADDRESS=unix:abstract=dex-session-bus \
   XDG_RUNTIME_DIR=/tmp/runtime-root XDG_SESSION_TYPE=x11 \

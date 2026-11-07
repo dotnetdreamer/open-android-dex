@@ -44,7 +44,10 @@ desktop, terminal, input, VncAuth. Not yet re-verified on the arm64 phone.
    phase** below.
 3. The Linux tile launches `LinuxActivity`, which polls `Linux.readStatus`
    (plain files, no daemon) and, once ready, has `LinuxService.start` write
-   `geometry` and spawn `linux-rt.sh`.
+   `geometry`, copy `linux-rt.sh` fresh from the APK — as it does the viewer
+   page, and `startWin` does `linux-win.sh` — and spawn it. Before, only a
+   provision copied it, so a guest already set up kept the script it was built
+   with until a `FEATURE_LEVEL` bump re-ran the whole setup for everyone.
 4. `linux-rt.sh` re-execs itself under `setsid`, writes its own pid to
    `rt.pid`, and runs proot as a child. Stopping is one
    `/system/bin/kill -9 -<rt.pid>` — see **Process-group teardown**.
@@ -288,6 +291,152 @@ when the layout has only **one** panel: that is not a dock beside a top bar, it
 is the desktop's only strip. Adding *launchers* stays per-boot either way,
 because an app installed later still has to get one.
 
+## What a start and an install cost
+
+Measured on the S25 Ultra (SM-S938B, Android 17, kernel 6.6, proot in seccomp
+mode), 2026-11-07, in scratch guests under `/data/local/tmp`: the real scripts,
+our `libproot.so`, the pinned rootfs and the same mirror, run as the shell user
+so that nothing of the app was touched — and then, for what only the app can
+show, in the app itself (**In the app**, below).
+
+**Starting the desktop.** `linux-rt.sh` used to start Xvnc, sleep 2 s, start
+the bus, sleep 1 s, run `dock.py` and then `theme.py`, start the sound server,
+sleep 1 s, and only then XFCE — four seconds of fixed sleeps whether the phone
+needed them or not, with nothing checking that they had been enough. Now the
+bus, the sound server and both config edits start beside Xvnc, and XFCE waits
+on each by asking it — `xset q` for the display, the bus's own
+`--print-address`, `wait` for the edits, `pactl info` for the sound — the way
+`linux-win.sh` already waited for its own. `theme.py` is a one-shot migration,
+and once its marker exists it is no longer started just to exit. Seconds from
+the spawn of `linux-rt.sh`, the old script and the new alternating on each
+guest after a warm-up start:
+
+| guest built by | script | runs | websockify listening | XFCE's panels and desktop managed |
+|---|---|---|---|---|
+| the stock setup | before | 4 | 4.46–4.51 | 5.17–5.21 |
+| | after | 4 | 0.56–0.58 | 1.26–1.29 |
+| this setup | before | 2 | 4.34–4.36 | 5.14–5.17 |
+| | after | 2 | 0.52–0.53 | 1.30–1.31 |
+
+"Managed" is xfwm4's `_NET_CLIENT_LIST` reaching its final count, read with
+`xprop` from a second proot. That is the script's share of a start and nothing
+more. Between the tile and a picture in the window there is also the app's
+side — the service spawning the script, `LinuxActivity`'s 1.5 s status poll,
+the page load and its 1 s retries, noVNC's connect and first paint, and the
+1.5 s health probe that takes the card down — and none of it changed, so the
+window gains less than the script does, and nothing like the same ratio (**In
+the app**). `LinuxService` copies the script from the APK at every spawn now
+(**Flow**, step 3), so the change reaches every existing guest without a
+`FEATURE_LEVEL` bump.
+
+**In the app.** LinuxOnDroid's debug build — not debuggable, as it ships —
+installed beside the launcher on the same phone, twice: once as this tree, once
+with git HEAD's `linux-rt.sh` and `dex.css` in its assets, nothing else
+different. Measured from outside, as any shell may: the screen, `/proc`.
+
+A start is cold — the app force-stopped, 5 s, then the launcher icon's own
+intent — and timed to the moment two points of the window, clear of the
+pointer ring, turn XFCE's desktop colour, which happens only once the card is
+down on a painted desktop. The screen was read every 0.26 s, so every time is
+late by up to that much, the same for both:
+
+| build | starts | launch to the desktop on screen |
+|---|---|---|
+| before | 4 | 6.24–6.42 s |
+| after | 7 | 3.18–3.34 s |
+
+The window shows its card at about half a second in both. That it gains about
+3.1 s rather than the script's 3.9 s is most likely the app's own polls — a
+status poll every 1.5 s, a page load retried every 1 s, the 1.5 s health probe
+— landing every start on their own ticks; that part is inferred, not measured. The first start after each install is left out: the
+install had restarted the app already, and one such run began with its window
+up.
+
+An idle desktop — a cold start left alone for 20 s, then 60 s of CPU ticks from
+`/proc/<pid>/stat` (100 to a CPU-second), two windows per build:
+
+| build | WebView renderer | the app's own process | the rest of the app's uid |
+|---|---|---|---|
+| before (the status dot pulsing forever) | 1,797 | 1,937 and 2,263 | 15–16 |
+| after (three pulses) | 7 and 8 | 6 and 8 | 9–11 |
+
+About 41 CPU-seconds a minute against a quarter of one: two-thirds of a core
+spent redrawing a dot on a desktop where nothing moved, the renderer painting
+it and the app process compositing it. The renderer is the sandboxed process
+that appeared with the launch; in one of the two "before" windows it could not
+be told apart, hence one number. The two builds' only difference that outlives
+the start is `dex.css`.
+
+The panel's red microphone, in both builds, is xfce4-pulseaudio-plugin's
+recording indicator: the app's own sound tap records the null sink's monitor.
+Nothing records a microphone.
+
+**Installing.** Stock against this build with no optional apps
+(`LINUX_APPS=none`): a bare desktop. The default selection — Firefox, Chromium,
+VS Code and git — was not measured. The same packages leave it, so the saving
+in packages and megabytes should carry over, but it is a smaller share of a
+much longer install. Same phone and mirror; the download times are the
+network's. Transaction times are apt's own, from `/var/log/apt/history.log`.
+In the app, the same bare desktop took 203 s of setup script, 216 s from the
+Install tap — with no in-app run of the old setup to set beside it:
+
+| | before (1 run) | after (2 runs) |
+|---|---|---|
+| the whole setup | 235 s | 154 s, 154 s |
+| the desktop's apt transaction | 123 s, 314 packages | 49 s and 63 s, 235 packages |
+| the desktop's download | 161 MB | 126 MB |
+| the first `apt-get update` | 37.4 MB | 28.8 MB |
+| the container on disk (`du`, apt's `.deb` cache included) | 1,442 MB | 1,126 MB |
+
+Where it comes from, in `linux-setup.sh`:
+
+- **noVNC and websockify as files** (`novnc_files`): their packages pulled in
+  70 others — nodejs, numpy with LAPACK and gfortran, OpenStack's oslo, babel's
+  locale data — 139 MB and 5,208 paths for 1.2 MB of web root and a few Python
+  modules. Checked on a guest this setup built: noVNC's own `vnc_lite.html`,
+  in a desktop browser through `adb forward`, logged in with VncAuth, drew the
+  desktop, opened the Applications menu on a click and ran a typed `uname -m`
+  in a terminal; the sound server and the 6081 tap the app plays from were up
+  beside it. Our own viewer page was not part of that — the app stages it.
+- **Their updates are the app's, not apt's.** The files belong to no package,
+  so `apt upgrade` passes them by; `NOVNC_SYNC` is the policy (see
+  `novnc_files`), and both of its paths were run on device. A bump re-took the
+  archive's versions on a guest that already had a desktop — 5 s, and the
+  record in `/usr/local/share/openandroiddex/novnc-files` rewritten — and a
+  refresh with no way to download logged its failure and kept the files and
+  the record it had, for the next pass to try again.
+- **Two icon themes off the disk**: `ubuntu-mono` and `humanity-icon-theme`
+  stay installed for `adwaita-icon-theme`'s sake, but a dpkg `path-exclude`
+  keeps their 11,390 files — over a quarter of every path in the guest — from
+  being unpacked. Nothing selects them. Fresh desktops only.
+- **No `Translation-en`** (`Acquire::Languages "none"`): Ubuntu's Packages
+  indexes already carry every description.
+- **Up to two fewer apt runs per setup pass**: no second `apt-get update` in
+  the SSH step when the same run fetched the lists minutes earlier, and no
+  `apt-get install python3` when dpkg's status file already has it (`pkg_ok`).
+
+**Measured and not taken: `force-unsafe-io`.** dpkg without an fsync per file
+is the usual container speed-up, but the desktop's `apt-get install`, from a
+warm `.deb` cache, took 127 s with it against 116 s and 135 s for two stock
+runs — inside the noise. `/data` on this phone is f2fs mounted
+`fsync_mode=nobarrier`, so an fsync is cheap already, and the option gives up
+dpkg's crash safety for nothing measurable.
+
+**Found and not fixed: fchmodat2.** Linux 6.6 added `fchmodat2`, and glibc 2.39
+sends every `fchmodat(…, AT_SYMLINK_NOFOLLOW)` through it. Our proot predates
+the syscall, so it reaches the kernel with the guest's path untranslated:
+`os.chmod(p, m, follow_symlinks=False)` fails with ENOENT on any path in the
+guest, and GNU tar unpacking over a directory that already exists exits 2
+("Cannot change mode … No such file or directory"). Unpacking into a fresh
+directory is unaffected, which is why `extract_tarball` works and why
+`novnc_files` moves its trees into place instead of unpacking over `/`.
+Rebuilding proot will not fix it on its own: `proot/build-proot.sh` relinks
+`v0.15_release` unchanged apart from the 16 KB alignment. It needs proot's
+source patched first — `fchmodat2` added to the syscalls whose path it
+translates, beside `fchmodat` — or a proot that already has that, and a
+patched proot is a change of behaviour, so it needs the device checks a
+straight relink did not.
+
 ## Device-measured constraints (do not regress)
 
 - **Hardlinks**: our uid may not `link()` on /data (SELinux). The rootfs
@@ -305,6 +454,9 @@ because an app installed later still has to get one.
   `pkill -l KILL -f`.
 - **proot never handles SIGTERM** (sits in waitpid), and a SIGKILLed tracer
   cannot reap tracees — hence pid kill *plus* per-guest belt pkills.
+- **`tar` over an existing directory fails on a 6.6 kernel** — fchmodat2, see
+  **What a start and an install cost**. Unpack into a fresh directory and move
+  the tree into place, as `extract_tarball` and `novnc_files` do.
 - **pkill self-match**: the bracket trick only covers the pattern's own text.
   Any *other* plain occurrence of a target word in the same command line is a
   self-kill. Also: `websockify` is an apt **package name** — the belt must

@@ -111,7 +111,9 @@ real script by name, every guest command handed to a stand-in — no rootfs, and
 nothing of the app touched: a step's line (apt's status lines read from the
 end, a tarball's percent with no 32-bit overflow, the ticker publishing within
 5 s and gone after), dpkg left half way and the repair that finishes a wanted
-package and removes a skipped one, Restart's clean-up, what an app no longer
+package and removes a skipped one, one package's state read from dpkg's status
+file with no apt (half-configured is not installed, and a name another only
+begins with is not that one), Restart's clean-up, what an app no longer
 wanted leaves behind, a half-extracted VS Code or IntelliJ never taken for an
 install, an extract that lands whole or leaves the old tree, a download kept
 through a timeout and started over only for curl 33 or HTTP 416, and the setsid
