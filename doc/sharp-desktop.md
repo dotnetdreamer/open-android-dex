@@ -31,7 +31,7 @@ is the second half of this record.
 | Telling the launcher | `adb.rs` (`adb_start_launcher`), `scrcpy.rs` (`watch_window_scale`) | `--ei base_dpi` on every launcher start, and a `DEFAULT_DENSITY` broadcast before a density that follows the window to another screen |
 | Display size | `DisplaySize` (the arithmetic), `SettingsActivity.buildDisplaySizeCard`, `DisplaySizePreview`, `DexPrefs.sizeFactor`, `LauncherActivity.reapplyDensity` | a multiple of the Default, preset or the user's own; the card and its preview; the two new rows |
 | Title bars | `CaptionService` (`px`, `trackDensity`) | bars in the display's own pixels |
-| Linux | `LinuxWm.atDpi`/`dpi`/`displaySize`, `LinuxWindows.desktopChanged`, `LinuxActivity.pixelsPerGuestPixel` | GTK's scale in a window, the X screen following the display; XFCE's framebuffer |
+| Linux | `LinuxWm.atDpi`/`dpi`/`displaySize`, `LinuxWindows.desktopChanged`, `LinuxGuestSize` (and the viewer's `dex-size.js`) | GTK's scale in a window, the X screen following the display; XFCE's framebuffer |
 | Who gets in | `openandroiddex-wmd`: `Peers.java`, `WmDaemon.callerOf`, `PC_ONLY`; `UnplugWatch.ARMED_KEYS` | the caller's uid; what each caller may ask |
 | Check | `cargo test display::`, `test/sharp-desktop-test.mjs`, `test/linux-windows-test.mjs`, `test/display-size-test.mjs` | the arithmetic and the parsing, off a phone |
 
@@ -323,7 +323,8 @@ Android pixel, so the scale is theirs.
 **XFCE in DeX.** Its framebuffer was the window's device pixels, which at
 320 dpi makes XFCE (pinned at 96 dpi for VNC's sake) half the size of
 everything around it. It now gets whole device pixels per X pixel: 2 from
-280 dpi, 3 from 440.
+280 dpi, 3 from 440 — and keeps them as the window is resized, drawn at
+exactly that scale (linux-viewer.md, "The desktop follows the window").
 
 ## Who may talk to the window daemon
 

@@ -382,7 +382,12 @@ windowed, maximised, or fullscreen with the bar folded away. XFCE re-lays
 itself out on RandR like any X desktop. The ceiling is the start's,
 3840×2400. The keys row is laid over the picture rather than taken out of it,
 so opening it does not re-lay the desktop out. A phone that is also showing
-the desktop sees the new size, letterboxed.
+the desktop sees the new size, letterboxed, until its own window changes shape
+— turning the phone takes the desktop back to the phone's (linux-viewer.md,
+"The desktop follows the window"). Neither side answers the other's resize, so
+the two never fight over it; the last request to reach Xvnc wins, and with the
+phone waiting 150 ms and this page 500 ms, that is not always the window that
+changed last.
 
 **The password rides the answer.** Xvnc's password (`vncpass`, made at setup)
 reaches the daemon on the `desktop` line and the computer in the `open` answer,

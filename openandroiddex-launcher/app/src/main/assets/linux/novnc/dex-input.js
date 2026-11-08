@@ -198,9 +198,9 @@ export function initInput(api) {
 
   /*
    * Mouse mode has no pan gesture — two fingers is scroll — so without this
-   * there is no way to reach the far side of a 1280-wide desktop through a
-   * 360-wide window. It runs while the cursor sits inside a band at the
-   * visible edge, which is exactly when the user is pushing against it.
+   * there is no way to reach the far side of a desktop zoomed in past the
+   * window. It runs while the cursor sits inside a band at the visible edge,
+   * which is exactly when the user is pushing against it.
    */
   let edgeReq = 0, edgeLast = 0;
   function edgeStart() {
@@ -271,8 +271,9 @@ export function initInput(api) {
    * clientToElement clips an out-of-range point to the extreme edge of the
    * framebuffer, so in touch mode a tap on the black band becomes a real click
    * on the very top row of the desktop — a finger nowhere near anything opening
-   * the XFCE Applications menu. On a portrait phone the black is most of the
-   * screen, so this is the common case, not the corner.
+   * the XFCE Applications menu. The desktop is the window's shape now, but not
+   * while the keyboard is up, nor when a computer has sized it to its own
+   * window, and then the black can be most of a phone's screen.
    *
    * A drag that starts on the picture and wanders off it keeps sending, and
    * keeps its button-up: clipping to the edge is what a selection drag to the

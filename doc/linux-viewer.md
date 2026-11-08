@@ -32,7 +32,8 @@ decisions below look arbitrary until you know what the platform refuses.
 | Connection, coordinates, chrome | `assets/linux/novnc/dex.js` | RFB, status, zoom/pan, the state machine |
 | Touch, and the only pointer bridge | `assets/linux/novnc/dex-input.js` | both gesture grammars, synthetic events |
 | Keyboard | `assets/linux/novnc/dex-keys.js` | the sink, the padded diff, latches, the key row |
-| Staging | `LinuxService.stageViewer()` | copies the five files into the guest per spawn |
+| The guest's size | `assets/linux/novnc/dex-size.js` | how big a desktop a window gets; `LinuxGuestSize` is the launcher's copy |
+| Staging | `LinuxService.stageViewer()` | copies every file in that directory into the guest per spawn |
 | The window | `LinuxActivity` | the URL, the retry ladder, the health probe |
 
 ## Why the page is ours, and why it is served from inside the guest
@@ -148,9 +149,10 @@ mouse. The other two exist for the case Direct cannot serve: a phone, where
 there is no pointer at all.
 
 **So the default is per window, not per app: Direct on the desktop display,
-Mouse in the phone's window.** Direct on a phone means poking at a 1280×800
-desktop through a ~360 px window with a fingertip that covers a 40 px circle of
-it — a 1 px window border, a menu item and a scrollbar are all inside one touch.
+Mouse in the phone's window.** Direct on a phone means poking at a desktop of
+900-odd pixels across through a ~400 px window with a fingertip that covers a
+40 px circle of it — a 1 px window border, a menu item and a scrollbar are all
+inside one touch.
 Mouse is the only one of the three that can hit any of them: the cursor moves
 relative and accelerated, and the click lands at a ring you can see rather than
 under the finger hiding it. Touch stays one tap away for the times the guest
@@ -250,7 +252,7 @@ Three decisions inside that:
   zoom level. The cursor clamps at the framebuffer edge, never at the viewport.
 - **Edge auto-pan is mandatory, not a nicety.** Mouse mode has no pan gesture —
   two fingers is scroll — so without it there is no way to reach the far side of
-  a 1280-wide desktop through a 360-wide window.
+  a desktop zoomed in past the window.
 - **Right-click fires on lift, not at the 500 ms mark.** It is the only way
   long-tap-right-click and long-press-drag-select can share one finger, and both
   are wanted. The ring that fades in at 500 ms is what makes the two outcomes
@@ -282,10 +284,12 @@ rendered box on every call**, never read back from the zoom variable: noVNC
 rescales from a `ResizeObserver`, so its number lands a frame after ours, and
 deriving from its box is the only mapping that cannot drift mid-animation.
 
-`clipViewport`, `dragViewport` and `resizeSession` are all off. `dragViewport`
-hijacks button 0 wholesale; `resizeSession` sends the container size in **CSS
-pixels**, which on a portrait phone would drag the Linux desktop down to about
-360×760 and leave XFCE unusable.
+`clipViewport` and `dragViewport` are off, and `resizeSession` is on only on a
+computer. `dragViewport` hijacks button 0 wholesale; `resizeSession` sends the
+container size in **CSS pixels**, which on a portrait phone would drag the
+Linux desktop down to about 360×760 and leave XFCE unusable — so the phone's
+window and the desktop display's ask for sizes of their own (see "The desktop
+follows the window").
 
 ## The keyboard, and why it is a text diff
 
@@ -324,27 +328,200 @@ the guest at all. The page itself never consumes Escape and never calls
 `showModal()` or `requestFullscreen()`, both of which would: `LinuxActivity`
 deliberately hands Escape to the guest the moment the WebView exists.
 
-## The phone gets a fixed desktop
+## The desktop follows the window
 
-`requestStart()` used to send the window's own pixels to `Xvnc -geometry`. On
-the desktop display that is right and still happens: the viewer scales the
-framebuffer to the stage in CSS px, so a framebuffer sized in device pixels
-lands 1:1 whatever dpi the display-size preset picked. On the phone's own panel
-at density ~2.75 it asked for a ~972×2062 desktop and then squeezed it back into
-~354 CSS px of width: XFCE's 10 pt menus end up under a millimetre tall, and no
-amount of chrome design rescues that. The phone now gets a flat 1280×800 desktop
-that it pans and zooms around, which also means rotating the phone does not
-reflow XFCE.
+Turn the phone and XFCE is laid out again for the other orientation, edge to
+edge; drag a window on the desktop display wider and the desktop gets the
+width. The page asks Xvnc for a screen of the window's shape whenever the
+window's box changes (`followWindow` in `dex.js`); Xvnc resizes and tells every
+viewer, and noVNC's canvas follows. Nothing reloads and nothing reconnects:
+`LinuxActivity` declares orientation and size in its `configChanges`, so a
+rotation is a resize of the same page.
+
+Before this the phone had a fixed 1280×800, letterboxed into either
+orientation — most of a portrait screen black, and a third of a landscape one —
+and the desktop display kept whatever size the start gave it.
+
+**How big** is `dex-size.js`. `LinuxGuestSize` is the launcher's copy, which
+`requestStart()` starts the desktop at, so that the page's first ask finds it
+already there instead of laying XFCE out a second time a moment after it
+started. For that the launcher needs the box as the page will measure it, bar
+and keys row included, and both of those live in the page's localStorage: so
+the window reads them off the live page with each health probe
+(`rememberChrome`, kept in `files/linux-viewer-chrome`) and a start goes by the
+last reading — the page's own defaults until there is one. And `LinuxService`
+no longer floors a start at 800×600, which moved a phone 320 CSS px wide from
+the 720 across it asks for; its floor is 320×200 now, a bound on nonsense, and
+`test/linux-guest-size-test.mjs` checks that neither its floor nor its ceiling
+moves any size a window asks for. What can still differ is the WebView's own
+measure of its box, a fraction of a CSS pixel off the launcher's arithmetic,
+which can now and then round to the next even size: the page then asks, and
+XFCE is laid out once more, two pixels wider or taller.
+
+| window | the guest's screen | for example |
+| --- | --- | --- |
+| the phone's own screen | 2.25 guest px to the CSS px, in either orientation; the short side 720 to 1200, the long side at most 2400 | a 411-dp phone: 924×1760 upright; on its side 2042×720 with the bar docked, 1930×798 with it folded away |
+| a window on the desktop display | the window's device pixels, in whole device pixels per guest pixel (1 around 160 dpi, 2 from 280, 3 from 440); 800×600 to 3840×2400 | a 1080p desktop at 1×: 1920×1036, the bar taken off |
+| a computer's window (`ctx=pc`) | noVNC's own `resizeSession`, unchanged: the box in CSS px | remote-access.md |
+
+Why those numbers. The phone's window in device pixels is the wrong answer: at
+density ~2.75 it is ~972×2062 of them, and the viewer would squeeze a desktop
+that size back into ~354 CSS px of width — XFCE's 10 pt menus under a
+millimetre tall, which no amount of chrome design rescues. A fixed scale in CSS
+px keeps everything in XFCE the same size when the phone turns, the way the
+phone's own apps turn — wherever none of the limits below decides. The 720
+floor is for XFCE's dialogs, which stop fitting below it, and a phone on its
+side under the docked bar is only about 300 CSS px tall: there the floor
+decides, and XFCE is drawn about 5 % smaller than upright (2042 guest px across
+859 CSS px, against 924 across 411). With the bar folded away the phone on its
+side is at 2.25 too. Either way the text is larger than the old 1280×800 drew
+it — a little on its side, a good deal upright. The 1200 ceiling keeps a tablet
+or an opened-out Fold from drawing its desktop smaller than a phone does; the
+2400 is the CPU's, which draws every pixel and encodes it again for each
+viewer, and as tall as `LinuxService` starts a desktop. The short side is made
+an exact even number and the long side follows it at the box's own ratio, so
+the desktop is the box's shape to within one of its own pixels: under half a
+CSS pixel of letterbox in any window a phone has. `test/linux-guest-size-test.mjs`
+checks that, and that the two copies agree to the pixel over some 300,000 boxes
+and windows.
+
+On the desktop display a desktop sized this way fits its window at exactly
+whole device pixels per guest pixel, and `layout()` takes that scale rather
+than the fit a hair larger: a scale of 1.001 resamples every line of text. That
+holds for a window at least 800×600 guest pixels' worth; a smaller one gets
+the 800×600 floor, scaled down to fit it, and is not sharp. Before, the start
+sized the guest to the whole window, the bar's 44 px included, and the fit drew
+it ~4 % smaller than that.
 
 **The two are told apart by display id, not by density.** Density looks like it
 would work and does not: the desktop display's density is whatever the
 resolution and size presets in Settings computed — 1.0 only at the 1080p preset,
 the same trap `custom-titlebar-v2.md` records for the caption. A density test
-would have sent a 1280×800 guest to a 2560-wide desktop at three of the five
+would have sent a phone-shaped guest to a 2560-wide desktop at three of the five
 1440p presets, including the default one.
 
-**This changes `$GEO` for containers that already exist.** The next spawn
-resizes their desktop.
+**The box** is the stage less the docked bar and a keys row the user pinned
+(`steadyBox`). Not less the on-screen keyboard, nor the keys row it brings up:
+those come and go, and a desktop laid out again every time the keyboard opened
+would be worse than one fitted above it meanwhile. A bar folded into the bubble
+gives the desktop its height back, as it does on a computer.
+
+**The keyboard never resizes the desktop**, whichever of two things it does to
+the page. Where it covers the page, the box is the same with it up or down,
+and a turn made while typing lands at once. Where it resizes the page, nothing
+measured while it is up is the window's own size — rotated, the box changes
+width and is still the keyboard's height short. The sign is in the two seconds
+after the keyboard is raised: the box against the one from just before it
+was, the same width and less height (`kbResizes`, believed for good once
+seen). Only then, and only against that box — the first version took any step
+to the same width and less height while the keyboard was up, and a turn makes
+one on its way round (see "Measured on the S25"). From then on the desktop
+keeps its size while the keyboard is up, and for a second after it goes, which
+is how long such a keyboard takes to give the page its height back; a turn
+made while typing lands then, once. The S25's keyboards cover the page.
+
+**When.** 150 ms after the box last changed on the phone, where a rotation is
+one change; noVNC's own 500 ms on the desktop display, where a window being
+dragged is many. And once at the first frame, so that a page connecting to a
+desktop started for another window, or sized since by another viewer, asks for
+its own. Never *because* the desktop changed size: that is another viewer's
+ask — a computer through remote access, or on the cable — and answering it
+would be a tug of war between two screens. The last request to reach Xvnc
+wins. That is not always the window that changed last: each waits its own
+time, so a computer's window resized a moment before the phone turns asks
+after it, and keeps the desktop.
+
+A desktop of a new size opens at that size's own zoom (`zoom.<w>x<h>`) — fit,
+until someone zooms it — and centred. The phone upright and on its side are two
+sizes, so each keeps its own; but it is the size that is remembered, not the
+orientation, and folding the bar away makes a third.
+
+**The message.** noVNC 1.3 asks for a size only through `resizeSession`, and
+only for its own box in CSS px. So the page sends the same SetDesktopSize
+itself: `RFB.messages.setDesktopSize` is public; the socket it writes to
+(`_sock`), the screen it names (`_screenID`, `_screenFlags`) and the flag that
+says Xvnc can resize (`_supportsSetDesktopSize`) are not — the same kind of
+reach `guestTakesUtf8` makes, checked the same way. Without them the desktop
+keeps the size it started at, letterboxed, as before. One oddity is
+load-bearing and harmless: noVNC 1.3 keeps the screen id as a byte view
+(`rQshiftBytes`), which the message turns into 0, so every ask names a screen
+Xvnc does not know. TigerVNC 1.13 takes that for a new layout — it lets its
+output go and gives it to the new screen — and resizes all the same; it is how
+`resizeSession` has always worked against it.
+
+**The dock** does not follow on its own. `dock.py` stands it on the left at a
+length that is a percent of the screen height, worked out once for the height
+it saw, and at another height the same percent leaves a gap under the top bar
+or runs the dock up into it, over the Applications button. `dockfit.py`,
+written into the guest by `linux-rt.sh` at every start, waits on the X server
+for the root window's ConfigureNotify and sets the length again through
+xfconfd (openandroiddex-linux/README.md, "And it follows the screen") — only a
+length it set itself, or before it has set one, a length dock.py could have
+made: one someone chose is theirs. XFCE does
+the rest itself: xfwm4 fits maximised windows to the new screen and keeps the
+others on it, xfdesktop lays its icons out on the new work area, and
+xfsettingsd — which compares outputs by id — sees the same one and opens no
+display dialog. (Read in their sources, xfwm4 4.18 and xfce4-settings 4.18.4;
+see "What is unproven".)
+
+**This changes `$GEO` for containers that already exist.** The next spawn on the
+phone starts at the window's shape instead of 1280×800.
+
+### Measured on the S25
+
+2026-11-08, Galaxy S25 Ultra (SM-S938B, Android 17), FHD+ at density 420 — a
+devicePixelRatio of 2.625, so a 411.43 CSS px wide window — with the dev build
+made debuggable (`ORG_GRADLE_PROJECT_debuggableLauncher=true`) so that the
+page could be read through the WebView's DevTools and the guest through
+`run-as`. Linux in the phone's own window, opened from the app list; the phone
+turned by `settings put system user_rotation`.
+
+| | the box, CSS px | the desktop | checked |
+| --- | --- | --- | --- |
+| upright, bar docked | 411.43 × 788 | 926×1774 | the start's `START 926x1774` and the first frame the same — laid out once |
+| on its side, bar docked | 854.86 × 310.48 | 1982×720 | `xrandr`: `current 1982 x 720` |
+| upright, bar folded | 411.43 × 840 | 926×1890 | |
+| on its side, bar folded | 854.86 × 366.48 | 1922×824 | started cold at it: `START 1922x824`, the first frame 1922×824, nothing after for 6 s |
+
+A turn reached the desktop 141 to 186 ms after the page saw the window change,
+in five turns — the 150 ms wait and Xvnc's answer. Before the window settles,
+the old desktop is drawn fitted into the new one for those 150 ms. The page's
+DevTools showed the picture's box against the window's: 0.01 × 0.26 CSS px
+short upright and 0.05 × 0.01 on its side, with the fit taken from the
+stage's fractional size. Taken from `clientWidth`/`clientHeight` — rounded —
+as it first was, it was 1.5 CSS px short on its side, and that is fixed now
+(see `layout()`).
+
+The dock, read off the X server (the panels' own windows): on its side the top
+bar is 1982×27 at 0,0 and the dock 49×694 at 0,26; upright the bar is 926×27
+and the dock 49×1747 at 0,27. `dockfit.py` recorded 96.39 and 98.53, and
+xfconfd wrote 96.39 to the panel's file. The dock meets the bar both ways —
+upright exactly, on its side over the bar's last row: dock.py's formula takes
+the bar as `size` × `nrows`, 26, and its window is 27. That pixel is dock.py's,
+and `dockfit.py` keeps its formula deliberately (it is how it recognises a
+length dock.py made).
+
+The keyboard: the S25's covers the page. Raised, the layout viewport stayed
+840 tall and the visual viewport fell to 477; the desktop kept its size,
+fitted above the keyboard, and closing it changed nothing either. A turn with
+the keyboard up found the first guard's mistake: on the way round, the page
+passes through a box taller than the one it lands on — 854.86 × 406.67 for
+18 ms, the keyboard hidden — and the step down to 366.48, the same width and
+less height while the keyboard was up, was read as the keyboard resizing the
+page. The desktop then stayed at the passing box's size, 1924×914, until the
+keyboard closed and a second had gone by. The guard now learns only in the
+two seconds after the keyboard is raised, and only against the box from just
+before it was: a turn changes the width, so it can never pass for that. After
+the fix, both ways round with the keyboard up reached the right desktop at
+once (186 and 183 ms), and closing the keyboard changed nothing.
+
+Not run on the phone: a dock length set by hand (`xfconf-query` cannot reach
+the session's bus from a second proot — "connection is closed" — and Panel
+Preferences was not driven; `test/linux-dockfit-test.mjs` covers the rule),
+the keys row pinned, the desktop display's window resized, two viewers at
+once, and a keyboard that resizes the page, which this phone does not have.
+The two fixes were run by copying the new `dex.js` into the guest's web root
+and reloading the page; the launcher on the phone was built before them.
 
 ## Reaching it without a desktop
 
@@ -422,7 +599,7 @@ insufficient.
 
 **Patching Ubuntu's `vnc.html`.** It is a package file: an `apt` upgrade
 replaces it, and the full noVNC UI is a monolith bound to its own element ids
-and its own settings and localisation modules. A page beside it costs five files
+and its own settings and localisation modules. A page beside it costs six files
 and owns its own contract.
 
 **Localising the page.** `assets/web/` is the only precedent and it is English
@@ -434,6 +611,15 @@ see the probe contract.
 ## What is unproven
 
 None of this has run on a device. In rough order of how quietly it would fail:
+
+- **The rest of "The desktop follows the window", beyond what "Measured on
+  the S25" ran.** *Tests:* pin the keys row and close and reopen Linux — the
+  log's `START <w>x<h>` and the first frame must be the same; set the dock's
+  length by hand in Panel Preferences and turn the phone — it must stay as set;
+  resize the Linux window on the desktop display — the desktop follows half a
+  second after the drag, sharp; and, on a phone whose keyboard resizes the page
+  rather than covering it, turn it with the keyboard up — the desktop keeps
+  its size until the keyboard closes, then follows once, a second later.
 
 - **Whether hover still reaches the canvas on the DeX display.** The chrome
   layer is `pointer-events: none` with only its controls opting back in, so it
@@ -490,8 +676,15 @@ None of this has run on a device. In rough order of how quietly it would fail:
 
 ## Costs
 
-Five files, ~102 KB, copied into the guest on every runtime spawn — a few
-milliseconds of a start that already takes seconds. Nothing new runs in the
-guest, no new port, no new process, and no new permission. The APK grows by
-~32 KB rather than the same 102: assets ship DEFLATEd and nothing exempts these
-(measured on the debug APK — 104,360 bytes of source compress to 32,489).
+Six files, ~142 KB, copied into the guest on every runtime spawn — a few
+milliseconds of a start that already takes seconds. The page itself runs
+nothing new in the guest: no port, no process, no permission. The APK grows by
+much less than that: assets ship DEFLATEd and nothing exempts these (measured
+on the debug APK when they were five files — 104,360 bytes of source
+compressed to 32,489).
+
+Following the window adds one process to the guest, `dockfit.py`: a python3
+blocked on the X server, which takes no CPU until the screen changes size and
+then runs `xfconf-query` twice. Its memory has not been measured. A resize
+itself costs a full repaint of the desktop, once, as any window resize on a
+computer does.

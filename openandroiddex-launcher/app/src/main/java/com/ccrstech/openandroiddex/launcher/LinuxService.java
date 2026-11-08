@@ -963,8 +963,14 @@ public class LinuxService extends Service {
             }
             // The ceiling is the daemon's too: a computer's screen may ask for
             // a desktop, and every pixel of it is drawn by this phone's CPU.
+            // The floor only keeps out nonsense. Every window floors its own
+            // size (LinuxGuestSize: 720 across on the phone, 800x600 on the
+            // desktop display; a computer's viewer resizes to its window as it
+            // connects), and a floor of its own here would start a desktop the
+            // viewer then asks to change: a phone 320 CSS px wide wants 720
+            // across, and 800 is what it got.
             writeFile(new File(dir, "geometry"),
-                    Math.min(Math.max(w, 800), 3840) + "x" + Math.min(Math.max(h, 600), 2400));
+                    Math.min(Math.max(w, 320), 3840) + "x" + Math.min(Math.max(h, 200), 2400));
             ProcessBuilder pb = new ProcessBuilder(
                     "/system/bin/sh", Linux.rtScript(this).getAbsolutePath());
             pb.directory(dir);

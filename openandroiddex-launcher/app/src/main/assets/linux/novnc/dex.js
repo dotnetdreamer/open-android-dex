@@ -27,6 +27,7 @@
 import RFB from './core/rfb.js';
 import { initInput } from './dex-input.js';
 import { initKeys } from './dex-keys.js';
+import { guestSize, sharpScale } from './dex-size.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -90,6 +91,15 @@ const ZOOM_MAX = 4.0;
    and encoded again for every viewer. */
 const PC_MAX_W = 3840;
 const PC_MAX_H = 2400;
+/* How long a window's new size has to hold before the guest is asked to match
+   it: a phone turning is one change, a window being dragged is many — noVNC's
+   own wait. See "the guest's screen follows the window". */
+const FOLLOW_PHONE_MS = 150;
+const FOLLOW_DESKTOP_MS = 500;
+const FOLLOW_SLOP = 1;        // CSS px a box may move by and still be the same box
+const FOLLOW_TRIES = 50;      // 100 ms apart: Xvnc says it can resize in its first update
+const KB_GONE_MS = 1000;      // a keyboard that resizes the page takes this to give it back
+const KB_LEARN_MS = 2000;     // and this, after it is raised, to show which kind it is
 const IDLE_TUCK_MS = 3000;
 const COACH_MS = 7000;
 const TOAST_MS = 4000;
@@ -375,10 +385,11 @@ function connect() {
      divides by the framebuffer size and there is not one yet. */
   rfb.clipViewport = false;    // mutually exclusive with scaleViewport by design
   rfb.scaleViewport = false;
-  /* On a computer the guest's screen follows the window: noVNC asks Xvnc for
-     the box's size once it is connected and after every resize, half a second
-     after the last. Nowhere else — it sends CSS px, and a portrait phone would
-     drag XFCE to ~360x760. */
+  /* On a computer noVNC itself keeps the guest's screen the window's size: it
+     asks Xvnc for the box once it is connected and after every resize, half a
+     second after the last. Only there — it asks in CSS px, which would drag a
+     portrait phone's XFCE to ~360x760 — so the phone's window and the desktop
+     display's ask for sizes of their own (followWindow). */
   rfb.resizeSession = ctx === 'pc';
   rfb.dragViewport = false;    // hijacks button 0 wholesale
   rfb.focusOnClick = false;    // we own focus — a tap must not steal it from the sink
@@ -439,10 +450,14 @@ function watchFramebuffer() {
 }
 
 let painted = false;
+let shape = '';   // the framebuffer size the zoom was last read for
 function onFramebuffer() {
   if (!canvas || !canvas.width) return;
+  const now = canvas.width + 'x' + canvas.height;
+  let reshaped = false;
   if (!painted) {
     painted = true;
+    shape = now;
     ui.zoom = readZoom();
     /* Size #screen BEFORE handing scaling over: autoscale measures the box it
        is given, and an auto-width div with a canvas inside it has not settled
@@ -457,13 +472,33 @@ function onFramebuffer() {
     setTimeout(() => label.classList.add('quiet'), 2000);
     if (input) input.recentre();
     firstRunCoach();
+  } else if (now !== shape) {
+    /* The desktop changed shape: the phone turned, the window was resized, or
+       another viewer asked. It opens at the zoom last used for this shape —
+       fit, unless someone zoomed it — for the reason zoomKey gives, centred:
+       a pan into the old shape means nothing in the new one. */
+    shape = now;
+    ui.zoom = readZoom();
+    panX = panY = 0;
+    reshaped = true;
   }
   layout();
+  /* The cursor ring is placed in client coordinates, so only once the picture
+     has been laid out at its new size. */
+  if (reshaped && input) input.recentre();
+  /* The first frame is the first moment the desktop's size is known. One that
+     was started for another window, or sized since by another viewer, is asked
+     to fit this one. */
+  if (!followed) {
+    followed = true;
+    followWindow(true);
+  }
 }
 
 function down(kind) {
   if (ui.down) return;
   ui.down = true;
+  clearTimeout(followTimer);
   document.body.classList.add('is-down');
   setStatus(kind, TEXT.reconnecting, 'bad');
   if (input) input.releaseAll();
@@ -562,9 +597,26 @@ function layout() {
    */
   stage.style.paddingTop = ins.top + 'px';
   stage.style.paddingBottom = ins.bottom + 'px';
-  const availW = Math.max(1, stage.clientWidth);
-  availH = Math.max(1, stage.clientHeight - ins.top - ins.bottom);
+  /* The stage's own fractional size, not clientWidth/clientHeight, which are
+     rounded: the desktop is sized to the fractional box (steadyBox), and a
+     fit to a rounded one fell up to a pixel and a half short on a phone on
+     its side (measured on the S25: 366.48 tall read as 366, and the ratio
+     carries the shortfall across). */
+  const sr = stage.getBoundingClientRect();
+  const availW = Math.max(1, sr.width);
+  availH = Math.max(1, sr.height - ins.top - ins.bottom);
   fitScale = Math.min(availW / fw, availH / fh);
+  /*
+   * A desktop sized for this window on the desktop display fits at whole device
+   * pixels per guest pixel, give or take the pixel its size was rounded down by.
+   * Fitted exactly instead, it would be drawn a hair larger than that, and a
+   * scale of 1.001 resamples every line of text in it. Within 2 % of sharp,
+   * sharp wins; anything else, someone else's size included, is fitted.
+   */
+  if (ctx === 'desktop') {
+    const sharp = sharpScale(window.devicePixelRatio || 1);
+    if (sharp <= fitScale && sharp >= fitScale * 0.98) fitScale = sharp;
+  }
   const z = ui.zoom === 'fit' ? fitScale : clamp(ui.zoom, ZOOM_MIN, ZOOM_MAX);
   screenEl.style.width = fw * z + 'px';
   screenEl.style.height = fh * z + 'px';
@@ -584,6 +636,8 @@ function layout() {
   /* The ring is placed in client coordinates, so anything that moves the
      picture has to move it too. */
   if (input) input.paintCursor();
+  /* Everything that can change the window's box comes through here. */
+  followWindow(false);
 }
 
 /*
@@ -665,8 +719,9 @@ function paintZoomValue() {
   v.textContent = ui.zoom === 'fit' ? TEXT.fit : Math.round(ui.zoom * 100) + '%';
 }
 
-/* Keyed by framebuffer size: a $GEO change must start at fit, not at a factor
-   chosen for a desktop that no longer exists. */
+/* Keyed by framebuffer size: a desktop of a new shape — the phone turned, the
+   window resized, a new $GEO — must start at fit, not at a factor chosen for a
+   desktop that no longer exists, and turning back finds that shape's zoom. */
 function zoomKey() {
   const { w, h } = fb();
   return 'zoom.' + w + 'x' + h;
@@ -679,8 +734,159 @@ function readZoom() {
 }
 function saveZoom() {
   if (!canvas || !canvas.width) return;
+  /* The key and the value now, not when the timer fires: the desktop can
+     change shape in between, and this shape's zoom would land on that one. */
+  const key = zoomKey(), z = ui.zoom;
   clearTimeout(saveTimer);
-  saveTimer = setTimeout(() => store.set(zoomKey(), ui.zoom), SAVE_MS);
+  saveTimer = setTimeout(() => store.set(key, z), SAVE_MS);
+}
+
+/* ── the guest's screen follows the window ──────────────────────────────── */
+
+/*
+ * The desktop is the window's shape. Turn the phone and XFCE is laid out again
+ * for the other orientation; drag a window on the desktop display wider and the
+ * desktop gets the width. Until this, the phone had a fixed 1280x800 that it
+ * letterboxed into either orientation — most of a portrait screen black — and
+ * the desktop display kept whatever size the start gave it. How big is
+ * dex-size.js; this is when, and how.
+ *
+ * How: Xvnc takes a SetDesktopSize from any client and tells all of them
+ * (ExtendedDesktopSize); noVNC resizes its canvas, watchFramebuffer sees that,
+ * and layout() fits the new picture. noVNC 1.3 only ever asks through
+ * resizeSession, and only for its own box in CSS px — on a phone a third of
+ * the desktop it needs — so this sends the same message itself.
+ * RFB.messages.setDesktopSize is public; the socket it writes to and the
+ * screen it names are not: the same private reach guestTakesUtf8 makes, and
+ * checked the same way. Where they are missing, the desktop keeps the size it
+ * started at, letterboxed, as before.
+ *
+ * When: the box changing, once the new one has held for a moment — and once
+ * at the first frame, so that a page connecting to a desktop someone else
+ * sized asks for its own. Never BECAUSE the desktop changed size: that is
+ * another viewer's ask (a computer through remote access, or on the cable),
+ * and answering it would be a tug of war between two screens. The last ask to
+ * reach Xvnc wins — not always the window that changed last, since each waits
+ * its own time first.
+ */
+let followed = false;      // the first frame has asked
+let followBox = null;      // the box the guest was last sized for, CSS px
+let followAsked = null;    // what was asked for it: a refused size is not asked twice
+let followTimer = 0;
+let followTries = 0;
+let followOff = false;     // this noVNC cannot be asked
+let kbResizes = false;     // this window's keyboard resizes the page rather than covering it
+let kbUpAt = 0;            // when the keyboard was last raised
+let kbBase = null;         // the box just before it was
+let kbDownAt = 0;          // when the keyboard last went down
+
+const follows = () => ctx === 'phone' || ctx === 'desktop';
+
+/*
+ * The part of the stage the desktop has for good, in CSS px: less the docked
+ * bar and a keys row the user pinned. Not less the keyboard, nor the keys row
+ * it brings up: those come and go, and a desktop laid out again every time the
+ * keyboard opened would be worse than one fitted above it meanwhile.
+ * Fractional, as the WebView has it — which is what the launcher starts the
+ * desktop from as well (LinuxGuestSize.forWindow).
+ */
+function steadyBox() {
+  const r = stage.getBoundingClientRect();
+  const top = ui.chrome === 'docked' ? bar.getBoundingClientRect().height : 0;
+  const row = ui.keys && store.get('keys', '0') === '1'
+    ? $('keys-row').getBoundingClientRect().height : 0;
+  return { w: r.width, h: r.height - top - row };
+}
+
+/** @param {boolean} now ask at once, without waiting for the box to hold */
+function followWindow(now) {
+  if (!painted || !follows() || followOff || ui.down) return;
+  const box = steadyBox();
+  if (box.w < 1 || box.h < 1) return;
+  const dw = followBox ? Math.abs(box.w - followBox.w) : Infinity;
+  const dh = followBox ? box.h - followBox.h : Infinity;
+  if (ui.kb) {
+    /*
+     * The keyboard may resize the page rather than cover it, and then nothing
+     * measured while it is up is the window's own size — a turn made while
+     * typing included: rotated, the box changes width and is still the
+     * keyboard's height short. Which kind it is shows in the moment after it
+     * is raised: the box against the one it had just before (kbBase), the same
+     * width and less height. Only then — a turn's own sizes on the way round
+     * are no sign of anything (on the S25 a turn with the keyboard up passes
+     * through a box taller than where it lands, and taking that for this kind
+     * left the desktop at the passing size until the keyboard closed). Once
+     * seen it is believed for good, and while the keyboard is up the desktop
+     * keeps its size; closing it lays the page out again (setKb), and a turn
+     * lands then. Where the keyboard covers the page — as the S25's do — the
+     * box is the window's with it up or down, and a turn lands at once.
+     */
+    const fresh = performance.now() - kbUpAt < KB_LEARN_MS;
+    if (fresh && kbBase && Math.abs(box.w - kbBase.w) < FOLLOW_SLOP && box.h <= kbBase.h - FOLLOW_SLOP) {
+      kbResizes = true;
+    }
+    if (kbResizes || !followBox) return;
+  } else if (kbResizes) {
+    /* Down, but not necessarily gone: such a keyboard gives the page its
+       height back only once it has finished going, so for a moment after, the
+       box is still its doing. Measured again when the moment is over. */
+    const left = KB_GONE_MS - (performance.now() - kbDownAt);
+    if (left > 0) {
+      clearTimeout(followTimer);
+      followTimer = setTimeout(() => followWindow(false), left + 20);
+      return;
+    }
+  }
+  if (!now && dw < FOLLOW_SLOP && Math.abs(dh) < FOLLOW_SLOP) return;
+  followBox = box;
+  followAsked = null;
+  followTries = 0;
+  clearTimeout(followTimer);
+  followTimer = 0;
+  if (now) askToFollow();
+  else followTimer = setTimeout(askToFollow, ctx === 'phone' ? FOLLOW_PHONE_MS : FOLLOW_DESKTOP_MS);
+}
+
+function askToFollow() {
+  clearTimeout(followTimer);
+  followTimer = 0;
+  if (!followBox || !follows() || followOff || ui.down || !rfb || !canvas || !canvas.width) return;
+  const want = guestSize(ctx, followBox.w, followBox.h, window.devicePixelRatio || 1);
+  if (canvas.width === want.w && canvas.height === want.h) return;
+  if (followAsked && followAsked.w === want.w && followAsked.h === want.h) return;
+  const sent = askGuestSize(want.w, want.h);
+  if (sent === 'later') {
+    if (++followTries <= FOLLOW_TRIES) followTimer = setTimeout(askToFollow, 100);
+    return;
+  }
+  if (sent === 'never') {
+    followOff = true;
+    return;
+  }
+  followAsked = want;
+}
+
+/*
+ * The message resizeSession sends, for a size of our choosing: 'later' until
+ * Xvnc has said it can — in its first update, a round trip after 'connect' —
+ * and 'never' on a noVNC without the pieces.
+ *
+ * The screen id and flags are the ones noVNC's own ask carries. In 1.3 they
+ * are byte views, which the message turns into 0; Xvnc takes that for a new
+ * screen, lets the old one go and gives the new one its output, so the resize
+ * lands all the same — as it always has for resizeSession.
+ */
+function askGuestSize(w, h) {
+  const send = RFB.messages && RFB.messages.setDesktopSize;
+  const sock = rfb._sock;
+  if (typeof send !== 'function' || !sock || typeof sock.flush !== 'function') return 'never';
+  if (rfb._supportsSetDesktopSize !== true) return 'later';
+  try {
+    send(sock, w, h, rfb._screenID, rfb._screenFlags);
+  } catch (e) {
+    return 'never';
+  }
+  return 'sent';
 }
 
 /* ── chrome ─────────────────────────────────────────────────────────────── */
@@ -826,12 +1032,13 @@ const MODES = ['direct', 'touch', 'mouse'];
  * before the control layer existed.
  *
  * On the PHONE there is no pointer to follow. Direct there means poking at a
- * 1280x800 desktop through a ~360 px window with a fingertip that covers a
- * 40 px circle of it: a 1 px window border, a menu item and a scrollbar are all
- * inside one touch. Mouse turns the panel into a trackpad — the cursor moves
- * relative, accelerated, and every click lands at the ring you can see rather
- * than under the finger hiding it — and it is the only one of the three that
- * can hit anything small. Touch is the middle answer and stays one tap away.
+ * desktop of 900-odd pixels across through a ~400 px window with a fingertip
+ * that covers a 40 px circle of it: a 1 px window border, a menu item and a
+ * scrollbar are all inside one touch. Mouse turns the panel into a trackpad —
+ * the cursor moves relative, accelerated, and every click lands at the ring
+ * you can see rather than under the finger hiding it — and it is the only one
+ * of the three that can hit anything small. Touch is the middle answer and
+ * stays one tap away.
  */
 function defaultMode() {
   return ctx === 'phone' ? 'mouse' : 'direct';
@@ -887,6 +1094,14 @@ function paintMode() {
 
 function setKb(on) {
   if (!keys) return;
+  /* When it came and went, for followWindow: what the box was before it came
+     tells a keyboard that resizes the page from one that covers it, and one
+     that resizes is still giving the height back for a moment after it goes. */
+  if (!ui.kb && on) {
+    kbUpAt = performance.now();
+    kbBase = painted ? steadyBox() : null;
+  }
+  if (ui.kb && !on) kbDownAt = performance.now();
   ui.kb = !!on;
   document.body.classList.toggle('kb', ui.kb);
   $('kb').classList.toggle('on', ui.kb);
@@ -1224,6 +1439,9 @@ window.dexContext = function (next) {
   ctx = to;
   setDesktopChrome(ctx === 'desktop');
   setMode(savedMode(), false);
+  /* The other window's rule for how big, whatever the box. */
+  followBox = null;
+  followWindow(true);
 };
 
 function boot() {

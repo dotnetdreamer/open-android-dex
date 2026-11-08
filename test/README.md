@@ -96,6 +96,49 @@ and icons found through links that name guest paths, and through links proot
 wrote with this side's. The window manager against a real Xvnc needs a guest
 and is recorded in the design record.
 
+The size the Linux desktop takes for its window (`doc/linux-viewer.md`, "The
+desktop follows the window") is checked the same way, with a JDK:
+
+```sh
+node test/linux-guest-size-test.mjs
+```
+
+It loads the viewer's rule (`dex-size.js`) in Node, compiles the launcher's copy
+(`LinuxGuestSize`) for this JVM, and runs both over some 300,000 boxes and
+whole windows (each window with the bar docked and folded, the keys row pinned
+and not): the two agree to the pixel, the bar and keys row heights the launcher
+assumes are `dex.css`'s, and `LinuxService`'s floor and ceiling move no size a
+window asks for; the phone's desktop is its box's shape to within one of its
+own pixels — under half a CSS pixel in any window a phone has — even, with its
+short side 720 to 1200 and its long side at most 2400, the same desktop
+whichever way round, at one scale in both orientations wherever no limit
+applies; the desktop display's fits its window at whole device pixels per
+guest pixel. A phone turning, XFCE
+laying itself out again and the dock keeping up need a phone, and are listed as
+unverified in the design record.
+
+The dock keeping up with those sizes (`openandroiddex-linux/README.md`, "And it
+follows the screen") has its logic checked with Python 3 (`PYTHON`, or
+`python3` on PATH):
+
+```sh
+node test/linux-dockfit-test.mjs
+```
+
+It cuts `dockfit.py` out of `linux-rt.sh`'s own heredoc, exactly as the script
+writes it into a guest, and runs it against canned `xfconf-query -l -v` output:
+a fresh guest left as dock.py made it, the phone turned upright and back (each
+a length set through xfconfd and recorded), a length someone chose, a dock they
+moved, a deskbar, a guest with no record, and no top bar all left alone; a guest
+from before it, with no record yet — a chosen 50 % left alone, dock.py's own
+length for another height taken over, a new guest started under the old 600
+floor recognised by the start height it is handed, and the one ambiguity left
+(a chosen 98 % is also dock.py's) shown for what it is — and the failures; on
+a 64-bit Linux, the X event's layout too. It also checks
+`linux-rt.sh` itself: the heredoc closed ahead of the session string, and no
+apostrophe inside that single-quoted string, which a lone one would end early
+without a word from `sh -n`.
+
 The Linux setup script's helpers (`openandroiddex-linux/README.md`, "Skip,
 Restart and a line that moves") are checked on a phone, under its own
 `/system/bin/sh` — mksh, the shell the app runs the script with, whose

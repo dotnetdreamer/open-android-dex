@@ -291,6 +291,46 @@ when the layout has only **one** panel: that is not a dock beside a top bar, it
 is the desktop's only strip. Adding *launchers* stays per-boot either way,
 because an app installed later still has to get one.
 
+### And it follows the screen
+
+The length is a percent of the screen height, worked out for the height the
+dock was first placed at, and the screen no longer holds still: every viewer
+asks Xvnc to make it the shape of its window — the phone turned on its side, a
+window on the desktop display dragged, a computer through remote access
+(doc/linux-viewer.md, "The desktop follows the window"). The same percent of
+another height leaves a gap under the top bar, or runs the dock up into it and
+over the Applications button: a dock fitted to the phone on its side, 720 tall,
+stops well short of the top bar once the phone is upright and the screen is
+1760 tall, and one fitted upright runs into it on its side.
+
+So `linux-rt.sh` writes `dockfit.py` into the guest at every start — no setup
+pass needed, as for the script itself — and runs it beside XFCE, niced, holding
+no port. It selects `StructureNotify` on the root window through libX11
+(ctypes: no X bindings for Python are installed, and none are needed), and
+RandR sends the root a `ConfigureNotify` whenever the screen is resized, so it
+sits blocked, costing nothing, until then — and dies with the X server. Then it
+reads the panels from xfconfd in one `xfconf-query -l -v`, finds the dock and
+the top bar by dock.py's own rules, and sets the dock's `length` through
+xfconfd: never in the file, which xfconfd owns while the session runs and the
+panel writes back out when it exits. It also runs once as it starts, because a
+session can start at a height the stored length was not made for.
+
+It keeps to dock.py's terms. Only a dock still where dock.py put it — vertical,
+snapped SW — and only at the length it was given last, recorded in
+`/root/.config/openandroiddex/dock-length`: a dock someone moved, or a length
+they chose in Panel Preferences, is theirs. Before there is a record — a guest
+from before this, or the first pass over a new one — the length is taken for
+dock.py's only if dock.py placed the dock at all (the layout marker above) and
+the length is one dock.py could have made: its formula for the height this
+session started at, which `linux-rt.sh` hands over, or for any height a
+desktop was started at before this, 600 to 2400. A 50 % someone chose is left
+alone. One case nothing left on a guest can tell apart: a length chosen by hand
+that dock.py could also have made — 98 % is its length for a screen 1300 tall —
+is taken over. The formula and the top bar's height are dock.py's, so on a
+fresh guest the first pass changes nothing.
+
+Not yet run against a real guest — see doc/linux-viewer.md, "What is unproven".
+
 ## What a start and an install cost
 
 Measured on the S25 Ultra (SM-S938B, Android 17, kernel 6.6, proot in seccomp

@@ -27,6 +27,8 @@
 #               http://127.0.0.1:6080/dex.html?password=<vncpass>&v=<rtpid>
 #               Ubuntu's own vnc.html and vnc_lite.html are untouched
 #               beside it.
+#   dockfit.py  no port — keeps the dock meeting the top bar whenever a
+#               viewer resizes the screen to its window. Written below.
 # The XFCE SESSION is what the runtime waits on: when it ends — the user logs
 # out, or xfce4-session dies — Xvnc and websockify are taken down with it and
 # proot exits. Without that the X server outlived the desktop and reconnecting
@@ -129,6 +131,255 @@ if [ -n "$SHARED" ]; then
     echo "shared folder: could not create or write $SHARED - bind skipped"
   fi
 fi
+
+# The dock's keeper, written into the guest at every start for the reason the
+# app copies this script in at every start: a guest built by an older setup
+# gets it with no setup pass. Started beside XFCE further down.
+#
+# Why it exists: dock.py stands the dock on the left edge, snapped to the
+# bottom, at a LENGTH that is a percent of the screen height -- the height less
+# the top bar, so the two edges meet -- and works it out once, for the screen it
+# saw. The screen does not hold still any more: every viewer asks Xvnc to make
+# it the shape of its window (the phone turned on its side, a window on the
+# desktop display dragged, a computer through remote access), and the same
+# percent of a new height leaves a gap under the top bar, or runs the dock up
+# into it and over the Applications button.
+mkdir -p "$ROOT/rootfs/usr/local/share/openandroiddex" 2>/dev/null
+cat > "$ROOT/rootfs/usr/local/share/openandroiddex/dockfit.py" 2>/dev/null <<'PYEOF'
+"""Keep the dock meeting the top bar whenever the screen changes size.
+
+Waits on the X server and puts the dock's length right after every resize.
+RandR tells the root window it was resized with a ConfigureNotify; blocked on
+that, this costs nothing while nothing changes, and it dies with the X server.
+The length goes through xfconfd (xfconf-query), never into the file: xfconfd
+owns the channel while the session runs, and the panel writes it all back out
+when it exits.
+
+Only while the dock is where dock.py put it -- vertical, snapped to the bottom
+of the left edge -- and at the length this gave it last (STATE), or, before
+there is a record, at a length dock.py could have made. A dock someone moved,
+or a length they chose, is theirs. The formula and the top bar's height are
+dock.py's own, so the first pass over a fresh guest changes nothing.
+
+The one argument is the session's start geometry, from linux-rt.sh.
+"""
+import ctypes
+import subprocess
+import sys
+
+MARK = "/root/.config/openandroiddex/dock-positioned"
+STATE = "/root/.config/openandroiddex/dock-length"
+CONFIGURE_NOTIFY = 22
+STRUCTURE_NOTIFY_MASK = 1 << 17
+
+# The height this session started at: dock.py worked the length out for it,
+# if this is the session it placed the dock in.
+START_H = 0
+if len(sys.argv) > 1:
+    try:
+        START_H = int(sys.argv[1].lower().split("x")[1])
+    except (IndexError, ValueError):
+        START_H = 0
+
+
+def xfconf(*args):
+    try:
+        return subprocess.run(("xfconf-query", "-c", "xfce4-panel") + args,
+                              stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                              universal_newlines=True, timeout=20)
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def panels():
+    """{"panel-1": {"position": "p=6;x=0;y=0", ...}, ...} in one call.
+
+    -l -v prints each property's name, padding, then its value; arrays print
+    as <<UNSUPPORTED>>, and none of the ones read here is an array.
+    """
+    found = {}
+    r = xfconf("-l", "-v")
+    if r is None or r.returncode != 0:
+        return found
+    for line in r.stdout.splitlines():
+        name, _, value = line.partition(" ")
+        parts = name.split("/")
+        if (len(parts) == 4 and parts[1] == "panels"
+                and parts[2].startswith("panel-")):
+            found.setdefault(parts[2], {})[parts[3]] = value.strip()
+    return found
+
+
+def snap(props):
+    pos = props.get("position", "")
+    if not pos.startswith("p="):
+        return -1
+    try:
+        return int(pos[2:].split(";")[0])
+    except ValueError:
+        return -1
+
+
+def top_bar(found, dock):
+    """dock.py's rule: a horizontal panel snapped along the top, 0 if none."""
+    for name in sorted(found):
+        props = found[name]
+        if name == dock or props.get("mode", "0") != "0":
+            continue
+        # NE, NW, NC, N -- the four that put a horizontal panel on top.
+        if snap(props) not in (2, 6, 9, 11):
+            continue
+        try:
+            return int(props.get("size") or 48) * int(props.get("nrows") or 1)
+        except ValueError:
+            return 48
+    return 0
+
+
+def number(text):
+    try:
+        return float(text)
+    except (TypeError, ValueError):
+        return None
+
+
+def made_for(height, top):
+    """dock.py's length for a screen this tall, as dock.py writes it."""
+    return "%.2f" % (float(height - top) * 100.0 / height)
+
+
+def dockpy_made(length, top):
+    """Could dock.py have given the dock this length?
+
+    It works the length out once, for the screen it first sees: this
+    session's, or that of a desktop the app started before this script
+    existed, every one of which was 600 to 2400 tall (LinuxService's floor and
+    ceiling then). A length it could not have made was chosen by someone.
+    """
+    heights = [START_H] if START_H > top else []
+    heights += [h for h in range(600, 2401) if h > top]
+    return any(abs(float(made_for(h, top)) - length) < 0.001 for h in heights)
+
+
+def ours(length, top):
+    """Is the dock still at the length this gave it -- or dock.py did?"""
+    if length is None:
+        return False
+    try:
+        with open(STATE) as f:
+            last = number(f.read().strip())
+    except OSError:
+        # Never recorded: a guest from before this, or the first pass over a
+        # new one. The length is dock.py's only if dock.py placed the dock (its
+        # marker) and the length is one it could have made. One someone chose
+        # in Panel Preferences is theirs -- unless it happens to be one dock.py
+        # could have made too, which nothing left on the guest can tell apart.
+        try:
+            with open(MARK) as f:
+                placed = int(f.read().strip() or 0) >= 4
+        except (OSError, ValueError):
+            return False
+        return placed and dockpy_made(length, top)
+    return last is not None and abs(length - last) < 0.01
+
+
+def fit(height):
+    found = panels()
+    dock = None
+    for name in sorted(found):
+        if found[name].get("mode") == "1" and snap(found[name]) == 8:
+            dock = name
+            break
+    if dock is None:
+        return
+    top = top_bar(found, dock)
+    if not 0 < top < height:
+        return
+    length = number(found[dock].get("length"))
+    if not ours(length, top):
+        return
+    want = made_for(height, top)
+    if length is None or abs(length - float(want)) >= 0.01:
+        r = xfconf("-p", "/panels/%s/length" % dock, "-n", "-t", "double", "-s", want)
+        if r is None or r.returncode != 0:
+            return
+    try:
+        with open(STATE, "w") as f:
+            f.write(want + "\n")
+    except OSError:
+        pass
+
+
+class XConfigureEvent(ctypes.Structure):
+    _fields_ = [("type", ctypes.c_int), ("serial", ctypes.c_ulong),
+                ("send_event", ctypes.c_int), ("display", ctypes.c_void_p),
+                ("event", ctypes.c_ulong), ("window", ctypes.c_ulong),
+                ("x", ctypes.c_int), ("y", ctypes.c_int),
+                ("width", ctypes.c_int), ("height", ctypes.c_int),
+                ("border_width", ctypes.c_int), ("above", ctypes.c_ulong),
+                ("override_redirect", ctypes.c_int)]
+
+
+class XEvent(ctypes.Union):
+    _fields_ = [("type", ctypes.c_int), ("xconfigure", XConfigureEvent),
+                ("pad", ctypes.c_long * 24)]
+
+
+def main():
+    try:
+        x = ctypes.CDLL("libX11.so.6")
+    except OSError:
+        return
+    x.XOpenDisplay.restype = ctypes.c_void_p
+    x.XOpenDisplay.argtypes = (ctypes.c_char_p,)
+    x.XDefaultRootWindow.restype = ctypes.c_ulong
+    x.XDefaultRootWindow.argtypes = (ctypes.c_void_p,)
+    x.XSelectInput.argtypes = (ctypes.c_void_p, ctypes.c_ulong, ctypes.c_long)
+    x.XGetGeometry.argtypes = (ctypes.c_void_p, ctypes.c_ulong,
+                               ctypes.POINTER(ctypes.c_ulong),
+                               ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int),
+                               ctypes.POINTER(ctypes.c_uint), ctypes.POINTER(ctypes.c_uint),
+                               ctypes.POINTER(ctypes.c_uint), ctypes.POINTER(ctypes.c_uint))
+    x.XPending.argtypes = (ctypes.c_void_p,)
+    x.XNextEvent.argtypes = (ctypes.c_void_p, ctypes.POINTER(XEvent))
+
+    dpy = x.XOpenDisplay(None)
+    if not dpy:
+        return
+    root = x.XDefaultRootWindow(dpy)
+    # Selected before the size is read, so a resize in between is not missed:
+    # the read is a round trip, and the request goes out ahead of it.
+    x.XSelectInput(dpy, root, STRUCTURE_NOTIFY_MASK)
+    win, pos = ctypes.c_ulong(), ctypes.c_int()
+    w, h, other = ctypes.c_uint(), ctypes.c_uint(), ctypes.c_uint()
+    height = 0
+    if x.XGetGeometry(dpy, root, ctypes.byref(win), ctypes.byref(pos), ctypes.byref(pos),
+                      ctypes.byref(w), ctypes.byref(h), ctypes.byref(other),
+                      ctypes.byref(other)):
+        height = h.value
+    # The session may have started at a height the length was not made for.
+    if height:
+        fit(height)
+
+    ev = XEvent()
+    while True:
+        x.XNextEvent(dpy, ctypes.byref(ev))
+        new = height
+        while True:
+            if ev.type == CONFIGURE_NOTIFY and ev.xconfigure.window == root:
+                new = ev.xconfigure.height
+            # A burst is answered once, for the size it ends at.
+            if not x.XPending(dpy):
+                break
+            x.XNextEvent(dpy, ctypes.byref(ev))
+        # Only the height moves the dock's length.
+        if new > 0 and new != height:
+            height = new
+            fit(height)
+
+
+main()
+PYEOF
 
 # The guest session, as one string so the quoting stays in one place.
 #
@@ -295,6 +546,17 @@ env DISPLAY=:1 DBUS_SESSION_BUS_ADDRESS=unix:abstract=dex-session-bus \
 XFCE=$!
 /usr/bin/websockify --web=/usr/share/novnc 127.0.0.1:6080 127.0.0.1:5901 &
 WS=$!
+# The dock follows the screen: see dockfit.py, written above this string. It
+# waits on X for a resize and costs nothing until one comes; niced, so that its
+# start never competes with the desktop starting beside it. Not on a guest
+# without python3, which has no dock.py to keep up with either. The geometry
+# tells it the height dock.py was handed, by the same sed as the Xvnc line.
+FIT=
+if [ -x /usr/bin/python3 ] && [ -f /usr/local/share/openandroiddex/dockfit.py ]; then
+  env DISPLAY=:1 DBUS_SESSION_BUS_ADDRESS=unix:abstract=dex-session-bus \
+    nice -n 10 python3 /usr/local/share/openandroiddex/dockfit.py GEOMETRY >/dev/null 2>&1 &
+  FIT=$!
+fi
 # THE session lifetime. Everything else is torn down behind it, so a logout
 # ends the container instead of leaving an empty X server behind. Its exit
 # status is carried all the way out: xfce4-session exits 0 when the user logged
@@ -303,7 +565,7 @@ WS=$!
 # in, and reading that as a crash is exactly what this used to do.
 wait $XFCE
 RC=$?
-kill -9 $WS $DBUS $XVNC $PULSE 2>/dev/null
+kill -9 $WS $DBUS $XVNC $PULSE $FIT 2>/dev/null
 exit $RC'
 
 # $GEO is host-side; substitute it rather than letting the guest shell see it.

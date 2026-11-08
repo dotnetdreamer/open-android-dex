@@ -187,6 +187,10 @@ public class LinuxActivity extends Activity {
     /** The none-timer re-kick fires once per window, not once per poll. */
     private boolean kicked;
     private long startSentAt;
+    /** A start is waiting for the window's first layout — see requestStart. */
+    private boolean startAfterLayout;
+    /** The viewer's chrome as last recorded — see rememberChrome; null until read. */
+    private String chromeSeen;
     /**
      * Set by Retry: phase stays "error" until the PC overwrites state.env,
      * and without the latch the very next poll would flip the screen
@@ -584,57 +588,121 @@ public class LinuxActivity extends Activity {
     }
 
     /**
-     * Ask the service to boot the container at a sensible desktop size.
+     * Ask the service to boot the container at the size the viewer is about to
+     * ask for: the window's shape, by {@link LinuxGuestSize}. The viewer keeps
+     * the desktop that shape from then on — the phone turned, the window
+     * resized — but one started at another shape would be laid out twice, the
+     * second time the moment the page connects.
      *
-     * The window's own pixels are the right answer on the desktop display: the
-     * viewer scales the framebuffer to the stage in CSS px, so a framebuffer
-     * sized in device pixels lands 1:1 whatever dpi the display-size preset
-     * picked. Up to a point: XFCE draws at 96 dpi whatever happens (its
-     * xsettings pin the scale at 1, for VNC's sake), so on a desktop fitted to
-     * a Retina or 4K screen — 320 dpi, two device pixels per dp — one for one
-     * would make it half the size of everything around it. There it gets whole
-     * device pixels per X pixel ({@link #pixelsPerGuestPixel}), drawn at the
-     * size it always had. They are the wrong answer on the phone's own panel: at density
-     * ~2.75 this window is ~972x2062 PIXELS, so Xvnc would be told to make a
-     * desktop that shape and the viewer would squeeze it back into ~354 CSS px
-     * of width. XFCE's 10 pt menus end up under a millimetre tall, and no
-     * amount of chrome design rescues that. The phone gets a fixed landscape
-     * desktop it pans and zooms around instead — which also means rotating the
-     * phone does not reflow XFCE.
+     * The rule is a different one in each window. On the desktop display it is
+     * the window's own pixels, in whole device pixels per guest pixel. On the
+     * phone's own panel the window's pixels are the wrong answer: at density
+     * ~2.75 this window is ~972x2062 PIXELS, and the viewer would squeeze a
+     * desktop that size back into ~354 CSS px of width — XFCE's 10 pt menus
+     * under a millimetre tall, which no amount of chrome design rescues. The
+     * phone gets 2.25 guest px to the CSS px instead, the same in either
+     * orientation wherever LinuxGuestSize's limits do not decide. (It used to
+     * get a fixed 1280x800, letterboxed into both.)
      *
      * The two are told apart by DISPLAY, not by density. Density looks like it
      * would work and does not: the desktop display's density is whatever
      * SettingsActivity's resolution and size presets computed, 1.0 only at the
      * 1080p preset (the same trap CaptionService documents), so a 1440p desktop
-     * would have taken the phone branch and booted a 1280x800 guest into a
+     * would have taken the phone branch and booted a phone-shaped guest into a
      * 2560-wide window.
      */
     private void requestStart() {
         long now = SystemClock.uptimeMillis();
         if (now - startSentAt < START_RETRY_MS) return;
+        // The box the WebView gets: the root less the insets it is padded by.
+        int bw = root.getWidth() - root.getPaddingLeft() - root.getPaddingRight();
+        int bh = root.getHeight() - root.getPaddingTop() - root.getPaddingBottom();
+        if ((bw <= 0 || bh <= 0) && !root.isLaidOut()) {
+            // The first poll can land before the first layout, and the size is
+            // the window's: wait for that layout rather than start a desktop of
+            // the wrong shape.
+            if (!startAfterLayout) {
+                startAfterLayout = true;
+                root.addOnLayoutChangeListener(new android.view.View.OnLayoutChangeListener() {
+                    @Override
+                    public void onLayoutChange(android.view.View v, int l, int t, int r, int b,
+                                               int ol, int ot, int or, int ob) {
+                        v.removeOnLayoutChangeListener(this);
+                        startAfterLayout = false;
+                        if (!destroyed) requestStart();
+                    }
+                });
+            }
+            return;
+        }
         startSentAt = now;
         final int w, h;
-        if (onPhone()) {
+        if (bw > 0 && bh > 0) {
+            // The bar and the keys row as the page last had them: both take
+            // height from the desktop, and the page restores both.
+            String chrome = chromeRecord();
+            int[] size = LinuxGuestSize.forWindow(onPhone(), bw, bh,
+                    getResources().getDisplayMetrics().density,
+                    !chrome.startsWith("bubble"), chrome.endsWith(" keys"));
+            w = size[0];
+            h = size[1];
+        } else {
+            // Laid out at no size at all: anything will do, the viewer asks for
+            // its own the moment it has a window to fit.
             w = 1280;
             h = 800;
-        } else {
-            int k = pixelsPerGuestPixel();
-            w = Math.max(root.getWidth() / k, 800);
-            h = Math.max(root.getHeight() / k, 600);
         }
         LinuxService.start(this, w, h);
         DexLog.step("linux", "START " + w + "x" + h);
     }
 
     /**
-     * Device pixels per guest pixel on the desktop: 1 around the usual 160 dpi,
-     * 2 from 280 (a desktop fitted to a 2x screen, or 1.75x of one), 3 from 440.
-     * Whole numbers only: the viewer then scales by exactly that, and XFCE's
-     * one-pixel lines stay one pixel wide instead of smearing across two.
+     * The viewer's chrome, kept for the next start: the bar docked or folded
+     * into the bubble, and the keys row pinned or not — "docked", "bubble",
+     * either with " keys" after it. Both take height from the desktop's box
+     * (dex.js, steadyBox), and both live in the page's localStorage, which
+     * nothing here can read before the page is up. So the window reads them off
+     * the live page ({@link #rememberChrome}) and a start goes by the last
+     * reading; until there is one, by the page's own defaults.
+     *
+     * A file beside the container, like the app list, and not inside it: the
+     * page's storage outlives a reinstall, so this does too.
      */
-    private int pixelsPerGuestPixel() {
-        int dpi = getResources().getDisplayMetrics().densityDpi;
-        return Math.max(1, (int) Math.floor(dpi / 160.0 + 0.25));
+    private java.io.File chromeFile() {
+        return new java.io.File(getFilesDir(), "linux-viewer-chrome");
+    }
+
+    private String chromeRecord() {
+        if (chromeSeen == null) chromeSeen = Linux.readFile(chromeFile()).trim();
+        return chromeSeen;
+    }
+
+    /**
+     * Read the chrome off the live page, and keep it if it changed. With every
+     * health probe of a painting page: two localStorage reads, and a write
+     * only when the user has folded the bar or pinned the keys row since.
+     *
+     * The page is served from inside the guest, so what it says is only ever
+     * allowed to pick one of the four records.
+     */
+    private void rememberChrome() {
+        if (webView == null) return;
+        webView.evaluateJavascript(
+                "(function(){try{return (localStorage.getItem('dexlinux.chrome')||'')"
+                        + "+'|'+(localStorage.getItem('dexlinux.keys')||'');}catch(e){return '';}})()",
+                raw -> {
+                    if (destroyed || raw == null) return;
+                    String v = raw.replace("\"", "");
+                    String rec = (v.startsWith("bubble|") ? "bubble" : "docked")
+                            + (v.endsWith("|1") ? " keys" : "");
+                    if (rec.equals(chromeRecord())) return;
+                    chromeSeen = rec;
+                    try (java.io.FileOutputStream out = new java.io.FileOutputStream(chromeFile())) {
+                        out.write(rec.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                    } catch (Exception e) {
+                        DexLog.warn("linux", "could not keep the viewer's chrome", e);
+                    }
+                });
     }
 
     /**
@@ -1519,6 +1587,7 @@ public class LinuxActivity extends Activity {
                         deadSince = 0;
                         loadTries = 0;
                         hideStartCard();
+                        rememberChrome();
                         return;
                     }
                     boolean dead = text.contains("closed") || text.contains("Failed")
