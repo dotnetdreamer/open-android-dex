@@ -1417,12 +1417,30 @@ public class LinuxService extends Service {
         DexLog.step("linux", "viewer staged (" + names.length + " files)");
     }
 
+    /**
+     * An asset onto disk whole, or not at all: written beside the target and
+     * renamed over it, as {@link #writeFile} does. Opening the target itself
+     * truncated it first, so a write that failed part way — a full phone, and
+     * a container can fill one — left an empty or cut-off file where a working
+     * one had been. linux-rt.sh is copied on every start and run on the next
+     * line: empty, it starts nothing; cut inside its session string, it writes
+     * rt.pid and stops, and the window connects to a desktop that never comes.
+     * A failed copy now leaves the last one in place, as startRuntime expects.
+     */
     private void copyAsset(String name, File dest) throws Exception {
+        File tmp = new File(dest.getAbsolutePath() + ".tmp");
         try (InputStream in = getAssets().open(name);
-             OutputStream out = new FileOutputStream(dest)) {
+             OutputStream out = new FileOutputStream(tmp)) {
             byte[] buf = new byte[1 << 14];
             int n;
             while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
+        } catch (Exception e) {
+            tmp.delete();
+            throw e;
+        }
+        if (!tmp.renameTo(dest)) {
+            tmp.delete();
+            throw new java.io.IOException("cannot replace " + dest);
         }
     }
 
