@@ -641,6 +641,8 @@ pub fn adb_list_devices(app: tauri::AppHandle) -> Result<Vec<DeviceInfo>, String
         *last = Some(summary);
     }
     note_attached(&devices);
+    // "Every time the app runs": each phone, once per plug-in.
+    see_to_child_process_limits(&app, &devices);
     *LAST_LIST.lock().unwrap() = Some((Instant::now(), devices.clone()));
     Ok(devices)
 }
@@ -682,6 +684,283 @@ fn note_attached(devices: &[DeviceInfo]) {
 /// How long `serial` has been ready without a break, if it is.
 pub fn attached_for(serial: &str) -> Option<Duration> {
     attached_since().lock().unwrap().get(serial).map(|t| t.elapsed())
+}
+
+// ── Android's child-process limit ─────────────────────────────────────────
+
+/// Where a phone on adb stands with its child-process limit, this run.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum LimitCheck {
+    /// Check number `attempt` is running, on a thread of its own.
+    Running { attempt: u32 },
+    /// Read back off (or there is no such limit): not looked at again until
+    /// the phone comes back onto adb.
+    Off,
+    /// Check number `attempt` did not leave it off (adb failed, or the phone
+    /// dropped the write): the poll tries again from `at`.
+    Retry { attempt: u32, at: Instant },
+}
+
+struct LimitChecks {
+    map: std::sync::Mutex<HashMap<String, LimitCheck>>,
+    /// Told whenever a check finishes, for [`child_limit_ready`].
+    done: std::sync::Condvar,
+}
+
+fn limit_checks() -> &'static LimitChecks {
+    static CHECKS: std::sync::OnceLock<LimitChecks> = std::sync::OnceLock::new();
+    CHECKS.get_or_init(|| LimitChecks { map: Default::default(), done: Default::default() })
+}
+
+/// The wait before the poll tries a phone again after its `attempt`th check
+/// failed: 30 s, doubling, never more than 10 minutes. A phone that drops the
+/// write every time is asked a few times an hour, not every 2.5 s.
+fn limit_retry_after(attempt: u32) -> Duration {
+    let doublings = attempt.saturating_sub(1).min(5);
+    Duration::from_secs((30u64 << doublings).min(600))
+}
+
+/// Which check, if any, the poll starts for a phone in `state` at `now`.
+fn limit_check_due(state: Option<&LimitCheck>, now: Instant) -> Option<u32> {
+    match state {
+        None => Some(1),
+        Some(LimitCheck::Retry { attempt, at }) if now >= *at => Some(attempt + 1),
+        _ => None,
+    }
+}
+
+/// Start check number `attempt` on its own thread; `map` is the caller's, locked.
+fn start_limit_check(app: &tauri::AppHandle, serial: &str, attempt: u32, map: &mut HashMap<String, LimitCheck>) {
+    map.insert(serial.to_string(), LimitCheck::Running { attempt });
+    let (app, serial) = (app.clone(), serial.to_string());
+    thread::spawn(move || {
+        let off = ensure_child_process_limit_off(&app, &serial);
+        let next = if off {
+            LimitCheck::Off
+        } else {
+            let wait = limit_retry_after(attempt);
+            log::info!("child-process limit on {serial}: trying again in {}s (attempt {attempt} failed)", wait.as_secs());
+            LimitCheck::Retry { attempt, at: Instant::now() + wait }
+        };
+        let checks = limit_checks();
+        checks.map.lock().unwrap().insert(serial, next);
+        checks.done.notify_all();
+    });
+}
+
+/// From the device poll: every ready phone is seen to as it comes onto adb,
+/// and again, backing off, until its limit reads back off. Never waits.
+fn see_to_child_process_limits(app: &tauri::AppHandle, devices: &[DeviceInfo]) {
+    let checks = limit_checks();
+    let mut map = checks.map.lock().unwrap();
+    // A phone gone from adb is forgotten, so it is checked afresh when it
+    // comes back. Not while its check runs: that thread writes its result here.
+    map.retain(|serial, state| {
+        matches!(state, LimitCheck::Running { .. })
+            || devices.iter().any(|d| d.serial == *serial && d.state == "device")
+    });
+    let now = Instant::now();
+    for d in devices.iter().filter(|d| d.state == "device") {
+        if let Some(attempt) = limit_check_due(map.get(&d.serial), now) {
+            start_limit_check(app, &d.serial, attempt, &mut map);
+        }
+    }
+}
+
+/// Before a Linux desktop starts on `serial` over adb: its limit off, as far as
+/// `wait` allows. Waits for a check that is running, and starts one at once if
+/// there was none or the last one failed, without waiting out the poll's
+/// back-off. True only when the limit has read back off. Blocking.
+pub fn child_limit_ready(app: &tauri::AppHandle, serial: &str, wait: Duration) -> bool {
+    let checks = limit_checks();
+    let deadline = Instant::now() + wait;
+    let mut map = checks.map.lock().unwrap();
+    match map.get(serial).copied() {
+        Some(LimitCheck::Off) => return true,
+        Some(LimitCheck::Running { .. }) => {}
+        None => start_limit_check(app, serial, 1, &mut map),
+        Some(LimitCheck::Retry { attempt, .. }) => start_limit_check(app, serial, attempt + 1, &mut map),
+    }
+    loop {
+        match map.get(serial) {
+            Some(LimitCheck::Off) => return true,
+            Some(LimitCheck::Running { .. }) => {}
+            _ => return false,
+        }
+        let now = Instant::now();
+        if now >= deadline {
+            return false;
+        }
+        map = checks.done.wait_timeout(map, deadline - now).unwrap().0;
+    }
+}
+
+/// Switch off Android's limit on child processes, if it is on, and say whether
+/// it now reads back off.
+///
+/// From Android 12, Android counts the processes apps have started besides
+/// their own ("phantom processes"), all apps together, and once there are more
+/// than 32 on the phone it kills the surplus: the children of the least
+/// important app first and, among one app's, the oldest first. For the
+/// launcher's Linux, the oldest are the session's own: sshd, linux-rt.sh,
+/// proot, then Xvnc and XFCE. So a browser in the guest, about fifteen
+/// processes for one busy tab, took the whole desktop down. Seen on the S25
+/// Ultra on 2026-11-11 as `Killing PhantomProcessRecord {… libproot.so…}:
+/// Trimming phantom processes`, with 38 of them, all the launcher's, six over
+/// and the six oldest killed, while the desktop window said it had been "shut
+/// down, or logged out of, on the phone". The launcher cannot switch it off
+/// for itself (ChildProcessLimit.java). The shell can, and this is the shell.
+///
+/// Both of its knobs, off by default, on every phone it sees:
+///
+/// - The `settings_enable_monitor_phantom_procs` feature flag, from Android
+///   12L. Off, the trim does nothing at all: the first thing it tests is this
+///   flag, as read from the S25's own services.jar (Android 17). Developer
+///   options' "Disable child process restrictions" (Android 14 and later)
+///   keeps it in a property the shell is not allowed to set (system_prop,
+///   refused on the S25 and the AVD), so this writes the Settings.Global
+///   value, which FeatureFlagUtils reads FIRST. While it is there, that switch
+///   cannot turn the limit back on; `settings delete global` does.
+/// - The `max_phantom_processes` device config, raised out of reach, from
+///   Android 12. It is Android 12's only knob, and from 12L the second line
+///   behind the flag, should that ever be deleted. Google's config sync may
+///   put it back later, and the next check raises it again. Sync is NOT
+///   disabled for it, as some guides do: that stops every remote config
+///   update on the phone, not just this one.
+///
+/// Never undone, unlike the session's other settings. Put back with a guest
+/// running, the trim would kill it on the spot, and Linux goes on running on
+/// the phone after the cable is pulled.
+pub fn ensure_child_process_limit_off(app: &tauri::AppHandle, serial: &str) -> bool {
+    let out = match run_adb_full(app, &["-s", serial, "shell", &child_limit_script()], Duration::from_secs(15), false) {
+        Ok(out) => out,
+        Err(e) => {
+            log::warn!("child-process limit on {serial}: could not look ({e})");
+            return false;
+        }
+    };
+    let (answer, sdk) = read_child_limit_answer(&out);
+    let knobs = match answer {
+        ChildLimit::NoLimit => {
+            log::info!("child-process limit on {serial}: none (sdk {sdk}, before Android 12)");
+            return true;
+        }
+        ChildLimit::NoAnswer => {
+            log::warn!("child-process limit on {serial}: no answer ({})", trunc(&out));
+            return false;
+        }
+        ChildLimit::Knobs(knobs) => knobs,
+    };
+    let switched: Vec<String> = knobs
+        .iter()
+        .filter_map(|k| match k {
+            Knob::SwitchedOff { knob, value } => Some(format!("{knob}={value}")),
+            _ => None,
+        })
+        .collect();
+    if knobs.iter().all(|k| matches!(k, Knob::AlreadyOff(_))) {
+        log::info!("child-process limit on {serial}: already off (sdk {sdk})");
+    } else if !switched.is_empty() {
+        log::info!(
+            "child-process limit on {serial}: was on, switched off ({}, sdk {sdk}). Past 32 child \
+             processes on the phone Android kills some, an app's oldest first, and for Linux those \
+             are proot and the desktop",
+            switched.join(", ")
+        );
+    }
+    let mut off = true;
+    for k in &knobs {
+        if let Knob::Refused { knob, want, now } = k {
+            off = false;
+            log::warn!(
+                "child-process limit on {serial}: could not switch it off ({knob} reads {now:?} \
+                 after writing {want}, sdk {sdk}). Android may close Linux there once the phone runs \
+                 more than 32 child processes, unless Developer options' \"Disable child process \
+                 restrictions\" is on"
+            );
+        }
+    }
+    off
+}
+
+/// The feature flag that turns the limit off, from Android 12L.
+const CHILD_LIMIT_FLAG: &str = "settings_enable_monitor_phantom_procs";
+/// The limit itself, and the value that puts it out of reach: Android 12's
+/// only knob, and a second line behind the flag from 12L, in case the flag is
+/// ever deleted (by hand, or by an update).
+const CHILD_LIMIT_MAX: (&str, &str) = ("max_phantom_processes", "2147483647");
+
+/// The one round trip [`ensure_child_process_limit_off`] makes. It reads
+/// before it writes, so a phone where both are already off is not written to
+/// at all. It prints a verdict line per knob (`none` before Android 12), then
+/// `sdk <n>`.
+fn child_limit_script() -> String {
+    let (max_knob, max) = CHILD_LIMIT_MAX;
+    format!(
+        "s=$(getprop ro.build.version.sdk); \
+         if [ \"$s\" -ge 31 ] 2>/dev/null; then \
+           if [ \"$s\" -ge 32 ]; then \
+             v=$(settings get global {CHILD_LIMIT_FLAG}); p=$(getprop persist.sys.fflag.override.{CHILD_LIMIT_FLAG}); \
+             off=0; [ \"$v\" = false ] && off=1; [ \"$v\" = null ] && [ \"$p\" = false ] && off=1; \
+             if [ $off = 1 ]; then echo flag off; \
+             else settings put global {CHILD_LIMIT_FLAG} false; echo flag on $(settings get global {CHILD_LIMIT_FLAG}); fi; \
+           fi; \
+           m=$(device_config get activity_manager {max_knob}); \
+           if [ \"$m\" = {max} ]; then echo max off; \
+           else device_config put activity_manager {max_knob} {max}; \
+           echo max on $(device_config get activity_manager {max_knob}); fi; \
+         else echo none; fi; \
+         echo sdk $s"
+    )
+}
+
+/// What [`child_limit_script`] found.
+#[derive(Debug, PartialEq)]
+enum ChildLimit {
+    /// Before Android 12: there is no such limit.
+    NoLimit,
+    /// Each knob it looked at, in the order it printed them.
+    Knobs(Vec<Knob>),
+    /// Nothing the script prints: not the phone's answer at all.
+    NoAnswer,
+}
+
+#[derive(Debug, PartialEq)]
+enum Knob {
+    AlreadyOff(&'static str),
+    /// It was on, and the write took.
+    SwitchedOff { knob: &'static str, value: &'static str },
+    /// It was on, and the knob reads `now` after writing `want`: a managed or
+    /// hardened phone that accepts a write and drops it.
+    Refused { knob: &'static str, want: &'static str, now: String },
+}
+
+/// The verdict lines and the SDK level ("?" when missing) out of the script's output.
+fn read_child_limit_answer(out: &str) -> (ChildLimit, String) {
+    let lines: Vec<&str> = out.lines().map(str::trim).collect();
+    let sdk = lines.iter().find_map(|l| l.strip_prefix("sdk ")).unwrap_or("?").to_string();
+    if lines.contains(&"none") {
+        return (ChildLimit::NoLimit, sdk);
+    }
+    let knobs: Vec<Knob> = lines
+        .iter()
+        .filter(|l| l.starts_with("flag ") || l.starts_with("max "))
+        .map(|line| {
+            let (knob, want) = if line.starts_with("flag ") { (CHILD_LIMIT_FLAG, "false") } else { CHILD_LIMIT_MAX };
+            if line.ends_with(" off") {
+                return Knob::AlreadyOff(knob);
+            }
+            // "<knob> on <value after the write>"; the value is empty when the read failed.
+            let now = line.splitn(3, ' ').nth(2).unwrap_or("").trim();
+            if now == want {
+                Knob::SwitchedOff { knob, value: want }
+            } else {
+                Knob::Refused { knob, want, now: now.to_string() }
+            }
+        })
+        .collect();
+    let answer = if knobs.is_empty() { ChildLimit::NoAnswer } else { ChildLimit::Knobs(knobs) };
+    (answer, sdk)
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2943,6 +3222,97 @@ pub fn adb_launch_on_display(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_child_limit_answer_reads_every_way_a_phone_answers() {
+        const MAX: &str = "max_phantom_processes";
+        let knobs = |out: &str| match read_child_limit_answer(out).0 {
+            ChildLimit::Knobs(k) => k,
+            other => panic!("expected knobs from {out:?}, got {other:?}"),
+        };
+        // The S25 Ultra (Android 17), 2026-11-11: the flag already off from
+        // the first version of this, the cap not yet raised; CRLF as adb on
+        // Windows may hand it over.
+        assert_eq!(
+            read_child_limit_answer("flag off\r\nmax on 2147483647\r\nsdk 37\r\n"),
+            (
+                ChildLimit::Knobs(vec![
+                    Knob::AlreadyOff(CHILD_LIMIT_FLAG),
+                    Knob::SwitchedOff { knob: MAX, value: "2147483647" },
+                ]),
+                "37".to_string()
+            )
+        );
+        // A phone seen for the first time, and one with both already off.
+        assert_eq!(
+            knobs("flag on false\nmax on 2147483647\nsdk 35\n"),
+            vec![
+                Knob::SwitchedOff { knob: CHILD_LIMIT_FLAG, value: "false" },
+                Knob::SwitchedOff { knob: MAX, value: "2147483647" },
+            ]
+        );
+        assert_eq!(
+            knobs("flag off\nmax off\nsdk 37\n"),
+            vec![Knob::AlreadyOff(CHILD_LIMIT_FLAG), Knob::AlreadyOff(MAX)]
+        );
+        // Android 12: the cap only, there is no flag yet.
+        assert_eq!(knobs("max on 2147483647\nsdk 31\n"), vec![Knob::SwitchedOff { knob: MAX, value: "2147483647" }]);
+        // Writes taken and dropped, and a read that failed.
+        assert_eq!(
+            knobs("flag on null\nmax on 32\nsdk 33\n"),
+            vec![
+                Knob::Refused { knob: CHILD_LIMIT_FLAG, want: "false", now: "null".to_string() },
+                Knob::Refused { knob: MAX, want: "2147483647", now: "32".to_string() },
+            ]
+        );
+        assert_eq!(
+            knobs("flag on\nmax off\nsdk 33\n"),
+            vec![
+                Knob::Refused { knob: CHILD_LIMIT_FLAG, want: "false", now: String::new() },
+                Knob::AlreadyOff(MAX),
+            ]
+        );
+        // Before Android 12 (the Redmi 9A), and nothing that is an answer.
+        assert_eq!(read_child_limit_answer("none\nsdk 30\n"), (ChildLimit::NoLimit, "30".to_string()));
+        assert_eq!(read_child_limit_answer(""), (ChildLimit::NoAnswer, "?".to_string()));
+        assert_eq!(read_child_limit_answer("error: closed\n").0, ChildLimit::NoAnswer);
+    }
+
+    #[test]
+    fn a_phone_whose_check_failed_is_checked_again_backing_off() {
+        let now = Instant::now();
+        // Seen for the first time: check number 1.
+        assert_eq!(limit_check_due(None, now), Some(1));
+        // Running, or read back off: nothing to start.
+        assert_eq!(limit_check_due(Some(&LimitCheck::Running { attempt: 1 }), now), None);
+        assert_eq!(limit_check_due(Some(&LimitCheck::Off), now), None);
+        // Failed: not before its time, then the next attempt.
+        let later = now + Duration::from_secs(30);
+        let failed = LimitCheck::Retry { attempt: 2, at: later };
+        assert_eq!(limit_check_due(Some(&failed), now), None);
+        assert_eq!(limit_check_due(Some(&failed), later), Some(3));
+        // 30 s, doubling, never more than ten minutes.
+        let waits: Vec<u64> = (1..=8).map(|n| limit_retry_after(n).as_secs()).collect();
+        assert_eq!(waits, vec![30, 60, 120, 240, 480, 600, 600, 600]);
+        assert_eq!(limit_retry_after(0).as_secs(), 30);
+        assert_eq!(limit_retry_after(u32::MAX).as_secs(), 600);
+    }
+
+    #[test]
+    fn the_child_limit_script_reads_before_it_writes() {
+        let s = child_limit_script();
+        // Each write sits in the else of a test that it is already off.
+        let flag_read = s.find("settings get global settings_enable_monitor_phantom_procs").unwrap();
+        let flag_write = s.find("settings put global settings_enable_monitor_phantom_procs false").unwrap();
+        assert!(flag_read < flag_write);
+        assert!(s.find("echo flag off").unwrap() < flag_write);
+        let max_read = s.find("device_config get activity_manager max_phantom_processes").unwrap();
+        let max_write = s.find("device_config put activity_manager max_phantom_processes 2147483647").unwrap();
+        assert!(max_read < max_write);
+        assert!(s.find("echo max off").unwrap() < max_write);
+        // Never the guides' sync switch: it stops every remote config update on the phone.
+        assert!(!s.contains("set_sync_disabled_for_tests"));
+    }
 
     #[test]
     fn a_serial_with_a_space_in_it_stays_whole() {

@@ -47,7 +47,8 @@ type Phase =
   | { kind: "connecting" }
   | { kind: "starting" }
   | { kind: "up" }
-  | { kind: "stopped" }
+  /** `message`: why, when the phone knows more than that it stopped (Android closed it). */
+  | { kind: "stopped"; message?: string }
   | { kind: "failed"; message: string };
 
 interface Stats {
@@ -507,7 +508,7 @@ export function UsbDesktop({
             told = true;
             up = false;
             gone();
-            setPhase({ kind: "stopped" });
+            setPhase({ kind: "stopped", message: message || undefined });
           } else {
             told = true;
             up = false;
@@ -629,7 +630,7 @@ export function UsbDesktop({
         <DesktopCover
           name={name}
           state={phase.kind}
-          message={phase.kind === "failed" ? phase.message : undefined}
+          message={phase.kind === "failed" || phase.kind === "stopped" ? phase.message : undefined}
           via={tier === "cable" ? "usb" : "wifi"}
           onAgain={() => actions.current.again()}
           onClose={() => void getCurrentWindow().close()}

@@ -488,6 +488,10 @@ public class LinuxActivity extends Activity {
             // otherwise. The "no runtime? start one" rule below is what made a
             // logout boot a fresh desktop a second later.
             if (!st.running && st.sessionEnded && !sessionRestartPending) {
+                if (ChildProcessLimit.killedByLimit(this, st)) {
+                    showKilled();
+                    return;
+                }
                 boolean clean = st.sessionExit == 0;
                 showAction(s(clean ? R.string.ln_session_ended : R.string.ln_session_failed),
                         s(clean ? R.string.ln_session_ended_sub : R.string.ln_session_failed_sub),
@@ -1643,20 +1647,64 @@ public class LinuxActivity extends Activity {
     /** ...and, for a failed step that can be done without, Skip beside the button. */
     private void showAction(String titleText, String detail, String buttonLabel,
                             String skipStep) {
+        showAction(titleText, detail, buttonLabel,
+                skipStep == null ? null : getString(R.string.ln_step_skip, stepName(skipStep)),
+                skipStep == null ? null : () -> askSkip(skipStep, true));
+    }
+
+    /**
+     * A session Android killed for running too many programs
+     * ({@link ChildProcessLimit}): said as that, not as a crash, with the one
+     * switch that stops it and, where this phone has it, a way there.
+     */
+    private void showKilled() {
+        boolean offer = ChildProcessLimit.hasSwitch()
+                && ChildProcessLimit.state(this) != ChildProcessLimit.State.OFF;
+        showAction(s(R.string.ln_session_killed), ChildProcessLimit.explain(this, false),
+                s(R.string.ln_session_start),
+                offer ? s(R.string.ln_dev_options) : null,
+                offer ? this::openDeveloperOptions : null);
+    }
+
+    /** Developer options, in a task of its own beside this one, as openRemote does. */
+    private void openDeveloperOptions() {
+        try {
+            startActivity(ChildProcessLimit.switchIntent());
+        } catch (Exception e) {
+            // Developer options switched off leaves no such screen. Settings'
+            // front page is the way to About phone, where it is switched on.
+            DexLog.warn("linux", "cannot open Developer options", e);
+            try {
+                startActivity(new Intent(android.provider.Settings.ACTION_SETTINGS)
+                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+            } catch (Exception ignored) {
+            }
+        }
+    }
+
+    /** ...with a second, quieter button beside the first when {@code secondLabel} is given. */
+    private void showAction(String titleText, String detail, String buttonLabel,
+                            String secondLabel, Runnable second) {
         if (UI_ERROR.equals(uiState) && titleText.equals(shownActionTitle)) return;
         uiState = UI_ERROR;
         shownActionTitle = titleText;
         LinearLayout column = centeredColumn();
         glyph(column);
         title(column, titleText);
-        if (detail != null && !detail.isEmpty()) subtext(column, detail);
+        if (detail != null && !detail.isEmpty()) {
+            TextView d = subtext(column, detail);
+            // A paragraph rather than a line (showKilled's): left to
+            // WRAP_CONTENT it is one line as wide as the window, as the
+            // chooser's body would be.
+            if (detail.length() > 120) d.setMaxWidth(dp(360));
+        }
 
         TextView retry = primaryButton(buttonLabel, this::retryProvision);
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         lp.topMargin = dp(20);
         lp.gravity = Gravity.CENTER_HORIZONTAL;
-        if (skipStep == null) {
+        if (secondLabel == null) {
             column.addView(retry, lp);
         } else {
             boolean stacked = onPhone();
@@ -1664,8 +1712,7 @@ public class LinuxActivity extends Activity {
             row.setOrientation(stacked ? LinearLayout.VERTICAL : LinearLayout.HORIZONTAL);
             row.setGravity(Gravity.CENTER);
             row.addView(retry);
-            TextView skip = dialogButton(getString(R.string.ln_step_skip, stepName(skipStep)),
-                    theme.hover, theme.text, () -> askSkip(skipStep, true));
+            TextView skip = dialogButton(secondLabel, theme.hover, theme.text, second);
             LinearLayout.LayoutParams skipLp = (LinearLayout.LayoutParams) skip.getLayoutParams();
             skipLp.leftMargin = stacked ? 0 : dp(10);
             skipLp.topMargin = stacked ? dp(10) : 0;

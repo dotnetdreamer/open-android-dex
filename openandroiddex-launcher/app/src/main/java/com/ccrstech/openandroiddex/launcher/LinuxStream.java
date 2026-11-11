@@ -85,6 +85,13 @@ final class LinuxStream {
         String vncPassword();
 
         /**
+         * Said with "stopped" when there is more to say than that: Android
+         * killed the desktop (ChildProcessLimit). Null for a logout or a stop.
+         * Waits up to {@code waitMs} for the runtime's verdict.
+         */
+        String stoppedWhy(long waitMs);
+
+        /**
          * A session began or ended: the service must not idle out from under
          * one, and the CPU must not sleep under it — a phone in a bag with its
          * screen off is still drawing the desktop for someone.
@@ -455,7 +462,8 @@ final class LinuxStream {
                     state = "starting";
                 }
                 if (!"starting".equals(state)) {
-                    state(state, null);
+                    // Long settled by now, so no wait for the why.
+                    state(state, "stopped".equals(state) ? host.stoppedWhy(0) : null);
                     return false;
                 }
                 // Said again every couple of seconds: it is also how a window
@@ -506,10 +514,11 @@ final class LinuxStream {
                 newEncoder(r.width, r.height);
                 while (!closing) r.readMessage(this);
             } catch (EOFException e) {
-                // Xvnc went away: the desktop was logged out of, or stopped.
+                // Xvnc went away: the desktop was logged out of, or stopped,
+                // or killed by Android, which the window is told in words.
                 if (!closing) {
                     try {
-                        state("stopped", null);
+                        state("stopped", host.stoppedWhy(3000));
                     } catch (IOException ignored) {
                     }
                 }

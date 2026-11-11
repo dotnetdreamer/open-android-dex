@@ -508,6 +508,26 @@ pub async fn remote_desktop_usb(
     let Some(device) = find(&app, &id, wake).await else {
         return Ok(None);
     };
+    // Android's child-process limit is what killed this desktop under a busy
+    // browser (adb.rs, ensure_child_process_limit_off). The device poll has
+    // usually seen to it already. Waited for, not just started: the window
+    // asks the phone to start the desktop as soon as this returns. Bounded,
+    // so a phone that will not answer still gets its desktop.
+    {
+        let (app, serial) = (app.clone(), device.serial.clone());
+        let off = tauri::async_runtime::spawn_blocking(move || {
+            crate::adb::child_limit_ready(&app, &serial, Duration::from_secs(8))
+        })
+        .await
+        .unwrap_or(false);
+        if !off {
+            log::warn!(
+                "remote: {}'s child-process limit is not known to be off; Android may close its \
+                 desktop once the phone runs more than 32 child processes",
+                device.serial
+            );
+        }
+    }
     let dev = if tauri::is_dev() {
         app.config().build.dev_url.as_ref().map(|u| u.origin().ascii_serialization())
     } else {

@@ -99,7 +99,9 @@ export function DesktopCover({
   const copy: Record<typeof state, [string, string]> = {
     connecting: [`Reaching ${name}…`, ""],
     starting: [`Starting the desktop on ${name}…`, "The first start can take a minute."],
-    stopped: [`The desktop isn't running on ${name}`, "It was shut down, or logged out of, on the phone."],
+    // The phone says why when it was not someone on it: Android closing it for
+    // running too many programs (ChildProcessLimit.java).
+    stopped: [`The desktop isn't running on ${name}`, message || "It was shut down, or logged out of, on the phone."],
     failed: [`Couldn't open the desktop on ${name}`, message ?? ""],
   };
   const [title, detail] = copy[state];
