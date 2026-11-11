@@ -1,0 +1,13 @@
+--- a/src/amd/common/ac_gpu_info.c
++++ b/src/amd/common/ac_gpu_info.c
+@@ -2104,7 +2104,9 @@
+    assert(info->drm_major == AC_AMDGPU_DRM_MAJOR);
+    info->is_amdgpu = true;
+ 
+-   if (info->drm_minor < AC_AMDGPU_DRM_MINOR) {
++   /* Open Android DeX: only with RADV_XCLIPSE_LOG. The Galaxy S24's kernel is 3.42, and
++    * on Linux the line reached the terminal of every GL app started there. */
++   if (info->drm_minor < AC_AMDGPU_DRM_MINOR && ac_xclipse_log_level() >= 1) {
+       fprintf(stderr, "amdgpu: DRM version is %u.%u.%u (< %u.%u); continuing.\n",
+               info->drm_major, info->drm_minor, info->drm_patchlevel,
+               AC_AMDGPU_DRM_MAJOR, AC_AMDGPU_DRM_MINOR);

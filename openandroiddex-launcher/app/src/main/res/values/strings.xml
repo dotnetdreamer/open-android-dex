@@ -1029,6 +1029,9 @@ If you switch this off again later, Android force-closes Linux and the desktop r
 
     <!-- The Linux tile's menu -->
     <string name="ln_remote_menu">Remote access…</string>
+    <string name="ln_gpu_menu">Use the GPU</string>
+    <string name="ln_gpu_on">Linux apps will use the GPU from the next time Linux starts.</string>
+    <string name="ln_gpu_off">Linux apps will use the CPU from the next time Linux starts.</string>
 
     <!-- ── Linux app windows ── -->
     <!-- A Linux app opens as a window of its own; the toast while it starts. -->

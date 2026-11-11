@@ -403,9 +403,39 @@ PYEOF
 # inherits xfce4-session's environment, which is this one.
 SESSION='rm -f /tmp/.X1-lock /tmp/.X11-unix/X1 /tmp/.oadx-bus
 mkdir -p /tmp/runtime-root && chmod 700 /tmp/runtime-root
+# The GPU (doc/linux-gpu.md). OADX_GPU names the driver the app copied into
+# this guest: turnip on an Adreno phone, xclipse (RADV) on an Exynos with an
+# Xclipse GPU, nothing anywhere else. Whether it really runs here is the probe
+# to say, which opens the GPU the way an app would, through that driver alone.
+# It runs beside the Xvnc start, so it costs the session next to nothing.
+GPUPROBE=
+GPUDIR=/usr/local/lib/openandroiddex/gpu
+if [ -n "$OADX_GPU" ] && [ -x $GPUDIR/oadx-vkprobe ] && [ -f $GPUDIR/${OADX_GPU}_icd.json ]; then
+  VK_ICD_FILENAMES=$GPUDIR/${OADX_GPU}_icd.json \
+    timeout 15 $GPUDIR/oadx-vkprobe >/tmp/.oadx-gpu 2>&1 &
+  GPUPROBE=$!
+fi
 Xvnc :1 -geometry GEOMETRY -depth 24 -rfbport 5901 -localhost \
   -rfbauth /root/.vnc/passwd -SecurityTypes VncAuth &
 XVNC=$!
+# Only a yes points GL at the GPU, because Mesa does not fall back by itself:
+# an app told to use Zink with no working GPU under it gets no GL at all.
+# Exported here, after Xvnc and before the bus: every app the session starts
+# gets it, the ones the bus activates too, and the X server does not -- its
+# own GLX would otherwise keep a GPU context open for nothing. Zink is GL on
+# top of our Vulkan driver, presenting through its own swapchain (kopper). Xvnc
+# has no DRI3, so GLX allows that only with LIBGL_KOPPER_DRI2 set, and the
+# WSI software path is how each finished frame reaches the window. NOT
+# GALLIUM_DRIVER=zink: that puts Zink under the software GL path, where it
+# renders and never shows a frame -- measured, a black window at 1600 FPS.
+if [ -n "$GPUPROBE" ]; then
+  if wait $GPUPROBE; then
+    echo "gpu: $(head -c 200 /tmp/.oadx-gpu)"
+    export MESA_LOADER_DRIVER_OVERRIDE=zink LIBGL_KOPPER_DRI2=1 MESA_VK_WSI_DEBUG=sw
+  else
+    echo "gpu: not used -- $(head -c 300 /tmp/.oadx-gpu)"
+  fi
+fi
 # NOTHING BELOW WAITS ON A CLOCK. This used to be Xvnc, sleep 2, the bus,
 # sleep 1, two python3 starts one after the other, the sound server, sleep 1,
 # and only then XFCE: four seconds of fixed sleeps on every launch whether the
@@ -592,6 +622,7 @@ SESSION=$(echo "$SESSION" | sed "s/GEOMETRY/$GEO/")
   -w /root /usr/bin/env -i HOME=/root TERM=xterm-256color DEBIAN_FRONTEND=noninteractive \
   PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
   XDG_CONFIG_DIRS=/usr/local/etc/xdg:/etc/xdg \
+  OADX_GPU="${LINUX_GPU:-}" \
   /bin/sh -c "$SESSION" &
 PROOT_PID=$!
 wait "$PROOT_PID"

@@ -975,6 +975,10 @@ public class LinuxService extends Service {
                     "/system/bin/sh", Linux.rtScript(this).getAbsolutePath());
             pb.directory(dir);
             pb.environment().putAll(Linux.scriptEnv(this));
+            // The phone's GPU for the session's GL apps, on an Adreno or an
+            // Xclipse phone; the guest probes it before using it. Anywhere
+            // else nothing is added and they draw on the CPU as before.
+            LinuxGpu.env(this, pb.environment());
             pb.redirectErrorStream(true);
             pb.redirectOutput(new File(dir, "rt.log"));
             // NOT waited and NOT setsid'd: it stays a child of this app so a
@@ -984,6 +988,7 @@ public class LinuxService extends Service {
             runtimeSpawnedAt = android.os.SystemClock.elapsedRealtime();
             runtimeProc = pb.start();
             liveRuntime = runtimeProc;
+            LinuxGpu.reportVerdict(pb.environment(), new File(dir, "rt.log"));
             // The guest has no audio device: it plays into a null sink and this
             // drains that sink's monitor into an AudioTrack. Started here rather
             // than when the window opens, because the container is what produces
@@ -1125,11 +1130,13 @@ public class LinuxService extends Service {
             ProcessBuilder pb = new ProcessBuilder("/system/bin/sh", Linux.winScript(this).getAbsolutePath());
             pb.directory(dir);
             pb.environment().putAll(Linux.scriptEnv(this));
+            LinuxGpu.env(this, pb.environment());
             pb.redirectErrorStream(true);
             pb.redirectOutput(new File(dir, "win.log"));
             Process p = pb.start();
             winInput = p.getOutputStream();
             liveWin = p;
+            LinuxGpu.reportVerdict(pb.environment(), new File(dir, "win.log"));
             LinuxAudio.start(LinuxAudio.WINDOWS);
             goForeground(getString(R.string.ln_label));
             DexLog.step("linux", "window session started " + w + "x" + h + " at " + dpi + " dpi");

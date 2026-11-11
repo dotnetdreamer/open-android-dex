@@ -1,0 +1,133 @@
+diff -ruN a/include/xclipse_linux_compat/android/log.h b/include/xclipse_linux_compat/android/log.h
+--- a/include/xclipse_linux_compat/android/log.h
++++ b/include/xclipse_linux_compat/android/log.h
+@@ -0,0 +1,63 @@
++/*
++ * Open Android DeX: the <android/log.h> a glibc Linux build of radv-xclipse
++ * gets (meson.build puts include/xclipse_linux_compat on the include path for
++ * one, but the port never published the directory). The Xclipse code logs
++ * through liblog; here every message goes to stderr instead. What is logged,
++ * and when, is still the port's decision (RADV_XCLIPSE_LOG).
++ *
++ * SPDX-License-Identifier: MIT
++ */
++#ifndef XCLIPSE_LINUX_COMPAT_ANDROID_LOG_H
++#define XCLIPSE_LINUX_COMPAT_ANDROID_LOG_H
++
++#include <stdarg.h>
++#include <stdio.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++typedef enum android_LogPriority {
++   ANDROID_LOG_UNKNOWN = 0,
++   ANDROID_LOG_DEFAULT,
++   ANDROID_LOG_VERBOSE,
++   ANDROID_LOG_DEBUG,
++   ANDROID_LOG_INFO,
++   ANDROID_LOG_WARN,
++   ANDROID_LOG_ERROR,
++   ANDROID_LOG_FATAL,
++   ANDROID_LOG_SILENT,
++} android_LogPriority;
++
++static inline int
++__android_log_vprint(int prio, const char *tag, const char *fmt, va_list ap)
++{
++   (void)prio;
++   int n = fprintf(stderr, "%s: ", tag ? tag : "radv");
++   n += vfprintf(stderr, fmt, ap);
++   fputc('\n', stderr);
++   return n + 1;
++}
++
++__attribute__((format(printf, 3, 4))) static inline int
++__android_log_print(int prio, const char *tag, const char *fmt, ...)
++{
++   va_list ap;
++   va_start(ap, fmt);
++   int n = __android_log_vprint(prio, tag, fmt, ap);
++   va_end(ap);
++   return n;
++}
++
++static inline int
++__android_log_write(int prio, const char *tag, const char *text)
++{
++   (void)prio;
++   return fprintf(stderr, "%s: %s\n", tag ? tag : "radv", text ? text : "");
++}
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* XCLIPSE_LINUX_COMPAT_ANDROID_LOG_H */
+diff -ruN a/include/xclipse_linux_compat/sys/system_properties.h b/include/xclipse_linux_compat/sys/system_properties.h
+--- a/include/xclipse_linux_compat/sys/system_properties.h
++++ b/include/xclipse_linux_compat/sys/system_properties.h
+@@ -0,0 +1,62 @@
++/*
++ * Open Android DeX: the <sys/system_properties.h> a glibc Linux build of
++ * radv-xclipse gets (see android/log.h beside it). Linux has no Android
++ * properties, so none is ever set: every Xclipse switch the port reads from a
++ * property it also reads from an environment variable first, and that is the
++ * way to set one here (RADV_XCLIPSE_LOG and the rest, in the port's README).
++ *
++ * SPDX-License-Identifier: MIT
++ */
++#ifndef XCLIPSE_LINUX_COMPAT_SYS_SYSTEM_PROPERTIES_H
++#define XCLIPSE_LINUX_COMPAT_SYS_SYSTEM_PROPERTIES_H
++
++#include <stdint.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++#define PROP_NAME_MAX 32
++#define PROP_VALUE_MAX 92
++
++typedef struct prop_info prop_info;
++
++static inline int
++__system_property_get(const char *name, char *value)
++{
++   (void)name;
++   value[0] = '\0';
++   return 0;
++}
++
++static inline const prop_info *
++__system_property_find(const char *name)
++{
++   (void)name;
++   return (const prop_info *)0;
++}
++
++static inline void
++__system_property_read_callback(const prop_info *pi,
++                                void (*callback)(void *cookie, const char *name, const char *value,
++                                                 uint32_t serial),
++                                void *cookie)
++{
++   (void)pi;
++   (void)callback;
++   (void)cookie;
++}
++
++static inline int
++__system_property_foreach(void (*fn)(const prop_info *pi, void *cookie), void *cookie)
++{
++   (void)fn;
++   (void)cookie;
++   return 0;
++}
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* XCLIPSE_LINUX_COMPAT_SYS_SYSTEM_PROPERTIES_H */
