@@ -3,12 +3,18 @@
 # + its two loaders for the ABIs the launcher ships, 16 KB page aligned.
 #
 # This is a re-implementation of green-green-avk/build-proot-android's
-# `make-proot-for-apk.sh` (commit 01f83b8), trimmed to our two ABIs and with one
-# addition: $ALIGN on every link. Android 15+ devices may use 16 KB memory
-# pages; an ELF whose LOAD segments are only 4 KB aligned cannot be mapped
-# there, and a debuggable build makes the platform pop an "Android App
-# Compatibility" dialog about it on every launch. The published prebuilts are
-# 4 KB (NDK's pre-r28 default), so the only fix is a relink.
+# `make-proot-for-apk.sh` (commit 01f83b8), trimmed to our two ABIs and with two
+# additions:
+#
+# - $ALIGN on every link. Android 15+ devices may use 16 KB memory pages; an
+#   ELF whose LOAD segments are only 4 KB aligned cannot be mapped there, and a
+#   debuggable build makes the platform pop an "Android App Compatibility"
+#   dialog about it on every launch. The published prebuilts are 4 KB (NDK's
+#   pre-r28 default), so the only fix is a relink.
+# - patches/*.patch on proot's source. untag-tracee-addresses.patch: proot
+#   read every heap string a program handed it through PTRACE_PEEKDATA, which
+#   fails on Android's tagged heap pointers on some kernels (6.1 on a Galaxy
+#   S24), so nothing could start there at all. See the patch.
 set -euo pipefail
 shopt -s nullglob
 
@@ -52,8 +58,15 @@ set_arch() {
 cd "$BUILD"
 [ -d "talloc-$TALLOC_V" ] || \
   curl -fsSL "https://download.samba.org/pub/talloc/talloc-$TALLOC_V.tar.gz" | tar -xz
-[ -d "proot-$PROOT_V" ] || \
+if [ ! -d "proot-$PROOT_V" ]; then
   curl -fsSL "https://github.com/green-green-avk/proot/archive/v$PROOT_V.tar.gz" | tar -xz
+  # Ours, in name order, onto the fresh tree only: a tree that is already there
+  # has them, and patch would fail on a second pass.
+  for P in /build/patches/*.patch; do
+    echo "══════════ patch $(basename "$P")"
+    patch -d "proot-$PROOT_V" -p1 --forward < "$P"
+  done
+fi
 
 # talloc's configure probes pkg-config for the *host* and wedges on the answers
 # file if it finds a real one. Upstream's workaround: a pkg-config that always

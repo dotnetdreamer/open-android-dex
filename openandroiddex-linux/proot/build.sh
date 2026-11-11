@@ -29,4 +29,7 @@ for ABI in arm64-v8a x86_64; do
   done
 done
 
-echo "done — bump LINUX_PAYLOAD_VERSION in Linux.java if proot itself changed"
+# proot runs from the APK's native-lib folder, never from inside the guest, so
+# an install of the new APK is all a new proot needs. Linux.PAYLOAD_VERSION is
+# not for this: a bump re-extracts every user's rootfs (a container reset).
+echo "done — the new APK carries it; no Linux.PAYLOAD_VERSION bump needed"

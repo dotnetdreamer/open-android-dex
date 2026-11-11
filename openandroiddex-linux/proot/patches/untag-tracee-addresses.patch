@@ -1,0 +1,108 @@
+--- a/src/tracee/mem.c
++++ b/src/tracee/mem.c
+@@ -41,6 +41,24 @@
+ #include "build.h"           /* HAVE_PROCESS_VM,  */
+ #include "cli/note.h"
+ 
++/**
++ * Return @address without the tag Android puts in the top byte of
++ * 64-bit heap pointers (Top Byte Ignore, Android 11 and later).  A
++ * tracee passes such pointers in its system call arguments, and on
++ * some kernels PTRACE_PEEKDATA fails with EIO on a tagged address
++ * (Linux 6.1 on a Galaxy S24, measured).  This build has no
++ * process_vm_readv(2), which accepts one, so every read of a heap
++ * string failed, starting with the path of the very first execve(2).
++ * PTRACE_POKEDATA takes the same kernel path.  The top byte is never
++ * part of an AArch64 user address, so dropping it changes nothing for
++ * an untagged pointer.
++ */
++#if defined(ARCH_ARM64)
++#define UNTAG(address) ((word_t)(address) & 0x00FFFFFFFFFFFFFFULL)
++#else
++#define UNTAG(address) ((word_t)(address))
++#endif
++
+ #ifdef HAS_POKEDATA_WORKAROUND
+ 
+ #include "tracee/reg.h"
+@@ -218,7 +236,7 @@
+ int write_data(Tracee *tracee, word_t dest_tracee, const void *src_tracer, word_t size)
+ {
+ 	word_t *src  = (word_t *)src_tracer;
+-	word_t *dest = (word_t *)dest_tracee;
++	word_t *dest = (word_t *)UNTAG(dest_tracee);
+ 
+ 	long   status;
+ 	word_t word, i, j;
+@@ -308,7 +326,7 @@
+ 	for (i = 0, size = 0; i < src_tracer_count; i++)
+ 		size += src_tracer[i].iov_len;
+ 
+-	remote.iov_base = (word_t *)dest_tracee;
++	remote.iov_base = (word_t *)UNTAG(dest_tracee);
+ 	remote.iov_len  = size;
+ 
+ 	status = process_vm_writev(tracee->pid, src_tracer, src_tracer_count, &remote, 1, 0);
+@@ -337,7 +355,7 @@
+  */
+ int read_data(const Tracee *tracee, void *dest_tracer, word_t src_tracee, word_t size)
+ {
+-	word_t *src  = (word_t *)src_tracee;
++	word_t *src  = (word_t *)UNTAG(src_tracee);
+ 	word_t *dest = (word_t *)dest_tracer;
+ 
+ 	word_t nb_trailing_bytes;
+@@ -411,7 +429,7 @@
+  */
+ int read_string(const Tracee *tracee, char *dest_tracer, word_t src_tracee, word_t max_size)
+ {
+-	word_t *src  = (word_t *)src_tracee;
++	word_t *src  = (word_t *)UNTAG(src_tracee);
+ 	word_t *dest = (word_t *)dest_tracer;
+ 
+ 	word_t nb_trailing_bytes;
+@@ -552,7 +570,7 @@
+ 	local.iov_base = &result;
+ 	local.iov_len  = sizeof_word(tracee);
+ 
+-	remote.iov_base = (void *)address;
++	remote.iov_base = (void *)UNTAG(address);
+ 	remote.iov_len  = sizeof_word(tracee);
+ 
+ 	errno = 0;
+@@ -562,7 +580,7 @@
+ 	/* Fallback to ptrace if something went wrong.  */
+ #endif
+ 	errno = 0;
+-	result = (word_t) ptrace(PTRACE_PEEKDATA, tracee->pid, address, NULL);
++	result = (word_t) ptrace(PTRACE_PEEKDATA, tracee->pid, UNTAG(address), NULL);
+ 
+ 	/* From ptrace(2) manual: "Unfortunately, under Linux,
+ 	 * different variations of this fault will return EIO or
+@@ -597,7 +615,7 @@
+ 	local.iov_base = &value;
+ 	local.iov_len  = sizeof_word(tracee);
+ 
+-	remote.iov_base = (void *)address;
++	remote.iov_base = (void *)UNTAG(address);
+ 	remote.iov_len  = sizeof_word(tracee);
+ 
+ 	errno = 0;
+@@ -610,7 +628,7 @@
+ 	 * a 64-bit kernel. */
+ 	if (is_32on64_mode(tracee)) {
+ 		errno = 0;
+-		tmp = (word_t) ptrace(PTRACE_PEEKDATA, tracee->pid, address, NULL);
++		tmp = (word_t) ptrace(PTRACE_PEEKDATA, tracee->pid, UNTAG(address), NULL);
+ 		if (errno != 0)
+ 			return;
+ 
+@@ -618,7 +636,7 @@
+ 	}
+ 
+ 	errno = 0;
+-	(void) ptrace(PTRACE_POKEDATA, tracee->pid, address, value);
++	(void) ptrace(PTRACE_POKEDATA, tracee->pid, UNTAG(address), value);
+ 
+ 	/* From ptrace(2) manual: "Unfortunately, under Linux,
+ 	 * different variations of this fault will return EIO or
