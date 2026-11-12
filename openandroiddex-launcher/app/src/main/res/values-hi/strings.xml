@@ -692,4 +692,35 @@
     <!-- ── Linux app windows ── -->
     <string name="lw_opening">%1$s खुल रहा है…</string>
     <string name="lw_close_window">विंडो बंद करें</string>
+
+    <!-- ── Send to computer ── -->
+    <string name="sc_label">कंप्यूटर पर भेजें</string>
+    <string name="sc_looking">आपका कंप्यूटर ढूंढा जा रहा है…</string>
+    <string name="sc_preparing">तैयार किया जा रहा है…</string>
+    <string name="sc_sending">%s पर भेजा जा रहा है…</string>
+    <string name="sc_waiting">%s का इंतज़ार किया जा रहा है…</string>
+    <string name="sc_count">%2$d में से %1$d</string>
+    <string name="sc_saved">%s पर Downloads में सेव हो गया</string>
+    <string name="sc_saved_some">%3$s पर Downloads में %2$d में से %1$d सेव हुए</string>
+    <string name="sc_opened">%s पर खुल गया</string>
+    <string name="sc_sent">%s पर भेज दिया गया</string>
+    <string name="sc_copied">%s के क्लिपबोर्ड पर कॉपी हो गया</string>
+    <string name="sc_copied_hint">वहाँ पेस्ट करें।</string>
+    <string name="sc_none_title">कोई कंप्यूटर कनेक्ट नहीं है</string>
+    <string name="sc_none_body">अपने कंप्यूटर पर Open Android DeX खोलें और यह फ़ोन कनेक्ट करें। फिर दोबारा भेजें।</string>
+    <string name="sc_silent_title">आपके कंप्यूटर ने जवाब नहीं दिया</string>
+    <string name="sc_silent_body">देखें कि वहाँ Open Android DeX अभी भी खुला है, फिर दोबारा कोशिश करें।</string>
+    <string name="sc_off">%s पर “कंप्यूटर पर भेजें” बंद है</string>
+    <string name="sc_failed">यह नहीं पहुँचा</string>
+    <string name="sc_failed_lost">%s से कनेक्शन टूट गया। इसे फिर से भेजें।</string>
+    <string name="sc_failed_space">%s पर पर्याप्त जगह नहीं है।</string>
+    <string name="sc_failed_read">यह फ़ोन %2$d में से %1$d नहीं पढ़ सका।</string>
+    <string name="sc_failed_busy">%s अभी व्यस्त है। एक मिनट बाद इसे फिर से भेजें।</string>
+    <string name="sc_failed_stuck">यह फ़ोन अभी भी पिछली फ़ाइलें खोल रहा है। एक मिनट बाद दोबारा कोशिश करें।</string>
+    <string name="sc_nothing">यहाँ भेजने के लिए कुछ नहीं है</string>
+    <string name="sc_too_much_text">एक बार में भेजने के लिए यह बहुत ज़्यादा टेक्स्ट है</string>
+    <string name="sc_too_many">एक बार में ज़्यादा से ज़्यादा %d चीज़ें भेजें</string>
+    <string name="sc_try_again">फिर से कोशिश करें</string>
+    <string name="sc_close">बंद करें</string>
+    <string name="sc_cancel">रद्द करें</string>
 </resources>

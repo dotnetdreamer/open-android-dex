@@ -66,6 +66,9 @@ pub struct Spec {
     /// The phone's notification it was opened from (its key): the app opens at
     /// what that is about — the conversation — rather than at its front screen.
     pub notif: Option<String>,
+    /// Its game controls (apps/game): an Android app's window's; None for a Linux window and the probe.
+    #[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
+    pub game: Option<Arc<super::game::Session>>,
 }
 
 /// What a window says about itself to the app.
@@ -312,6 +315,10 @@ pub struct Link {
     clock_offset_us: AtomicI64,
     best_rtt_us: AtomicU64,
     host: Arc<dyn Host>,
+    /// The stream's last codec configuration (SPS and PPS): what a still needs before its key frame.
+    config: Mutex<Option<Vec<u8>>>,
+    /// Waiting for the next key frame: the game controls' editor, for its still.
+    stills: Mutex<Vec<Sender<Vec<u8>>>>,
 }
 
 impl Link {
@@ -338,14 +345,50 @@ impl Link {
             clock_offset_us: AtomicI64::new(i64::MIN),
             best_rtt_us: AtomicU64::new(u64::MAX),
             host,
+            config: Mutex::new(None),
+            stills: Mutex::new(Vec::new()),
         };
         (Arc::new(link), rx)
+    }
+
+    /// The picture as it is now, for the game controls' editor: the stream's
+    /// configuration and the next key frame, which the phone is asked for — or
+    /// why not, after `wait`.
+    #[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
+    pub fn still(&self, wait: Duration) -> Result<(Vec<u8>, Vec<u8>), String> {
+        let (tx, rx) = mpsc::channel();
+        self.stills.lock().unwrap().push(tx);
+        self.send(wire::json(&json!({"t": "keyframe"})));
+        let key = rx.recv_timeout(wait).map_err(|_| "the phone sent no picture in time".to_string())?;
+        let config = self.config.lock().unwrap().clone().unwrap_or_default();
+        Ok((config, key))
+    }
+
+    /// A piece of the picture, as it passes to the window: the configuration
+    /// kept, a key frame handed to whoever waits for one.
+    fn tap(&self, flags: u8, data: &[u8]) {
+        if flags & wire::VIDEO_CONFIG != 0 {
+            *self.config.lock().unwrap() = Some(data.to_vec());
+        } else if flags & wire::VIDEO_KEY != 0 {
+            let waiting = std::mem::take(&mut *self.stills.lock().unwrap());
+            for tx in waiting {
+                let _ = tx.send(data.to_vec());
+            }
+        }
     }
 
     pub fn send(&self, bytes: Vec<u8>) {
         if let Some(tx) = self.out.lock().unwrap().as_ref() {
             let _ = tx.send(bytes);
         }
+    }
+
+    /// Which connection the window's messages go on: one more each time it is
+    /// made again (cable ↔ Wi‑Fi, or the same way back). The phone starts each
+    /// with nothing held, so whatever is held is sent again on a new one.
+    #[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
+    pub fn generation(&self) -> u64 {
+        self.generation.load(Ordering::SeqCst)
     }
 
     /// What the phone's server calls this window: how a notification of its
@@ -736,6 +779,7 @@ fn read_loop(
                         let _ = a.send(ack_bytes.clone());
                     }
                 }
+                link.tap(flags, data);
                 surface.video(flags, pts, data.to_vec());
             }
             wire::JSON => {
@@ -759,6 +803,11 @@ fn read_loop(
                         }
                     }
                     Some("drag") => surface.dragging(v["on"].as_bool() == Some(true)),
+                    // The phone could not make a game controller (doc/game-mode.md): said once per window.
+                    Some("gamepad") if v["ok"].as_bool() == Some(false) => {
+                        log::warn!("apps: {}: the phone made no game controller: {}", surface.label(), v["message"]);
+                        surface.note(Some(super::gamepad::REFUSED.into()), false);
+                    }
                     Some("dragged") => surface.dragged(fetch::Offer::parse(&v)),
                     Some("video") => {
                         let coded = (v["w"].as_u64().unwrap_or(0) as u32, v["h"].as_u64().unwrap_or(0) as u32);

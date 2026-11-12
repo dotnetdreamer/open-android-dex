@@ -5,10 +5,11 @@
 //! The phone offers them by number (AppOffers.java) and this computer takes
 //! each file on a connection of its own, through adb as a window's is, as a
 //! dropped file goes the other way (drops.rs): `{"t":"get","id","i"}`, the
-//! phone's answer with the file's name and size, then its bytes, raw, until
-//! the connection closes. They land in a folder of this app's own under the
-//! computer's temporary folder, one per offer, and go from there to wherever
-//! they were dropped or pasted.
+//! phone's answer with the file's name and size, then its bytes in pieces and
+//! an end mark (wire.rs, `Pieces`): without the mark a file is cut short. They
+//! land in a folder of this app's own under the computer's temporary folder,
+//! one per offer — reserved and landed as an arrival is (send/inbox.rs) — and
+//! go from there to wherever they were dropped or pasted.
 
 use std::fs::File;
 use std::io::{Read, Write};
@@ -215,11 +216,13 @@ pub fn get(route: &Route, id: u64, i: usize, dir: &Path, mut progress: impl FnMu
         return Err(answer["message"].as_str().unwrap_or("your phone couldn't send it").to_string());
     }
     let size = answer["size"].as_i64().and_then(|s| u64::try_from(s).ok());
-    let path = free_name(&dir.join(safe_name(answer["name"].as_str().unwrap_or("file"))));
-    let mut part_name = path.file_name().unwrap_or_default().to_os_string();
-    part_name.push(".part");
-    let part = path.with_file_name(part_name);
-    let mut out = File::create(&part).map_err(|e| format!("{} couldn't save it ({e})", this_computer()))?;
+    // The name and its part made here, exclusively, as an arrival's are (send/inbox.rs): never a file that
+    // was there — another of this offer's, say `x.part` beside `x` — opened, truncated or renamed over.
+    let r = crate::send::inbox::reserve(dir, &safe_name(answer["name"].as_str().unwrap_or("file")))
+        .map_err(|e| format!("{} couldn't save it ({e})", this_computer()))?;
+    let mut out = r.file();
+    // Pieces, then the end mark: a stream that stops before it is a file cut short, with or without a size.
+    let mut s = wire::Pieces::new(s);
     let mut buf = vec![0u8; 256 * 1024];
     let mut got = 0u64;
     let copied = loop {
@@ -236,20 +239,15 @@ pub fn get(route: &Route, id: u64, i: usize, dir: &Path, mut progress: impl FnMu
             Err(_) => break Err("your phone stopped sending it".into()),
         }
     };
-    drop(out);
     let whole = copied.and_then(|()| match size {
         Some(s) if got < s => Err("your phone stopped sending it".into()),
         _ => Ok(()),
     });
     if let Err(e) = whole {
-        let _ = std::fs::remove_file(&part);
+        r.abandon();
         return Err(e);
     }
-    std::fs::rename(&part, &path).map_err(|e| {
-        let _ = std::fs::remove_file(&part);
-        format!("{} couldn't save it ({e})", this_computer())
-    })?;
-    Ok(path)
+    r.land().map_err(|e| format!("{} couldn't save it ({e})", this_computer()))
 }
 
 /// A folder of its own for one offer's files, under this computer's
@@ -298,20 +296,20 @@ pub fn free_name(wanted: &Path) -> PathBuf {
 
 /// A name from the phone, as a file name here: no folders, nothing this
 /// computer's filesystem refuses, not empty, not too long — the extension kept.
+///
+/// Nothing that changes how it reads without being seen either: a
+/// right-to-left mark makes "invoice\u{202E}fdp.exe" read "invoiceexe.pdf".
+/// Trailing dots and spaces go in any mix, as Windows drops them on disk
+/// ("a.exe. ." is "a.exe" there), so the name kept here is the file's own.
 pub fn safe_name(name: &str) -> String {
     let last = name.rsplit(['/', '\\']).next().unwrap_or("");
     let mut cleaned: String = last
         .chars()
+        .filter(|c| !invisible(*c))
         .map(|c| if c.is_control() || "<>:\"|?*".contains(c) { '_' } else { c })
         .collect();
-    // Windows drops trailing dots and spaces, and a file may not be named for a device.
-    cleaned = cleaned.trim().trim_end_matches('.').trim().to_string();
-    let stem_upper = cleaned.split('.').next().unwrap_or("").to_ascii_uppercase();
-    let device = matches!(stem_upper.as_str(), "CON" | "PRN" | "AUX" | "NUL")
-        || ((stem_upper.starts_with("COM") || stem_upper.starts_with("LPT"))
-            && stem_upper.len() == 4
-            && stem_upper.as_bytes()[3].is_ascii_digit());
-    if device {
+    cleaned = windows_keeps(cleaned.trim_start()).to_string();
+    if is_device(&cleaned) {
         cleaned = format!("_{cleaned}");
     }
     if cleaned.is_empty() || cleaned.starts_with('.') && cleaned.chars().all(|c| c == '.') {
@@ -326,7 +324,51 @@ pub fn safe_name(name: &str) -> String {
     while stem.len() + ext.len() > NAME_MAX {
         stem.pop();
     }
-    format!("{stem}{ext}")
+    let cut = format!("{stem}{ext}");
+    let cut = windows_keeps(&cut);
+    // Cut down to nothing but dots and spaces (a dot, 250 spaces, then text): never an empty name.
+    if cut.is_empty() || cut.chars().all(|c| c == '.') {
+        return "file".into();
+    }
+    cut.to_string()
+}
+
+/// A name from another app, for something that arrives unasked ("Send to
+/// computer", Keep a copy): a [`safe_name`] that is not hidden either — no
+/// leading dot, so nothing lands in Downloads that Finder and Explorer do not
+/// show. A file dragged out by hand keeps its dot.
+pub fn arrival_name(name: &str) -> String {
+    let last = name.rsplit(['/', '\\']).next().unwrap_or("");
+    safe_name(last.trim_start_matches(|c: char| c == '.' || c.is_whitespace() || invisible(c)))
+}
+
+/// Characters that change how a name reads and are not seen: direction
+/// marks, embeddings and isolates, the zero-width space, the word joiner, the
+/// soft hyphen, the BOM. Not the zero-width non-joiner and joiner (U+200C,
+/// U+200D): Persian and Indic names, and emoji, need them.
+fn invisible(c: char) -> bool {
+    matches!(
+        c,
+        '\u{200B}' | '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{2060}' | '\u{00AD}' | '\u{FEFF}' | '\u{061C}'
+    )
+}
+
+/// `name` as Windows keeps it on disk: without its trailing dots and spaces, in any mix.
+pub fn windows_keeps(name: &str) -> &str {
+    name.trim_end_matches(|c: char| c == '.' || c.is_whitespace())
+}
+
+/// A name Windows keeps for a device, whatever follows it: "CON", "con .txt",
+/// "nul.tar.gz", "COM1", "COM¹", "LPT0", "CONIN$".
+fn is_device(name: &str) -> bool {
+    let stem = name.split('.').next().unwrap_or("").trim_end_matches(' ').to_uppercase();
+    if matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$") {
+        return true;
+    }
+    let mut c = stem.chars();
+    let head: String = c.by_ref().take(3).collect();
+    let tail: Vec<char> = c.collect();
+    (head == "COM" || head == "LPT") && tail.len() == 1 && (tail[0].is_ascii_digit() || matches!(tail[0], '¹' | '²' | '³'))
 }
 
 /// This computer's Downloads folder, where a drag let go of before it could
@@ -340,6 +382,27 @@ pub fn downloads() -> Option<PathBuf> {
     d.is_dir().then_some(d)
 }
 
+/// `from` into `dir` under its own name, or the next free one, as an arrival
+/// lands (send/inbox.rs): the name and its part made here, exclusively, the
+/// bytes copied into the part, and the part renamed over the name only while
+/// that is still the empty file made for it — a file put there meanwhile is
+/// never replaced. `from` is removed once it has landed. Where it landed.
+pub(crate) fn into(dir: &Path, from: &Path) -> std::io::Result<PathBuf> {
+    let name = from.file_name().unwrap_or_default().to_string_lossy().into_owned();
+    let r = crate::send::inbox::reserve(dir, &name)?;
+    let copied = File::open(from).and_then(|mut f| {
+        let mut out = r.file();
+        std::io::copy(&mut f, &mut out)
+    });
+    if let Err(e) = copied {
+        r.abandon();
+        return Err(e);
+    }
+    let to = r.land()?;
+    let _ = std::fs::remove_file(from);
+    Ok(to)
+}
+
 /// The files of `taking` moved into Downloads: the note that says where they went, or why not.
 pub fn into_downloads(taking: &Taking, offer: &Offer) -> String {
     let Some(downloads) = downloads() else {
@@ -349,13 +412,10 @@ pub fn into_downloads(taking: &Taking, offer: &Offer) -> String {
     let mut failed = None;
     for (i, item) in offer.files() {
         match taking.wait(i, Duration::from_secs(600)) {
-            Ok(from) => {
-                let to = free_name(&downloads.join(from.file_name().unwrap_or_default()));
-                match std::fs::rename(&from, &to).or_else(|_| std::fs::copy(&from, &to).map(|_| ())) {
-                    Ok(()) => moved.push(to),
-                    Err(e) => failed = Some(format!("{} couldn't be saved ({e})", short(&item.name))),
-                }
-            }
+            Ok(from) => match into(&downloads, &from) {
+                Ok(to) => moved.push(to),
+                Err(e) => failed = Some(format!("{} couldn't be saved ({e})", short(&item.name))),
+            },
             Err(e) => failed = Some(format!("{} couldn't be copied: {e}", short(&item.name))),
         }
     }
@@ -407,6 +467,86 @@ mod tests {
         let long = format!("{}.jpeg", "x".repeat(400));
         let s = safe_name(&long);
         assert!(s.len() <= NAME_MAX && s.ends_with(".jpeg"), "{s}");
+    }
+
+    #[test]
+    fn a_name_ends_as_windows_keeps_it() {
+        // Trailing dots and spaces in any mix: the name here is the file's name on disk.
+        assert_eq!(safe_name("payload.exe. ."), "payload.exe");
+        assert_eq!(safe_name("Invoice.pdf.exe. . . "), "Invoice.pdf.exe");
+        assert_eq!(safe_name("a . . .  "), "a");
+        assert_eq!(safe_name(". . ."), "file");
+        assert_eq!(windows_keeps("x.jpg. "), "x.jpg");
+        // Cut to length, it still does not end in a dot or a space.
+        let long = format!("{}. . .", "y".repeat(NAME_MAX - 1));
+        let s = safe_name(&long);
+        assert!(!s.ends_with('.') && !s.ends_with(' ') && s.len() <= NAME_MAX, "{s:?}");
+    }
+
+    #[test]
+    fn a_name_reads_as_it_is() {
+        assert_eq!(safe_name("invoice\u{202E}fdp.exe"), "invoicefdp.exe");
+        assert_eq!(safe_name("\u{2066}a\u{2069}b\u{200B}c\u{200F}\u{FEFF}.txt"), "abc.txt");
+        assert_eq!(safe_name("photo\u{202A}\u{202D}.jpg"), "photo.jpg");
+        assert_eq!(safe_name("in\u{00AD}voice\u{2060}.pdf"), "invoice.pdf");
+        // The joiners stay: a Persian name, a family emoji.
+        assert_eq!(safe_name("می\u{200C}خواهم.jpg"), "می\u{200C}خواهم.jpg");
+        assert_eq!(safe_name("👨\u{200D}👩\u{200D}👧.png"), "👨\u{200D}👩\u{200D}👧.png");
+        // Never empty, however it is cut.
+        let odd = format!(".{}text", " ".repeat(250));
+        assert!(!safe_name(&odd).is_empty() && safe_name(&odd) != ".", "{:?}", safe_name(&odd));
+        assert_eq!(safe_name(&format!(".{}x", " ".repeat(250))), "file");
+        // Letters of every script stay.
+        assert_eq!(safe_name("صورة.jpg"), "صورة.jpg");
+        assert_eq!(safe_name("फ़ोटो.png"), "फ़ोटो.png");
+    }
+
+    #[test]
+    fn every_device_name_windows_keeps_is_out() {
+        for n in ["con .txt", "CON", "nul.tar.gz", "COM¹", "com².txt", "LPT³", "COM0", "lpt9.log", "CONIN$", "conout$.txt", "aux . ."] {
+            assert!(safe_name(n).starts_with('_'), "{n} -> {}", safe_name(n));
+        }
+        for n in ["console.txt", "COM10", "comet.jpg", "LPT", "nullable.txt", "CON-notes.txt"] {
+            assert!(!safe_name(n).starts_with('_'), "{n} -> {}", safe_name(n));
+        }
+    }
+
+    #[test]
+    fn what_arrives_unasked_is_never_hidden() {
+        assert_eq!(arrival_name(".bashrc"), "bashrc");
+        assert_eq!(arrival_name("...hidden.jpg"), "hidden.jpg");
+        assert_eq!(arrival_name(" .x.txt"), "x.txt");
+        assert_eq!(arrival_name("\u{200B}.y.png"), "y.png");
+        assert_eq!(arrival_name("a/b/.c"), "c");
+        assert_eq!(arrival_name("..."), "file");
+        assert_eq!(arrival_name(".con.txt"), "_con.txt");
+        assert_eq!(arrival_name("IMG_1.jpg"), "IMG_1.jpg");
+        // A file dragged out by hand keeps its dot.
+        assert_eq!(safe_name(".bashrc"), ".bashrc");
+    }
+
+    #[test]
+    fn a_drag_into_downloads_never_replaces_what_is_there() {
+        let d = std::env::temp_dir().join(format!("oadx-fetch-into-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let (tmp, downloads) = (d.join("offer"), d.join("Downloads"));
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::create_dir_all(&downloads).unwrap();
+        // Someone's file at the name, and someone's part at the next name's part: both left as they are.
+        std::fs::write(downloads.join("x.jpg"), b"theirs").unwrap();
+        std::fs::write(downloads.join(".x (2).jpg.part"), b"their part").unwrap();
+        std::fs::write(tmp.join("x.jpg"), b"from the phone").unwrap();
+        let to = into(&downloads, &tmp.join("x.jpg")).unwrap();
+        assert_eq!(to, downloads.join("x (3).jpg"));
+        assert_eq!(std::fs::read(&to).unwrap(), b"from the phone");
+        assert_eq!(std::fs::read(downloads.join("x.jpg")).unwrap(), b"theirs");
+        assert_eq!(std::fs::read(downloads.join(".x (2).jpg.part")).unwrap(), b"their part");
+        assert!(!downloads.join("x (2).jpg").exists(), "the name passed over is not left behind");
+        assert!(!tmp.join("x.jpg").exists(), "moved, not copied and left");
+        // Nothing of ours left beside it: no part, no empty reservation.
+        let ours: Vec<_> = std::fs::read_dir(&downloads).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        assert_eq!(ours.len(), 3, "{ours:?}");
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]

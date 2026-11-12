@@ -13,6 +13,7 @@ mod remote;
 mod remote_desktop;
 mod remote_usb;
 mod scrcpy;
+mod send;
 mod shell;
 mod transfer;
 mod wireless;
@@ -130,6 +131,13 @@ pub fn run() {
             apps::apps_pending,
             apps::apps_clipboard_files,
             apps::apps_paste,
+            apps::game::editor::game_editor_load,
+            apps::game::editor::game_still,
+            apps::game::editor::game_warned,
+            apps::game::editor::game_save,
+            apps::game::editor::game_export,
+            apps::game::editor::game_import,
+            apps::game::editor::game_reveal,
             notifications::notifications_state,
             notifications::notifications_apps,
             notifications::notifications_set,
@@ -137,6 +145,22 @@ pub fn run() {
             notifications::notifications_test,
             notifications::notifications_fix,
             notifications::notifications_counts,
+            // Send to computer, the Photos tab and Keep a copy (send/).
+            send::send_state,
+            send::send_set,
+            send::send_setup,
+            send::inbox::send_recent,
+            send::inbox::send_clear,
+            send::inbox::send_act,
+            send::photos_watch,
+            send::photos::photos_list,
+            send::photos::photos_older,
+            send::photos::photos_thumb,
+            send::photos::photos_act,
+            send::keep::keep_state,
+            send::keep::keep_set,
+            send::keep::keep_choose,
+            send::keep::keep_show,
             quit::app_close_seen,
             quit::app_close_answer
         ])
@@ -172,6 +196,8 @@ pub fn run() {
             // The phone's notifications as this computer's own, for every phone
             // that is attached while they are on.
             notifications::start(&app.handle().clone());
+            // Send to computer and the photos: each attached phone's link, while something wants it.
+            send::start(&app.handle().clone());
             Ok(())
         })
         .build(tauri::generate_context!())
@@ -189,6 +215,8 @@ pub fn run() {
                 apps::pin::exiting();
                 // The phone's toasts first: nothing can act on them once this has gone.
                 notifications::stop();
+                // What is on its way from a phone stops, its part and reservation removed.
+                send::stop();
                 // Every phone app's window closes first, each app back on its
                 // phone at once — before the seconds the desktop's undo takes.
                 apps::shutdown(app);

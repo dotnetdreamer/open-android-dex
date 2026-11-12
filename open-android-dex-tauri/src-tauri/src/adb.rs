@@ -2089,6 +2089,15 @@ fn install_apk(app: &tauri::AppHandle, serial: &str, apk: &str) -> Result<(), St
 /// available trade: Android offers no way to re-sign an installed package, and
 /// a desktop that cannot start is worse than one that forgets its settings.
 fn install_launcher(app: &tauri::AppHandle, serial: &str, apk: &str) -> Result<(), String> {
+    let installed = install_launcher_once(app, serial, apk);
+    if installed.is_ok() {
+        // "Send to computer" looks at the new launcher once: its share entry may be had now.
+        crate::send::launcher_installed(serial);
+    }
+    installed
+}
+
+fn install_launcher_once(app: &tauri::AppHandle, serial: &str, apk: &str) -> Result<(), String> {
     let err = match install_apk(app, serial, apk) {
         Ok(()) => return Ok(()),
         Err(e) => e,
@@ -2186,6 +2195,30 @@ fn bundled_apk_sha256(apk: &std::path::Path) -> Option<String> {
 /// phone's is not this build, and never while its Linux is running: an install
 /// stops the package, and that Linux with it.
 pub(crate) fn ensure_launcher(app: &tauri::AppHandle, serial: &str) -> Result<(), String> {
+    ensure_launcher_with(
+        app,
+        serial,
+        "the phone's touchpad",
+        "Close Linux on your phone first: setting up the touchpad would end it.",
+        "The touchpad couldn't be set up",
+    )
+}
+
+/// The same, for "Send to computer"'s entry in the phone's share menu: the
+/// Photos tab's Set it up / Update it, pressed by a person (send/mod.rs).
+pub(crate) fn ensure_launcher_for_send(app: &tauri::AppHandle, serial: &str) -> Result<(), String> {
+    ensure_launcher_with(
+        app,
+        serial,
+        "Send to computer",
+        "Close Linux on your phone first: updating Open Android DeX there would end it.",
+        "Open Android DeX couldn't be put on your phone",
+    )
+}
+
+/// [`ensure_launcher`]'s body: `what` it is for, in the log; `linux`, the
+/// sentence while the phone's Linux runs; `failed`, how a failure starts.
+fn ensure_launcher_with(app: &tauri::AppHandle, serial: &str, what: &str, linux: &str, failed: &str) -> Result<(), String> {
     let apk = bin_dir(app)?.join("openandroiddex-launcher.apk");
     if !apk.exists() {
         return Err("This copy of Open Android DeX has no phone app to install.".into());
@@ -2195,9 +2228,9 @@ pub(crate) fn ensure_launcher(app: &tauri::AppHandle, serial: &str) -> Result<()
         return Ok(());
     }
     if linux_running {
-        return Err("Close Linux on your phone first: setting up the touchpad would end it.".into());
+        return Err(linux.into());
     }
-    log::info!("installing {} for the phone's touchpad", apk.display());
+    log::info!("installing {} for {what}", apk.display());
     let (done, asked) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false)));
     watch_for_install_prompt(app, serial, done.clone(), asked.clone());
     let installed = install_launcher(app, serial, &apk.to_string_lossy());
@@ -2206,16 +2239,17 @@ pub(crate) fn ensure_launcher(app: &tauri::AppHandle, serial: &str) -> Result<()
         if asked.load(Ordering::SeqCst) {
             "Your phone is asking about installing Open Android DeX. Answer it on the phone, then try again.".into()
         } else {
-            log::warn!("{LAUNCHER_PACKAGE} did not install for the phone's touchpad: {e}");
-            not_installed(&e)
+            log::warn!("{LAUNCHER_PACKAGE} did not install for {what}: {e}");
+            not_installed(&e, failed)
         }
     })
 }
 
-/// Why the launcher did not install, as the one line a window's note has.
-/// What adb said is the log's: this computer's path to the APK is in it, and
-/// a phone's stack trace, and the desktop's own words for it run to a paragraph.
-fn not_installed(err: &str) -> String {
+/// Why the launcher did not install, as the one line a window's note has —
+/// `failed`, then why. What adb said is the log's: this computer's path to the
+/// APK is in it, and a phone's stack trace, and the desktop's own words for it
+/// run to a paragraph.
+fn not_installed(err: &str, failed: &str) -> String {
     let why = if is_install_restricted(err) {
         "your phone doesn't allow installs from a computer (on Xiaomi: Developer options → Install via USB)"
     } else if err.contains("INSUFFICIENT_STORAGE") || err.contains("not enough space") {
@@ -2223,9 +2257,9 @@ fn not_installed(err: &str) -> String {
     } else if is_signature_conflict(err) {
         "uninstall Open Android DeX on your phone, then try again"
     } else {
-        return "The touchpad couldn't be set up on your phone".into();
+        return if failed.ends_with("on your phone") { failed.to_string() } else { format!("{failed} on your phone") };
     };
-    format!("The touchpad couldn't be set up: {why}")
+    format!("{failed}: {why}")
 }
 
 /// What the phone has of the launcher: whether its installed APK is this very
@@ -3511,13 +3545,18 @@ unrelated_key=7
                     \tat android.util.ExceptionUtils.wrap(ExceptionUtils.java:34)";
         let other =
             "adb: failed to install C:\\x\\openandroiddex-launcher.apk: Failure [INSTALL_FAILED_INTERNAL_ERROR]";
+        let pad = "The touchpad couldn't be set up";
         let said = [
-            not_installed(full),
-            not_installed("Failure [INSTALL_FAILED_INSUFFICIENT_STORAGE]"),
-            not_installed(&install_restricted_help(REAL_RESTRICTED)),
-            not_installed("Failure [INSTALL_FAILED_UPDATE_INCOMPATIBLE: Package signatures do not match]"),
-            not_installed(other),
+            not_installed(full, pad),
+            not_installed("Failure [INSTALL_FAILED_INSUFFICIENT_STORAGE]", pad),
+            not_installed(&install_restricted_help(REAL_RESTRICTED), pad),
+            not_installed("Failure [INSTALL_FAILED_UPDATE_INCOMPATIBLE: Package signatures do not match]", pad),
+            not_installed(other, pad),
         ];
+        // Send to computer's Set it up says it in its own words.
+        let send = "Open Android DeX couldn't be put on your phone";
+        assert_eq!(not_installed(other, send), send);
+        assert_eq!(not_installed(full, send), format!("{send}: your phone is out of space"));
         assert_eq!(said[0], "The touchpad couldn't be set up: your phone is out of space");
         assert_eq!(said[1], said[0]);
         assert!(said[2].contains("doesn't allow installs from a computer"), "{}", said[2]);

@@ -39,8 +39,10 @@ access it through the built-in Web viewer in a browser.
 - **Your phone becomes a computer** when you plug it into your PC or Mac
 - **Open apps side by side** and move or resize them, just like on a laptop
 - **Use any phone app on your computer**, like WhatsApp, without opening the whole desktop
+- **Play your phone's games on your computer**, with a controller, or with your keyboard and mouse
 - **Get your messages and calls on your computer**, and reply or answer without picking up your phone
 - **Copy and paste between your phone and computer**, and drag files onto your phone
+- **Send anything from your phone to your computer** from the share menu, and see new photos there as you take them
 - **Use your phone as a touchpad** to move the mouse and click
 - **Pull out the cable and keep working** over Wi-Fi
 - **Works without a computer too**, right on your phone or on a monitor
@@ -238,6 +240,31 @@ there. On a Linux computer an Android app opens in a simpler window, which your
 dock shows by the app's own name and icon and lets you pin. Linux apps are not
 offered there.
 
+### Play your phone's games on your computer
+
+Open a game from the **Apps** tab and it runs on your phone, in a window on
+your computer. No emulator, and nothing to install twice.
+
+- **Use a controller.** Plug one into your computer, or pair it, and click
+  the game's window. The game sees an ordinary controller, as if it were
+  plugged into your phone. It works on the phone's desktop too
+- **Or your keyboard and mouse.** For a game that only has buttons on the
+  screen, ☰ → **Set up game controls…** shows the game with a stick, a few
+  buttons and an **Aim** on top. Drag each one onto the game's button, then
+  click it to pick a key. W A S D moves, the mouse aims, and a key
+  presses a button for as long as you hold it
+- **Each game remembers its controls.** Once a game has them, F8 turns them
+  on and off in its window (⌘G on a Mac); in every other window F8 and ⌘G
+  stay the app's. **Export** saves them as a small file you can send to
+  someone, and **Import** takes one
+- **Esc always gives your mouse back**
+- **Check the game's rules first.** Some online games do not allow a
+  keyboard and mouse, and can suspend an account that uses them. Open
+  Android DeX asks you once for each game
+
+Keyboard and mouse controls are for Windows and Mac. On a Linux computer a
+controller works. How it works: [doc/game-mode.md](doc/game-mode.md).
+
 ### Your phone's notifications, on your computer
 
 When a message arrives on your phone, it comes up on your computer as one of
@@ -267,6 +294,38 @@ Nothing is installed or changed on your phone for this: the part that reads
 its notifications runs only while the phone is attached and notifications
 are on. They come to Windows and Mac computers; on Linux the phone's desktop
 shows them. How it works: [doc/phone-notifications.md](doc/phone-notifications.md).
+
+### Send it to your computer, and your photos are already there
+
+In any app on your phone, tap Share, then **Send to computer**. A photo or a
+file is in your computer's Downloads folder a moment later. A link opens in
+your browser. Text is on your clipboard, ready to paste. Your computer tells
+you with one of its own notifications, and nothing is ever written over: a
+second `report.pdf` arrives as `report (2).pdf`.
+
+The **Photos** tab shows the newest photos and screenshots on your phone.
+Take one, and it is there by itself. Open it, save it, or copy it and paste
+it into what you are writing.
+
+- **Save photos to your computer.** Turn on *Save photos to this Mac* (or
+  *this PC*) and every new photo is saved into a folder you choose, now and
+  each time your phone connects. Choose *New photos only*, or *All photos*
+  to take everything already on the phone too.
+  Nothing is deleted from your phone, nothing is saved twice, and a cable
+  pulled half way just means it carries on later
+- **Nothing runs by itself.** A file is saved, never opened. A link opens
+  only if it is a web address, and *Open links automatically* turns even that
+  off
+- **It stays between the two of them.** Photos and files go straight from
+  your phone to your computer, over the cable or your own Wi‑Fi. There is no
+  account and no cloud
+- **It works however your phone is connected**, with the desktop open, with
+  one app in a window, or with neither
+
+The photos need nothing installed on your phone. *Send to computer* needs
+the Open Android DeX app on it, which the desktop puts there; if you only
+use your apps in windows, the Photos tab has a button for it. How it works:
+[doc/send-to-computer.md](doc/send-to-computer.md).
 
 ### Ubuntu, a whole Linux computer, running on your phone
 
@@ -493,6 +552,16 @@ Plug in with a cable and the desktop app turns this on for you and turns it back
 off when you finish. Without a cable, tap the bell in the taskbar and it will
 show you the phone screen that switches it on. Either way you can turn it off
 for good in Settings → Notifications, and the bell disappears with it.
+</details>
+
+<details>
+<summary><b>Do my photos go through anyone's server?</b></summary>
+
+No. *Send to computer*, the Photos tab and *Save photos* all work over the
+same connection as everything else here: the cable, or your own Wi‑Fi. If
+the folder you keep copies in is one your computer syncs somewhere (OneDrive
+does this with Pictures on some PCs), that program uploads them as it does
+everything else in that folder; the app says so when it sees it.
 </details>
 
 <details>

@@ -19,15 +19,18 @@ import java.util.Map;
 /**
  * What the computer may take from the phone: the items of a drag carried out
  * of one of its windows (AppDrags), or of what the phone's clipboard holds
- * when that is a picture or a file (AppClipboard) — by number, for as long
- * as the phone may read them ({@link #KEEP_MS}).
+ * when that is a picture or a file (AppClipboard), or of a share to "Send to
+ * computer", open already (AppSend) — by number, for as long as the phone may
+ * read them ({@link #KEEP_MS}).
  *
  * <p>The computer takes each file on a connection of its own, as it sends a
  * dropped one (AppDrop), so a big one holds up nothing: its first message is
  * {@code {"t":"get","id","i"}}, the phone answers {@code {"t":"get","ok":true,
  * "name","mime","size"}} — the size -1 where the provider does not say — and
- * the file's bytes follow, raw, until the connection closes. Or {@code "ok":
- * false} and a {@code message}.
+ * the file's bytes follow in pieces ({@link Wire#PIECE}), then an empty piece:
+ * the end mark. A connection that closes before it is a file cut short, never
+ * one taken for whole — with or without a size. Or {@code "ok": false} and a
+ * {@code message}.
  */
 final class AppOffers {
 
@@ -35,13 +38,34 @@ final class AppOffers {
     static final long KEEP_MS = 15 * 60_000L;
     private static final int KEEP_MAX = 32;
 
-    /** One thing on offer: a file (its URI), or text. */
+    /** Told how far a file has gone: {@code bytes} of {@code total} (-1 unknown). */
+    interface Progress {
+        void sent(long bytes, long total);
+    }
+
+    /** One thing on offer: a file (its URI, or the file itself, open), or text. */
     static final class Item {
         String uri;
         String name;
         String mime;
         long size = -1;
         String text;
+        /**
+         * The file, already open — what was shared to the launcher's "Send to
+         * computer", which the launcher opened and handed over (AppSend): the
+         * shell holds no grant to open its URI itself. Read once, then closed.
+         */
+        Content.Opened opened;
+        /** It came open ({@link #opened}): once read or closed, there is nothing more to give. */
+        boolean handedOver;
+        /** Hears the bytes as they go, for the phone's card (AppSend); null if nobody asks. */
+        Progress progress;
+
+        synchronized Content.Opened takeOpened() {
+            Content.Opened o = opened;
+            opened = null;
+            return o;
+        }
 
         JSONObject toJson() throws org.json.JSONException {
             JSONObject j = new JSONObject();
@@ -54,9 +78,12 @@ final class AppOffers {
     private static final class Offer {
         final List<Item> items;
         final long at = SystemClock.uptimeMillis();
+        /** A share's (AppSend), which drops it as the share ends: never closed for its age. */
+        final boolean held;
 
-        Offer(List<Item> items) {
+        Offer(List<Item> items, boolean held) {
             this.items = items;
+            this.held = held;
         }
     }
 
@@ -64,15 +91,66 @@ final class AppOffers {
     private int next;
 
     /** Offer {@code items}: their number, for the computer to take them by. */
-    synchronized int put(List<Item> items) {
+    int put(List<Item> items) {
+        return put(items, false);
+    }
+
+    /**
+     * Offer a share's {@code items}, which its owner drops as the share ends
+     * ({@link #drop}): a share still pending, or waiting its turn on the
+     * computer, is never closed here — not for its age, not for the offers
+     * that came after it. Shares are held to a few where they are let in
+     * (AppSend's openers, the computer's caps), so they are not counted
+     * against {@link #KEEP_MAX}.
+     */
+    int putHeld(List<Item> items) {
+        return put(items, true);
+    }
+
+    private synchronized int put(List<Item> items, boolean held) {
         long now = SystemClock.uptimeMillis();
+        int loose = 0;
+        for (Offer o : offers.values()) {
+            if (!o.held) loose++;
+        }
         for (Iterator<Offer> i = offers.values().iterator(); i.hasNext(); ) {
             Offer o = i.next();
-            if (now - o.at > KEEP_MS || offers.size() >= KEEP_MAX) i.remove();
+            if (o.held) continue;
+            if (closes(now - o.at, loose, held)) {
+                i.remove();
+                loose--;
+                closeAll(o);
+            }
         }
         int id = ++next;
-        offers.put(id, new Offer(items));
+        offers.put(id, new Offer(items, held));
         return id;
+    }
+
+    /**
+     * Whether a drag's or a clip's offer ({@code age} ms old, the oldest first)
+     * is closed as another is put: once it is {@link #KEEP_MS} old, or while
+     * {@code loose} of them are open already and the new one is one too. A
+     * share's ({@code held}) is never closed this way, nor makes room for itself.
+     */
+    static boolean closes(long age, int loose, boolean newHeld) {
+        return age > KEEP_MS || (!newHeld && loose >= KEEP_MAX);
+    }
+
+    /** Offer {@code id} taken back: what it still holds open, closed — a file on its way ends there. */
+    void drop(int id) {
+        Offer o;
+        synchronized (this) {
+            o = offers.remove(id);
+        }
+        if (o != null) closeAll(o);
+    }
+
+    private static void closeAll(Offer o) {
+        for (Item it : o.items) {
+            Content.Opened open = it.takeOpened();
+            if (open != null) open.close();
+        }
     }
 
     private synchronized Item get(int id, int i) {
@@ -119,24 +197,39 @@ final class AppOffers {
                 wire.json(failed("That is no longer on offer: drag or copy it again."));
                 return;
             }
-            try (Content.Opened o = Content.open(Uri.parse(it.uri))) {
+            // Opened already (a share's), or opened now as the shell (a drag's, a clip's).
+            Content.Opened handed = it.takeOpened();
+            if (handed == null && it.handedOver) {
+                // A share's file taken once already, or taken back: never opened again as the shell.
+                wire.json(failed("That is no longer on offer: send it again."));
+                return;
+            }
+            boolean begun = false;
+            try (Content.Opened o = handed != null ? handed : Content.open(Uri.parse(it.uri))) {
                 long size = o.length >= 0 ? o.length : it.size;
+                // exact: the file's own length, not what the sending app said (a pipe has none): fewer bytes
+                // than an exact size is a file cut short; a said one is a hint either way.
                 wire.json(new JSONObject().put("t", "get").put("ok", true).put("name", it.name)
-                        .put("mime", it.mime == null ? "" : it.mime).put("size", size));
-                OutputStream out = sock.getOutputStream();
+                        .put("mime", it.mime == null ? "" : it.mime).put("size", size).put("exact", o.length >= 0));
+                begun = true;
                 byte[] buf = new byte[256 * 1024];
                 long sent = 0;
                 long t0 = SystemClock.uptimeMillis();
+                if (it.progress != null) it.progress.sent(0, size);
                 for (int n; (n = o.in.read(buf)) > 0; ) {
-                    out.write(buf, 0, n);
+                    wire.send(Wire.PIECE, null, 0, buf, n);
                     sent += n;
+                    if (it.progress != null) it.progress.sent(sent, size);
                 }
-                out.flush();
+                // The end mark: only now is the file whole.
+                wire.send(Wire.PIECE, null, 0, buf, 0);
                 AppServer.log("sent " + it.name + " to the computer (" + sent + " bytes in "
                         + (SystemClock.uptimeMillis() - t0) + " ms)");
             } catch (IOException | RuntimeException e) {
                 AppServer.log("could not read " + it.name + " (" + e + ")");
-                wire.json(failed("The phone could not read it."));
+                // After the answer the pieces: the connection is closed without the end mark, which the
+                // computer takes for a file cut short.
+                if (!begun) wire.json(failed("The phone could not read it."));
             }
         } catch (Exception ignored) {
             // the computer went: there is nobody to tell

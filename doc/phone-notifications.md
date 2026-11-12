@@ -326,6 +326,11 @@ A server started for notifications alone does not bring the phone's
 clipboard to this computer: that starts, as it always has, once the Apps
 page or a window has used the server.
 
+"Send to computer" and the Photos tab keep a server too (doc/send-to-computer.md,
+"The link's life"), with a keeper of their own: notifications turned off
+leave running a server they want, and they let go of one notifications
+still want.
+
 ## The bell
 
 In the title bar, beside Help, on every tab — notifications are not one

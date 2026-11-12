@@ -12,6 +12,7 @@ import { DesktopPage, type Method } from "./features/desktop/DesktopPage";
 import { deviceName, type AdbState, type LaunchMode, type Phase, type Progress } from "./features/desktop/model";
 import { useSessions } from "./features/mirror/useSessions";
 import { NotificationsBell } from "./features/notifications/NotificationsBell";
+import { PhotosPanel } from "./features/photos/PhotosPanel";
 import { RemotePanel } from "./features/remote/RemotePanel";
 import { WirelessPanel } from "./features/wireless/WirelessPanel";
 import { ContextMenu, type ContextAction } from "./ui/ContextMenu";
@@ -105,6 +106,20 @@ export default function App() {
   const [askedOnPhone, setAskedOnPhone] = useState(false);
   const { toast, say, dismiss } = useToast();
   const [tab, setTab] = useState<Tab>("desktop");
+  // What the phone sent (Send to computer), said here where this computer showed no notification of it.
+  useEffect(() => {
+    const un = listen<{ item?: { kind: string; title: string }; system?: boolean | null }>("send:arrived", ({ payload }) => {
+      const it = payload.item;
+      if (!it || payload.system !== false) return;
+      say(it.title, it.kind === "failed" ? "bad" : "ok");
+    });
+    // One of its notifications clicked: the Photos tab, where what arrived is listed.
+    const unShow = listen("send:show", () => setTab("photos"));
+    return () => {
+      un.then((f) => f());
+      unShow.then((f) => f());
+    };
+  }, [say]);
   /** Cable or Wi-Fi, on the connect screen. Wi-Fi first for someone who has used it before. */
   const [method, setMethod] = useState<Method>("usb");
   const [version, setVersion] = useState("");
@@ -714,7 +729,7 @@ export default function App() {
       ? "device" in phase
         ? phase.device
         : readyDevice
-      : tab === "apps"
+      : tab === "apps" || tab === "photos"
         ? readyDevice
         : devices.find((d) => d.state === "device");
   const dropPhone = devices.find((d) => d.state === "device" && d.serial === shownPhone?.serial);
@@ -887,6 +902,8 @@ export default function App() {
             />
           ) : tab === "apps" ? (
             <AppsPanel device={readyDevice} say={say} />
+          ) : tab === "photos" ? (
+            <PhotosPanel key={readyDevice?.serial ?? ""} device={readyDevice} say={say} />
           ) : (
             <RemotePanel devices={devices} />
           )}

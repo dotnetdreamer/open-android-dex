@@ -46,6 +46,14 @@ openandroiddex-remote = { path = "../../openandroiddex-remote" }
 # is the same tokio Tauri already links.
 tokio = { version = "1", features = ["rt-multi-thread", "sync"] }
 
+# Game controllers for the phone apps' windows (apps/gamepad.rs): each system's
+# own reader — Windows.Gaming.Input through the `windows` crate this app has,
+# IOKit HID on a Mac — with hot-plug and SDL's controller database, so
+# PlayStation and Switch pads map as Xbox ones do. A Linux computer's windows
+# are scrcpy's, which reads controllers itself (scrcpy.rs, --gamepad=uhid).
+[target.'cfg(any(windows, target_os = "macos"))'.dependencies]
+gilrs = { version = "0.11", default-features = false, features = ["wgi"] }
+
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.60", features = [
     "Win32_Foundation",
@@ -105,6 +113,10 @@ windows = { version = "0.62", features = [
     "Win32_Graphics_Imaging",
     "Win32_Media_MediaFoundation",
     "Win32_Storage_EnhancedStorage",
+    # What a file from the phone lands by (send/inbox.rs): a file's volume
+    # serial and id, which says it is still the one made, and a part's hidden
+    # mark. On already through tao and wry; declared rather than leaned on.
+    "Win32_Storage_FileSystem",
     "Win32_System_Com",
     "Win32_System_Com_StructuredStorage",
     # This computer's clipboard, watched as it changes and read where a
@@ -199,6 +211,9 @@ objc2-core-graphics = { version = "0.3", default-features = false, features = [
     # (apps/mac, pad): a warp, which takes no permission and posts no event.
     "CGRemoteOperation",
     "CGError",
+    # …and game controls' look area holding the pointer still while the mouse
+    # moves (apps/mac, CGAssociateMouseAndMouseCursorPosition takes a boolean_t).
+    "libc",
 ] }
 objc2-app-kit = { version = "0.3", default-features = false, features = [
     "std",
@@ -262,6 +277,12 @@ objc2-app-kit = { version = "0.3", default-features = false, features = [
     "NSDraggingItem",
     "NSDraggingSession",
     "NSFilePromiseProvider",
+    # Keep a copy's Change… (send/pick.rs): the system's folder chooser.
+    "NSOpenPanel",
+    "NSPanel",
+    "NSSavePanel",
+    # …game controls' look area, which hides the pointer while it has the mouse (apps/game).
+    "NSCursor",
 ] }
 # The picture of a phone app's window on a Mac (apps/mac/video.rs): a layer
 # macOS decodes H.264 into, and the CoreMedia buffers it takes. The same

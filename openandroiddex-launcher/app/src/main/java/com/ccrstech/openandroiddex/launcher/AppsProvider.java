@@ -3,6 +3,7 @@ package com.ccrstech.openandroiddex.launcher;
 import android.content.ContentProvider;
 import android.content.ContentValues;
 import android.content.Context;
+import android.content.res.AssetFileDescriptor;
 import android.database.Cursor;
 import android.graphics.Bitmap;
 import android.net.Uri;
@@ -76,6 +77,15 @@ import java.util.concurrent.TimeUnit;
  *     them: which it has opened ({@code opened}, each one's {@code i}),
  *     waiting up to {@code wait} ms for all of them. {@code drop.forget}
  *     {@code {batch}} — the app did not take them: they go.</li>
+ * <li>{@code share.take} {@code {computer, os, v}} — what "Send to computer"
+ *     has waiting, now taken, and what was taken back ({@link SendQueue});
+ *     {@code share.refuse} {@code {computer, why}} — this computer takes no
+ *     shares; {@code share.opened} {@code {id, failed}}, {@code share.progress}
+ *     {@code {id, i, n, bytes, total}}, {@code share.wait} {@code {id}} — it
+ *     waits its turn on the computer, {@code share.done} {@code {id, ok, did,
+ *     landed, failed, message?, computer}} — how it goes, for the card;
+ *     {@code share.enable} {@code {on}} — the share entry on or off, which
+ *     only this app may change.</li>
  * </ul>
  *
  * <p>{@code linux.apps} also says how far the setup is ({@code phase},
@@ -83,7 +93,9 @@ import java.util.concurrent.TimeUnit;
  *
  * <p>A dropped file is staged by opening {@code drop/<batch>/<i>/<name>} here
  * for writing, and read back for reading: a file in this app's cache, which
- * {@link DropsProvider} serves to the app it is dropped on.
+ * {@link DropsProvider} serves to the app it is dropped on. A shared one,
+ * {@code share/<id>/<i>/<name>}, is opened by this app and handed over open
+ * ({@link #openAssetFile}).
  *
  * <b>Only the shell may call this</b>, as {@link RemoteProvider}: the manifest
  * guards it with {@code android.permission.DUMP}, and {@link #call} checks the
@@ -112,6 +124,13 @@ public class AppsProvider extends ContentProvider {
         long token = Binder.clearCallingIdentity();
         try {
             JSONObject in = arg == null || arg.isEmpty() ? new JSONObject() : new JSONObject(arg);
+            // Send to computer's: answered before Linux's windows are woken for nothing.
+            if (method != null && method.startsWith("share.")) {
+                out = share(method, in);
+                Bundle b = new Bundle();
+                b.putString("json", out.toString());
+                return b;
+            }
             LinuxWindows windows = LinuxWindows.get(ctx);
             switch (method == null ? "" : method) {
                 case "linux.apps": {
@@ -299,6 +318,51 @@ public class AppsProvider extends ContentProvider {
         Bundle b = new Bundle();
         b.putString("json", out.toString());
         return b;
+    }
+
+    /** The {@code share.*} methods: Send to computer's card and the server's questions ({@link SendQueue}). */
+    private JSONObject share(String method, JSONObject in) throws Exception {
+        switch (method) {
+            case "share.enable":
+                return SendQueue.enable(getContext(), in.optBoolean("on"));
+            case "share.take":
+                return SendQueue.take(in);
+            case "share.refuse":
+                return SendQueue.refuse(in);
+            case "share.opened":
+                return SendQueue.opened(in);
+            case "share.progress":
+                return SendQueue.progress(in);
+            case "share.wait":
+                return SendQueue.waiting(in);
+            case "share.done":
+                return SendQueue.done(in);
+            default:
+                return new JSONObject().put("ok", false).put("message", "no method " + method);
+        }
+    }
+
+    /**
+     * A shared item ({@code share/<id>/<i>/<name>}), opened by this app under
+     * its own identity — it holds the share's permission while the card is up —
+     * and handed to the shell as the open file. The shell only. Everything
+     * else is {@link #openFile}'s.
+     */
+    @Override
+    public AssetFileDescriptor openAssetFile(Uri uri, String mode) throws FileNotFoundException {
+        List<String> path = uri.getPathSegments();
+        if (path.isEmpty() || !"share".equals(path.get(0))) return super.openAssetFile(uri, mode);
+        int uid = Binder.getCallingUid();
+        if (uid != SHELL_UID && uid != ROOT_UID) {
+            throw new SecurityException("the phone's apps on a computer are for adb only");
+        }
+        if (!"r".equals(mode)) throw new FileNotFoundException("a share is read only");
+        long token = Binder.clearCallingIdentity();
+        try {
+            return SendQueue.open(getContext(), path);
+        } finally {
+            Binder.restoreCallingIdentity(token);
+        }
     }
 
     private static LinuxApps.App find(LinuxWindows windows, String id) {

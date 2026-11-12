@@ -886,7 +886,22 @@ fn announced(app: &tauri::AppHandle, phone: &str) -> Option<String> {
 #[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
 fn adbd_ports(app: &tauri::AppHandle, serial: &str) -> Vec<u16> {
     let table = run_adb_quiet(app, &["-s", serial, "shell", "cat /proc/net/tcp6 /proc/net/tcp"]).unwrap_or_default();
-    parse_adbd_ports(&table)
+    let reversed = run_adb_quiet(app, &["-s", serial, "reverse", "--list"]).unwrap_or_default();
+    without_reversed(parse_adbd_ports(&table), &reversed)
+}
+
+/// `ports` less the phone's side of each `adb reverse --list` line
+/// ("UsbFfs tcp:7192 tcp:7192"): adbd listens for a reverse on every address
+/// too, as for the network, and an `adb connect` to the file service's 7192
+/// reaches this computer's own listener and hangs until adb gives up, leaving
+/// an offline transport behind (seen on a Galaxy S24).
+#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
+fn without_reversed(ports: Vec<u16>, list: &str) -> Vec<u16> {
+    let reversed: Vec<u16> = list
+        .lines()
+        .filter_map(|l| l.split_whitespace().nth(1)?.strip_prefix("tcp:")?.parse().ok())
+        .collect();
+    ports.into_iter().filter(|p| !reversed.contains(p)).collect()
 }
 
 /// The listening sockets in `/proc/net/tcp6` and `/proc/net/tcp` that are the
@@ -1731,6 +1746,26 @@ mod tests {
                      3: 00000000:22B8 00000000:0000 0A 00000000:00000000 00:00000000 00000000 10234        0 30411 1 0000000000000000 100 0 0 10 0\n";
         assert_eq!(parse_adbd_ports(table), vec![42761, 5555]);
         assert!(parse_adbd_ports("").is_empty());
+    }
+
+    /// A Galaxy S24 (Android 15) with Wireless debugging on (0xA007) while the
+    /// file service's `adb reverse tcp:7192` stands (0x1C18): both listen on
+    /// every address, as the shell; only the first is Wireless debugging.
+    #[test]
+    fn a_port_adb_reverse_listens_on_is_not_wireless_debugging() {
+        let table = "  sl  local_address                         remote_address                        st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n\
+                     0: 00000000000000000000000000000000:A007 00000000000000000000000000000000:0000 0A 00000000:00000000 00:00000000 00000000  2000        0 1 1 0000000000000000 100 0 0 10 0\n\
+                     1: 0000000000000000FFFF00000100007F:1C16 00000000000000000000000000000000:0000 0A 00000000:00000000 00:00000000 00000000  2000        0 2 1 0000000000000000 100 0 0 10 0\n\
+                     2: 00000000000000000000000000000000:1C18 00000000000000000000000000000000:0000 0A 00000000:00000000 00:00000000 00000000  2000        0 3 1 0000000000000000 100 0 0 10 0\n";
+        let ports = parse_adbd_ports(table);
+        assert_eq!(ports, vec![40967, 7192]);
+        assert_eq!(without_reversed(ports.clone(), "UsbFfs tcp:7192 tcp:7192\n"), vec![40967]);
+        // The phone's side is the one that counts, whatever this computer's is.
+        assert_eq!(without_reversed(ports.clone(), "UsbFfs tcp:7192 tcp:7194\n"), vec![40967]);
+        assert_eq!(without_reversed(ports.clone(), "UsbFfs tcp:7194 tcp:7192\n"), vec![40967, 7192]);
+        // No reverse, or a list that could not be read: every port is tried, as before.
+        assert_eq!(without_reversed(ports.clone(), ""), vec![40967, 7192]);
+        assert_eq!(without_reversed(ports, "UsbFfs localabstract:scrcpy_1a2b tcp:27183\n"), vec![40967, 7192]);
     }
 
     fn device(serial: &str, state: &str, hardware: Option<&str>) -> crate::adb::DeviceInfo {

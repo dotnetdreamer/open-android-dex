@@ -1280,6 +1280,12 @@ fn mkdir(path: &Path) -> Answer<String> {
         .map_err(|e| Fault::io("could not create", &e))
 }
 
+/// The free bytes of the volume holding `path`: where a file from the phone
+/// lands (send/), checked before anything is written there.
+pub(crate) fn free_bytes(path: &Path) -> Option<u64> {
+    free(path).ok().map(|(free, _)| free)
+}
+
 /// `{free, total}` for the volume holding `path`, in bytes.
 fn free(path: &Path) -> Answer<(u64, u64)> {
     let dir = nearest_dir(path)

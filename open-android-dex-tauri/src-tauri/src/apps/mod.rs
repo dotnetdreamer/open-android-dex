@@ -34,6 +34,10 @@ mod clipboard;
 mod drops;
 #[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
 mod fetch;
+#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
+pub(crate) mod game;
+#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
+mod gamepad;
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod h264;
 pub(crate) mod host;
@@ -47,6 +51,7 @@ mod pad;
 pub(crate) mod pin;
 #[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
 mod shape;
+pub(crate) mod shared;
 #[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
 mod sound;
 #[cfg(windows)]
@@ -695,6 +700,7 @@ fn open_new(
         via: via(serial),
         clicked,
         notif,
+        game: Some(game::Session::new(app, id, pkg, &row.label)),
     };
     open_window(app, serial, phone, pkg, &row.label, spec, since, opening)?;
     // Its pin, if it has one, opens it from this phone from now on.
@@ -1244,7 +1250,63 @@ fn open_window(
     KEEPER.call_once(move || {
         let _ = std::thread::Builder::new().name("apps-keeper".into()).spawn(move || keep(app));
     });
+    // Game controllers, read while a phone window is open (doc/game-mode.md).
+    gamepad::start();
+    #[cfg(debug_assertions)]
+    {
+        static HOOK: std::sync::Once = std::sync::Once::new();
+        HOOK.call_once(game::hook::start);
+    }
     Ok(())
+}
+
+/// Whether an Android app's window is open (game controllers are read only then).
+#[cfg(any(windows, target_os = "macos"))]
+fn any_android_window() -> bool {
+    windows().lock().unwrap().values().any(|w| w.linux.is_none())
+}
+
+/// The Android app's window in front, if one is: where game controllers go.
+/// A debug build's hook may have the newest stand in (`OADX_GAME_HOOK_ANY=1`, game/hook.rs).
+#[cfg(any(windows, target_os = "macos"))]
+fn front_android_window() -> Option<Arc<native::Window>> {
+    let all = windows().lock().unwrap();
+    if cfg!(debug_assertions) && std::env::var("OADX_GAME_HOOK_ANY").as_deref() == Ok("1") {
+        return all.values().filter(|w| w.linux.is_none()).max_by_key(|w| w.id).cloned();
+    }
+    all.values().find(|w| w.linux.is_none() && w.is_front()).cloned()
+}
+
+/// The game controls of the phone window in front — or, `any`, of the newest one (the debug hook's).
+#[cfg(any(windows, target_os = "macos"))]
+pub(crate) fn game_front(any: bool) -> Option<Arc<game::Session>> {
+    let all = windows().lock().unwrap();
+    let w = if any { all.values().filter(|w| w.game().is_some()).max_by_key(|w| w.id) } else { all.values().find(|w| w.is_front()) };
+    w.and_then(|w| w.game())
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
+pub(crate) fn game_front(_any: bool) -> Option<Arc<game::Session>> {
+    None
+}
+
+/// The debug hook's `reconnect`: the connection of the phone window in front
+/// (or, `any`, the newest) made again the way it goes now — as a move between
+/// the cable and Wi‑Fi makes it, without leaving the cable.
+#[cfg(all(debug_assertions, any(windows, target_os = "macos")))]
+pub(crate) fn reconnect_front(any: bool) -> Result<(), String> {
+    let w = {
+        let all = windows().lock().unwrap();
+        let w = if any { all.values().filter(|w| w.game().is_some()).max_by_key(|w| w.id) } else { all.values().find(|w| w.is_front()) };
+        w.cloned().ok_or("no phone window in front")?
+    };
+    let route = w.route();
+    w.reconnect(route, false).map_err(|e| format!("{e:?}"))
+}
+
+#[cfg(all(debug_assertions, not(any(windows, target_os = "macos"))))]
+pub(crate) fn reconnect_front(_any: bool) -> Result<(), String> {
+    Err("no phone windows here".into())
 }
 
 /// What a window of this app asks of it: its news, the clipboard, its sound
@@ -1320,6 +1382,10 @@ impl link::Host for WindowHost {
                 if let Some(phone) = self.phone() {
                     pad::showing(&serial, &phone);
                 }
+                // Game controls come back on, if they were on when this game's window last had them.
+                if let Some(g) = self.window().and_then(|w| w.game()) {
+                    g.live();
+                }
             }
             link::Event::Failed(message) => {
                 log::warn!("apps [{serial}] {pkg}: {message}");
@@ -1345,6 +1411,10 @@ impl link::Host for WindowHost {
                 }
                 if let Some(w) = self.window() {
                     note(&w, Some(format!("Reconnecting to {}…", phone_name(&self.device))), true);
+                    // Game controls let go of everything and give the mouse back over "Reconnecting…".
+                    if let Some(g) = w.game() {
+                        g.blur();
+                    }
                 }
                 wake_keeper();
             }
@@ -1367,6 +1437,8 @@ impl link::Host for WindowHost {
                 if let Some(phone) = self.phone() {
                     pad::showing(&serial, &phone);
                 }
+                // Game controls' fingers and controllers go again by themselves: each
+                // follows the connection's generation (game/mod.rs, gamepad.rs).
             }
             link::Event::Closed => {
                 let was = kept().lock().unwrap().remove(&self.id);
@@ -1376,6 +1448,9 @@ impl link::Host for WindowHost {
                     let window = all.remove(&self.id);
                     (window, !all.values().any(|w| w.serial() == serial))
                 };
+                if let Some(g) = window.as_ref().and_then(|w| w.game()) {
+                    g.closed();
+                }
                 if last {
                     crate::scrcpy::apps_audio(app, &serial, false);
                 }
@@ -1538,6 +1613,25 @@ fn copy_asked(phone: &str, window: Arc<dyn link::Surface>) {
 #[cfg(any(windows, target_os = "macos"))]
 pub(crate) fn copy_answered(phone: &str) -> Option<Arc<dyn link::Surface>> {
     copy_waiting().lock().unwrap().remove(phone).map(|(_, w)| w)
+}
+
+/// Text the phone sent ("Send to computer", send/inbox.rs), on this computer's
+/// clipboard — what the control connection's reader does with the phone's
+/// copied text, and with the same guard: the phone's server is told it is
+/// that text, so the clipboard watcher does not hand it straight back.
+pub(crate) fn from_phone_clipboard(app: &tauri::AppHandle, phone: &str, text: &str) -> bool {
+    use tauri_plugin_clipboard_manager::ClipboardExt;
+    if let Some(server) = host::of_phone(phone) {
+        *server.clip_last.lock().unwrap() = text.to_string();
+    }
+    // Whether it is there: "Copied" is said only when it is.
+    match app.clipboard().write_text(text.to_string()) {
+        Ok(()) => true,
+        Err(e) => {
+            log::warn!("apps: cannot set this computer's clipboard: {e}");
+            false
+        }
+    }
 }
 
 /// The phone copied text, which is this computer's to paste now: the window
@@ -1920,6 +2014,7 @@ pub fn probe(serial: &str, socket: &str, pkg: &str, label: &str, icon_png: Optio
         via: via(serial),
         clicked: Instant::now(),
         notif: None,
+        game: None,
     };
     let _window = win::open(spec, host)?;
     let _ = rx.recv();
@@ -2079,6 +2174,7 @@ fn open_linux_window(app: &tauri::AppHandle, serial: &str, xid: i32, title: &str
         via: via(serial),
         clicked: mapped,
         notif: None,
+        game: None,
     };
     if let Err(e) = open_window(app, serial, &phone, &app_pkg, &label, spec, "Linux mapped it", Opening::new(serial)) {
         log::warn!("apps [{serial}] Linux window 0x{xid:x}: {e}");

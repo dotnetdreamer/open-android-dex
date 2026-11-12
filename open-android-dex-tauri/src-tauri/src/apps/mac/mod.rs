@@ -53,7 +53,7 @@ use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol, ProtocolObject, Sel}
 use objc2::{define_class, msg_send, sel, AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, Message};
 use objc2_app_kit::{
     NSAnimatablePropertyContainer, NSAnimationContext, NSApplication, NSApplicationPresentationOptions,
-    NSAutoresizingMaskOptions, NSBackingStoreType, NSButton, NSColor, NSControlStateValueOn, NSDragOperation,
+    NSAutoresizingMaskOptions, NSBackingStoreType, NSButton, NSColor, NSControlStateValueOn, NSCursor, NSDragOperation,
     NSDraggingContext, NSDraggingDestination, NSDraggingInfo, NSDraggingItem, NSDraggingSession, NSDraggingSource,
     NSEvent, NSEventModifierFlags, NSFilePromiseProvider, NSFilePromiseProviderDelegate, NSFont, NSFontWeightMedium,
     NSFontWeightSemibold, NSImage, NSImageSymbolConfiguration, NSLayoutAttribute, NSLineBreakMode, NSMenu,
@@ -73,6 +73,7 @@ use serde_json::json;
 
 use super::drops;
 use super::fetch::{self, Offer, Taking};
+use super::game::{self, engine::Event as GameEvent, engine::Input as GameInput, engine::MouseButton, engine::WheelWay};
 use super::keys::{self, mac as mk};
 use super::link::{self, DisplaySize, Event, Host, Link, NetSpec, Refused, Route, Spec, Surface};
 use super::shape;
@@ -170,6 +171,21 @@ impl Window {
     pub fn say(&self, text: Option<String>) {
         Surface::say(&*self.shared, text);
     }
+
+    /// A message on its connection to the phone (a game controller's state).
+    pub fn send(&self, bytes: Vec<u8>) {
+        self.shared.link.send(bytes);
+    }
+
+    /// Which of its connections that goes on (link::Link::generation).
+    pub fn generation(&self) -> u64 {
+        self.shared.link.generation()
+    }
+
+    /// Its game controls, an Android app's window's.
+    pub fn game(&self) -> Option<Arc<game::Session>> {
+        self.shared.game.clone()
+    }
 }
 
 /// The scale of the screen the pointer is on — the one a click just opened something from.
@@ -204,6 +220,8 @@ struct Shared {
     /// The key window: the one in front, what the keyboard types into. A
     /// window resigns it when this app stops being the active one, too.
     front: AtomicBool,
+    /// Its game controls (apps/game): an Android app's window's.
+    game: Option<Arc<game::Session>>,
 }
 
 /// How the picture has been doing, for the log every ten seconds.
@@ -296,6 +314,9 @@ impl Surface for Shared {
             }
             *label = name.to_string();
         }
+        if let Some(g) = &self.game {
+            g.named(name);
+        }
         let name = name.to_string();
         with_window(self.id, move |w, v| {
             let name = NSString::from_str(&name);
@@ -348,6 +369,48 @@ impl Surface for Shared {
 
     fn dragged(&self, offer: Option<Offer>) {
         with_window(self.id, move |_, v| v.carry_out(offer));
+    }
+}
+
+/// What the window's game controls ask of it (apps/game), from their own threads.
+impl game::Shell for Shared {
+    fn capture(&self, on: bool) {
+        with_window(self.id, move |_, v| v.capture(on));
+    }
+
+    fn game_note(&self, text: Option<String>, busy: bool) {
+        Surface::note(self, text, busy);
+    }
+
+    fn bring_forward(&self) {
+        with_window(self.id, |w, _| {
+            if w.isMiniaturized() {
+                w.deminiaturize(None);
+            }
+            w.makeKeyAndOrderFront(None);
+            activate(w.mtm());
+        });
+    }
+
+    /// The app's part of the picture (the clip), and its screen, from the main
+    /// screen's top left in points: AppKit counts up from the bottom.
+    fn picture_frame(&self) -> Option<game::Frame> {
+        let id = self.id;
+        dispatch2::run_on_main(move |mtm| {
+            let (w, v) = parts(id)?;
+            let in_window = v.convertRect_toView(v.ivars().clip.frame(), None);
+            let r = w.convertRectToScreen(in_window);
+            let top = NSScreen::screens(mtm).firstObject().map_or(0.0, |s| s.frame().size.height);
+            let s = w.screen().map(|s| s.visibleFrame())?;
+            Some(game::Frame {
+                x: r.origin.x,
+                y: top - (r.origin.y + r.size.height),
+                w: r.size.width,
+                h: r.size.height,
+                screen: (s.origin.x, top - (s.origin.y + s.size.height), s.size.width, s.size.height),
+                scale: 1.0,
+            })
+        })
     }
 }
 
@@ -572,7 +635,11 @@ pub fn open(spec: Spec, host: Arc<dyn Host>) -> Result<Arc<Window>, String> {
         device: spec.device.clone(),
         note_seq: Arc::new(AtomicU64::new(0)),
         front: AtomicBool::new(false),
+        game: spec.game.clone(),
     });
+    if let Some(g) = &shared.game {
+        g.attach(shared.link.clone(), shared.clone());
+    }
     let look = Look {
         id: spec.id,
         label: spec.label.clone(),
@@ -738,6 +805,7 @@ fn make(mtm: MainThreadMarker, look: &Look, shared: &Arc<Shared>) {
     }
     activate(mtm);
     OPEN.with(|o| o.borrow_mut().insert(look.id, Parts { window, view }));
+    watch_the_session();
 }
 
 /// A borderless button showing one of the system's symbols, which `target` answers.
@@ -1005,6 +1073,17 @@ struct Ui {
     /// What the last drag carried out promised its files with: a receiver
     /// holds them weakly, and asks for each as it is dropped.
     promised: RefCell<Vec<Retained<PhoneFile>>>,
+    /// Keys handed to the game controls, by macOS's code: their let-go goes
+    /// there too. With each, whether the keyboard's own state has said it is
+    /// down (game::released).
+    game_keys: RefCell<HashMap<u16, bool>>,
+    /// A look at the keyboard's state is due for the keys above.
+    reconciling: Cell<bool>,
+    /// The pointer is taken for a look area (game controls), and where it was before.
+    captured: Cell<bool>,
+    captured_from: Cell<Option<NSPoint>>,
+    /// A trackpad's scrolling, added up into notches for a control bound to the wheel.
+    wheel: Cell<f64>,
 }
 
 define_class!(
@@ -1073,7 +1152,8 @@ define_class!(
             if self.ivars().out.get() == Out::Refused {
                 self.ivars().out.set(Out::No);
             }
-            let control = event.modifierFlags().contains(NSEventModifierFlags::Control);
+            // Not while game controls are on: Control may be a game's key, and the click its fire.
+            let control = event.modifierFlags().contains(NSEventModifierFlags::Control) && self.game_on().is_none();
             self.ivars().control_click.set(control);
             self.press(event, if control { BUTTON_SECONDARY } else { BUTTON_PRIMARY }, true);
         }
@@ -1136,6 +1216,11 @@ define_class!(
 
         #[unsafe(method(mouseMoved:))]
         fn mouse_moved(&self, event: &NSEvent) {
+            // Taken for looking around, the pointer never reaches the full-screen bar.
+            if self.ivars().captured.get() {
+                self.pointer(event);
+                return;
+            }
             if self.ivars().buttons.get() == 0 {
                 let on_bar = self.track(self.convertPoint_fromView(event.locationInWindow(), None));
                 if !on_bar {
@@ -1149,7 +1234,7 @@ define_class!(
             // Out over the top of the screen (into the strip beside a camera
             // notch, or onto a screen above) is as good as touching it.
             self.track(self.convertPoint_fromView(event.locationInWindow(), None));
-            if self.ivars().buttons.get() == 0 {
+            if self.ivars().buttons.get() == 0 && self.game_on().is_none() {
                 self.ivars().shared.link.send(wire::json(&json!({"t": "leave"})));
             }
         }
@@ -1166,6 +1251,9 @@ define_class!(
             if h == 0.0 && v == 0.0 {
                 return;
             }
+            if self.game_wheel(v) {
+                return;
+            }
             let (dx, dy) = self.on_display(event);
             let meta = mods(event).meta();
             self.ivars().shared.link.send(wire::scroll(dx, dy, h as f32, v as f32, meta));
@@ -1173,6 +1261,10 @@ define_class!(
 
         #[unsafe(method(keyDown:))]
         fn key_down(&self, event: &NSEvent) {
+            // F8, and while they are on the keys the game controls have, are theirs.
+            if self.game_key_down(event) {
+                return;
+            }
             let kvk = event.keyCode();
             let ui = self.ivars();
             // Esc takes a full-screen window out of full screen, and does not
@@ -1204,6 +1296,9 @@ define_class!(
 
         #[unsafe(method(keyUp:))]
         fn key_up(&self, event: &NSEvent) {
+            if self.game_key_up(event.keyCode()) {
+                return;
+            }
             if event.keyCode() == mk::ESCAPE {
                 self.ivars().esc_held.set(false);
             }
@@ -1220,6 +1315,15 @@ define_class!(
         #[unsafe(method(performKeyEquivalent:))]
         fn perform_key_equivalent(&self, event: &NSEvent) -> bool {
             self.shortcut(event)
+        }
+
+        /// Shift, Control and Option, which come to a view as a change of the
+        /// modifiers and never as keys: a game control's key while they are on.
+        #[unsafe(method(flagsChanged:))]
+        fn flags_changed(&self, event: &NSEvent) {
+            if !self.game_flags(event) {
+                let _: () = unsafe { msg_send![super(self), flagsChanged: event] };
+            }
         }
 
         /// The title bar's Back, and the full-screen bar's.
@@ -1293,6 +1397,22 @@ define_class!(
             shared.link.host().touchpad(shared.clone());
         }
 
+        /// More's "Game controls": on and off, as ⌘G and F8 (apps/game).
+        #[unsafe(method(gameControls:))]
+        fn game_controls(&self, _sender: Option<&AnyObject>) {
+            if let Some(g) = &self.ivars().shared.game {
+                g.toggle();
+            }
+        }
+
+        /// More's "Set up game controls…": the editor (apps/game/editor.rs).
+        #[unsafe(method(setUpGameControls:))]
+        fn set_up_game_controls(&self, _sender: Option<&AnyObject>) {
+            if let Some(g) = &self.ivars().shared.game {
+                g.set_up();
+            }
+        }
+
         /// More's "Keep in Dock": the app as an application of its own in the
         /// Dock, which opens it here again from there, this app started for it
         /// if need be (apps/pin.rs). A note under the title bar says how it went.
@@ -1345,9 +1465,9 @@ define_class!(
             let taken = !paths.is_empty();
             if taken {
                 let shared = self.ivars().shared.clone();
-                // Let go on the picture: for the app there.
+                // Let go on the picture: for the app there — not while game controls have the mouse: to Downloads.
                 let p = self.convertPoint_fromView(sender.draggingLocation(), None);
-                let on = self.on_picture(p).then(|| {
+                let on = (self.on_picture(p) && self.game_on().is_none()).then(|| {
                     let (x, y) = self.at_display(p);
                     drops::On { key: shared.link.key().to_string(), x, y }
                 });
@@ -1457,26 +1577,25 @@ define_class!(
 
         #[unsafe(method(windowDidBecomeKey:))]
         fn window_did_become_key(&self, _notification: &NSNotification) {
-            self.ivars().shared.front.store(true, Ordering::SeqCst);
-            let link = &self.ivars().shared.link;
-            link.hand_clipboard_over();
-            link.send(wire::json(&json!({"t": "focus"})));
+            self.front_again();
         }
 
         #[unsafe(method(windowDidResignKey:))]
         fn window_did_resign_key(&self, _notification: &NSNotification) {
-            self.ivars().shared.front.store(false, Ordering::SeqCst);
-            let link = &self.ivars().shared.link;
-            for (_, code) in self.ivars().keys_down.borrow_mut().drain() {
-                link.send(wire::key(false, 0, code, 0));
-            }
-            link.send(wire::json(&json!({"t": "blur"})));
+            // ⌘Tab, another window, the Dock: game controls let go of everything, the mouse comes back.
+            self.front_lost();
         }
 
         #[unsafe(method(windowDidEndLiveResize:))]
         fn window_did_end_live_resize(&self, _notification: &NSNotification) {
             self.ivars().shared.ask_size();
             self.held_still();
+        }
+
+        /// Moved (a tiling shortcut, Stage Manager, another screen): a taken pointer goes with the picture.
+        #[unsafe(method(windowDidMove:))]
+        fn window_did_move(&self, _notification: &NSNotification) {
+            self.recentre();
         }
 
         /// macOS's full screen, with the menu bar kept away — and the title bar,
@@ -1577,6 +1696,11 @@ impl AppView {
             out: Cell::new(Out::No),
             ready: RefCell::new(None),
             promised: RefCell::new(Vec::new()),
+            game_keys: RefCell::new(HashMap::new()),
+            reconciling: Cell::new(false),
+            captured: Cell::new(false),
+            captured_from: Cell::new(None),
+            wheel: Cell::new(0.0),
         });
         let view: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: frame] };
         view.setWantsLayer(true);
@@ -1641,6 +1765,8 @@ impl AppView {
         ui.menu_open.set(true);
         menu.popUpMenuPositioningItem_atLocation_inView(None, NSPoint::new(0.0, y), Some(button));
         ui.menu_open.set(false);
+        // The menu's loop had the keyboard: a game key let go meanwhile is let go now.
+        self.after_menu();
         if let Some(w) = self.window() {
             self.track(self.convertPoint_fromView(w.mouseLocationOutsideOfEventStream(), None));
         }
@@ -1657,6 +1783,8 @@ impl AppView {
         self.lay_out_picture();
         self.place_handle();
         self.place_note();
+        // The picture moved under a taken pointer (F11, a zoom): the pointer back in its middle.
+        self.recentre();
         if !settle {
             return;
         }
@@ -1784,6 +1912,16 @@ impl AppView {
         }
         menu.addItem(&item);
         menu.addItem(&pad);
+        // Game controls, an Android app's (apps/game): ⌘G is caught by the view itself, shown
+        // here — once the game has controls set up; until then ⌘G is the app's.
+        if let Some(g) = &ui.shared.game {
+            let on = edit("Game controls", sel!(gameControls:), if g.shortcut_is_ours() { "g" } else { "" });
+            if g.is_on() {
+                on.setState(NSControlStateValueOn);
+            }
+            menu.addItem(&on);
+            menu.addItem(&edit("Set up game controls…", sel!(setUpGameControls:), ""));
+        }
         // An Android app's: a Linux app is the phone's Linux, not an app of its own.
         if !ui.shared.linux {
             menu.addItem(&NSMenuItem::separatorItem(mtm));
@@ -1886,6 +2024,10 @@ impl AppView {
     /// the app sees no more of the press.
     fn carrying_out(&self, event: &NSEvent) -> bool {
         let ui = self.ivars();
+        // Game controls' fingers are never a drag carried out.
+        if self.game_on().is_some() {
+            return false;
+        }
         match ui.out.get() {
             Out::Ready => {
                 ui.out.set(Out::No);
@@ -2005,7 +2147,9 @@ impl AppView {
             None => NSPoint::new(0.0, 0.0),
         };
         let (x, y) = self.at_display(p);
-        ui.shared.link.send(wire::pointer(0, x, y, 0));
+        if self.game_on().is_none() {
+            ui.shared.link.send(wire::pointer(0, x, y, 0));
+        }
     }
 
     /// The pointer at `p` in a full-screen window: at the top of the screen
@@ -2157,6 +2301,17 @@ impl AppView {
             return false;
         }
         let plain = event.charactersIgnoringModifiers().map(|s| s.to_string()).unwrap_or_default();
+        // ⌘G: game controls on and off, in an Android app's window whose game has them set up
+        // (or has them on); elsewhere it goes to the app as Ctrl+G, as before. The key that
+        // types g — by G's place only on a layout whose key there types no Latin letter.
+        if let Some(g) = &self.ivars().shared.game {
+            if game::keys::mac_is_g(&plain, event.keyCode()) && !(m.shift || m.option || m.control) && g.shortcut_is_ours() {
+                if !event.isARepeat() {
+                    g.toggle();
+                }
+                return true;
+            }
+        }
         if mk::stays_on_mac(&plain, m) {
             return false;
         }
@@ -2193,6 +2348,8 @@ impl AppView {
         if ui.closed.replace(true) {
             return;
         }
+        // The mouse back from game controls, before anything else goes.
+        self.capture(false);
         let shared = &ui.shared;
         // An Android app's next window opens as this one closes.
         if let (false, Some(w)) = (shared.linux, self.window()) {
@@ -2233,20 +2390,33 @@ impl AppView {
         if buttons != 0 && ui.buttons.get() == 0 {
             ui.caret.set(p);
         }
-        ui.buttons.set(buttons);
+        let was = ui.buttons.replace(buttons);
         let (x, y) = self.at_display(p);
+        // With game controls on, the pad's pointer is this Mac's: a tap on it is a finger where the pointer is.
+        if let Some(g) = self.game_on() {
+            if !g.captured() {
+                g.event(GameEvent::Pointer { x, y });
+                if (was ^ buttons) & BUTTON_PRIMARY != 0 {
+                    g.event(GameEvent::Input { input: GameInput::Mouse(MouseButton::Left), down: buttons & BUTTON_PRIMARY != 0 });
+                }
+            }
+            return;
+        }
         ui.shared.link.send(wire::pointer(buttons, x, y, 0));
     }
 
     /// The phone's touchpad's wheel, at `p`.
     fn pad_scroll(&self, p: NSPoint, h: f64, v: f64) {
+        if self.game_wheel(v) || self.game_on().is_some() {
+            return;
+        }
         let (x, y) = self.at_display(p);
         self.ivars().shared.link.send(wire::scroll(x, y, h as f32, v as f32, 0));
     }
 
     /// The phone's touchpad's pointer has left the picture.
     fn pad_leave(&self) {
-        if self.ivars().buttons.get() == 0 {
+        if self.ivars().buttons.get() == 0 && self.game_on().is_none() {
             self.ivars().shared.link.send(wire::json(&json!({"t": "leave"})));
         }
     }
@@ -2265,6 +2435,16 @@ impl AppView {
     }
 
     fn pointer(&self, event: &NSEvent) {
+        // Game controls: the free pointer where it is, the taken one as how far it moved.
+        if let Some(g) = self.game_on() {
+            if self.ivars().captured.get() {
+                g.event(GameEvent::Delta { dx: event.deltaX() as f32, dy: event.deltaY() as f32 });
+            } else {
+                let (x, y) = self.on_display(event);
+                g.event(GameEvent::Pointer { x, y });
+            }
+            return;
+        }
         let (x, y) = self.on_display(event);
         let link = &self.ivars().shared.link;
         link.send(wire::pointer(self.ivars().buttons.get(), x, y, mods(event).meta()));
@@ -2282,12 +2462,42 @@ impl AppView {
             }
             ui.buttons.set(ui.buttons.get() & !bit);
         }
+        if let Some(g) = self.game_on() {
+            let button = match bit {
+                BUTTON_PRIMARY => MouseButton::Left,
+                BUTTON_SECONDARY => MouseButton::Right,
+                _ => MouseButton::Middle,
+            };
+            self.game_button(&g, button, down, Some(event));
+            return;
+        }
         self.pointer(event);
+    }
+
+    /// A mouse button for game controls: a left click with the pointer free is
+    /// a finger where it is; any other button, or any while the pointer is
+    /// taken, its control's if it has one, else nothing.
+    fn game_button(&self, g: &game::Session, button: MouseButton, down: bool, event: Option<&NSEvent>) {
+        let input = GameInput::Mouse(button);
+        if button == MouseButton::Left && !g.captured() {
+            if let Some(e) = event {
+                let (x, y) = self.on_display(e);
+                g.event(GameEvent::Pointer { x, y });
+            }
+            g.event(GameEvent::Input { input, down });
+        } else if g.captured() || g.takes(input) {
+            g.event(GameEvent::Input { input, down });
+        }
     }
 
     /// A mouse's third button is its middle one; its side buttons are Back and
     /// Forward, as a real mouse's are on Android.
     fn other(&self, event: &NSEvent, down: bool) {
+        if let (Some(g), 3 | 4) = (self.game_on(), event.buttonNumber()) {
+            let button = if event.buttonNumber() == 3 { MouseButton::Back } else { MouseButton::Forward };
+            self.game_button(&g, button, down, None);
+            return;
+        }
         match event.buttonNumber() {
             2 => self.press(event, BUTTON_TERTIARY, down),
             3 => self.ivars().shared.link.send(wire::key(down, 0, keys::code::BACK, 0)),
@@ -2313,6 +2523,379 @@ impl AppView {
             self.ivars().shared.link.send(wire::text(&text));
         }
     }
+
+    // ── in front, and not ──
+
+    /// The window is the one the person uses again. The phone hears so before
+    /// `front` is set, which is what lets a game controller's report go to it
+    /// (gamepad.rs): a report never comes to the phone ahead of the window's focus.
+    fn front_again(&self) {
+        let shared = &self.ivars().shared;
+        // Key behind the lock screen is in front of nobody: the unlock brings it back (front_maybe_again).
+        if shared.front.load(Ordering::SeqCst) || SCREEN_LOCKED.load(Ordering::SeqCst) {
+            return;
+        }
+        shared.link.hand_clipboard_over();
+        shared.link.send(wire::json(&json!({"t": "focus"})));
+        shared.front.store(true, Ordering::SeqCst);
+    }
+
+    /// The window is not the one the person uses — another has the keyboard,
+    /// the screen locked, the Mac went to sleep: everything held is let go on
+    /// the phone, game controls' fingers and controllers included, and the mouse
+    /// is given back.
+    fn front_lost(&self) {
+        let ui = self.ivars();
+        ui.shared.front.store(false, Ordering::SeqCst);
+        self.capture(false);
+        ui.game_keys.borrow_mut().clear();
+        if let Some(g) = &ui.shared.game {
+            g.blur();
+        }
+        let link = &ui.shared.link;
+        for (_, code) in ui.keys_down.borrow_mut().drain() {
+            link.send(wire::key(false, 0, code, 0));
+        }
+        link.send(wire::json(&json!({"t": "blur"})));
+    }
+
+    /// The screen was unlocked, the Mac woke, this app is active again: in front
+    /// again if the window still has the keyboard.
+    fn front_maybe_again(&self) {
+        let mtm = self.mtm();
+        // Awake behind the lock screen, the window is key and the app active, in front of nobody.
+        if SCREEN_LOCKED.load(Ordering::SeqCst) {
+            return;
+        }
+        if self.window().is_some_and(|w| w.isKeyWindow()) && NSApplication::sharedApplication(mtm).isActive() {
+            self.front_again();
+        }
+    }
+
+    // ── game controls (apps/game) ──
+
+    /// The window's game controls, while they are on.
+    fn game_on(&self) -> Option<Arc<game::Session>> {
+        self.ivars().shared.game.as_ref().filter(|g| g.is_on()).cloned()
+    }
+
+    /// The controls' held keys checked against the keyboard's own state, a few
+    /// times a second while any is held: a key whose release went elsewhere — to
+    /// the lock screen, to a menu — is let go. A key the keyboard's state never
+    /// showed down is left to its own release.
+    fn reconcile(&self) {
+        let ui = self.ivars();
+        ui.reconciling.set(false);
+        let up = game::released(&mut *ui.game_keys.borrow_mut(), |k| Some(key_is_down(k)));
+        for kvk in up {
+            log::info!("game: {}: a held key's release never came; it is let go", ui.shared.label());
+            self.game_let_go(kvk);
+        }
+        self.reconcile_soon();
+    }
+
+    /// The next look at the keyboard's state, if a key is held and none is due.
+    fn reconcile_soon(&self) {
+        let ui = self.ivars();
+        if ui.game_keys.borrow().is_empty() || ui.reconciling.replace(true) {
+            return;
+        }
+        let id = ui.shared.id;
+        if let Ok(when) = DispatchTime::try_from(game::RECONCILE_EVERY) {
+            let _ = DispatchQueue::main().after(when, move || with_window(id, |_, v| v.reconcile()));
+        }
+    }
+
+    /// A menu of the window's own closed: its loop had the keyboard. Keys let go
+    /// meanwhile are let go now; those the keyboard's state cannot speak for, too.
+    fn after_menu(&self) {
+        let ui = self.ivars();
+        let mut up = game::released(&mut *ui.game_keys.borrow_mut(), |k| Some(key_is_down(k)));
+        let unknown: Vec<u16> = ui.game_keys.borrow().iter().filter(|(_, seen)| !**seen).map(|(k, _)| *k).collect();
+        for k in &unknown {
+            ui.game_keys.borrow_mut().remove(k);
+        }
+        up.extend(unknown);
+        for kvk in up {
+            self.game_let_go(kvk);
+        }
+    }
+
+    /// A game key's let-go, to the controls, its press having been theirs.
+    fn game_let_go(&self, kvk: u16) {
+        if let (Some(g), Some(k)) = (&self.ivars().shared.game, game::keys::from_mac(kvk)) {
+            g.event(GameEvent::Input { input: GameInput::Key(k), down: false });
+        }
+    }
+
+    /// A key down for game controls: F8 alone turns them on and off; while
+    /// they are on, Esc gives back a taken mouse, and a key a control has is
+    /// that control's, once however long it is held. True if it was theirs.
+    fn game_key_down(&self, event: &NSEvent) -> bool {
+        let ui = self.ivars();
+        let Some(g) = ui.shared.game.clone() else { return false };
+        let kvk = event.keyCode();
+        if ui.game_keys.borrow().contains_key(&kvk) {
+            return true; // its repeat
+        }
+        let m = mods(event);
+        if m.command {
+            return false; // ⌘ is never a game key
+        }
+        // F8 is the controls' only where this game has them set up (else the app's), and then never reaches the app.
+        if kvk == MAC_F8 && g.shortcut_is_ours() {
+            if !event.isARepeat() {
+                g.toggle();
+            }
+            return true;
+        }
+        // A key that went to the phone before the controls came on lets go there too.
+        if !g.is_on() || ui.keys_down.borrow().contains_key(&kvk) {
+            return false;
+        }
+        let Some(k) = game::keys::from_mac(kvk) else { return false };
+        let input = GameInput::Key(k);
+        if (k == game::keys::ESCAPE && g.captured()) || g.takes(input) {
+            ui.game_keys.borrow_mut().insert(kvk, key_is_down(kvk));
+            self.reconcile_soon();
+            if !event.isARepeat() {
+                g.event(GameEvent::Input { input, down: true });
+            }
+            return true;
+        }
+        false
+    }
+
+    /// A key's let-go: the game controls', if its press was.
+    fn game_key_up(&self, kvk: u16) -> bool {
+        if self.ivars().game_keys.borrow_mut().remove(&kvk).is_none() {
+            return false;
+        }
+        self.game_let_go(kvk);
+        true
+    }
+
+    /// Shift, Control or Option went down or up: which one is the event's key
+    /// code, and whether it is down now the modifiers' device bits. A game
+    /// control's, while they are on. ⌘ never is.
+    fn game_flags(&self, event: &NSEvent) -> bool {
+        let ui = self.ivars();
+        let Some(g) = ui.shared.game.clone() else { return false };
+        let kvk = event.keyCode();
+        // NX_DEVICE*KEYMASK: which of the two keys of each kind is held.
+        let mask: NSUInteger = match kvk {
+            0x38 => 0x02,   // left Shift
+            0x3C => 0x04,   // right Shift
+            0x3B => 0x01,   // left Control
+            0x3E => 0x2000, // right Control
+            0x3A => 0x20,   // left Option
+            0x3D => 0x40,   // right Option
+            _ => return false,
+        };
+        let down = event.modifierFlags().0 & mask != 0;
+        if !down {
+            return self.game_key_up(kvk);
+        }
+        let Some(k) = game::keys::from_mac(kvk) else { return false };
+        if !g.takes(GameInput::Key(k)) || ui.game_keys.borrow().contains_key(&kvk) {
+            return false;
+        }
+        ui.game_keys.borrow_mut().insert(kvk, key_is_down(kvk));
+        self.reconcile_soon();
+        g.event(GameEvent::Input { input: GameInput::Key(k), down: true });
+        true
+    }
+
+    /// The wheel, `v` notches up (fractions for a trackpad), while game
+    /// controls are on: a control's tap for each whole notch, if one has the
+    /// wheel; nothing reaches the app either way. False while they are off.
+    fn game_wheel(&self, v: f64) -> bool {
+        let Some(g) = self.game_on() else { return false };
+        let ui = self.ivars();
+        let mut acc = ui.wheel.get() + v;
+        while acc.abs() >= 1.0 {
+            let way = if acc > 0.0 { WheelWay::Up } else { WheelWay::Down };
+            acc -= acc.signum();
+            let input = GameInput::Wheel(way);
+            if g.takes(input) {
+                g.event(GameEvent::Input { input, down: true });
+                g.event(GameEvent::Input { input, down: false });
+            }
+        }
+        ui.wheel.set(acc);
+        true
+    }
+
+    /// The pointer taken for looking around — hidden, held in the middle of
+    /// the picture, its movement coming as deltas — or given back where it
+    /// was. Once each way: hiding and showing the cursor are counted.
+    /// A taken pointer held in the middle of the picture, where the window is
+    /// now: a window moved or resized under it would leave it — hidden — over
+    /// whatever is there, and a click would land there. Nothing while not taken.
+    fn recentre(&self) {
+        let ui = self.ivars();
+        if !ui.captured.get() {
+            return;
+        }
+        if let Some(w) = self.window() {
+            let c = ui.clip.frame();
+            let mid = NSPoint::new(c.origin.x + c.size.width / 2.0, c.origin.y + c.size.height / 2.0);
+            warp(w.convertPointToScreen(self.convertPoint_toView(mid, None)), self.mtm());
+        }
+    }
+
+    fn capture(&self, on: bool) {
+        let ui = self.ivars();
+        // A taking that was on its way as the window closed: never a pointer hidden by a window that is gone.
+        if on && ui.closed.get() {
+            return;
+        }
+        // Only for the window that has the keyboard, in the app that is active:
+        // anywhere else Esc could not reach it. A right press on a window
+        // behind reaches its view without making it key.
+        let mtm = self.mtm();
+        if on && !(self.window().is_some_and(|w| w.isKeyWindow()) && NSApplication::sharedApplication(mtm).isActive()) {
+            log::info!(
+                "game: {}: the mouse is not taken: this window is not the one in use (key window {}, app active {})",
+                ui.shared.label(),
+                self.window().is_some_and(|w| w.isKeyWindow()),
+                NSApplication::sharedApplication(mtm).isActive()
+            );
+            if let Some(g) = &ui.shared.game {
+                g.blur();
+            }
+            return;
+        }
+        if ui.captured.replace(on) == on {
+            return;
+        }
+        if on {
+            ui.captured_from.set(Some(NSEvent::mouseLocation()));
+            self.recentre();
+            let _ = objc2_core_graphics::CGAssociateMouseAndMouseCursorPosition(false);
+            NSCursor::hide();
+            log::info!("game: {}: the mouse is taken for looking around", ui.shared.label());
+        } else {
+            // Put back first, then joined to the mouse again, as SDL and GLFW
+            // do: the other way round leaves the pointer still for a moment.
+            if let Some(p) = ui.captured_from.take() {
+                warp(p, mtm);
+            }
+            let _ = objc2_core_graphics::CGAssociateMouseAndMouseCursorPosition(true);
+            NSCursor::unhide();
+            log::info!("game: {}: the mouse is given back", ui.shared.label());
+        }
+    }
+}
+
+/// Carbon's kVK_F8: game controls on and off.
+const MAC_F8: u16 = 0x64;
+
+#[link(name = "CoreGraphics", kind = "framework")]
+unsafe extern "C" {
+    /// Whether `key` is down now in the state `source` names.
+    fn CGEventSourceKeyState(source: i32, key: u16) -> bool;
+    /// This login session's own description (a CFDictionary, ours to release), or null outside one.
+    fn CGSessionCopyCurrentDictionary() -> *const std::ffi::c_void;
+}
+
+#[link(name = "CoreFoundation", kind = "framework")]
+unsafe extern "C" {
+    fn CFRelease(cf: *const std::ffi::c_void);
+}
+
+/// Whether this session's screen is locked now, as the session itself says
+/// (`CGSSessionScreenIsLocked`): what an app started behind a locked screen
+/// knows before any lock or unlock is said.
+fn screen_locked_now() -> bool {
+    unsafe {
+        let d = CGSessionCopyCurrentDictionary();
+        if d.is_null() {
+            return false;
+        }
+        // A CFDictionary is an NSDictionary.
+        let dict = &*(d as *const AnyObject);
+        let v: Option<Retained<AnyObject>> = msg_send![dict, objectForKey: ns_string!("CGSSessionScreenIsLocked")];
+        let locked = v.is_some_and(|v| {
+            let b: bool = msg_send![&*v, boolValue];
+            b
+        });
+        CFRelease(d);
+        locked
+    }
+}
+
+/// Whether a key is down now, as the keyboard itself has it
+/// (kCGEventSourceStateHIDSystemState): not as the app's events say, which
+/// miss a release that went to the lock screen or a menu.
+fn key_is_down(kvk: u16) -> bool {
+    const HID_SYSTEM_STATE: i32 = 1;
+    unsafe { CGEventSourceKeyState(HID_SYSTEM_STATE, kvk) }
+}
+
+/// The screen is locked (com.apple.screenIsLocked, until screenIsUnlocked): no
+/// window is in front of anyone, though one may be key behind the lock screen
+/// after the Mac wakes.
+static SCREEN_LOCKED: AtomicBool = AtomicBool::new(false);
+
+/// The screen locking, the Mac going to sleep, another user's session, this
+/// app no longer active: as the window losing the keyboard, for every phone
+/// window that has it; and the other way when they end. Watched once, for the
+/// app's life (doc/game-mode.md, "When a key's release never comes").
+fn watch_the_session() {
+    use block2::RcBlock;
+    use objc2_foundation::NSOperationQueue;
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        // Locked already, before any lock was said: nobody is in front until the unlock.
+        if screen_locked_now() {
+            SCREEN_LOCKED.store(true, Ordering::SeqCst);
+            log::info!("apps: the screen is locked; the windows are in front of nobody until it is unlocked");
+        }
+        // `lock`: the screen's own lock and unlock, which also say whether anyone is in front at all.
+        let each = |lost: bool, lock: bool| {
+            move |_: std::ptr::NonNull<NSNotification>| {
+                if lock {
+                    SCREEN_LOCKED.store(lost, Ordering::SeqCst);
+                }
+                let views: Vec<Retained<AppView>> = OPEN.with(|o| o.borrow().values().map(|p| p.view.clone()).collect());
+                for v in views {
+                    if lost {
+                        if v.ivars().shared.front.load(Ordering::SeqCst) {
+                            v.front_lost();
+                        }
+                    } else {
+                        v.front_maybe_again();
+                    }
+                }
+            }
+        };
+        let watch = |center: &AnyObject, name: &NSString, lost: bool| {
+            let lock = name.to_string().starts_with("com.apple.screenIs");
+            let block = RcBlock::new(each(lost, lock));
+            let queue = NSOperationQueue::mainQueue();
+            let token: Option<Retained<AnyObject>> = unsafe {
+                msg_send![center, addObserverForName: name, object: std::ptr::null::<AnyObject>(), queue: &*queue, usingBlock: &*block]
+            };
+            // Kept for the app's life: the center holds the block until the token is removed.
+            std::mem::forget(token);
+        };
+        unsafe {
+            let distributed: Retained<AnyObject> = msg_send![objc2::class!(NSDistributedNotificationCenter), defaultCenter];
+            watch(&distributed, ns_string!("com.apple.screenIsLocked"), true);
+            watch(&distributed, ns_string!("com.apple.screenIsUnlocked"), false);
+            let workspace = NSWorkspace::sharedWorkspace().notificationCenter();
+            watch(&workspace, objc2_app_kit::NSWorkspaceWillSleepNotification, true);
+            watch(&workspace, objc2_app_kit::NSWorkspaceDidWakeNotification, false);
+            watch(&workspace, objc2_app_kit::NSWorkspaceScreensDidSleepNotification, true);
+            watch(&workspace, objc2_app_kit::NSWorkspaceScreensDidWakeNotification, false);
+            watch(&workspace, objc2_app_kit::NSWorkspaceSessionDidResignActiveNotification, true);
+            watch(&workspace, objc2_app_kit::NSWorkspaceSessionDidBecomeActiveNotification, false);
+            let app: Retained<AnyObject> = msg_send![objc2::class!(NSNotificationCenter), defaultCenter];
+            watch(&app, objc2_app_kit::NSApplicationDidResignActiveNotification, true);
+            watch(&app, objc2_app_kit::NSApplicationDidBecomeActiveNotification, false);
+        }
+    });
 }
 
 /// A drag let go of before this Mac's own could carry it: its files into
@@ -2473,5 +3056,14 @@ fn mods(event: &NSEvent) -> mk::Mods {
         option: f.contains(NSEventModifierFlags::Option),
         command: f.contains(NSEventModifierFlags::Command),
         caps: f.contains(NSEventModifierFlags::CapsLock),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn the_session_says_whether_its_screen_is_locked() {
+        // Whatever it says: read without a fault, its dictionary released (objc2 checks the types in a debug build).
+        let _ = super::screen_locked_now();
     }
 }

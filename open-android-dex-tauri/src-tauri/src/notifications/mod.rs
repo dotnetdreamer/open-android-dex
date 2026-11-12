@@ -1108,6 +1108,46 @@ fn note(id: &str, phone: Option<&str>, title: &str, body: &str, buttons: Vec<But
     });
 }
 
+/// One of this app's own toasts for "Send to computer" (send/inbox.rs): a
+/// note that may carry a picture, its buttons' codes coming back to
+/// `send::toast_clicked`. False if the system did not take it — no
+/// notifications here (a Linux computer, a Mac development run, turned off) —
+/// and the page's own toast says it instead.
+pub(crate) fn own_toast(id: &str, phone: &str, title: &str, body: &str, picture: Option<PathBuf>, buttons: Vec<(String, i64)>) -> bool {
+    if !native::shows_any() {
+        return false;
+    }
+    let attribution = phone_name(phone);
+    put_up(|settings| {
+        let t = Toast {
+            id: id.to_string(),
+            group: "this-app".into(),
+            from: From::Us,
+            kind: Kind::Note,
+            title: title.to_string(),
+            body: body.to_string(),
+            attribution,
+            when: now_ms(),
+            avatar: None,
+            picture,
+            reply: None,
+            buttons: buttons
+                .into_iter()
+                .map(|(label, i)| Button { label, act: Act::Button(i).code(), style: Style::Plain, menu: false })
+                .collect(),
+            silent: !settings.sound,
+            popup: true,
+        };
+        let shown = Shown { phone: phone.to_string(), kind: Kind::Note, item: Item::default(), from: From::Us, group: t.group.clone(), avatar: None };
+        Some((t, shown))
+    })
+}
+
+/// The phone's notifications want its app server running: they are on, and this computer shows them.
+pub(crate) fn wants_server() -> bool {
+    wanted()
+}
+
 /// The first phone to listen, introduced: what this is, and the way to turn it off.
 fn introduction(phone: &str) {
     let name = phone_name(phone);
@@ -1158,6 +1198,21 @@ fn from_phone(app: &AppHandle, serial: &str, phone: &str, item: &Item) -> From {
 // ── a click ──
 
 fn click(app: &AppHandle, c: Click) {
+    // "Send to computer"'s own toasts: theirs to act on.
+    if c.id.starts_with("send-") {
+        {
+            let _up = up();
+            state().shown.remove(&c.id);
+        }
+        // Its body (None), or one of its buttons; closing it asks nothing.
+        let button = match c.act {
+            Act::Open => None,
+            Act::Button(i) => Some(i),
+            _ => return,
+        };
+        crate::send::toast_clicked(app, &c.id, button);
+        return;
+    }
     // The system takes a toast away with a click on it: forgotten here too —
     // except a call's, kept until the phone says the call ended, which takes
     // down whatever is left of it then.

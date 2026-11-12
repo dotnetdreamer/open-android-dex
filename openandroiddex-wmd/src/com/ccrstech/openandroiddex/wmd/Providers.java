@@ -76,6 +76,37 @@ final class Providers {
         }
     }
 
+    /**
+     * Let go of {@code authority}'s provider: a held one keeps its process from
+     * being reclaimed, and the launcher asked once for a share need not stay up
+     * for as long as this server runs. The next call acquires it again.
+     */
+    static void release(String authority) {
+        Held h;
+        synchronized (HELD) {
+            h = HELD.remove(authority);
+        }
+        if (h == null) return;
+        try {
+            Object am = Refl.callStatic(Refl.cls("android.app.ActivityManager"), "getService", new Class<?>[]{});
+            for (Method m : am.getClass().getMethods()) {
+                Class<?>[] p = m.getParameterTypes();
+                if (m.getName().equals("removeContentProviderExternalAsUser") && p.length == 3) {
+                    m.invoke(am, authority, h.token, 0);
+                    return;
+                }
+            }
+            for (Method m : am.getClass().getMethods()) {
+                if (m.getName().equals("removeContentProviderExternal") && m.getParameterTypes().length == 2) {
+                    m.invoke(am, authority, h.token);
+                    return;
+                }
+            }
+        } catch (Throwable ignored) {
+            // held until this process ends, as before
+        }
+    }
+
     private static Bundle invoke(Object provider, String authority, String method, String arg) throws Exception {
         for (Method m : provider.getClass().getMethods()) {
             if (!m.getName().equals("call")) continue;

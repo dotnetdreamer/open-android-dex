@@ -162,6 +162,12 @@
     color: var(--ink-3);
     white-space: nowrap;
   }
+  /* Four sections leave the window's default width no room for the name: the logo says it. */
+  @media (max-width: 860px) {
+    .titlebar-name {
+      display: none;
+    }
+  }
 
   /* Windows and Linux draw no caption buttons; these are ours. */
   .caption-btn {
@@ -597,6 +603,124 @@
     background: var(--accent);
     box-shadow: 0 0 0 2px var(--bg);
     animation: badge-in 300ms var(--ease-spring) both;
+  }
+
+  /* ── The phone's photos (Photos tab) ──────────────────────────────── */
+
+  /* Square pictures, newest first, as many to a row as fit. */
+  .photos-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(112px, 1fr));
+    gap: 6px;
+  }
+  .photo-tile {
+    position: relative;
+    aspect-ratio: 1;
+    overflow: hidden;
+    border-radius: var(--r-sm);
+    background: var(--surface-2);
+    box-shadow: inset 0 0 0 1px var(--line);
+    transition:
+      transform 160ms var(--ease-out),
+      box-shadow 120ms ease;
+  }
+  .photo-tile img,
+  .photo-blank {
+    display: block;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+  }
+  .photo-tile img {
+    animation: fade-in 200ms ease both;
+  }
+  .photo-tile:hover {
+    transform: translateY(-1px);
+  }
+  .photo-tile[aria-selected="true"] {
+    box-shadow:
+      0 0 0 2px var(--accent),
+      0 0 0 4px var(--accent-soft);
+  }
+  .photo-tile:focus-visible {
+    outline: none;
+    box-shadow: 0 0 0 2px var(--accent);
+  }
+  .photo-day {
+    margin-bottom: 8px;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--ink-2);
+  }
+  /* What a selected picture can do: along the foot of the page. */
+  .photo-bar {
+    position: fixed;
+    left: 50%;
+    bottom: 16px;
+    z-index: 30;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    width: min(620px, calc(100vw - 32px));
+    padding: 6px 6px 6px 14px;
+    border-radius: var(--r-md);
+    transform: translateX(-50%);
+  }
+  .keep-card {
+    padding: 13px 14px;
+  }
+  .keep-detail {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    margin: 12px 0 0 44px;
+  }
+  .keep-path {
+    display: inline-flex;
+    min-width: 0;
+    max-width: 100%;
+    align-items: center;
+    gap: 6px;
+  }
+  /* A thin bar: Keep a copy's progress, a file on its way. */
+  .keep-bar {
+    height: 3px;
+    overflow: hidden;
+    border-radius: 2px;
+    background: var(--surface-3);
+  }
+  .keep-bar > span {
+    display: block;
+    height: 100%;
+    border-radius: inherit;
+    background: var(--accent);
+    transition: width 240ms var(--ease-out);
+  }
+  /* What just arrived from the phone, for a minute or two. */
+  .arrival {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 9px 8px 9px 10px;
+    animation: rise-in 240ms var(--ease-out) both;
+  }
+  .sent-list {
+    overflow: hidden;
+  }
+  .sent-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 9px 14px;
+    font-size: 12.5px;
+    color: var(--ink-2);
+  }
+  .send-switch {
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 12.5px;
+    color: var(--ink-2);
   }
 
   /* ── Switches ─────────────────────────────────────────────────────── */
@@ -1717,5 +1841,275 @@
   .st-cable.is-flowing .st-cable-pulse {
     stroke-dasharray: none;
     opacity: 0.6;
+  }
+}
+
+/* ── A game's controls editor (src/features/game, doc/game-mode.md) ──────
+   Its own window over the game's: a bar, a line of help, the game's still
+   with the controls on top, a line of help. The picture area is the game's
+   picture at its size; the bars' heights are apps/game/editor.rs's TOP and
+   FOOT. A control is a translucent accent ring with its key in it; the one
+   chosen has a solid line, and a card beside it. */
+@layer components {
+  .game-editor {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    background: var(--bg);
+  }
+  .game-bar {
+    display: flex;
+    flex-shrink: 0;
+    align-items: center;
+    gap: 10px;
+    height: 52px;
+    padding: 0 14px 0 16px;
+  }
+  .game-done {
+    min-width: 72px;
+  }
+  .game-hint {
+    flex-shrink: 0;
+    height: 44px;
+    margin: 0;
+    padding: 0 16px 12px;
+  }
+  .game-foot {
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    height: 46px;
+    margin: 0;
+    padding: 0 16px;
+    box-shadow: 0 -1px 0 var(--line);
+  }
+  .game-stage {
+    position: relative;
+    flex: 1;
+    min-height: 0;
+    background: #05070b;
+    box-shadow: 0 -1px 0 var(--line);
+  }
+  .game-stage-message {
+    display: grid;
+    place-items: center;
+    padding: 24px;
+    text-align: center;
+  }
+  .game-picture {
+    position: absolute;
+    background: var(--bg-raised);
+  }
+  .game-still {
+    display: block;
+    width: 100%;
+    height: 100%;
+  }
+  .game-picture-note {
+    position: absolute;
+    inset: 0;
+    display: grid;
+    place-items: center;
+    padding: 24px;
+    text-align: center;
+  }
+  .game-picture-note.is-top {
+    align-items: start;
+    padding-top: 16px;
+    pointer-events: none;
+  }
+  .game-empty {
+    position: absolute;
+    inset: 0;
+    display: grid;
+    place-items: center;
+    padding: 24px;
+    pointer-events: none;
+  }
+  .game-empty-text {
+    max-width: 340px;
+    padding: 9px 14px;
+    border-radius: var(--r-md);
+    font-size: 12.5px;
+    line-height: 18px;
+    text-align: center;
+    color: var(--ink-2);
+    background: color-mix(in srgb, var(--bg-overlay) 88%, transparent);
+    box-shadow: inset 0 0 0 1px var(--line-2);
+  }
+
+  /* ── its controls ── */
+  .game-control {
+    position: absolute;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transform: translate(-50%, -50%);
+    border-radius: 999px;
+    font-size: 12.5px;
+    font-weight: 650;
+    letter-spacing: -0.005em;
+    color: #ffffff;
+    text-shadow: 0 1px 2px rgba(0, 0, 0, 0.6);
+    background: color-mix(in srgb, var(--accent) 22%, rgba(5, 7, 11, 0.35));
+    box-shadow:
+      inset 0 0 0 1.5px var(--accent-line),
+      0 2px 12px -2px rgba(0, 0, 0, 0.55);
+    touch-action: none;
+    transition: box-shadow 140ms ease, background 140ms ease;
+  }
+  .game-control:hover {
+    background: color-mix(in srgb, var(--accent) 30%, rgba(5, 7, 11, 0.35));
+  }
+  .game-control.is-selected {
+    z-index: 2;
+    box-shadow:
+      inset 0 0 0 2px var(--accent-ink),
+      0 0 0 4px var(--accent-soft),
+      0 2px 12px -2px rgba(0, 0, 0, 0.55);
+  }
+  .game-stick-knob {
+    width: 34%;
+    height: 34%;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--accent) 40%, transparent);
+    box-shadow: inset 0 0 0 1.5px var(--accent-line);
+  }
+  .game-stick-key {
+    position: absolute;
+    min-width: 18px;
+    font-size: 12px;
+    line-height: 16px;
+    text-align: center;
+  }
+  .game-stick-key.up {
+    top: 9%;
+  }
+  .game-stick-key.down {
+    bottom: 9%;
+  }
+  .game-stick-key.left {
+    left: 9%;
+  }
+  .game-stick-key.right {
+    right: 9%;
+  }
+  .game-control.game-look {
+    border-radius: var(--r-lg);
+    background: color-mix(in srgb, var(--accent) 9%, transparent);
+    box-shadow: none;
+    outline: 1.5px dashed var(--accent-line);
+    outline-offset: -1.5px;
+  }
+  .game-control.game-look:hover {
+    background: color-mix(in srgb, var(--accent) 14%, transparent);
+  }
+  .game-control.game-look.is-selected {
+    outline: 2px solid var(--accent-ink);
+    box-shadow: 0 0 0 4px var(--accent-soft);
+  }
+  .game-look-label {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 1px;
+    padding: 6px 12px;
+    border-radius: var(--r-sm);
+    text-shadow: none;
+    background: color-mix(in srgb, var(--bg-overlay) 80%, transparent);
+  }
+  .game-look-label .caption {
+    color: var(--ink-2);
+  }
+  .game-look-handle {
+    position: absolute;
+    right: -6px;
+    bottom: -6px;
+    width: 12px;
+    height: 12px;
+    border-radius: 4px;
+    background: var(--accent-ink);
+    box-shadow: 0 0 0 2px var(--bg);
+    cursor: nwse-resize;
+  }
+
+  /* ── the chosen control's card ── */
+  .game-card {
+    position: absolute;
+    z-index: 5;
+    padding: 14px 14px 12px;
+    border-radius: var(--r-lg);
+  }
+  .game-card .segmented-item {
+    padding: 0 8px;
+  }
+  .game-card-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    min-height: 34px;
+  }
+  .game-chip {
+    min-width: 76px;
+    height: 28px;
+    padding: 0 10px;
+    border-radius: var(--r-sm);
+    font-size: 12.5px;
+    font-weight: 600;
+    color: var(--ink-1);
+    background: var(--surface-2);
+    box-shadow:
+      inset 0 0 0 1px var(--line-2),
+      inset 0 1px 0 rgba(255, 255, 255, 0.04);
+    transition: background 120ms ease, box-shadow 120ms ease;
+  }
+  .game-chip:hover {
+    background: var(--surface-3);
+  }
+  .game-chip.is-none {
+    color: var(--ink-3);
+    font-weight: 500;
+  }
+  .game-chip.is-waiting {
+    color: var(--accent-ink);
+    font-weight: 500;
+    background: var(--accent-soft);
+    box-shadow: inset 0 0 0 1.5px var(--accent-line);
+  }
+  .game-refused {
+    margin-top: 8px;
+    color: var(--warn);
+  }
+  .game-range {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 140px;
+    height: 18px;
+    background: transparent;
+  }
+  .game-range::-webkit-slider-runnable-track {
+    height: 4px;
+    border-radius: 999px;
+    background: var(--surface-3);
+  }
+  .game-range::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    width: 16px;
+    height: 16px;
+    margin-top: -6px;
+    border-radius: 999px;
+    background: #ffffff;
+    box-shadow:
+      0 0 0 1px rgba(0, 0, 0, 0.25),
+      0 1px 4px rgba(0, 0, 0, 0.5);
+  }
+  .game-range:focus-visible {
+    outline: none;
+  }
+  .game-range:focus-visible::-webkit-slider-thumb {
+    box-shadow:
+      0 0 0 2px var(--accent-ink),
+      0 1px 4px rgba(0, 0, 0, 0.5);
   }
 }

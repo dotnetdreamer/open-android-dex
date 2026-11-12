@@ -692,4 +692,35 @@
     <!-- ── Linux app windows ── -->
     <string name="lw_opening">%1$s ખુલી રહ્યું છે…</string>
     <string name="lw_close_window">વિન્ડો બંધ કરો</string>
+
+    <!-- ── Send to computer ── -->
+    <string name="sc_label">કમ્પ્યુટર પર મોકલો</string>
+    <string name="sc_looking">તમારું કમ્પ્યુટર શોધી રહ્યું છે…</string>
+    <string name="sc_preparing">તૈયાર થઈ રહ્યું છે…</string>
+    <string name="sc_sending">%s પર મોકલી રહ્યું છે…</string>
+    <string name="sc_waiting">%s ની રાહ જોઈ રહ્યું છે…</string>
+    <string name="sc_count">%2$d માંથી %1$d</string>
+    <string name="sc_saved">%s પર Downloads માં સેવ થયું</string>
+    <string name="sc_saved_some">%3$s પર Downloads માં %2$d માંથી %1$d સેવ થયા</string>
+    <string name="sc_opened">%s પર ખોલ્યું</string>
+    <string name="sc_sent">%s પર મોકલ્યું</string>
+    <string name="sc_copied">%s ના ક્લિપબોર્ડ પર કૉપિ થયું</string>
+    <string name="sc_copied_hint">ત્યાં પેસ્ટ કરો.</string>
+    <string name="sc_none_title">કોઈ કમ્પ્યુટર કનેક્ટ નથી</string>
+    <string name="sc_none_body">તમારા કમ્પ્યુટર પર Open Android DeX ખોલો અને આ ફોન કનેક્ટ કરો. પછી ફરી મોકલો.</string>
+    <string name="sc_silent_title">તમારા કમ્પ્યુટરે જવાબ ન આપ્યો</string>
+    <string name="sc_silent_body">ત્યાં Open Android DeX હજુ ખુલ્લું છે કે નહીં તે તપાસો, પછી ફરી પ્રયાસ કરો.</string>
+    <string name="sc_off">%s પર “કમ્પ્યુટર પર મોકલો” બંધ છે</string>
+    <string name="sc_failed">તે પહોંચ્યું નહીં</string>
+    <string name="sc_failed_lost">%s સાથેનું કનેક્શન તૂટી ગયું. તેને ફરી મોકલો.</string>
+    <string name="sc_failed_space">%s પર પૂરતી જગ્યા નથી.</string>
+    <string name="sc_failed_read">આ ફોન %2$d માંથી %1$d વાંચી શક્યો નહીં.</string>
+    <string name="sc_failed_busy">%s અત્યારે વ્યસ્ત છે. એક મિનિટ પછી તેને ફરી મોકલો.</string>
+    <string name="sc_failed_stuck">આ ફોન હજુ અગાઉની ફાઇલો ખોલી રહ્યો છે. એક મિનિટ પછી ફરી પ્રયાસ કરો.</string>
+    <string name="sc_nothing">અહીં મોકલવા માટે કંઈ નથી</string>
+    <string name="sc_too_much_text">એક સાથે મોકલવા માટે આ ઘણું વધારે લખાણ છે</string>
+    <string name="sc_too_many">એક વખતે વધુમાં વધુ %d વસ્તુઓ મોકલો</string>
+    <string name="sc_try_again">ફરી પ્રયાસ કરો</string>
+    <string name="sc_close">બંધ કરો</string>
+    <string name="sc_cancel">રદ કરો</string>
 </resources>

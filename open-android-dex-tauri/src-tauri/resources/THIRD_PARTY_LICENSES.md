@@ -113,6 +113,30 @@ Copyright © the scrcpy authors; Apache License, Version 2.0.
 
 ---
 
+## Compiled into the app (Windows and macOS)
+
+### gilrs 0.11.2 and gilrs-core 0.6.8
+
+Copyright © the gilrs project contributors.
+Licensed under the **Apache License, Version 2.0** or the **MIT licence**, at
+your option.
+Source: https://gitlab.com/gilrs-project/gilrs
+
+Reads game controllers for the phone apps' windows (doc/game-mode.md). It has
+no file of its own: it is compiled into the app's executable on Windows and
+macOS; a Linux build does not include it.
+
+### SDL_GameControllerDB
+
+Copyright © 1997-2025 Sam Lantinga and the SDL_GameControllerDB contributors.
+Licensed under the **zlib licence**.
+Source: https://github.com/mdqinc/SDL_GameControllerDB
+
+The controller mappings gilrs carries, compiled into the app with it, so
+PlayStation and Switch controllers map as Xbox ones do.
+
+---
+
 ## Bundled inside the launcher APK
 
 These are extracted and executed **on the phone**, never on the host.

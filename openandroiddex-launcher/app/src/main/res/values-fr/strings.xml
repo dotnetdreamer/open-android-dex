@@ -692,4 +692,35 @@ Si vous la désactivez plus tard, Android forcera la fermeture de Linux et le bu
     <!-- ── Linux app windows ── -->
     <string name="lw_opening">Ouverture de %1$s…</string>
     <string name="lw_close_window">Fermer la fenêtre</string>
+
+    <!-- ── Send to computer ── -->
+    <string name="sc_label">Envoyer à l’ordinateur</string>
+    <string name="sc_looking">Recherche de votre ordinateur…</string>
+    <string name="sc_preparing">Préparation…</string>
+    <string name="sc_sending">Envoi vers %s…</string>
+    <string name="sc_waiting">En attente de %s…</string>
+    <string name="sc_count">%1$d sur %2$d</string>
+    <string name="sc_saved">Enregistré dans Téléchargements sur %s</string>
+    <string name="sc_saved_some">%1$d sur %2$d enregistrés dans Téléchargements sur %3$s</string>
+    <string name="sc_opened">Ouvert sur %s</string>
+    <string name="sc_sent">Envoyé à %s</string>
+    <string name="sc_copied">Copié dans le presse-papiers de %s</string>
+    <string name="sc_copied_hint">Vous pouvez le coller là-bas.</string>
+    <string name="sc_none_title">Aucun ordinateur n’est connecté</string>
+    <string name="sc_none_body">Ouvrez Open Android DeX sur votre ordinateur et connectez ce téléphone. Puis renvoyez-le.</string>
+    <string name="sc_silent_title">Votre ordinateur n’a pas répondu</string>
+    <string name="sc_silent_body">Vérifiez qu’Open Android DeX y est toujours ouvert, puis réessayez.</string>
+    <string name="sc_off">« Envoyer à l’ordinateur » est désactivé sur %s</string>
+    <string name="sc_failed">Ce n’est pas arrivé</string>
+    <string name="sc_failed_lost">La connexion à %s a été perdue. Renvoyez-le.</string>
+    <string name="sc_failed_space">Il n’y a pas assez de place sur %s.</string>
+    <string name="sc_failed_read">Ce téléphone n’a pas pu lire %1$d sur %2$d.</string>
+    <string name="sc_failed_busy">%s est occupé. Renvoyez-le dans une minute.</string>
+    <string name="sc_failed_stuck">Ce téléphone ouvre encore des fichiers précédents. Réessayez dans une minute.</string>
+    <string name="sc_nothing">Il n’y a rien à envoyer ici</string>
+    <string name="sc_too_much_text">C’est trop de texte à envoyer en une fois</string>
+    <string name="sc_too_many">Envoyez au plus %d éléments à la fois</string>
+    <string name="sc_try_again">Réessayer</string>
+    <string name="sc_close">Fermer</string>
+    <string name="sc_cancel">Annuler</string>
 </resources>

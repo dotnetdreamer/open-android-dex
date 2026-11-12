@@ -696,4 +696,35 @@ Wenn du sie später wieder abschaltest, erzwingt Android das Beenden von Linux u
     <!-- ── Linux app windows ── -->
     <string name="lw_opening">%1$s wird geöffnet…</string>
     <string name="lw_close_window">Fenster schließen</string>
+
+    <!-- ── Send to computer ── -->
+    <string name="sc_label">An Computer senden</string>
+    <string name="sc_looking">Computer wird gesucht…</string>
+    <string name="sc_preparing">Wird vorbereitet…</string>
+    <string name="sc_sending">Wird an %s gesendet…</string>
+    <string name="sc_waiting">Warten auf %s…</string>
+    <string name="sc_count">%1$d von %2$d</string>
+    <string name="sc_saved">In „Downloads“ auf %s gespeichert</string>
+    <string name="sc_saved_some">%1$d von %2$d in „Downloads“ auf %3$s gespeichert</string>
+    <string name="sc_opened">Auf %s geöffnet</string>
+    <string name="sc_sent">An %s gesendet</string>
+    <string name="sc_copied">In die Zwischenablage auf %s kopiert</string>
+    <string name="sc_copied_hint">Sie können es dort einfügen.</string>
+    <string name="sc_none_title">Kein Computer verbunden</string>
+    <string name="sc_none_body">Öffnen Sie Open Android DeX auf Ihrem Computer und verbinden Sie dieses Telefon. Senden Sie es dann erneut.</string>
+    <string name="sc_silent_title">Ihr Computer hat nicht geantwortet</string>
+    <string name="sc_silent_body">Prüfen Sie, ob Open Android DeX dort noch geöffnet ist, und versuchen Sie es erneut.</string>
+    <string name="sc_off">„An Computer senden“ ist auf %s ausgeschaltet</string>
+    <string name="sc_failed">Nicht angekommen</string>
+    <string name="sc_failed_lost">Die Verbindung zu %s wurde unterbrochen. Senden Sie es erneut.</string>
+    <string name="sc_failed_space">Auf %s ist nicht genug Platz.</string>
+    <string name="sc_failed_read">Dieses Telefon konnte %1$d von %2$d nicht lesen.</string>
+    <string name="sc_failed_busy">%s ist gerade ausgelastet. Senden Sie es in einer Minute erneut.</string>
+    <string name="sc_failed_stuck">Dieses Telefon öffnet noch frühere Dateien. Versuchen Sie es in einer Minute erneut.</string>
+    <string name="sc_nothing">Hier gibt es nichts zu senden</string>
+    <string name="sc_too_much_text">Das ist zu viel Text auf einmal</string>
+    <string name="sc_too_many">Senden Sie höchstens %d Elemente auf einmal</string>
+    <string name="sc_try_again">Erneut versuchen</string>
+    <string name="sc_close">Schließen</string>
+    <string name="sc_cancel">Abbrechen</string>
 </resources>

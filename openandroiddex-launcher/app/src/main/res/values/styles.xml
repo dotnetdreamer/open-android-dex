@@ -31,4 +31,21 @@
     </style>
 
     <style name="Theme.OpenAndroidDeX.Detour" parent="Base.Theme.OpenAndroidDeX.Detour" />
+
+    <!-- Send to computer's card (SendActivity): see-through over the app it was
+         shared from, the screen dimmed a little behind it, and no window
+         animation of its own — the card slides up by itself. Not floating: the
+         window covers the screen so a tap outside the card is its to hear. -->
+    <style name="Theme.OpenAndroidDeX.Send" parent="android:Theme.DeviceDefault.NoActionBar">
+        <item name="android:windowIsTranslucent">true</item>
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:windowContentOverlay">@null</item>
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:backgroundDimEnabled">true</item>
+        <item name="android:backgroundDimAmount">0.3</item>
+        <item name="android:windowAnimationStyle">@null</item>
+        <item name="android:windowDisablePreview">true</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+    </style>
 </resources>

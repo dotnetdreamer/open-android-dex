@@ -1047,4 +1047,39 @@ If you switch this off again later, Android force-closes Linux and the desktop r
     <string name="lw_opening">Opening %1$s…</string>
     <!-- The taskbar menu of a Linux app's window: asks the app to close it. -->
     <string name="lw_close_window">Close window</string>
+
+    <!-- ── Send to computer ── -->
+    <!-- The entry in the phone's share menu, under the app's icon; and the card
+         that comes up over the app it was shared from. %s / %1$s / %3$s are the
+         computer's own name, as its owner set it ("IK's MacBook Pro"): never
+         quoted or declined. "Downloads" is the computer's Downloads folder. -->
+    <string name="sc_label">Send to computer</string>
+    <string name="sc_looking">Looking for your computer…</string>
+    <string name="sc_preparing">Getting it ready…</string>
+    <string name="sc_sending">Sending to %s…</string>
+    <string name="sc_waiting">Waiting for %s…</string>
+    <string name="sc_count">%1$d of %2$d</string>
+    <string name="sc_saved">Saved to Downloads on %s</string>
+    <string name="sc_saved_some">%1$d of %2$d saved to Downloads on %3$s</string>
+    <string name="sc_opened">Opened on %s</string>
+    <string name="sc_sent">Sent to %s</string>
+    <string name="sc_copied">Copied to the clipboard on %s</string>
+    <string name="sc_copied_hint">Paste it there.</string>
+    <string name="sc_none_title">No computer is connected</string>
+    <string name="sc_none_body">Start Open Android DeX on your computer and connect this phone. Then send again.</string>
+    <string name="sc_silent_title">Your computer didn\'t answer</string>
+    <string name="sc_silent_body">Check that Open Android DeX is still open there, then try again.</string>
+    <string name="sc_off">Send to computer is turned off on %s</string>
+    <string name="sc_failed">It didn\'t arrive</string>
+    <string name="sc_failed_lost">The connection to %s was lost. Send it again.</string>
+    <string name="sc_failed_space">There isn\'t enough room on %s.</string>
+    <string name="sc_failed_read">This phone couldn\'t read %1$d of %2$d.</string>
+    <string name="sc_failed_busy">%s is busy. Send it again in a minute.</string>
+    <string name="sc_failed_stuck">This phone is still opening earlier files. Try again in a minute.</string>
+    <string name="sc_nothing">There\'s nothing here to send</string>
+    <string name="sc_too_much_text">That\'s too much text to send at once</string>
+    <string name="sc_too_many">Send up to %d things at a time</string>
+    <string name="sc_try_again">Try again</string>
+    <string name="sc_close">Close</string>
+    <string name="sc_cancel">Cancel</string>
 </resources>
