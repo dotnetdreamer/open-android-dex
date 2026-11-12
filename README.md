@@ -468,8 +468,11 @@ enabled.
 
 The PC app switches a few display settings on while the desktop is running and
 puts them all back afterwards, including when you unplug without closing the
-app. In standalone mode, making Open Android DeX your default home app is
-optional, and you can switch back in Android's default-app settings.
+app. One setting stays changed: Android's limit on how many background
+programs apps may run, which the PC app turns off because Ubuntu needs more
+than it allows (see "Ubuntu closes by itself" below, which also says how to
+turn it back on). In standalone mode, making Open Android DeX your default home
+app is optional, and you can switch back in Android's default-app settings.
 </details>
 
 <details>
@@ -538,6 +541,33 @@ Those phones are aggressive about killing apps that run for a long time with the
 screen off, and the first Ubuntu setup takes a while. Turn off battery
 optimisation for the app before you start the install. If you are using it
 through the desktop app this is handled for you.
+</details>
+
+<details>
+<summary><b>Ubuntu closes by itself while I use it, often with a browser open.</b></summary>
+
+Android 12 and newer lets apps run 32 background programs between them, across
+the whole phone, and closes some once there are more. Ubuntu gets there easily:
+the desktop is about twenty on its own, and one busy browser tab can be fifteen
+more. When it looks like that is what happened, the Linux window says "Android
+probably closed Linux".
+
+Connect the phone to Open Android DeX on a computer and the desktop app turns
+that limit off, every time it finds it on. It stays off after you unplug,
+unless something turns it back on, such as an Android update. On a phone with
+no computer, on Android 14 or newer, open Settings → Developer options and turn
+on Disable child process restrictions. The Linux window has a button that takes
+you there.
+
+Once the desktop app has turned it off, the Developer options switch can no
+longer turn it back on. To have Android's limit back, run these with the phone
+connected, and know that the desktop app turns it off again the next time it
+sees the phone:
+
+```
+adb shell settings delete global settings_enable_monitor_phantom_procs
+adb shell device_config delete activity_manager max_phantom_processes
+```
 </details>
 
 <details>

@@ -34,18 +34,38 @@ relink.
 
 `build-proot.sh` reimplements upstream's `make-proot-for-apk.sh` (commit
 `01f83b8`) with the same pins — NDK **r23c** (23.2.8568313), API 21, proot
-`v0.15_release`, talloc `2.1.14` — and adds exactly one thing:
+`v0.15_release`, talloc `2.1.14` — and adds exactly two things:
 
     -Wl,-z,max-page-size=16384
 
-on every link. Holding the toolchain identical is the point: it makes "did the
-rebuild change proot's behaviour?" answerable with *no, only the segment
-alignment moved*. The build fails if any LOAD segment comes out under 16 KB.
+on every link, and the patches in `patches/` on proot's source. Holding the
+toolchain identical is the point: it makes "did the rebuild change proot's
+behaviour?" answerable with *only where a patch says so*. The build fails if any
+LOAD segment comes out under 16 KB.
 
 Three separate links need the flag and they are reached three different ways —
 proot itself through `LDFLAGS`, and each loader through its own
 `LOADER_LDFLAGS` / `LOADER_LDFLAGS-m32`, which proot's makefile builds from
 scratch and never seeds from `LDFLAGS`.
+
+### `patches/untag-tracee-addresses.patch`
+
+Android 11 and later put a tag in the top byte of 64-bit heap pointers, and
+the programs proot runs pass those pointers to the kernel. proot reads what they
+point at (a file name, an argument) out of the program's memory. At API 21 the
+NDK has no `process_vm_readv`, so this proot reads with `PTRACE_PEEKDATA` only,
+and on some kernels that fails on a tagged address: Linux 6.1 on a Galaxy S24
+(Exynos 2400, Android 15) returns EIO, so proot could not start even
+`/usr/bin/true` and Linux setup died at its first step. The patch drops the top
+byte before every access to the program's memory, on arm64 only. That byte is
+never part of an arm64 user address, so an untagged pointer is unaffected.
+x86_64 builds the same code as before. With it the S24 installed and ran Linux,
+and a Galaxy S25 Ultra (Linux 6.6.127), which ran the unpatched proot fine, runs
+the patched one the same (2026-11-11).
+
+A new proot needs no `Linux.PAYLOAD_VERSION` bump: it runs from the APK's
+native-lib folder, so installing the APK is all it takes, while a bump wipes
+every user's container.
 
 ## Notes
 

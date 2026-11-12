@@ -686,6 +686,9 @@ Si vous la désactivez plus tard, Android forcera la fermeture de Linux et le bu
     <string name="rm_note_turn_off">Désactiver</string>
     <string name="rm_note_resume">L’accès à distance est en pause — appuyez pour reprendre</string>
     <string name="ln_remote_menu">Accès à distance…</string>
+    <string name="ln_gpu_menu">Utiliser le GPU</string>
+    <string name="ln_gpu_on">Les applis Linux utiliseront le GPU au prochain démarrage de Linux.</string>
+    <string name="ln_gpu_off">Les applis Linux utiliseront le processeur au prochain démarrage de Linux.</string>
 
     <!-- ── Linux app windows ── -->
     <string name="lw_opening">Ouverture de %1$s…</string>

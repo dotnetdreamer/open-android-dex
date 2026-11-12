@@ -379,6 +379,11 @@ public class LinuxService extends Service {
             }
 
             @Override
+            public String stoppedWhy(long waitMs) {
+                return LinuxService.this.stoppedWhy(waitMs);
+            }
+
+            @Override
             public void streaming(boolean on) {
                 streamAwake(on);
                 // A session that ended may have been the last reason to be up.
@@ -924,7 +929,19 @@ public class LinuxService extends Service {
         try {
             Linux.Status st = Linux.readStatus(this);
             if (!"ready".equals(st.phase)) return; // nothing to start yet
-            if (runtimeUp && st.running) {
+            // runtimeAlive() too, not the flag and the pid file alone: both
+            // outlive a runtime that was killed rather than ended (see
+            // watchRuntime), and with only them this answered "already up" to
+            // every start of a desktop that was gone.
+            // And a runtime spawned moments ago counts as up before its
+            // rt.pid is written. Two starts land inside that gap as soon as
+            // a stopped desktop can be started again: a computer's "Start it"
+            // spawns one, and the Linux window, still open on its "Android
+            // closed Linux" card, sees no runtime and no verdict and sends a
+            // start of its own. Measured on the S25: the second came 100 ms
+            // after the first, killed it, and spawned again.
+            long sinceSpawn = android.os.SystemClock.elapsedRealtime() - runtimeSpawnedAt;
+            if (runtimeUp && runtimeAlive() && (st.running || sinceSpawn < 15_000)) {
                 if (withSound) LinuxAudio.start(LinuxAudio.DESKTOP);
                 goForeground(getString(R.string.ln_label));
                 return; // already up — do NOT spawn a second one
@@ -975,6 +992,10 @@ public class LinuxService extends Service {
                     "/system/bin/sh", Linux.rtScript(this).getAbsolutePath());
             pb.directory(dir);
             pb.environment().putAll(Linux.scriptEnv(this));
+            // The phone's GPU for the session's GL apps, on an Adreno or an
+            // Xclipse phone; the guest probes it before using it. Anywhere
+            // else nothing is added and they draw on the CPU as before.
+            LinuxGpu.env(this, pb.environment());
             pb.redirectErrorStream(true);
             pb.redirectOutput(new File(dir, "rt.log"));
             // NOT waited and NOT setsid'd: it stays a child of this app so a
@@ -984,6 +1005,8 @@ public class LinuxService extends Service {
             runtimeSpawnedAt = android.os.SystemClock.elapsedRealtime();
             runtimeProc = pb.start();
             liveRuntime = runtimeProc;
+            watchRuntime(runtimeProc);
+            LinuxGpu.reportVerdict(pb.environment(), new File(dir, "rt.log"));
             // The guest has no audio device: it plays into a null sink and this
             // drains that sink's monitor into an AudioTrack. Started here rather
             // than when the window opens, because the container is what produces
@@ -1034,7 +1057,7 @@ public class LinuxService extends Service {
                         + "if [ -n \"$P\" ]; then "
                         + "/system/bin/kill -9 -\"$P\" 2>/dev/null; "
                         + "/system/bin/kill -9 \"$P\" 2>/dev/null; fi; "
-                        + "rm -f " + q(dir) + "/rt.pid " + q(dir) + "/rt.exit; "
+                        + "rm -f " + q(dir) + "/rt.pid " + q(dir) + "/rt.exit " + q(dir) + "/rt.limit; "
                         + "pkill -l KILL -f '[X]vnc :1' 2>/dev/null; "
                         + "pkill -l KILL -f '[w]ebsockify --web' 2>/dev/null; "
                         + "pkill -l KILL -f '[p]ulseaudio -n --file=/etc/pulse/dex.pa' 2>/dev/null; "
@@ -1062,6 +1085,118 @@ public class LinuxService extends Service {
         liveRuntime = null;
         runtimeUp = false;
         DexLog.step("linux", "runtime stopped");
+    }
+
+    /**
+     * Wait on the runtime just spawned, on a thread of its own, and settle what
+     * it leaves behind if it ends without being asked to ({@link #runtimeEnded}).
+     */
+    private void watchRuntime(Process p) {
+        Thread t = new Thread(() -> {
+            int code;
+            try {
+                code = p.waitFor();
+            } catch (InterruptedException e) {
+                return;
+            }
+            try {
+                io.execute(() -> runtimeEnded(p, code));
+            } catch (java.util.concurrent.RejectedExecutionException destroyed) {
+                // onDestroy has run. The next instance's first start runs
+                // stopRuntime, which clears up the same leftovers.
+            }
+        }, "linux-rt-watch");
+        t.setDaemon(true);
+        t.start();
+    }
+
+    /**
+     * The runtime ended, and not through {@link #stopRuntime}. io thread, so a
+     * start or a stop is never half done under it.
+     *
+     * <p>linux-rt.sh clears rt.pid and leaves its verdict in rt.exit when the
+     * session ends under it: a logout, a crash, proot killed. When the script
+     * ITSELF is killed, neither happens, and that is exactly what Android's
+     * child-process limit does (ChildProcessLimit): it kills an app's OLDEST
+     * processes first, and the script is among the oldest. The stale rt.pid,
+     * with runtimeUp still set, then read as a desktop still up: every start
+     * was answered "already up", the Linux window sat on "Connecting" and a
+     * computer's "Start it" did nothing, until the app was restarted.
+     *
+     * <p>So: whatever of the script's group outlived it goes too (proot, when
+     * the kill stopped short of it, would keep a desktop up that nothing
+     * watches any more), and the verdict the script would have written is
+     * written for it. The verdict goes first: rt.pid gone with no rt.exit
+     * beside it reads as stopped from this side ({@link #stoppedWhy}).
+     */
+    private void runtimeEnded(Process p, int code) {
+        if (runtimeProc != p) return; // stopRuntime got here first, or a newer runtime replaced it
+        runtimeProc = null;
+        if (liveRuntime == p) liveRuntime = null;
+        runtimeUp = false;
+        // The sound pump is the desktop's; it would retry against a guest that is gone.
+        LinuxAudio.stop(LinuxAudio.DESKTOP);
+        File dir = Linux.root(this);
+        File pidFile = new File(dir, "rt.pid");
+        String pid = Linux.readFile(pidFile).trim();
+        boolean scriptKilled = pid.matches("\\d+");
+        // The session's verdict: the script's own, or this exit code when the
+        // script itself was what got killed.
+        String verdict = Linux.readFile(Linux.rtExit(this)).trim();
+        if (verdict.isEmpty() && scriptKilled) verdict = String.valueOf(code);
+        boolean killed = String.valueOf(ChildProcessLimit.KILLED_EXIT).equals(verdict);
+        ChildProcessLimit.State limit = killed ? ChildProcessLimit.state(this) : null;
+        // Ahead of the verdict, which is what the windows wait on.
+        if (killed) writeFile(ChildProcessLimit.killMarker(this), limit.name());
+        if (scriptKilled) {
+            try {
+                new ProcessBuilder("/system/bin/sh", "-c",
+                        "/system/bin/kill -9 -" + pid + " 2>/dev/null; true")
+                        .redirectErrorStream(true).start().waitFor();
+            } catch (Exception e) {
+                DexLog.step("linux", "runtime leftovers kill error: " + e);
+            }
+            if (!Linux.rtExit(this).exists()) writeFile(Linux.rtExit(this), verdict);
+            pidFile.delete();
+        }
+        DexLog.step("linux", "runtime ended by itself: script exit " + code + ", session exit "
+                + (verdict.isEmpty() ? "none" : verdict)
+                + (scriptKilled ? ", script killed before it could clean up" : "")
+                + (killed ? " (SIGKILL: Android's child-process limit is " + limit + ")" : ""));
+        idleStop();
+    }
+
+    /**
+     * For a computer's window: why the desktop stopped, when Android killed it
+     * ({@link ChildProcessLimit}), and null for anything else. Waits up to
+     * {@code waitMs} for the verdict, because Xvnc's socket closes the moment
+     * the guest goes, a beat before the script that ran it is settled. Any
+     * thread.
+     */
+    String stoppedWhy(long waitMs) {
+        long until = android.os.SystemClock.elapsedRealtime() + waitMs;
+        boolean twice = false;
+        while (true) {
+            Linux.Status st = Linux.readStatus(this);
+            if (st.sessionEnded) {
+                return ChildProcessLimit.killedByLimit(this, st)
+                        ? ChildProcessLimit.explain(this, true) : null;
+            }
+            // Neither a pid nor a verdict: stopped from this side, since
+            // stopRuntime removes both. Read twice, though: the script itself
+            // removes rt.pid a moment before it writes rt.exit.
+            if (!st.running) {
+                if (twice) return null;
+                twice = true;
+            }
+            if (android.os.SystemClock.elapsedRealtime() >= until) return null;
+            try {
+                Thread.sleep(twice ? 50 : 100);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return null;
+            }
+        }
     }
 
     // ── the window session: Linux apps as windows of their own ──
@@ -1125,11 +1260,13 @@ public class LinuxService extends Service {
             ProcessBuilder pb = new ProcessBuilder("/system/bin/sh", Linux.winScript(this).getAbsolutePath());
             pb.directory(dir);
             pb.environment().putAll(Linux.scriptEnv(this));
+            LinuxGpu.env(this, pb.environment());
             pb.redirectErrorStream(true);
             pb.redirectOutput(new File(dir, "win.log"));
             Process p = pb.start();
             winInput = p.getOutputStream();
             liveWin = p;
+            LinuxGpu.reportVerdict(pb.environment(), new File(dir, "win.log"));
             LinuxAudio.start(LinuxAudio.WINDOWS);
             goForeground(getString(R.string.ln_label));
             DexLog.step("linux", "window session started " + w + "x" + h + " at " + dpi + " dpi");

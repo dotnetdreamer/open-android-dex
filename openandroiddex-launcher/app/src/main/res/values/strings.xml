@@ -606,6 +606,15 @@
     <string name="ln_session_ended">You logged out of Linux</string>
     <string name="ln_session_ended_sub">The session is closed and the container has stopped. Nothing was lost from the installed system.</string>
     <string name="ln_session_start">Start a session</string>
+    <!-- A session ended by SIGKILL while Android's child-process limit read as on (ChildProcessLimit): the likely cause, said as likely, since the app cannot see who sent the kill. The why line and one next-step line are joined with a space. -->
+    <string name="ln_session_killed">Android probably closed Linux</string>
+    <string name="ln_killed_why">Android closes some background programs once apps are running more than 32 of them across the phone, and Linux on its own uses most of those.</string>
+    <string name="ln_killed_why_pc">Android probably closed it. It closes some background programs once apps are running more than 32 of them across the phone, and Linux on its own uses most of those.</string>
+    <string name="ln_killed_switch">To stop that, turn on Disable child process restrictions in Developer options.</string>
+    <string name="ln_killed_switch_pc">To stop that, turn on Disable child process restrictions in the phone\'s Developer options.</string>
+    <string name="ln_killed_connect">To stop that, connect this phone to Open Android DeX on a computer. It switches that limit off.</string>
+    <string name="ln_killed_off_now">That limit is off on this phone now.</string>
+    <string name="ln_dev_options">Developer options</string>
     <string name="ln_close_title">Shut down Linux?</string>
     <string name="ln_close_body">This ends the Ubuntu session and stops the container. Anything unsaved inside it is lost. To put it aside and keep it running, minimise the window instead.</string>
     <string name="ln_close_cancel">Cancel</string>
@@ -1030,6 +1039,9 @@ If you switch this off again later, Android force-closes Linux and the desktop r
 
     <!-- The Linux tile's menu -->
     <string name="ln_remote_menu">Remote access…</string>
+    <string name="ln_gpu_menu">Use the GPU</string>
+    <string name="ln_gpu_on">Linux apps will use the GPU from the next time Linux starts.</string>
+    <string name="ln_gpu_off">Linux apps will use the CPU from the next time Linux starts.</string>
 
     <!-- ── Linux app windows ── -->
     <!-- A Linux app opens as a window of its own; the toast while it starts. -->

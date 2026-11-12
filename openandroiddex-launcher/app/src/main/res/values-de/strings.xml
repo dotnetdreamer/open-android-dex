@@ -690,6 +690,9 @@ Wenn du sie später wieder abschaltest, erzwingt Android das Beenden von Linux u
     <string name="rm_note_turn_off">Ausschalten</string>
     <string name="rm_note_resume">Fernzugriff ist pausiert — zum Fortsetzen tippen</string>
     <string name="ln_remote_menu">Fernzugriff…</string>
+    <string name="ln_gpu_menu">GPU verwenden</string>
+    <string name="ln_gpu_on">Linux-Apps nutzen ab dem nächsten Start von Linux die GPU.</string>
+    <string name="ln_gpu_off">Linux-Apps nutzen ab dem nächsten Start von Linux die CPU.</string>
 
     <!-- ── Linux app windows ── -->
     <string name="lw_opening">%1$s wird geöffnet…</string>

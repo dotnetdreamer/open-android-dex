@@ -27,6 +27,11 @@ authoritative list shipped with each release. In summary:
   SDL2                       Zlib         (bundled by scrcpy)
   QEMU                       GPL-2.0-only (openandroiddex-docker guest VM)
   proot                      GPL-2.0+     (openandroiddex-linux guest)
+  talloc                     LGPL-3.0+    (linked into proot)
+  Mesa (Turnip driver)       MIT          (openandroiddex-linux guest GPU;
+                                           a few files BSD, BSL-1.0, CC0)
+  radv-xclipse (Mesa RADV)   MIT          (guest GPU on Xclipse phones; with
+                                           libdrm and Expat, MIT; zlib, Zlib)
   Alpine Linux, Ubuntu       various      (guest images, downloaded at runtime)
 
 The Android SDK, Gradle and the npm/crates dependency trees are build-time

@@ -3215,6 +3215,15 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
         if (LinuxRemote.available(this)) {
             menu.getMenu().add(0, 7, 3, getString(R.string.ln_remote_menu));
         }
+        // GL on the phone's GPU (doc/linux-gpu.md). Only where it can work,
+        // an Adreno or an Xclipse: anywhere else there is nothing to switch,
+        // and a box that did nothing would be a lie. On by default; this is
+        // the way out for an app that draws wrongly on it.
+        if (LinuxGpu.available()) {
+            menu.getMenu().add(0, 8, 3, getString(R.string.ln_gpu_menu))
+                    .setCheckable(true)
+                    .setChecked(LinuxGpu.enabled(this));
+        }
         menu.getMenu().add(0, 4, 4, getString(R.string.ln_reinstall));
         // Only while there is something to remove. Offering "Uninstall" over a
         // container that is already gone is an action that would do nothing,
@@ -3241,6 +3250,13 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
                 chooseLinuxApps();
             } else if (id == 7) {
                 openLinuxRemote();
+            } else if (id == 8) {
+                // Read at every start, so a session already up keeps what it
+                // started with; the note says when the change lands.
+                boolean on = !LinuxGpu.enabled(this);
+                LinuxGpu.setEnabled(this, on);
+                Toast.makeText(this, getString(on ? R.string.ln_gpu_on : R.string.ln_gpu_off),
+                        Toast.LENGTH_LONG).show();
             }
             return true;
         });

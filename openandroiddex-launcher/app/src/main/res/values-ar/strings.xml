@@ -698,6 +698,9 @@
     <string name="rm_note_turn_off">إيقاف</string>
     <string name="rm_note_resume">الوصول عن بُعد متوقف مؤقتًا — انقر للاستئناف</string>
     <string name="ln_remote_menu">الوصول عن بُعد…</string>
+    <string name="ln_gpu_menu">استخدام وحدة معالجة الرسومات (GPU)</string>
+    <string name="ln_gpu_on">ستستخدم تطبيقات Linux وحدة معالجة الرسومات (GPU) بدءًا من التشغيل التالي لـ Linux.</string>
+    <string name="ln_gpu_off">ستستخدم تطبيقات Linux المعالج (CPU) بدءًا من التشغيل التالي لـ Linux.</string>
 
     <!-- ── Linux app windows ── -->
     <string name="lw_opening">جارٍ فتح %1$s…</string>

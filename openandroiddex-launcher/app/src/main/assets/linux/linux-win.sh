@@ -96,11 +96,28 @@ fi
 # X repeating it as well would type everything twice.
 SESSION='rm -f /tmp/.X2-lock /tmp/.X11-unix/X2
 mkdir -p /tmp/runtime-root && chmod 700 /tmp/runtime-root
+# The GPU, exactly as in linux-rt.sh: probed beside the Xvnc start, and only a
+# yes exported, after Xvnc and before the bus and every app.
+GPUPROBE=
+GPUDIR=/usr/local/lib/openandroiddex/gpu
+if [ -n "$OADX_GPU" ] && [ -x $GPUDIR/oadx-vkprobe ] && [ -f $GPUDIR/${OADX_GPU}_icd.json ]; then
+  VK_ICD_FILENAMES=$GPUDIR/${OADX_GPU}_icd.json \
+    timeout 15 $GPUDIR/oadx-vkprobe >/tmp/.oadx-win-gpu 2>&1 &
+  GPUPROBE=$!
+fi
 Xvnc :2 -geometry GEOMETRY -depth 24 -dpi DPIVALUE -rfbport 5902 -localhost \
   -rfbauth /root/.vnc/passwd -SecurityTypes VncAuth \
   -auth /tmp/.oadx-win.xauth -nolisten tcp &
 XVNC=$!
 export DISPLAY=:2 XAUTHORITY=/tmp/.oadx-win.xauth
+if [ -n "$GPUPROBE" ]; then
+  if wait $GPUPROBE; then
+    echo "gpu: $(head -c 200 /tmp/.oadx-win-gpu)"
+    export MESA_LOADER_DRIVER_OVERRIDE=zink LIBGL_KOPPER_DRI2=1 MESA_VK_WSI_DEBUG=sw
+  else
+    echo "gpu: not used -- $(head -c 300 /tmp/.oadx-win-gpu)"
+  fi
+fi
 n=0
 until xset q >/dev/null 2>&1; do
   n=$((n + 1))
@@ -182,6 +199,7 @@ exec 3<&0
   -w /root /usr/bin/env -i HOME=/root TERM=xterm-256color \
   PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
   XDG_CONFIG_DIRS=/usr/local/etc/xdg:/etc/xdg \
+  OADX_GPU="${LINUX_GPU:-}" \
   /bin/sh -c "$SESSION" <&3 &
 PROOT_PID=$!
 exec 3<&-
