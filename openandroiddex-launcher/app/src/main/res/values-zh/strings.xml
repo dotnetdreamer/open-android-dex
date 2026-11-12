@@ -273,6 +273,7 @@
     <string name="lx_exit_body">桌面将关闭，手机恢复正常。仍在此处打开的应用会移回手机。</string>
     <string name="lx_exit_body_home">桌面就是你的主屏幕，因此系统会询问改由哪个应用接管。</string>
     <string name="lx_exiting">正在退出 DeX…</string>
+    <string name="lx_desktop_elsewhere">桌面已在另一块屏幕上打开。请先在那里关闭，才能在这里打开。</string>
 
     <!-- Phone touchpad -->
     <string name="lx_pad">鼠标</string>

@@ -211,17 +211,45 @@
             android:resizeableActivity="true"
             android:stateNotNeeded="true"
             android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|density|keyboard|keyboardHidden|navigation|uiMode">
-            <!-- openable like a normal app (e.g. via am start from the PC) -->
-            <intent-filter>
-                <action android:name="android.intent.action.MAIN" />
-                <category android:name="android.intent.category.LAUNCHER" />
-            </intent-filter>
+            <!-- No MAIN/LAUNCHER here, though it used to be the app's icon. A
+                 launcher's start of a singleTask activity that is already running
+                 takes its task to that launcher's display: the icon on the phone
+                 moved a live desktop off the computer, and its taskbar stayed
+                 behind. The icon is DesktopIconActivity's now, below. Everything
+                 that means THIS activity starts it by explicit component (the
+                 PC's `am start -n`, the window daemon's HOME), which needs no
+                 filter. -->
             <!-- eligible as a home on secondary displays -->
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.HOME" />
                 <category android:name="android.intent.category.SECONDARY_HOME" />
                 <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </activity>
+
+        <!-- The app's icon, on the phone's home screen and in any other display's
+             launcher. It opens the desktop as LauncherActivity's own entry did, and
+             leaves one already running on a display of its own where it is rather
+             than moving it here (see DesktopIconActivity).
+
+             A trampoline like LinuxAppActivity, for the same reasons: it owns a task,
+             draws nothing and is out of Recents, under an affinity of its own so it
+             never joins the desktop's task. No icon or label of its own: the
+             application's are the app's. -->
+        <activity
+            android:name=".DesktopIconActivity"
+            android:exported="true"
+            android:launchMode="singleTask"
+            android:taskAffinity="com.ccrstech.openandroiddex.launcher.icon"
+            android:theme="@style/Theme.OpenAndroidDeX.Detour"
+            android:excludeFromRecents="true"
+            android:autoRemoveFromRecents="true"
+            android:resizeableActivity="true"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|density|keyboard|keyboardHidden|navigation|uiMode|locale|layoutDirection|fontScale">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
         <!-- In-desktop Settings window (Display size). singleTask so

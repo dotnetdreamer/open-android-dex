@@ -408,6 +408,7 @@
     <string name="lx_exit_body">The desktop closes and the phone goes back to normal. Apps still open here move to the phone.</string>
     <string name="lx_exit_body_home">The desktop is your home screen, so you will be asked which app takes that over.</string>
     <string name="lx_exiting">Exiting DeX…</string>
+    <string name="lx_desktop_elsewhere">The desktop is already open on another screen. Close it there to open it here.</string>
 
     <!-- Phone touchpad: the dock's Mouse button and its options -->
     <string name="lx_pad">Mouse</string>

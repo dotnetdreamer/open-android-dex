@@ -273,6 +273,7 @@
     <string name="lx_exit_body">डेस्कटॉप बंद हो जाएगा और फ़ोन सामान्य हो जाएगा। यहाँ खुले ऐप फ़ोन पर चले जाएंगे।</string>
     <string name="lx_exit_body_home">डेस्कटॉप ही आपकी होम स्क्रीन है, इसलिए पूछा जाएगा कि उसे कौन-सी ऐप संभालेगी।</string>
     <string name="lx_exiting">DeX बंद हो रहा है…</string>
+    <string name="lx_desktop_elsewhere">डेस्कटॉप पहले से किसी दूसरी स्क्रीन पर खुला है। इसे यहाँ खोलने के लिए वहाँ बंद करें।</string>
 
     <!-- Phone touchpad -->
     <string name="lx_pad">माउस</string>

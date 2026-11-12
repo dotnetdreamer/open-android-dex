@@ -334,6 +334,21 @@ phone has no pad, tie, display, forward or dex of its own left. There is no
 browser-page mode: on someone's own phone it would leave a tab and a history
 entry.
 
+The window daemon's answer to `DESKTOP` — which display is the desktop
+(`doc/custom-titlebar-v2.md`, issue #11) — is a rule over the task tree, and that
+rule is checked on a computer's JVM, with a JDK:
+
+```sh
+node test/desktop-display-test.mjs
+```
+
+It compiles the daemon's own `DesktopDisplay` and runs it over task trees read off
+a phone: the desktop found past a window on it and another display's app, and with
+another app's activity on top of it in its own task; never on the phone's own
+screen; never the launcher's Settings on another display; and in the gap an APK
+install makes, the display the desktop was last seen on while that display holds a
+task, then none at all — not the other display's app.
+
 Everything else needs a device. `doc/web-viewer.md`, `doc/remote-access.md`,
 `doc/usb-desktop.md`, `doc/apps-on-pc.md`, `doc/phone-notifications.md` and
 `doc/game-mode.md` list what is still unverified there.

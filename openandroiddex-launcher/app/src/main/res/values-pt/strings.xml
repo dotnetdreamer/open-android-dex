@@ -273,6 +273,7 @@
     <string name="lx_exit_body">O desktop é fechado e o telefone volta ao normal. Os apps ainda abertos aqui vão para o telefone.</string>
     <string name="lx_exit_body_home">A área de trabalho é a sua tela de início, então será perguntado qual app assume isso.</string>
     <string name="lx_exiting">Saindo do DeX…</string>
+    <string name="lx_desktop_elsewhere">A área de trabalho já está aberta em outra tela. Feche-a lá para abri-la aqui.</string>
 
     <!-- Phone touchpad -->
     <string name="lx_pad">Mouse</string>

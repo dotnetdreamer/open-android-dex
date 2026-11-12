@@ -767,6 +767,12 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
     /** Display width in px the view tree was built for — see refreshDisplayMetrics. */
     private int uiWidthPx;
 
+    /**
+     * Display the view tree — and the taskbar's overlay window with it — was
+     * built on. See refreshDisplayMetrics.
+     */
+    private int uiDisplayId = Display.INVALID_DISPLAY;
+
     /** True when that width is too narrow for the full desktop chrome. */
     private boolean compact;
 
@@ -813,7 +819,16 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
     private final android.hardware.display.DisplayManager.DisplayListener displayListener =
             new android.hardware.display.DisplayManager.DisplayListener() {
                 @Override public void onDisplayAdded(int displayId) {}
-                @Override public void onDisplayRemoved(int displayId) {}
+                /**
+                 * The display the shell was built for, gone while the shell is on
+                 * another: the taskbar went with it (see refreshDisplayMetrics). On
+                 * the desktop's own display this is just the session ending, and
+                 * refreshDisplayMetrics finds nothing moved.
+                 */
+                @Override
+                public void onDisplayRemoved(int displayId) {
+                    if (displayId == uiDisplayId) maybeRebuildForDisplay();
+                }
 
                 @Override
                 public void onDisplayChanged(int displayId) {
@@ -1218,6 +1233,9 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
     protected void onResume() {
         super.onResume();
         handler.post(clockTick);
+        // Back in front, possibly on a display other than the one the shell was
+        // built for — a move nothing else announced (see refreshDisplayMetrics).
+        maybeRebuildForDisplay();
     }
 
     @Override
@@ -1273,12 +1291,17 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
     /**
      * A start while we are already running (singleTask): the desktop app setting
      * the desktop up again, which says the Default density of the display it made.
+     *
+     * A start from another display is also what MOVES this task there, so the
+     * display is checked as well (see refreshDisplayMetrics) — posted, so it is
+     * read once everything this start delivered has been applied.
      */
     @Override
     protected void onNewIntent(Intent intent) {
         super.onNewIntent(intent);
         setIntent(intent);
         if (rememberBaseDpi(intent)) reapplyDensity();
+        handler.post(this::maybeRebuildForDisplay);
     }
 
     /**
@@ -1327,26 +1350,45 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
 
     /**
      * Re-read the density and width the view tree has to match, and say whether
-     * either moved.
+     * either moved — or the display under it did.
      *
      * Width counts as much as density here: rotating the phone leaves the
      * density alone but carries the shell across {@link #COMPACT_WIDTH_DP},
      * and the tree on screen was built for the other side of that line.
+     *
+     * The display counts whatever its size, because of the taskbar. It is an
+     * overlay WINDOW, added to the display this activity was on when the tree
+     * was built, and the window manager does not take it along when the
+     * activity's task moves. A desktop moved to another display of the same
+     * size and density — a start of this singleTask shell from that display is
+     * all it takes — gets no configuration change at all, so nothing rebuilt
+     * it: the desktop arrived bare, the bar stayed on the old display and went
+     * when that display did, and since taskbarOverlay still said it was up,
+     * nothing ever put it back. Measured on an S25 Ultra between two
+     * 2464x1296/160 displays.
      */
     private boolean refreshDisplayMetrics() {
         Point size = new Point();
         getWindowManager().getDefaultDisplay().getRealSize(size);
         int density = currentDisplayDensity();
-        boolean changed = density != uiDensity || size.x != uiWidthPx;
+        int display = displayId();
+        boolean changed = density != uiDensity || size.x != uiWidthPx || display != uiDisplayId;
         uiDensity = density;
         uiWidthPx = size.x;
+        uiDisplayId = display;
         compact = Math.round(size.x * 160f / Math.max(1, density)) < COMPACT_WIDTH_DP;
         return changed;
     }
 
-    /** Rebuild every view for the display's current density and width, if either moved. */
+    /**
+     * Rebuild every view for the display's current density and width, if either
+     * moved — or for the display the shell is on now, if that did. Asked from
+     * every place a move can show up (see refreshDisplayMetrics), since none of
+     * them sees every move. Never once destroyed: a posted check can outlive us,
+     * and a rebuild then would put a taskbar up for a desktop that is gone.
+     */
     private void maybeRebuildForDisplay() {
-        if (isFinishing()) return;
+        if (isFinishing() || isDestroyed()) return;
         if (!refreshDisplayMetrics()) return;
         rebuildShell();
     }

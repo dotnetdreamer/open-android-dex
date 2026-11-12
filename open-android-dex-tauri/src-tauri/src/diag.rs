@@ -23,13 +23,14 @@
 //! before the PC drains its pipes — which is exactly the case that used to
 //! leave us with no evidence at all.
 
+use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read};
 use std::path::PathBuf;
-use std::process::Stdio;
+use std::process::{Child, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tauri::{AppHandle, Manager, Runtime};
 use tauri_plugin_log::{
@@ -280,59 +281,220 @@ const LOGCAT_SPEC: &[&str] = &[
 /// ship stock scrcpy, so the equivalent channel is its logcat output: the
 /// server logs there as well as to the pipe, and logcat survives the process
 /// dying with a pipe still buffered.
+///
+/// For the life of the session, not of one `logcat`. A pulled cable or a Wi‑Fi
+/// drop ends the process while the session carries on through its reconnect,
+/// and the stream used to end with it: everything the launcher did after the
+/// first reconnect — the stretch most worth reading — never reached the file.
+/// So it is picked up again whenever the phone answers, from the time of the
+/// last line it gave (`-T`), which brings in what the phone logged while it was
+/// away as well.
 pub fn stream_device_log(app: &AppHandle, serial: &str, key: &str, stop: Arc<AtomicBool>) {
-    let mut cmd = adb::adb_command(app);
-    // -T 1: start at the end of the buffer, not at the beginning of boot
-    cmd.args(["-s", serial, "logcat", "-v", "time", "-T", "1"]);
-    cmd.args(LOGCAT_SPEC);
-    cmd.stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-    let mut child = match cmd.spawn() {
-        Ok(c) => c,
-        Err(e) => {
-            log::warn!("device log [{key}] could not start logcat: {e}");
-            return;
-        }
-    };
-    // logcat never ends by itself, and an app killed mid-session never gets
-    // to the kill below.
-    adb::end_with_this_app(&child);
-    let Some(out) = child.stdout.take() else {
-        return;
-    };
-    log::info!("device log [{key}] streaming ({})", LOGCAT_SPEC.join(" "));
-
-    let child = Arc::new(Mutex::new(child));
+    // The logcat running now, for the stopper to kill; None between runs.
+    let current: Arc<Mutex<Option<Child>>> = Arc::new(Mutex::new(None));
     {
         // logcat blocks on the phone, so the only way it ends is being killed
-        let child = child.clone();
+        let current = current.clone();
+        let stop = stop.clone();
         let key = key.to_string();
         thread::spawn(move || {
             while !stop.load(Ordering::SeqCst) {
                 thread::sleep(Duration::from_millis(250));
             }
-            let _ = child.lock().unwrap().kill();
+            if let Some(child) = current.lock().unwrap().as_mut() {
+                let _ = child.kill();
+            }
             log::debug!("device log [{key}] stopped");
         });
     }
+    let app = app.clone();
+    let serial = serial.to_string();
     let key = key.to_string();
     thread::spawn(move || {
-        for line in BufReader::new(out).lines().map_while(Result::ok) {
-            let line = line.trim_end();
-            if line.is_empty() || line.starts_with("--------- beginning") {
-                continue;
+        // What the file already has, for the run that picks the stream up again.
+        let mut resume = Resume::default();
+        let mut first = true;
+        let mut retry = RESTREAM_FIRST;
+        let mut gap_said = false;
+        while !stop.load(Ordering::SeqCst) {
+            let mut cmd = adb::adb_command(&app);
+            let from = resume.from();
+            cmd.args(["-s", serial.as_str(), "logcat", "-v", "time", "-T", from.as_str()]);
+            cmd.args(LOGCAT_SPEC);
+            cmd.stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null());
+            let mut child = match cmd.spawn() {
+                Ok(c) => c,
+                Err(e) => {
+                    log::warn!("device log [{key}] could not start logcat: {e}");
+                    return;
+                }
+            };
+            // logcat never ends by itself, and an app killed mid-session never
+            // gets to the stopper.
+            adb::end_with_this_app(&child);
+            let Some(out) = child.stdout.take() else {
+                return;
+            };
+            *current.lock().unwrap() = Some(child);
+            // A stop that landed while this run was starting found nothing to kill.
+            if stop.load(Ordering::SeqCst) {
+                if let Some(child) = current.lock().unwrap().as_mut() {
+                    let _ = child.kill();
+                }
+                break;
             }
-            // logcat's own level letter (E/W) decides ours, so a phone-side
-            // error is as visible in the file as a host-side one
-            if line.contains(" E/") || line.contains(" F/") {
-                log::warn!("device [{key}] {line}");
-            } else {
-                log::info!("device [{key}] {line}");
+            if first {
+                log::info!("device log [{key}] streaming ({})", LOGCAT_SPEC.join(" "));
+                first = false;
             }
+            let mut replay = resume.replay();
+            let mut got = 0usize;
+            for line in BufReader::new(out).lines().map_while(Result::ok) {
+                let line = line.trim_end();
+                if line.is_empty() || line.starts_with("--------- beginning") {
+                    continue;
+                }
+                if replay.already_printed(line) {
+                    continue;
+                }
+                if got == 0 && gap_said {
+                    log::info!("device log [{key}] the phone answers again — picked up from {from}");
+                    gap_said = false;
+                }
+                got += 1;
+                resume.printed(line);
+                // logcat's own level letter (E/W) decides ours, so a phone-side
+                // error is as visible in the file as a host-side one
+                if line.contains(" E/") || line.contains(" F/") {
+                    log::warn!("device [{key}] {line}");
+                } else {
+                    log::info!("device [{key}] {line}");
+                }
+            }
+            if let Some(mut child) = current.lock().unwrap().take() {
+                let _ = child.wait();
+            }
+            if stop.load(Ordering::SeqCst) {
+                break;
+            }
+            // The phone went away under it with the session still up. Said once a
+            // gap, not once a retry: a reconnect can take a minute.
+            if got > 0 {
+                retry = RESTREAM_FIRST;
+            }
+            if !gap_said {
+                log::info!(
+                    "device log [{key}] ended with the session still up — picking it up again \
+                     when the phone answers"
+                );
+                gap_said = true;
+            }
+            let until = Instant::now() + retry;
+            while Instant::now() < until && !stop.load(Ordering::SeqCst) {
+                thread::sleep(Duration::from_millis(250));
+            }
+            retry = (retry * 2).min(RESTREAM_MAX);
         }
-        let _ = child.lock().unwrap().wait();
     });
+}
+
+/// First wait before a device log that ended mid-session is started again, and
+/// the longest any later wait grows to while the phone stays away.
+const RESTREAM_FIRST: Duration = Duration::from_secs(1);
+const RESTREAM_MAX: Duration = Duration::from_secs(5);
+
+/// Where a device log got to, for the run that picks it up after a gap: the
+/// `-v time` stamp of the last line it printed, and every printed line that
+/// carried that stamp.
+///
+/// `-T` replays from the start of that millisecond, so a picked-up run opens with
+/// lines the file already has. They come off the replay one for one: each printed
+/// line cancels one identical replayed line at that stamp, and whatever is left
+/// over is new. Matching only the last line printed was ambiguous both ways — two
+/// identical lines in one millisecond replayed one of them, and a boundary line
+/// not seen again dropped every new line that shared its millisecond. One case is
+/// beyond telling apart: the same line logged twice in one millisecond, once on
+/// each side of the gap, is printed once.
+#[derive(Default)]
+struct Resume {
+    stamp: Option<String>,
+    at_stamp: Vec<String>,
+}
+
+impl Resume {
+    /// `line` went to the file.
+    fn printed(&mut self, line: &str) {
+        let Some(stamp) = logcat_stamp(line) else {
+            return;
+        };
+        if self.stamp.as_deref() != Some(stamp) {
+            self.stamp = Some(stamp.to_string());
+            self.at_stamp.clear();
+        }
+        self.at_stamp.push(line.to_string());
+    }
+
+    /// What `-T` takes: that stamp, or 1 — the end of the buffer rather than the
+    /// beginning of boot — for a stream that has printed nothing yet.
+    fn from(&self) -> String {
+        self.stamp.clone().unwrap_or_else(|| "1".to_string())
+    }
+
+    /// The lines a run started from [`Resume::from`] must not print again.
+    fn replay(&self) -> Replay {
+        let mut left: HashMap<String, usize> = HashMap::new();
+        for line in &self.at_stamp {
+            *left.entry(line.clone()).or_default() += 1;
+        }
+        Replay { stamp: self.stamp.clone(), left }
+    }
+}
+
+/// The opening of a picked-up run: the lines of [`Resume`]'s millisecond the file
+/// already has, and how many of each.
+struct Replay {
+    stamp: Option<String>,
+    left: HashMap<String, usize>,
+}
+
+impl Replay {
+    /// True for a replayed line the file already has, which it then uses up.
+    fn already_printed(&mut self, line: &str) -> bool {
+        if self.left.is_empty() {
+            return false;
+        }
+        match logcat_stamp(line) {
+            Some(stamp) if Some(stamp) == self.stamp.as_deref() => {
+                // Not among them: logged in that millisecond after the gap, so new.
+                let Some(n) = self.left.get_mut(line) else {
+                    return false;
+                };
+                *n -= 1;
+                if *n == 0 {
+                    self.left.remove(line);
+                }
+                true
+            }
+            // Past that millisecond nothing more can be a repeat.
+            Some(_) => {
+                self.left.clear();
+                false
+            }
+            None => false,
+        }
+    }
+}
+
+/// The `-v time` stamp a logcat line opens with (`MM-DD hh:mm:ss.mmm`), if it
+/// opens with one: what `-T` takes back to pick a stream up where it ended.
+fn logcat_stamp(line: &str) -> Option<&str> {
+    let stamp = line.get(..18)?;
+    let b = stamp.as_bytes();
+    let shaped = b[2] == b'-' && b[5] == b' ' && b[8] == b':' && b[11] == b':' && b[14] == b'.';
+    (shaped && b.iter().enumerate().all(|(i, c)| [2, 5, 8, 11, 14].contains(&i) || c.is_ascii_digit()))
+        .then_some(stamp)
 }
 
 // ── Diagnostics dump ───────────────────────────────────────────────────
@@ -567,4 +729,63 @@ pub fn diag_reveal(app: AppHandle, path: Option<String>) -> Result<(), String> {
         let _ = std::fs::create_dir_all(dir);
     }
     tauri_plugin_opener::reveal_item_in_dir(&target).map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn logcat_stamp_is_the_time_a_stream_picks_up_from() {
+        assert_eq!(
+            logcat_stamp("11-09 18:45:39.079 I/OpenDeX (31243): [launcher] desktop ready"),
+            Some("11-09 18:45:39.079")
+        );
+        // logcat's own banner, a line cut short, and lines that only look like one:
+        // handing any of them to `-T` would start the stream somewhere wrong.
+        assert_eq!(logcat_stamp("--------- beginning of main"), None);
+        assert_eq!(logcat_stamp("11-09 18:45"), None);
+        assert_eq!(logcat_stamp("11/09 18:45:39.079 I/OpenDeX: x"), None);
+        assert_eq!(logcat_stamp("1a-09 18:45:39.079 I/OpenDeX: x"), None);
+        assert_eq!(logcat_stamp("11-09 18:45:39,079 I/OpenDeX: x"), None);
+    }
+
+    /// What a run picked up after a gap prints of `replayed`, given what the file
+    /// had from before it.
+    fn picked_up(before: &[&str], replayed: &[&str]) -> Vec<String> {
+        let mut resume = Resume::default();
+        for line in before {
+            resume.printed(line);
+        }
+        let mut replay = resume.replay();
+        replayed
+            .iter()
+            .filter(|line| !replay.already_printed(line))
+            .map(|line| line.to_string())
+            .collect()
+    }
+
+    #[test]
+    fn a_picked_up_stream_prints_each_line_once() {
+        let first = "11-12 10:00:00.000 I/OpenDeX ( 1001): [x] first";
+        let same = "11-12 10:00:00.001 I/OpenDeX ( 1001): [x] same";
+        let next = "11-12 10:00:00.002 I/OpenDeX ( 1001): [x] next";
+        // Two identical lines in one millisecond, both in the file before the gap.
+        // Matching the last line printed took the first of them for the boundary and
+        // printed the second again.
+        assert_eq!(picked_up(&[first, same, same], &[same, same, next]), [next]);
+        assert_eq!(picked_up(&[first, same], &[same, same, next]), [same, next]);
+
+        // A line logged in the boundary's millisecond after the gap is new, wherever
+        // it sorts on the way back — and so is everything after a boundary line the
+        // buffer no longer has, which matching on it skipped whole.
+        let before = "11-12 10:00:01.500 I/OpenDeX ( 1001): [x] before the gap";
+        let during = "11-12 10:00:01.500 I/OpenDeX ( 1001): [x] during the gap";
+        assert_eq!(picked_up(&[before], &[before, during]), [during]);
+        assert_eq!(picked_up(&[before], &[during, before]), [during]);
+        assert_eq!(picked_up(&[before], &[during, next]), [during, next]);
+
+        // A stream that never printed anything has nothing to skip.
+        assert_eq!(picked_up(&[], &[same, next]), [same, next]);
+    }
 }
