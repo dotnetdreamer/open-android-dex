@@ -339,13 +339,31 @@ const phoneTime = () => {
   return /\.\d{4,}$/.test(t) ? t.replace(/(\.\d{3})\d+$/, "$1") : sh("date +'%m-%d %H:%M:%S.000'").trim();
 };
 
-/** The text of the calculator's formula, read from the focused display's window by uiautomator, or null. */
-function formulaText() {
+/** The focused display's window as uiautomator dumps it. */
+function uiDump() {
   const file = "/data/local/tmp/oadx-game-test-ui.xml";
   sh(`uiautomator dump ${file} >/dev/null 2>&1`);
   const xml = sh(`cat ${file} 2>/dev/null`);
   sh(`rm -f ${file}`);
-  const m = xml.match(/text="([^"]*)"[^>]*resource-id="[^"]*(?:edt_formula|formula)"/) || xml.match(/resource-id="[^"]*(?:edt_formula|formula)"[^>]*text="([^"]*)"/);
+  return xml;
+}
+
+/**
+ * Where the view whose id ends in `id` (a pattern) is on the focused display: the centre of its
+ * bounds as uiautomator gives them, or null. Sure on One UI 9, where viewCentre's sum of the
+ * hierarchy's nested bounds put the calculator's 7 and 8 a row too high, on its C.
+ */
+function boundsCentre(xml, id) {
+  const m = xml.match(new RegExp(`resource-id="[^"]*(?:${id})"[^>]*bounds="\\[(\\d+),(\\d+)\\]\\[(\\d+),(\\d+)\\]"`));
+  return m ? { x: (Number(m[1]) + Number(m[3])) / 2, y: (Number(m[2]) + Number(m[4])) / 2 } : null;
+}
+
+/** The text of the calculator's formula, read from the focused display's window by uiautomator, or null. */
+function formulaText() {
+  const xml = uiDump();
+  // The field itself first: One UI 9's calculator has a layout, …:id/relative_of_formula, ahead of it with no text.
+  const at = (id) => xml.match(new RegExp(`text="([^"]*)"[^>]*resource-id="[^"]*${id}"`)) || xml.match(new RegExp(`resource-id="[^"]*${id}"[^>]*text="([^"]*)"`));
+  const m = at("edt_formula") || at("[/_]formula");
   return m ? m[1] : null;
 }
 
@@ -513,9 +531,10 @@ async function main() {
   }
 
   // A finger held on 7 while another taps 8: buttons act on release, so "87".
-  const seven = viewCentre(b.pkg, /btn_0?7\b|digit_7\b/);
-  const eight = viewCentre(b.pkg, /btn_0?8\b|digit_8\b/);
-  const clear = viewCentre(b.pkg, /btn_clear\b|\bclr\b/);
+  const ui = uiDump();
+  const seven = boundsCentre(ui, "btn_0?7|digit_7") ?? viewCentre(b.pkg, /btn_0?7\b|digit_7\b/);
+  const eight = boundsCentre(ui, "btn_0?8|digit_8") ?? viewCentre(b.pkg, /btn_0?8\b|digit_8\b/);
+  const clear = boundsCentre(ui, "btn_clear|[/_]clr") ?? viewCentre(b.pkg, /btn_clear\b|\bclr\b/);
   if (seven && eight) {
     if (clear) {
       b.w.touch([f(1, clear.x, clear.y)]);
