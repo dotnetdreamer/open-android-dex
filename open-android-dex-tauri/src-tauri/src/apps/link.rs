@@ -319,7 +319,24 @@ pub struct Link {
     config: Mutex<Option<Vec<u8>>>,
     /// Waiting for the next key frame: the game controls' editor, for its still.
     stills: Mutex<Vec<Sender<Vec<u8>>>>,
+    /// The picture since its last key frame, as it passed: the still when no
+    /// new key frame comes. A picture that does not change sends nothing, and
+    /// many games stop drawing once their window loses the keyboard.
+    last_still: Mutex<Option<Gop>>,
 }
+
+/// A key frame with the configuration it came with, and the frames after it.
+struct Gop {
+    config: Vec<u8>,
+    frames: Vec<Vec<u8>>,
+    bytes: usize,
+    /// A new key frame was asked for, the frames having grown past [`GOP_MAX`].
+    asked: bool,
+}
+
+/// How much of the picture is kept after its key frame before a new key frame
+/// is asked for (and twice that, with none coming, before it is let go).
+const GOP_MAX: usize = 8 << 20;
 
 impl Link {
     /// A link, and the other end of what it sends: for [`start`].
@@ -347,6 +364,7 @@ impl Link {
             host,
             config: Mutex::new(None),
             stills: Mutex::new(Vec::new()),
+            last_still: Mutex::new(None),
         };
         (Arc::new(link), rx)
     }
@@ -355,13 +373,37 @@ impl Link {
     /// configuration and the next key frame, which the phone is asked for — or
     /// why not, after `wait`.
     #[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
-    pub fn still(&self, wait: Duration) -> Result<(Vec<u8>, Vec<u8>), String> {
+    pub fn still(&self, wait: Duration) -> Result<(Vec<u8>, Vec<Vec<u8>>), String> {
+        let rx = self.ask_still();
+        self.still_from(rx, wait)
+    }
+
+    /// The phone asked for a key frame now; [`Link::still_from`] waits for it.
+    /// Asked before the editor's window opens, while the game still draws.
+    pub fn ask_still(&self) -> Receiver<Vec<u8>> {
         let (tx, rx) = mpsc::channel();
         self.stills.lock().unwrap().push(tx);
         self.send(wire::json(&json!({"t": "keyframe"})));
-        let key = rx.recv_timeout(wait).map_err(|_| "the phone sent no picture in time".to_string())?;
-        let config = self.config.lock().unwrap().clone().unwrap_or_default();
-        Ok((config, key))
+        rx
+    }
+
+    /// The configuration and the frames to decode for the picture now: the key
+    /// frame asked for with [`Link::ask_still`] or — none coming in time — the
+    /// last key frame and every frame after it.
+    pub fn still_from(&self, rx: Receiver<Vec<u8>>, wait: Duration) -> Result<(Vec<u8>, Vec<Vec<u8>>), String> {
+        // With the picture kept, a game that draws answers at once; one that doesn't is not waited for long.
+        let kept = self.last_still.lock().unwrap().is_some();
+        let wait = if kept { wait.min(Duration::from_millis(300)) } else { wait };
+        match rx.recv_timeout(wait) {
+            Ok(key) => Ok((self.config.lock().unwrap().clone().unwrap_or_default(), vec![key])),
+            Err(_) => self
+                .last_still
+                .lock()
+                .unwrap()
+                .as_ref()
+                .map(|g| (g.config.clone(), g.frames.clone()))
+                .ok_or_else(|| "the phone sent no picture in time".to_string()),
+        }
     }
 
     /// A piece of the picture, as it passes to the window: the configuration
@@ -370,9 +412,32 @@ impl Link {
         if flags & wire::VIDEO_CONFIG != 0 {
             *self.config.lock().unwrap() = Some(data.to_vec());
         } else if flags & wire::VIDEO_KEY != 0 {
+            let config = self.config.lock().unwrap().clone().unwrap_or_default();
+            *self.last_still.lock().unwrap() = Some(Gop { config, frames: vec![data.to_vec()], bytes: data.len(), asked: false });
             let waiting = std::mem::take(&mut *self.stills.lock().unwrap());
             for tx in waiting {
                 let _ = tx.send(data.to_vec());
+            }
+        } else {
+            let ask = {
+                let mut kept = self.last_still.lock().unwrap();
+                match kept.as_mut() {
+                    Some(g) if g.bytes > 2 * GOP_MAX => {
+                        *kept = None;
+                        false
+                    }
+                    Some(g) => {
+                        g.frames.push(data.to_vec());
+                        g.bytes += data.len();
+                        let ask = g.bytes > GOP_MAX && !g.asked;
+                        g.asked |= ask;
+                        ask
+                    }
+                    None => false,
+                }
+            };
+            if ask {
+                self.send(wire::json(&json!({"t": "keyframe"})));
             }
         }
     }
