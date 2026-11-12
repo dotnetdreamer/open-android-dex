@@ -376,31 +376,39 @@ function pattern(i, size) {
 }
 
 function buildTestApp() {
-  const bt = ["36.1.0", "36.0.0", "35.0.0", "34.0.0"].map((v) => path.join(sdk, "build-tools", v)).find((d) => fs.existsSync(path.join(d, "d8")));
+  // On Windows the build tools are d8.bat and apksigner.bat beside aapt2.exe and zipalign.exe; a .bat
+  // runs only through cmd.exe. The dex goes into the APK with the JDK's jar, which javac's JDK has
+  // everywhere, where zip is a Mac's and Linux's only.
+  const win = process.platform === "win32";
+  const tool = (dir, name) => path.join(dir, name + (win ? (name === "d8" || name === "apksigner" ? ".bat" : ".exe") : ""));
+  const bt = ["36.1.0", "36.0.0", "35.0.0", "34.0.0"].map((v) => path.join(sdk, "build-tools", v)).find((d) => fs.existsSync(tool(d, "d8")));
   const jar = path.join(sdk, "platforms", "android-36", "android.jar");
-  const javacCandidates = [process.env.JAVA_HOME && path.join(process.env.JAVA_HOME, "bin", "javac"), "/Applications/Android Studio.app/Contents/jbr/Contents/Home/bin/javac", "javac"];
-  const javac = javacCandidates.find((j) => j && (j === "javac" || fs.existsSync(j)));
-  if (!bt || !fs.existsSync(jar)) return null;
+  const jdk = (name) => [process.env.JAVA_HOME && path.join(process.env.JAVA_HOME, "bin", name + (win ? ".exe" : "")), `/Applications/Android Studio.app/Contents/jbr/Contents/Home/bin/${name}`, name].find((j) => j && (j === name || fs.existsSync(j)));
+  const javac = jdk("javac");
+  if (!bt || !fs.existsSync(jar)) {
+    console.log(`SKIP the sharing app: no Android build-tools 34–36 with d8, or no platform android-36, under ${sdk}`);
+    return null;
+  }
   const src = path.join(here, "send");
   const out = path.join(src, "build");
   fs.rmSync(out, { recursive: true, force: true });
   fs.mkdirSync(path.join(out, "classes"), { recursive: true });
   const run = (cmd, a) => {
-    const r = spawnSync(cmd, a, { encoding: "utf8" });
-    if (r.status !== 0) throw new Error(`${path.basename(cmd)}: ${r.stderr || r.stdout}`);
+    const r = cmd.endsWith(".bat") ? spawnSync("cmd.exe", ["/d", "/s", "/c", cmd, ...a], { encoding: "utf8" }) : spawnSync(cmd, a, { encoding: "utf8" });
+    if (r.status !== 0) throw new Error(`${path.basename(cmd)}: ${r.stderr || r.stdout || r.error}`);
   };
-  run(path.join(bt, "aapt2"), ["link", "-o", path.join(out, "base.apk"), "-I", jar, "--manifest", path.join(src, "AndroidManifest.xml")]);
+  run(tool(bt, "aapt2"), ["link", "-o", path.join(out, "base.apk"), "-I", jar, "--manifest", path.join(src, "AndroidManifest.xml")]);
   const sources = fs.readdirSync(path.join(src, "src/com/ccrstech/openandroiddex/sendtest")).map((f) => path.join(src, "src/com/ccrstech/openandroiddex/sendtest", f));
   run(javac, ["-nowarn", "-source", "17", "-target", "17", "-cp", jar, "-d", path.join(out, "classes"), ...sources]);
   const classes = [];
   const walk = (d) => fs.readdirSync(d, { withFileTypes: true }).forEach((e) => (e.isDirectory() ? walk(path.join(d, e.name)) : classes.push(path.join(d, e.name))));
   walk(path.join(out, "classes"));
-  run(path.join(bt, "d8"), ["--min-api", "26", "--output", out, ...classes]);
+  run(tool(bt, "d8"), ["--min-api", "26", "--output", out, ...classes]);
   fs.copyFileSync(path.join(out, "base.apk"), path.join(out, "unaligned.apk"));
-  run("zip", ["-j", "-q", path.join(out, "unaligned.apk"), path.join(out, "classes.dex")]);
-  run(path.join(bt, "zipalign"), ["-f", "4", path.join(out, "unaligned.apk"), path.join(out, "aligned.apk")]);
+  run(jdk("jar"), ["--update", "--no-manifest", "--file", path.join(out, "unaligned.apk"), "-C", out, "classes.dex"]);
+  run(tool(bt, "zipalign"), ["-f", "4", path.join(out, "unaligned.apk"), path.join(out, "aligned.apk")]);
   const key = path.join(here, "..", "openandroiddex-launcher", "app", "debug.keystore");
-  run(path.join(bt, "apksigner"), ["sign", "--ks", key, "--ks-pass", "pass:android", "--key-pass", "pass:android", "--ks-key-alias", "androiddebugkey", "--out", path.join(out, "sendtest.apk"), path.join(out, "aligned.apk")]);
+  run(tool(bt, "apksigner"), ["sign", "--ks", key, "--ks-pass", "pass:android", "--key-pass", "pass:android", "--ks-key-alias", "androiddebugkey", "--out", path.join(out, "sendtest.apk"), path.join(out, "aligned.apk")]);
   return path.join(out, "sendtest.apk");
 }
 
@@ -653,7 +661,8 @@ async function tapOutsideCard(server, w) {
   const y = size ? Math.round(Number(size[2]) * 0.12) : 300;
   sh(`input -d 0 tap ${x} ${y}`);
   await sleep(300);
-  const stays = sh("dumpsys activity activities | grep -E 'topResumedActivity' | head -1").includes(`${LAUNCHER}/.SendActivity`);
+  // Android 12 says mResumedActivity, with no topResumedActivity: the same lines the card was found by above.
+  const stays = sh("dumpsys activity activities | grep -E 'topResumedActivity|ResumedActivity:' | head -3").includes(`${LAUNCHER}/.SendActivity`);
   const shared = await w.next((v) => v.t === "shared", 15000);
   let ok = false;
   if (shared) {
