@@ -273,6 +273,7 @@
     <string name="lx_exit_body">El escritorio se cierra y el teléfono vuelve a la normalidad. Las apps que sigan abiertas aquí pasan al teléfono.</string>
     <string name="lx_exit_body_home">El escritorio es tu pantalla de inicio, así que se te preguntará qué app la asume.</string>
     <string name="lx_exiting">Saliendo de DeX…</string>
+    <string name="lx_desktop_elsewhere">El escritorio ya está abierto en otra pantalla. Ciérralo allí para abrirlo aquí.</string>
 
     <!-- Phone touchpad -->
     <string name="lx_pad">Ratón</string>

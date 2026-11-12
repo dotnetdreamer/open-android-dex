@@ -220,10 +220,16 @@ Two more that were visual rather than silent:
   adb shell "md5sum $(adb shell pm path com.ccrstech.openandroiddex.launcher)"
   ```
 - **Never hard-code the display id.** It changes per scrcpy session and dead sessions leave
-  virtual displays behind. The daemon answers `DESKTOP <pkg>`, preferring the display
-  hosting the launcher and falling back to the one with the most visible tasks — the
-  fallback matters because installing the APK force-stops the launcher, i.e. destroys the
-  very signal used to find the desktop.
+  virtual displays behind. The daemon answers `DESKTOP <pkg>` from the task tree
+  (`DesktopDisplay`, checked by `test/desktop-display-test.mjs`): the display where the
+  launcher's desktop activity is the top or the root of a task — nothing else of the
+  launcher's counts, as its Settings or Linux window can be on any display — and in the gap
+  while installing the APK has force-stopped the launcher, which destroys the very signal
+  used to find the desktop, the display it was last seen on, for as long as that display
+  still holds a task. Never "the display with the most visible tasks", which this used to
+  fall back to: once the desktop's own display has gone that is any display at all, and a
+  reconnect handed CaptionService the PC's app windows (or another mirroring app's display)
+  as the desktop ([issue #11](https://github.com/dotnetdreamer/open-android-dex/issues/11)).
 - **`setAppBounds` outlives its owner binder.** Clear it explicitly; a crashed host
   otherwise leaves every app short by the strip height.
 - **Match the platform caption's height, and only ever grow to it.** One UI's is 40 dp here

@@ -273,6 +273,7 @@
     <string name="lx_exit_body">سيُغلق سطح المكتب ويعود الهاتف إلى وضعه الطبيعي. والتطبيقات المفتوحة هنا ستنتقل إلى الهاتف.</string>
     <string name="lx_exit_body_home">سطح المكتب هو شاشتك الرئيسية، لذا سيُطلب منك اختيار التطبيق الذي يتولّى ذلك.</string>
     <string name="lx_exiting">جارٍ إنهاء DeX…</string>
+    <string name="lx_desktop_elsewhere">سطح المكتب مفتوح بالفعل على شاشة أخرى. أغلقه هناك لتفتحه هنا.</string>
 
     <!-- Phone touchpad -->
     <string name="lx_pad">الماوس</string>

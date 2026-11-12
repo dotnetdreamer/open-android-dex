@@ -273,6 +273,7 @@
     <string name="lx_exit_body">Der Desktop wird geschlossen und das Telefon ist wieder normal. Hier noch geöffnete Apps wandern auf das Telefon.</string>
     <string name="lx_exit_body_home">Der Desktop ist dein Startbildschirm — du wirst also gefragt, welche App das übernimmt.</string>
     <string name="lx_exiting">DeX wird beendet…</string>
+    <string name="lx_desktop_elsewhere">Der Desktop ist bereits auf einem anderen Bildschirm geöffnet. Schließe ihn dort, um ihn hier zu öffnen.</string>
 
     <!-- Phone touchpad -->
     <string name="lx_pad">Maus</string>

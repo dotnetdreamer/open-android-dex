@@ -95,6 +95,7 @@ final class Wm {
         Rect appBounds = new Rect();
         String pkg = "?";
         String activity = "?";
+        String root = "?";     // the task's base activity, as "pkg/cls"
         Object token;          // WindowContainerToken
         Object info;           // the raw RunningTaskInfo
 
@@ -188,6 +189,8 @@ final class Wm {
                     t.pkg = top.getPackageName();
                     t.activity = top.getClassName();
                 }
+                ComponentName root = (ComponentName) Refl.field(info, "baseActivity");
+                if (root != null) t.root = root.flattenToString();
                 out.add(t);
             }
             return out;
@@ -198,37 +201,22 @@ final class Wm {
     /** Enough for every task a phone has running; the list comes most recently used first. */
     private static final int RUNNING_TASKS_MAX = 100;
 
+    /** The display the desktop was last seen on: what an update's gap answers with. */
+    private static volatile int lastDesktop = -1;
+
     /**
-     * The display the desktop is on, or -1.
-     *
-     * Preference order matters. Hosting {@code pkg} (the launcher) is the strongest
-     * signal, but it cannot be the only one: reinstalling the launcher APK force-stops
-     * it, so keying solely on it makes the desktop undiscoverable for exactly as long as
-     * an update takes. Falling back to "most visible tasks" keeps it found, and skipping
-     * displays whose tasks are all invisible rejects the virtual displays that dead
-     * scrcpy sessions leave behind.
+     * The display the desktop is on, or -1. The rule is {@link DesktopDisplay}'s, kept
+     * apart from Android so it can be checked on its own: this feeds it the task tree,
+     * and remembers where it last found the desktop for the gap an update makes.
      */
     static int displayHosting(String pkg) {
-        List<TaskRec> all = allTasks();
-        for (TaskRec t : all) {
-            if (t.displayId != 0 && pkg.equals(t.pkg)) return t.displayId;
+        List<DesktopDisplay.Task> tasks = new ArrayList<>();
+        for (TaskRec t : allTasks()) {
+            tasks.add(new DesktopDisplay.Task(t.displayId, t.pkg + "/" + t.activity, t.root));
         }
-        int best = -1;
-        int bestVisible = 0;
-        for (TaskRec t : all) {
-            if (t.displayId == 0 || !t.visible) continue;
-            int visible = 0;
-            for (TaskRec o : all) {
-                if (o.displayId == t.displayId && o.visible) visible++;
-            }
-            // Ties go to the newest display: ids increase, and the live session is the
-            // most recently created one.
-            if (visible > bestVisible || (visible == bestVisible && t.displayId > best)) {
-                best = t.displayId;
-                bestVisible = visible;
-            }
-        }
-        return best;
+        int display = DesktopDisplay.pick(tasks, pkg + "/" + pkg + ".LauncherActivity", lastDesktop);
+        if (display > 0) lastDesktop = display;
+        return display;
     }
 
     static TaskRec taskById(int displayId, int taskId) {
@@ -275,6 +263,8 @@ final class Wm {
             t.pkg = top.getPackageName();
             t.activity = top.getClassName();
         }
+        ComponentName root = (ComponentName) Refl.field(info, "baseActivity");
+        if (root != null) t.root = root.flattenToString();
         return t;
     }
 

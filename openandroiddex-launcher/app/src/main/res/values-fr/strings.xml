@@ -273,6 +273,7 @@
     <string name="lx_exit_body">Le bureau se ferme et le téléphone revient à la normale. Les applis encore ouvertes ici passent sur le téléphone.</string>
     <string name="lx_exit_body_home">Le bureau est votre écran d’accueil : il vous sera demandé quelle application le remplace.</string>
     <string name="lx_exiting">Fermeture de DeX…</string>
+    <string name="lx_desktop_elsewhere">Le bureau est déjà ouvert sur un autre écran. Fermez-le là-bas pour l’ouvrir ici.</string>
 
     <!-- Phone touchpad -->
     <string name="lx_pad">Souris</string>
