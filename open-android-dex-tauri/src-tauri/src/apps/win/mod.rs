@@ -2842,8 +2842,16 @@ impl Ui {
                 WM_KEYDOWN | WM_SYSKEYDOWN => {
                     let vk = wp.0 as u32;
                     let m = mods();
-                    // Windows' own: Alt+F4 closes, whatever the controls have.
+                    // Windows' own: Alt+F4 closes, whatever the controls have. With the mouse taken
+                    // for looking around Windows did nothing with it, the capture this window holds
+                    // standing in its way: the mouse is given back first, as Esc gives it back.
                     if msg == WM_SYSKEYDOWN && vk == VK_F4.0 as u32 {
+                        if self.captured {
+                            self.give_pointer_back(true);
+                            if let Some(g) = &self.shared.game {
+                                g.event(GameEvent::Input { input: GameInput::Key(game::keys::ESCAPE), down: true });
+                            }
+                        }
                         return DefWindowProcW(hwnd, msg, wp, lp);
                     }
                     // F8, and while they are on the keys the game controls have, are theirs —
