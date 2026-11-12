@@ -54,7 +54,9 @@ const PAD_NAME = "Microsoft X-Box 360 pad";
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const adbArgs = (...a) => (serialArg ? ["-s", serialArg, ...a] : a);
-const adb = (...a) => spawnSync(ADB, adbArgs(...a), { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 }).stdout || "";
+// adb on Windows hands `shell`'s output back with CRLF line ends, with a pty or without (`exec-out` does
+// not): taken back to LF, or every parse anchored at a line's end would miss there.
+const adb = (...a) => (spawnSync(ADB, adbArgs(...a), { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 }).stdout || "").replace(/\r\n/g, "\n");
 const sh = (cmd) => adb("shell", cmd);
 
 // Never on whatever device adb picks: with more than one, the serial is asked for.
