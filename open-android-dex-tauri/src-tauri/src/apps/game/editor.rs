@@ -32,6 +32,9 @@ struct Open {
     session: Weak<Session>,
     /// Files this editor exported: the only ones it may show in Finder or Explorer.
     exported: HashSet<PathBuf>,
+    /// The key frame asked for as the editor opened, while the game still had
+    /// the keyboard: many games stop drawing once they lose it.
+    early: Option<std::sync::mpsc::Receiver<Vec<u8>>>,
 }
 
 fn editors() -> &'static Mutex<HashMap<u64, Open>> {
@@ -53,7 +56,8 @@ pub fn open(session: Arc<Session>) {
         let _ = w.set_focus();
         return;
     }
-    editors().lock().unwrap().insert(session.id, Open { session: Arc::downgrade(&session), exported: HashSet::new() });
+    let early = session.link().map(|l| l.ask_still());
+    editors().lock().unwrap().insert(session.id, Open { session: Arc::downgrade(&session), exported: HashSet::new(), early });
     let frame = session.shell().and_then(|s| s.picture_frame());
     let place = frame.map(placed);
     let url = WebviewUrl::App(format!("index.html#game={}", session.id).into());
@@ -155,18 +159,40 @@ pub async fn game_editor_load(window: WebviewWindow) -> Result<Value, String> {
 }
 
 /// The game's picture now: a u32 (big-endian) with the configuration's length,
-/// the configuration, then the key frame — H.264 Annex B, for WebCodecs.
+/// the configuration, then each frame as a u32 length and its bytes — a key
+/// frame first, then the frames after it — H.264 Annex B, for WebCodecs.
 #[tauri::command]
 pub async fn game_still(window: WebviewWindow) -> Result<tauri::ipc::Response, String> {
     let s = session_of(&window)?;
     let link = s.link().ok_or("The game's window has closed.")?;
-    let (config, key) = tauri::async_runtime::spawn_blocking(move || link.still(STILL_WAIT))
-        .await
-        .map_err(|e| e.to_string())??;
-    let mut out = Vec::with_capacity(4 + config.len() + key.len());
+    let early = editors().lock().unwrap().get_mut(&s.id).and_then(|o| o.early.take());
+    let was_early = early.is_some();
+    let t0 = std::time::Instant::now();
+    let got = tauri::async_runtime::spawn_blocking(move || match early {
+        Some(rx) => link.still_from(rx, STILL_WAIT),
+        None => link.still(STILL_WAIT),
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    match &got {
+        Ok((_, frames)) => log::info!(
+            "game: {}: a still for the editor ({}): {} frame(s), {} bytes, in {} ms",
+            s.pkg,
+            if was_early { "asked as it opened" } else { "asked now" },
+            frames.len(),
+            frames.iter().map(Vec::len).sum::<usize>(),
+            t0.elapsed().as_millis()
+        ),
+        Err(e) => log::warn!("game: {}: no still for the editor after {} ms: {e}", s.pkg, t0.elapsed().as_millis()),
+    }
+    let (config, frames) = got?;
+    let mut out = Vec::with_capacity(4 + config.len() + frames.iter().map(|f| 4 + f.len()).sum::<usize>());
     out.extend_from_slice(&(config.len() as u32).to_be_bytes());
     out.extend_from_slice(&config);
-    out.extend_from_slice(&key);
+    for f in &frames {
+        out.extend_from_slice(&(f.len() as u32).to_be_bytes());
+        out.extend_from_slice(f);
+    }
     Ok(tauri::ipc::Response::new(out))
 }
 
