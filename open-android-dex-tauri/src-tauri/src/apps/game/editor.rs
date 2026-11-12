@@ -79,6 +79,12 @@ pub fn open(session: Arc<Session>) {
                 let off = (inner.x as f64 - outer.x as f64, inner.y as f64 - outer.y as f64);
                 let _ = w.set_position(tauri::PhysicalPosition::new((want.0 - off.0).round() as i32, (want.1 - off.1).round() as i32));
             }
+            // Windows shows a window built here without making it the one in front: the game's
+            // window, another thread's, keeps the keyboard, and the editor opens behind it and
+            // behind any window over that (seen with the phone's desktop open). Asked for again,
+            // as the editor's second Set up does, it comes forward.
+            #[cfg(windows)]
+            let _ = w.set_focus();
             log::info!("game: {}: the editor is open{}", session.pkg, if place.is_some() { ", over the game's picture" } else { "" });
         }
         Err(e) => log::warn!("game: {}: the editor did not open: {e}", session.pkg),
