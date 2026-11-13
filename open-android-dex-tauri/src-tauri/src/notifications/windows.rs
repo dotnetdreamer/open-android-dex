@@ -17,10 +17,15 @@
 //! are taken out of the notification center when this app goes (`clear`), so
 //! there are none. Windows calls a toast's handlers only while something
 //! holds the toast, so each is held until it goes.
+//!
+//! Windows pops one banner of this app's own at a time: one of ours shown
+//! while another is up would go straight into the notification center, so it
+//! waits for that one's banner to go (banners.rs).
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use tauri::{AppHandle, Manager};
 use windows::core::{IInspectable, Interface, HSTRING};
@@ -35,6 +40,7 @@ use windows::Win32::System::Registry::{
     RegCloseKey, RegEnumKeyExW, RegOpenKeyExW, RegSetKeyValueW, HKEY, HKEY_CURRENT_USER, KEY_READ, REG_SZ,
 };
 
+use super::banners::{self, Banners};
 use super::toast::{self, Act, From, Kind, Toast};
 
 pub const SUPPORTED: bool = true;
@@ -144,15 +150,82 @@ fn identity(from: &From) -> String {
     }
 }
 
-pub fn show(t: &Toast) -> Result<(), String> {
-    let id = identity(&t.from);
-    let toast = build(t).map_err(|e| format!("the toast: {e}"))?;
-    notifier(&id).and_then(|n| n.Show(&toast)).map_err(|e| format!("Windows refused it: {e}"))?;
-    live().lock().unwrap().insert(t.id.clone(), toast);
-    Ok(())
+/// This app's own toasts that are to pop: one banner at a time (banners.rs).
+fn banners() -> &'static Mutex<Banners<Toast>> {
+    static BANNERS: OnceLock<Mutex<Banners<Toast>>> = OnceLock::new();
+    BANNERS.get_or_init(Default::default)
 }
 
-fn build(t: &Toast) -> windows::core::Result<ToastNotification> {
+pub fn show(t: &Toast) -> Result<(), String> {
+    // Ours, to pop up while one of ours is up: Windows would put it straight into
+    // the notification center. It waits for that one's banner to go (banners.rs).
+    if matches!(t.from, From::Us) && t.popup {
+        let asked = banners().lock().unwrap().ask(&t.id, t.clone(), Instant::now());
+        return match asked {
+            Some((serial, t)) => pop(&t, Some(serial)),
+            None => {
+                log::info!("notifications: {} waits for the banner up now to go", t.id);
+                Ok(())
+            }
+        };
+    }
+    pop(t, None)
+}
+
+/// `t` up; `serial`, one of our banners (banners.rs), whose going lets the next one pop.
+fn pop(t: &Toast, serial: Option<u64>) -> Result<(), String> {
+    let id = identity(&t.from);
+    let shown = build(t, serial)
+        .map_err(|e| format!("the toast: {e}"))
+        .and_then(|toast| {
+            notifier(&id).and_then(|n| n.Show(&toast)).map_err(|e| format!("Windows refused it: {e}"))?;
+            Ok(toast)
+        });
+    match shown {
+        Ok(toast) => {
+            live().lock().unwrap().insert(t.id.clone(), toast);
+            if serial.is_some() {
+                next_banner_later();
+            }
+            Ok(())
+        }
+        Err(e) => {
+            if let Some(serial) = serial {
+                banner_gone(serial);
+            }
+            Err(e)
+        }
+    }
+}
+
+/// The banner of our toast `serial` went: the next one waiting pops.
+fn banner_gone(serial: u64) {
+    let next = banners().lock().unwrap().gone(serial, Instant::now());
+    pop_waiting(next);
+}
+
+/// Should Windows never say the banner just popped went, the next one waiting pops after
+/// [`banners::UP_AT_MOST`] all the same.
+fn next_banner_later() {
+    std::thread::spawn(|| {
+        std::thread::sleep(banners::UP_AT_MOST + Duration::from_millis(50));
+        let next = banners().lock().unwrap().next(Instant::now());
+        if let Some((_, id, _)) = &next {
+            log::info!("notifications: {id} pops: Windows never said the banner before it went");
+        }
+        pop_waiting(next);
+    });
+}
+
+fn pop_waiting(next: Option<(u64, String, Toast)>) {
+    if let Some((serial, id, t)) = next {
+        if let Err(e) = pop(&t, Some(serial)) {
+            log::warn!("notifications: {id} could not be shown after waiting: {e}");
+        }
+    }
+}
+
+fn build(t: &Toast, serial: Option<u64>) -> windows::core::Result<ToastNotification> {
     let doc = XmlDocument::new()?;
     doc.LoadXml(&HSTRING::from(toast::windows_xml(t)))?;
     let toast = ToastNotification::CreateToastNotification(&doc)?;
@@ -184,6 +257,9 @@ fn build(t: &Toast) -> windows::core::Result<ToastNotification> {
             Some(act) => deliver(Click { id: id.clone(), act, text }),
             None => log::warn!("notifications: a click Windows says was \"{code}\""),
         }
+        if let Some(serial) = serial {
+            banner_gone(serial);
+        }
         Ok(())
     }))?;
 
@@ -204,6 +280,10 @@ fn build(t: &Toast) -> windows::core::Result<ToastNotification> {
             // Gone quietly into the notification center, where a click still reaches it: held.
             _ => {}
         }
+        // Whichever way, its banner is gone: the next of ours waiting pops.
+        if let Some(serial) = serial {
+            banner_gone(serial);
+        }
         Ok(())
     }))?;
 
@@ -213,6 +293,9 @@ fn build(t: &Toast) -> windows::core::Result<ToastNotification> {
             log::warn!("notifications: Windows could not show {id}: {:?}", args.ErrorCode());
         }
         let_go(&id, sender.as_ref());
+        if let Some(serial) = serial {
+            banner_gone(serial);
+        }
         Ok(())
     }))?;
     Ok(toast)
@@ -248,6 +331,10 @@ fn deliver(c: Click) {
 
 /// A toast down: off the screen if it is up, and out of the notification center.
 pub fn hide(id: &str, group: &str, from: &From) {
+    // Still waiting for a banner of ours to go: it never pops. (An older one under its id may be up.)
+    if matches!(from, From::Us) {
+        banners().lock().unwrap().forget(id);
+    }
     let aumid = match from {
         From::Us => OURS.to_string(),
         From::Phone { pkg, .. } => crate::apps::app_user_model_id(pkg),
@@ -265,6 +352,7 @@ pub fn hide(id: &str, group: &str, from: &From) {
 /// Everything this app has in the notification center, gone: at start (what
 /// an earlier run left, which nothing can act on now) and at exit.
 pub fn clear() {
+    banners().lock().unwrap().clear();
     live().lock().unwrap().clear();
     let Ok(history) = ToastNotificationManager::History() else { return };
     let _ = history.ClearWithId(&HSTRING::from(OURS));
