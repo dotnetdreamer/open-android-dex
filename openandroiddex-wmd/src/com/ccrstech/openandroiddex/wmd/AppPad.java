@@ -257,6 +257,16 @@ final class AppPad {
 
     /** What is in front of the phone's own screen, for the pad to get out of the way of. */
     private static void top(OutputStream out) throws IOException {
+        out.write((front().toString() + "\n").getBytes(StandardCharsets.UTF_8));
+        out.flush();
+    }
+
+    /**
+     * The task in front of the phone's own screen, as the answer to a {@code top}
+     * line: {@code {"t":"top","task","pkg"}}, -1 and empty where the platform will
+     * not say. The touchpad's, and the phone's controller's (AppController).
+     */
+    static JSONObject front() {
         JSONObject r = new JSONObject();
         try {
             r.put("t", "top").put("task", -1).put("pkg", "");
@@ -268,8 +278,7 @@ final class AppPad {
         } catch (Exception e) {
             // the platform would not say: none
         }
-        out.write((r.toString() + "\n").getBytes(StandardCharsets.UTF_8));
-        out.flush();
+        return r;
     }
 
     /** One thing the pad did, to the computer. */

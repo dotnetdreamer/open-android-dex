@@ -998,13 +998,33 @@ final class AppWindow implements LinuxStreamEncoder.Output, AppVideo.Gate {
     /** A game controller's state from the computer (AppGamepads); the phone's refusal said once. */
     private void gamepad(int slot, byte[] report) {
         String refused = server.gamepads().report(this, slot, report);
-        if (refused == null || padRefusedSaid) return;
+        if (refused != null) padRefused(slot, refused);
+    }
+
+    /** The phone makes no game controller (AppGamepads): said to the computer, once for this window. */
+    void padRefused(int slot, String refused) {
+        if (padRefusedSaid) return;
         padRefusedSaid = true;
         try {
             wire.json(new JSONObject().put("t", "gamepad").put("slot", slot).put("ok", false).put("message", refused));
         } catch (Exception ignored) {
             // the computer's end went
         }
+    }
+
+    /** Someone is using the window, though not through its connection: the phone's own controller (AppController). */
+    void used() {
+        inputAt = SystemClock.uptimeMillis();
+    }
+
+    /** The app in the window. */
+    String pkg() {
+        return pkg;
+    }
+
+    /** A Linux app's window: the phone's Linux, which no game controller plays. */
+    boolean linux() {
+        return xid != 0;
     }
 
     /**
@@ -1035,12 +1055,15 @@ final class AppWindow implements LinuxStreamEncoder.Output, AppVideo.Gate {
                 // The window came to the front on the computer: the next key is for it.
                 wantsKeys = true;
                 padsResting = false;
+                // And the phone's own controller plays in it (AppController).
+                server.focused(this);
                 break;
             case "blur":
                 padsResting = true;
                 input.releaseAll();
                 input.left();
                 server.gamepads().rest(this);
+                server.blurred(this);
                 break;
             case "leave":
                 // The pointer left the window: nothing under it is hovered any more.

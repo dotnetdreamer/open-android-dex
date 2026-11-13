@@ -50,7 +50,8 @@ import java.util.concurrent.atomic.AtomicInteger;
  * adbd is, and root. Not the launcher, whose uid is also the Linux guest's: this
  * socket takes a mouse and a keyboard into any app on the phone. The launcher's
  * touchpad, for the computer's windows, has a loopback port of its own while the
- * computer asks for it, and a token ({@link AppPad}).
+ * computer asks for it, and a token ({@link AppPad}); so does the phone's screen as a
+ * game controller ({@link AppController}).
  *
  * <p>Usage: {@code app_process / com.ccrstech.openandroiddex.wmd.AppServer socket-name}.
  * It stops when the computer says so — "stop" on its stdin, or on the control
@@ -157,6 +158,12 @@ public final class AppServer {
             });
     /** The phone's screen as the touchpad of its windows on the computer, while the computer asks for it. */
     private final AppPad pad = new AppPad(this::toComputer);
+    /** The phone's screen as a game controller for its windows on the computer, while the computer offers it. */
+    private final AppController controller = new AppController(this, this::toComputer);
+    /** The window the computer says is in front now, while one of ours is; null otherwise. */
+    private volatile AppWindow front;
+    /** The window that was last in front, kept while the computer's front is something of its own. */
+    private volatile AppWindow lastFront;
     /** Drags the windows' apps let go of, heard by the launcher, and carried out to the computer. */
     private final AppDrags drags = new AppDrags();
     /** What the computer may take from the phone: what a drag carried out, what the clipboard holds. */
@@ -580,9 +587,48 @@ public final class AppServer {
         }
     }
 
-    /** No window running, the pad not offered, no Linux windows pumped: nothing else needs the launcher kept up. */
+    /** No window running, the pad and the controller not offered, no Linux windows pumped: nothing else needs the launcher kept up. */
     boolean idle() {
-        return running.isEmpty() && !pad.armed() && !pumping;
+        return running.isEmpty() && !pad.armed() && !controller.armed() && !pumping;
+    }
+
+    // ── the window in front, for the phone's own controller ──
+
+    /** {@code w} came to the front on the computer. */
+    void focused(AppWindow w) {
+        front = w;
+        lastFront = w;
+        controller.frontChanged();
+    }
+
+    /** {@code w} is no longer in front on the computer: something else there is. */
+    void blurred(AppWindow w) {
+        if (front == w) front = null;
+        controller.frontChanged();
+    }
+
+    /**
+     * The window the phone's own controller plays in (AppController): the one in
+     * front on the computer — or, while the computer's front is something of its
+     * own, the one that was last — or the only window open; null for none.
+     * Never a Linux app's window.
+     */
+    AppWindow controllerTarget() {
+        AppWindow w = front;
+        if (playable(w)) return w;
+        w = lastFront;
+        if (playable(w)) return w;
+        AppWindow only = null;
+        for (AppWindow x : running) {
+            if (!playable(x)) continue;
+            if (only != null) return null;
+            only = x;
+        }
+        return only;
+    }
+
+    private boolean playable(AppWindow w) {
+        return w != null && !w.closing && !w.linux() && w.displayId >= 0 && running.contains(w);
     }
 
     /** The window with {@code key}, or null. */
@@ -735,6 +781,28 @@ public final class AppServer {
                     }
                     case "padOff":
                         padding.execute(() -> pad.disarm("the computer asked"));
+                        break;
+                    case "controllerOn": {
+                        boolean open = j.optBoolean("open");
+                        boolean notice = j.optBoolean("notice");
+                        padding.execute(() -> {
+                            JSONObject r;
+                            try {
+                                r = controller.arm(open, notice);
+                            } catch (Exception e) {
+                                r = new JSONObject();
+                                try {
+                                    r.put("t", "controllerOn").put("open", open).put("notice", notice)
+                                            .put("ok", false).put("message", String.valueOf(e));
+                                } catch (Exception ignored) {
+                                }
+                            }
+                            toComputer(r);
+                        });
+                        break;
+                    }
+                    case "controllerOff":
+                        padding.execute(() -> controller.disarm("the computer asked"));
                         break;
                     case "gamepad":
                         if (!j.optBoolean("on", true)) gamepads.gone(j.optInt("slot", -1));
@@ -999,6 +1067,10 @@ public final class AppServer {
 
     void forget(AppWindow w) {
         windows.remove(w);
+        boolean wasFront = front == w || lastFront == w;
+        if (front == w) front = null;
+        if (lastFront == w) lastFront = null;
+        if (wasFront) controller.frontChanged();
     }
 
     /** Every window's display, looked at a few times a second: an app that has gone closes its window. */
@@ -1136,6 +1208,8 @@ public final class AppServer {
         send.stopping();
         // The pad and its offer go from the phone, and the overlay app-op back if it was given for them.
         if (pad.armed()) pad.disarm("the server is stopping");
+        // So do the phone's controller and its offer.
+        if (controller.armed()) controller.disarm("the server is stopping");
         List<AppWindow> open = new ArrayList<>(running);
         for (AppWindow w : open) w.closeAll(null);
         // A file still arriving is cut short as a dropped link cuts it: its

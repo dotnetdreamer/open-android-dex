@@ -47,16 +47,25 @@ import java.util.Set;
  * is clicked, its pad's input is held, never sent to the phone's own screen or
  * another window's app, and the computer is told.
  *
+ * <p>The phone's own screen can be one more controller ({@link AppController}):
+ * its pad is made the same way, in a slot of its own ({@link #PHONE}) that the
+ * computer's reports never reach, for the window in front on the computer.
+ *
  * <p>A pad goes when its window ends, when the computer says its controller
- * went, and when the server stops. A server that is killed loses its pads with
+ * went — the phone's own, when it closes — and when the server stops. A server that is killed loses its pads with
  * its file descriptors, but its ties would stay in system_server until the
  * phone restarts: so the ports it made are written down as it makes them, and
  * the next server takes back the ties of one that is no longer running.
  */
 final class AppGamepads {
 
-    /** Controllers at once. */
+    /** The computer's controllers at once: slots 0 to 3. */
     static final int SLOTS = 4;
+    /**
+     * The phone's own screen as a controller (AppController): a slot past the
+     * computer's, which the computer's reports never reach.
+     */
+    static final int PHONE = SLOTS;
     /** The report the computer sends: buttons u16, hat u8, four i16 sticks, two u8 triggers, little-endian. */
     static final int REPORT = 13;
 
@@ -169,7 +178,7 @@ final class AppGamepads {
     }
 
     private final String suffix;
-    private final Pad[] pads = new Pad[SLOTS];
+    private final Pad[] pads = new Pad[SLOTS + 1];
     /** Every port this run has made, for the marker and the end. */
     private final Set<String> ports = new LinkedHashSet<>();
     private final File marker;
@@ -195,7 +204,26 @@ final class AppGamepads {
      * on this phone, else null.
      */
     synchronized String report(AppWindow w, int slot, byte[] report) {
-        if (slot < 0 || slot >= SLOTS || report.length != REPORT) return null;
+        if (slot < 0 || slot >= SLOTS) return null;
+        return put(w, slot, report);
+    }
+
+    /**
+     * The phone's own controller's state, for window {@code w} — the one in
+     * front on the computer (AppController): as {@link #report}, in its own slot.
+     */
+    synchronized String phone(AppWindow w, byte[] report) {
+        return put(w, PHONE, report);
+    }
+
+    /** Whether the pad in {@code slot} is held for want of the phone's focus (the focus route). */
+    synchronized boolean held(int slot) {
+        Pad p = slot >= 0 && slot < pads.length ? pads[slot] : null;
+        return p != null && p.held;
+    }
+
+    private String put(AppWindow w, int slot, byte[] report) {
+        if (report.length != REPORT) return null;
         if (refused != null) return refused;
         Pad p = pads[slot];
         if (p == null) {
@@ -252,10 +280,14 @@ final class AppGamepads {
         return null;
     }
 
-    /** {@code w} lost the computer's focus, or its connection: its pads let go, still tied to it. */
+    /**
+     * {@code w} lost the computer's focus, or its connection: its pads let go, still tied to it.
+     * Not the phone's own controller's, which plays on while the computer's front is something
+     * else (AppController): its state stands until its fingers change it.
+     */
     synchronized void rest(AppWindow w) {
         for (Pad p : pads) {
-            if (p == null || p.owner != w || Arrays.equals(p.last, NEUTRAL)) continue;
+            if (p == null || p.slot == PHONE || p.owner != w || Arrays.equals(p.last, NEUTRAL)) continue;
             try {
                 write(p, NEUTRAL);
                 p.last = NEUTRAL;
@@ -275,6 +307,23 @@ final class AppGamepads {
     /** The computer's controller in {@code slot} went: its pad goes. */
     synchronized void gone(int slot) {
         if (slot >= 0 && slot < SLOTS && pads[slot] != null) destroy(pads[slot]);
+    }
+
+    /** The phone's own controller closed: its pad goes, as a controller unplugged. */
+    synchronized void phoneGone() {
+        if (pads[PHONE] != null) destroy(pads[PHONE]);
+    }
+
+    /** The phone's own controller has no window to play in: what its pad holds is let go where it is. */
+    synchronized void phoneRest() {
+        Pad p = pads[PHONE];
+        if (p == null || Arrays.equals(p.last, NEUTRAL)) return;
+        try {
+            write(p, NEUTRAL);
+            p.last = NEUTRAL;
+        } catch (Exception e) {
+            destroy(p);
+        }
     }
 
     /** The server is stopping: every pad and every tie goes, and the marker. */
