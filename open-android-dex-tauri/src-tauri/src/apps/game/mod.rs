@@ -219,6 +219,19 @@ impl Session {
     /// The controls on or off; `say` from a person's own asking, which this
     /// game remembers for its next window.
     pub fn set_on(&self, on: bool, say: bool) {
+        self.switch(on, say);
+        self.game_mode();
+    }
+
+    /// Game mode, for the phone's own controller (apps/controller.rs): whether
+    /// this window has its controls on now — its phone's notification offers
+    /// the controller while one of its windows does.
+    fn game_mode(&self) {
+        let on = self.is_on();
+        super::controller::game_controls(self.id, if on { super::phone_of_window(self.id) } else { None }, on);
+    }
+
+    fn switch(&self, on: bool, say: bool) {
         if on {
             // The controls there were go first, whatever comes of these: Done with
             // every control removed leaves none working.
@@ -318,6 +331,7 @@ impl Session {
     /// The window is gone.
     pub fn closed(&self) {
         self.stop();
+        super::controller::game_controls(self.id, None, false);
         editor::closed(&self.app, self.id);
         *self.window.lock().unwrap() = None;
     }
@@ -417,6 +431,7 @@ impl Session {
                             self.running.lock().unwrap().take();
                             shell.controls(false);
                             shell.game_note(Some(other_shape_note(shape)), false);
+                            super::controller::game_controls(self.id, None, false);
                             break;
                         }
                     }

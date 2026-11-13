@@ -253,6 +253,20 @@ impl Server {
         self.send(&json!({"t": "padOff"}))
     }
 
+    /// The phone's screen as a game controller for its windows here
+    /// (apps/controller.rs): offered on the phone, its notification up while
+    /// `notice` (game mode), or with `open`, up on it now. The phone answers
+    /// `controllerOn` — how it went — and says what the controller does
+    /// (`controller`); its state stays on the phone.
+    pub fn controller_on(&self, open: bool, notice: bool) -> Result<(), String> {
+        self.send(&json!({"t": "controllerOn", "open": open, "notice": notice}))
+    }
+
+    /// The controller no longer offered: down on the phone, its notification too, and its port closed.
+    pub fn controller_off(&self) -> Result<(), String> {
+        self.send(&json!({"t": "controllerOff"}))
+    }
+
     /// This computer's clipboard for the phone's next paste, on the phone's own
     /// connection, unless it is what either side last handed over. True if it went.
     pub fn give_clipboard(&self, text: &str) -> bool {
@@ -823,6 +837,7 @@ fn spawn_control_reader(
                             crate::notifications::phone_said(&serial, &phone, &v);
                         }
                         Some("pad") | Some("padOn") => super::pad::said(&serial, &phone, &v),
+                        Some("controller") | Some("controllerOn") => super::controller::said(&serial, &phone, &v),
                         // The server's own log, once the shell it printed to has gone with its cable.
                         Some("log") => log::info!("apps [{serial}] {}", v["line"].as_str().unwrap_or("")),
                         Some("clip") => {

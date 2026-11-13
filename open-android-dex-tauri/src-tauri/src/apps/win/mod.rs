@@ -784,6 +784,8 @@ const MENU_TABLET: usize = 6;
 /// Game controls on and off (F8), and their editor (apps/game).
 const MENU_GAME: usize = 7;
 const MENU_GAME_SETUP: usize = 8;
+/// More's "Use phone as game controller" (apps/controller.rs).
+const MENU_CONTROLLER: usize = 9;
 /// VK_F8: game controls on and off.
 const VK_F8_CODE: u32 = 0x77;
 
@@ -2270,6 +2272,8 @@ impl Ui {
                 let text = if g.shortcut_is_ours() { w!("Game controls\tF8") } else { w!("Game controls") };
                 let _ = AppendMenuW(menu, MF_STRING | tick, MENU_GAME, text);
                 let _ = AppendMenuW(menu, MF_STRING, MENU_GAME_SETUP, w!("Set up game controls…"));
+                // The phone's own screen as a controller for its windows here (apps/controller.rs).
+                let _ = AppendMenuW(menu, MF_STRING, MENU_CONTROLLER, w!("Use phone as game controller"));
             }
             dark_menus(hwnd, self.shared.dark.load(Ordering::SeqCst));
             // Under the button, and never over it.
@@ -2297,6 +2301,7 @@ impl Ui {
                     MENU_PHONE => self.lay_out_as(hwnd, shape::Layout::Phone),
                     MENU_TABLET => self.lay_out_as(hwnd, shape::Layout::Tablet),
                     MENU_TOUCHPAD => self.shared.link.host().touchpad(self.shared.clone()),
+                    MENU_CONTROLLER => self.shared.link.host().controller(self.shared.clone()),
                     MENU_GAME => {
                         if let Some(g) = &self.shared.game {
                             g.toggle();

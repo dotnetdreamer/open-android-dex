@@ -31,6 +31,8 @@ mod adbsock;
 #[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
 mod clipboard;
 #[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
+mod controller;
+#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
 mod drops;
 #[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
 mod fetch;
@@ -1378,9 +1380,10 @@ impl link::Host for WindowHost {
                 // once its picture has: the sound's own server is a second
                 // JVM starting on the phone, which slowed the window it came with.
                 crate::scrcpy::apps_audio(app, &serial, true);
-                // And the phone's screen is offered as its touchpad.
+                // And the phone's screen is offered as its touchpad, and as a game controller.
                 if let Some(phone) = self.phone() {
                     pad::showing(&serial, &phone);
+                    controller::showing(&serial, &phone);
                 }
                 // Game controls come back on, if they were on when this game's window last had them.
                 if let Some(g) = self.window().and_then(|w| w.game()) {
@@ -1433,9 +1436,10 @@ impl link::Host for WindowHost {
                 }
                 // The sound follows the window to the way it takes now.
                 crate::scrcpy::apps_audio(app, &serial, true);
-                // So does the touchpad, on a server that may be a new one.
+                // So do the touchpad and the game controller, on a server that may be a new one.
                 if let Some(phone) = self.phone() {
                     pad::showing(&serial, &phone);
+                    controller::showing(&serial, &phone);
                 }
                 // Game controls' fingers and controllers go again by themselves: each
                 // follows the connection's generation (game/mod.rs, gamepad.rs).
@@ -1454,10 +1458,11 @@ impl link::Host for WindowHost {
                 if last {
                     crate::scrcpy::apps_audio(app, &serial, false);
                 }
-                // The phone's last window here: its screen is no longer offered as a touchpad.
+                // The phone's last window here: its screen is no longer offered as a touchpad, or a controller.
                 if let Some(k) = &was {
                     if !kept().lock().unwrap().values().any(|o| o.phone == k.phone) {
                         pad::closed(&k.phone);
+                        controller::closed(&k.phone);
                     }
                 }
                 // Closed while its connection was gone: its app waits for this
@@ -1520,6 +1525,11 @@ impl link::Host for WindowHost {
     fn touchpad(&self, window: Arc<dyn link::Surface>) {
         let Some(phone) = self.phone() else { return };
         pad::open_now(&self.app, &self.serial(), &phone, window);
+    }
+
+    fn controller(&self, window: Arc<dyn link::Surface>) {
+        let Some(phone) = self.phone() else { return };
+        controller::open_now(&self.app, &self.serial(), &phone, window);
     }
 
     fn activated(&self) {
@@ -1745,8 +1755,20 @@ fn window_act(a: pad::Act) {
     }
 }
 
-/// A note in every window of `phone` here — the touchpad kept off its screen,
-/// and back (apps/pad.rs).
+/// The phone window `id` shows, while it is open (apps/controller.rs).
+#[cfg(any(windows, target_os = "macos"))]
+pub(crate) fn phone_of_window(id: u64) -> Option<String> {
+    kept().lock().unwrap().get(&id).map(|k| k.phone.clone())
+}
+
+/// No windows of ours on this computer: none shows a phone.
+#[cfg(not(any(windows, target_os = "macos")))]
+pub(crate) fn phone_of_window(_id: u64) -> Option<String> {
+    None
+}
+
+/// A note in every window of `phone` here — the touchpad or the game
+/// controller kept off its screen, and back (apps/pad.rs, apps/controller.rs).
 #[cfg(any(windows, target_os = "macos"))]
 fn note_phone(phone: &str, text: Option<String>, busy: bool) {
     let ids: Vec<u64> = kept().lock().unwrap().iter().filter(|(_, k)| k.phone == phone).map(|(id, _)| *id).collect();
@@ -2062,6 +2084,10 @@ impl link::Host for ProbeHost {
 
     fn touchpad(&self, window: Arc<dyn link::Surface>) {
         window.note(Some("The phone's touchpad needs the app around the window".into()), false);
+    }
+
+    fn controller(&self, window: Arc<dyn link::Surface>) {
+        window.note(Some("The phone's game controller needs the app around the window".into()), false);
     }
 
     /// The copy key goes to the app all the same; with no clipboard here, nothing comes back.

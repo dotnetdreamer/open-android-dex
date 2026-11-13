@@ -263,6 +263,9 @@ pub trait Host: Send + Sync {
     /// More's "Use phone as touchpad": the phone's screen up as the touchpad
     /// of its windows here (apps/pad.rs); `window` hears how it went.
     fn touchpad(&self, window: Arc<dyn Surface>);
+    /// More's "Use phone as game controller": the phone's screen up as a game
+    /// controller for its windows here (apps/controller.rs); `window` hears how it went.
+    fn controller(&self, window: Arc<dyn Surface>);
     /// More's Copy, sent to the app as its copy key: whatever the phone
     /// copies next comes here as anything it copies does, and `window` says
     /// so — or that nothing was.
@@ -979,6 +982,7 @@ mod tests {
         fn pick_sound(&self, _choice: sound::Choice, _window: Arc<dyn Surface>) {}
         fn dropped(&self, _paths: Vec<PathBuf>, _on: Option<super::super::drops::On>, _window: Arc<dyn Surface>) {}
         fn touchpad(&self, _window: Arc<dyn Surface>) {}
+        fn controller(&self, _window: Arc<dyn Surface>) {}
         fn copying(&self, _window: Arc<dyn Surface>) {}
     }
 

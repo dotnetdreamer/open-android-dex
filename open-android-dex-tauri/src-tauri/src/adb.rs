@@ -2222,6 +2222,18 @@ pub(crate) fn ensure_launcher(app: &tauri::AppHandle, serial: &str) -> Result<()
     )
 }
 
+/// The same, for the phone's screen as a game controller: More's "Use phone
+/// as game controller", pressed by a person (apps/controller.rs).
+pub(crate) fn ensure_launcher_for_controller(app: &tauri::AppHandle, serial: &str) -> Result<(), String> {
+    ensure_launcher_with(
+        app,
+        serial,
+        "the phone's game controller",
+        "Close Linux on your phone first: setting up the game controller would end it.",
+        "The game controller couldn't be set up",
+    )
+}
+
 /// The same, for "Send to computer"'s entry in the phone's share menu: the
 /// Photos tab's Set it up / Update it, pressed by a person (send/mod.rs).
 pub(crate) fn ensure_launcher_for_send(app: &tauri::AppHandle, serial: &str) -> Result<(), String> {

@@ -1397,6 +1397,14 @@ define_class!(
             shared.link.host().touchpad(shared.clone());
         }
 
+        /// More's "Use phone as game controller": the phone's screen up as a game
+        /// controller for its windows here (apps/controller.rs). A note under the title bar says how it went.
+        #[unsafe(method(usePhoneController:))]
+        fn use_phone_controller(&self, _sender: Option<&AnyObject>) {
+            let shared = self.ivars().shared.clone();
+            shared.link.host().controller(shared.clone());
+        }
+
         /// More's "Game controls": on and off, as ⌘G and F8 (apps/game).
         #[unsafe(method(gameControls:))]
         fn game_controls(&self, _sender: Option<&AnyObject>) {
@@ -1921,6 +1929,8 @@ impl AppView {
             }
             menu.addItem(&on);
             menu.addItem(&edit("Set up game controls…", sel!(setUpGameControls:), ""));
+            // The phone's own screen as a controller for its windows here (apps/controller.rs).
+            menu.addItem(&edit("Use phone as game controller", sel!(usePhoneController:), ""));
         }
         // An Android app's: a Linux app is the phone's Linux, not an app of its own.
         if !ui.shared.linux {
