@@ -334,6 +334,31 @@ phone has no pad, tie, display, forward or dex of its own left. There is no
 browser-page mode: on someone's own phone it would leave a tab and a history
 entry.
 
+The phone's screen as a game controller for those windows
+(`doc/game-mode.md`, "The phone as a controller") is checked the same way:
+
+```sh
+node test/controller-test.mjs [serial] [app A] [app B]
+```
+
+It needs this build's launcher on the phone. A defaults to Files, which B
+closes, B to a calculator or the clock; where Files keeps every overlay off the
+screen (Android 15 and later) give an A that does not, such as the clock. It
+runs the app server from the dex, opens both in windows, and offers the
+controller on the control wire: the launcher let draw over other apps; a
+connection to its port from anything but the launcher refused; its
+notification up while game mode is said to be on, and down after (where the
+launcher may post one); up, the phone's screen turned landscape, playing the
+window last in front and then the one that comes in front. Then real taps on
+the controller, read from its own layout line in logcat: its B makes the
+phone's own pad (slot 4) for A and reaches A's app — closing it, or One UI's
+dispatcher saying so — held below Android 13 until a press on A's display, and
+A's window told; its left stick moves the pad's stick while the finger is down
+(the kernel's `ABS_X`); ✕ closes it and its pad goes; the screen upright again
+(with auto-rotate off); withdrawn, the app-op as it was; and the server's stop
+withdrawing it. It never taps while the controller is kept off the screen,
+where a tap would land on whatever is under it, and says why instead.
+
 The window daemon's answer to `DESKTOP` — which display is the desktop
 (`doc/custom-titlebar-v2.md`, issue #11) — is a rule over the task tree, and that
 rule is checked on a computer's JVM, with a JDK:
