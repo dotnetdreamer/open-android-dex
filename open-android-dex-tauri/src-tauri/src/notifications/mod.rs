@@ -21,8 +21,12 @@
 //!   server listen while the switch is on — and what a click asks of the phone.
 //! - `toast`: one toast as plain data, and Windows' XML of it.
 //! - `windows`, `macos`: the system's notifications; `unsupported` elsewhere.
+//! - `banners`: Windows pops one banner of this app's at a time; the rest wait.
 
 mod toast;
+
+#[cfg_attr(not(windows), allow(dead_code))]
+mod banners;
 
 #[cfg_attr(windows, path = "windows.rs")]
 #[cfg_attr(target_os = "macos", path = "macos.rs")]

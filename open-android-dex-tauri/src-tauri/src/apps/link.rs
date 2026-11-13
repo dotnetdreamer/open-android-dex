@@ -873,6 +873,12 @@ fn read_loop(
                         log::warn!("apps: {}: the phone made no game controller: {}", surface.label(), v["message"]);
                         surface.note(Some(super::gamepad::REFUSED.into()), false);
                     }
+                    // The phone holds the controller's input: the window's display does not have its
+                    // focus, which below Android 13 only a click there gives (doc/game-mode.md).
+                    Some("gamepad") if v["focus"].as_bool() == Some(false) => {
+                        log::info!("apps: {}: the game controller waits for a click in the window", surface.label());
+                        surface.note(Some(super::gamepad::CLICK_FIRST.into()), false);
+                    }
                     Some("dragged") => surface.dragged(fetch::Offer::parse(&v)),
                     Some("video") => {
                         let coded = (v["w"].as_u64().unwrap_or(0) as u32, v["h"].as_u64().unwrap_or(0) as u32);

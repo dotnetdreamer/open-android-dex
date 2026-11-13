@@ -6,7 +6,8 @@
 //
 // With no serial it runs only where adb sees exactly one device. An app is
 // `package` or `package/activity`. A defaults to Files (DocumentsUI), B to the
-// first calculator the phone has. Pushes the window daemon's dex
+// first calculator the phone has, or else its clock (without the "87" check).
+// Pushes the window daemon's dex
 // (openandroiddex-wmd/openandroiddex-wmd.dex, build it first) to a path of its
 // own, runs the server as the app does, opens A and B in two windows and sends
 // what the computer sends:
@@ -17,7 +18,12 @@
 //   report on the other window moves it there; blur lets it go, and a report
 //   after the blur is dropped until the next focus; the window's end, the
 //   control connection's "gone" and the server's stop take it away; and a
-//   server killed with kill -9 leaves a tie that the next one takes back;
+//   server killed with kill -9 leaves a tie that the next one takes back.
+//   Where the phone will not tie a pad (below Android 15) the pad goes by the
+//   focus: the tie checks are notes there, and where the windows' displays are
+//   not trusted (below Android 13) B on A's window is held while B's display
+//   has the focus — nothing closes, A's window is told to wait for a click —
+//   and closes A after a tap on A's display;
 // - game controls' fingers (0x24): three fingers held together, two on the
 //   calculator's 7 and 8 (8 let go first: "87"), a mouse move among them
 //   dropped, twenty fingers with ids past Android's last (16 held at most,
@@ -29,8 +35,10 @@
 // Never a report to a window it did not open, and never a pad left free: the
 // server makes each one tied to a display that does not exist first. The
 // tasks the windows made are taken out of the phone's recent apps at the end;
-// the dex, the forwards and the servers go; and the phone is checked for any
-// pad, tie, display or marker of ours left. About ninety seconds.
+// the dex, the forwards and the servers go; the launcher's drawing over other
+// apps, if a server gave it and died with it given (Android 17's drag
+// catchers), is put back as it was; and the phone is checked for any pad, tie,
+// display or marker of ours left. About ninety seconds.
 //
 // Reads One UI's dispatcher lines in logcat ("Delivering touch to … d=N") where
 // the phone prints them; elsewhere those checks say they could not be made.
@@ -266,6 +274,11 @@ function inputState(suffix) {
       gamepad: /Classes:.*GAMEPAD/.test(b),
       hatY: Number((b.match(/ABS_HAT0Y=(-?\d+)/) || [])[1] ?? NaN),
     }));
+  // Below Android 15 dumpsys input prints no axis's value: the kernel's, as getevent reads it.
+  if (pads.some((p) => Number.isNaN(p.hatY))) {
+    const kernel = hatsByLocation();
+    for (const p of pads) if (Number.isNaN(p.hatY)) p.hatY = kernel[p.port] ?? NaN;
+  }
   const ties = {};
   const at = dump.indexOf("Unique Id Associations:");
   if (at >= 0) {
@@ -279,6 +292,17 @@ function inputState(suffix) {
   for (const m of dump.matchAll(/Viewport VIRTUAL: displayId=(\d+), uniqueId=(.*?), port=/g)) unique[m[1]] = m[2];
   const focused = Number((dump.match(/FocusedDisplayId:\s*(-?\d+)/) || [])[1] ?? NaN);
   return { pads, ties, unique, focused, ourTies: Object.keys(ties).filter((p) => p.startsWith("oadx-pad:")), dump };
+}
+
+/** Each input device's ABS_HAT0Y now, by its location (our pads' port), as the kernel has it: getevent -il. */
+function hatsByLocation() {
+  const out = {};
+  for (const dev of sh("getevent -il 2>/dev/null").split(/^add device /m)) {
+    const where = dev.match(/location:\s*"([^"]*)"/);
+    const hat = dev.match(/ABS_HAT0Y\s*:\s*value (-?\d+)/);
+    if (where && hat) out[where[1]] = Number(hat[1]);
+  }
+  return out;
 }
 
 /** `want` of `inputState` true within `ms`. */
@@ -370,17 +394,35 @@ function formulaText() {
 // ── the apps ──
 
 const CALCULATORS = ["com.sec.android.app.popupcalculator", "com.google.android.calculator", "com.android.calculator2"];
-const installed = new Set(sh("pm list packages").split("\n").map((l) => l.replace("package:", "").trim()));
+const CLOCKS = ["com.sec.android.app.clockpackage", "com.google.android.deskclock", "com.android.deskclock"];
+const installed = new Set(sh("pm list packages").split("\n").map((l) => l.replace("package:", "").trim()).filter(Boolean));
 const app = (s) => {
   const [pkg, activity = ""] = s.split("/");
   return { pkg, activity };
 };
 const A = appA ? app(appA) : { pkg: "com.google.android.documentsui", activity: "com.android.documentsui.files.FilesActivity" };
-const B = appB ? app(appB) : { pkg: CALCULATORS.find((p) => installed.has(p)) || "", activity: "" };
+// A phone with no calculator (a Galaxy A13 has none): its clock, and the "87" check is not made.
+const B = appB ? app(appB) : { pkg: CALCULATORS.find((p) => installed.has(p)) || CLOCKS.find((p) => installed.has(p)) || "", activity: "" };
 if (!installed.has(A.pkg) || !installed.has(B.pkg)) {
-  console.error(`Needs ${A.pkg || "Files"} and ${B.pkg || "a calculator"} on the phone (give two others: node test/game-test.mjs <serial> <pkg> <pkg>).`);
+  console.error(`Needs ${A.pkg || "Files"} and ${B.pkg || "a calculator or a clock"} on the phone (give two others: node test/game-test.mjs <serial> <pkg> <pkg>).`);
   process.exit(2);
 }
+
+// ── the launcher's drawing over other apps ──
+
+const LAUNCHER = "com.ccrstech.openandroiddex.launcher";
+const OVERLAY_GIVEN = "/data/local/tmp/oadx-overlay-given";
+/**
+ * The launcher's SYSTEM_ALERT_WINDOW mode, and whether a server marked it as given by one of them
+ * (LauncherOverlay: Android 17's drag catchers on the windows' displays need it); null without the launcher.
+ */
+function overlayState() {
+  if (!installed.has(LAUNCHER)) return null;
+  const mode = (sh(`cmd appops get ${LAUNCHER} SYSTEM_ALERT_WINDOW`).match(/SYSTEM_ALERT_WINDOW: (\w+)/) || [])[1] ?? "default";
+  return { mode, given: sh(`ls ${OVERLAY_GIVEN} 2>/dev/null`).trim() === OVERLAY_GIVEN };
+}
+const overlayBefore = overlayState();
+
 if (!fs.existsSync(DEX)) {
   console.error(`No ${DEX}: build it first (openandroiddex-wmd/build.cmd or build.sh, or npm run apk).`);
   process.exit(2);
@@ -409,11 +451,18 @@ async function closes(win, ms) {
   return v ? (v.ended ? "ended" : v.state) : null;
 }
 
-/** Tap an empty part of a window's display, so its display has Android's focus. */
+/**
+ * Touch a corner of a window's display, so its display has Android's focus: a press, which is what
+ * gives it (WindowManagerService.onPointerDownOutsideFocusLocked), cancelled rather than let go, so
+ * the app does nothing with it. A click in the window on the computer is a press there too.
+ */
 async function focusByTap(win, x = 20, y = 1250) {
-  sh(`input -d ${win.display} tap ${x} ${y}`);
+  sh(`input -d ${win.display} motionevent DOWN ${x} ${y}; input -d ${win.display} motionevent CANCEL ${x} ${y}`);
   await sleep(900);
 }
+
+/** The next message on `win`'s connection for which `want` is true, or the window's end; null in `ms`. */
+const heard = (win, want, ms) => win.w.until((v) => want(v) || v.t === "state", ms);
 
 async function main() {
   adb("push", DEX, PHONE_DEX);
@@ -442,9 +491,16 @@ async function main() {
   const port0 = `oadx-pad:${s1.suffix}:0`;
   for (let i = 0; i < 20 && !s1.said(/game controller 0 made/).length; i++) await sleep(50);
   const madeLine = s1.said(/game controller 0 made/)[0] || "";
+  // Below Android 15 the phone will not tie a pad to a display: it goes by the focus. Where the windows'
+  // displays are not trusted as well (below Android 13), a window's display is given the focus only by a
+  // press there: a pad's input on a window whose display lacks it is held until one.
+  const tied = / tied to it/.test(madeLine);
+  const heldForClick = !tied && s1.said(/will not make a trusted display/).length > 0;
+  const tieOk = (s, display) => !tied || s.ties[port0] === s.unique[display];
   check("a report on A makes a pad on the phone", st.pads.length === 1 && st.pads[0].port === port0, JSON.stringify(st.pads));
   check("…an Xbox 360 pad to Android: its key layout, a gamepad", st.pads[0]?.xbox && st.pads[0]?.gamepad);
-  check("…tied to A's display", st.ties[port0] === st.unique[a.display], `${st.ties[port0]} vs display ${a.display}: ${st.unique[a.display]}`);
+  if (tied) check("…tied to A's display", st.ties[port0] === st.unique[a.display], `${st.ties[port0]} vs display ${a.display}: ${st.unique[a.display]}`);
+  else note(`not tied: this phone gives a pad to the display with the focus${heldForClick ? ", and its windows' displays are not trusted" : ""}`);
   note(madeLine.replace(/^INFO: apps: /, ""));
   check("B's display has the focus meanwhile", st.focused === b.display, `focused ${st.focused}`);
 
@@ -460,7 +516,7 @@ async function main() {
   await sleep(700);
   const viewAfter = focusedView(b.pkg);
   st = inputState(s1.suffix);
-  check("a report on B moves the pad to B's display", st.ties[port0] === st.unique[b.display], st.ties[port0]);
+  if (tied) check("a report on B moves the pad to B's display", st.ties[port0] === st.unique[b.display], st.ties[port0]);
   check("…the same pad, not a second one", st.pads.length === 1 && s1.said(/game controller 0 made/).length === 1);
   check("…and the hat moves the calculator's focus", viewAfter !== viewBefore, `${viewBefore} → ${viewAfter}`);
 
@@ -470,20 +526,39 @@ async function main() {
   a.w.pad(0, report({ buttons: BTN_B }));
   await sleep(120);
   a.w.pad(0, NEUTRAL);
-  const saidA = await closes(a, 4000);
-  const saidB = await closes(b, 400);
-  check("B pressed on A's window closes A, while B's display has the focus", saidA === "closed" && focusedThen === b.display, `A said ${saidA}, focused ${focusedThen}`);
-  check("…and B stays open", saidB === null, `B said ${saidB}`);
+  if (heldForClick) {
+    // Not to B's app, nor to the phone's own screen: held, and A's window told why.
+    const told = await heard(a, (v) => v.t === "gamepad", 4000);
+    const heldA = told?.t === "state" ? told.state : await closes(a, 1500);
+    const heldB = await closes(b, 400);
+    check("B pressed on A's window, while B's display has the focus, is held: nothing closes", heldA === null && heldB === null && focusedThen === b.display, `A said ${heldA}, B said ${heldB}, focused ${focusedThen}`);
+    check("…and A's window is told the controller waits for a click", told?.t === "gamepad" && told.slot === 0 && told.focus === false, JSON.stringify(told));
+    await focusByTap(a);
+    const focusedNow = inputState(s1.suffix).focused;
+    a.w.pad(0, report({ buttons: BTN_B }));
+    await sleep(120);
+    a.w.pad(0, NEUTRAL);
+    const saidA = await closes(a, 4000);
+    const saidB = await closes(b, 400);
+    check("…and after a press on A's display, B pressed on A's window closes A", saidA === "closed" && focusedNow === a.display, `A said ${saidA}, focused ${focusedNow}`);
+    check("…and B stays open", saidB === null, `B said ${saidB}`);
+  } else {
+    const saidA = await closes(a, 4000);
+    const saidB = await closes(b, 400);
+    check("B pressed on A's window closes A, while B's display has the focus", saidA === "closed" && focusedThen === b.display, `A said ${saidA}, focused ${focusedThen}`);
+    check("…and B stays open", saidB === null, `B said ${saidB}`);
+  }
   st = await waitInput(s1.suffix, (s) => s.pads.length === 0);
   check("A's end takes its pad and its tie away", st.pads.length === 0 && !st.ties[port0], `${st.pads.length} pads, tie ${st.ties[port0] ?? "none"}`);
 
   // A pad on B; blur lets it go.
+  if (heldForClick) await focusByTap(b);
   b.w.pad(0, report({ hat: 5 }));
   st = await waitInput(s1.suffix, (s) => s.pads.length === 1 && s.pads[0].hatY === 1);
-  check("a new report on B makes a pad tied to B, the hat held", st.pads.length === 1 && st.pads[0].hatY === 1 && st.ties[port0] === st.unique[b.display], `hat ${st.pads[0]?.hatY}`);
+  check(`a new report on B makes a pad${tied ? " tied to B" : ""}, the hat held`, st.pads.length === 1 && st.pads[0].hatY === 1 && tieOk(st, b.display), `hat ${st.pads[0]?.hatY}`);
   b.w.json({ t: "blur" });
   st = await waitInput(s1.suffix, (s) => s.pads.length === 1 && s.pads[0].hatY === 0);
-  check("blur on B lets the pad go (the hat centred), still tied", st.pads[0]?.hatY === 0 && st.ties[port0] === st.unique[b.display], `hat ${st.pads[0]?.hatY}`);
+  check(`blur on B lets the pad go (the hat centred)${tied ? ", still tied" : ""}`, st.pads[0]?.hatY === 0 && tieOk(st, b.display), `hat ${st.pads[0]?.hatY}`);
   // A report that crossed the blur: dropped until the window's next focus.
   b.w.pad(0, report({ hat: 5 }));
   await sleep(700);
@@ -720,7 +795,7 @@ async function main() {
   const c = await openWindow(s2, "C", B);
   c.w.pad(0, NEUTRAL);
   const port2 = `oadx-pad:${s2.suffix}:0`;
-  st = await waitInput(s2.suffix, (s) => s.pads.length === 1 && !!s.ties[port2]);
+  st = await waitInput(s2.suffix, (s) => s.pads.length === 1 && (!tied || !!s.ties[port2]));
   const pid2 = s2.pid();
   note(`server 2 is pid ${pid2}: ${sh(`cat /proc/${pid2}/cmdline | tr '\\0' ' '`).trim()}`);
   sh(`kill -9 ${pid2}`);
@@ -729,14 +804,14 @@ async function main() {
   await sleep(1500);
   st = inputState(s2.suffix);
   const marker2 = `oadx-pads-${s2.suffix}`;
-  check("kill -9: the pad goes with the server, its tie and marker stay", st.pads.length === 0 && !!st.ties[port2] && sh("ls /data/local/tmp").includes(marker2), `tie ${st.ties[port2] ?? "none"}`);
+  check(`kill -9: the pad goes with the server, its ${tied ? "tie and " : ""}marker stay${tied ? "" : "s"}`, st.pads.length === 0 && (!tied || !!st.ties[port2]) && sh("ls /data/local/tmp").includes(marker2), `tie ${st.ties[port2] ?? "none"}`);
   // The killed server's display went: Android put its app on the phone's own screen. Out of the way again.
   for (const id of tasks) sh(`am stack remove ${id} 2>/dev/null`);
   const s3 = new Server();
   servers.push(s3);
   await s3.ready();
   st = inputState(null);
-  check("the next server takes the tie back and the marker away", !st.ties[port2] && !sh("ls /data/local/tmp").includes(marker2), s3.said(/took back/)[0]?.replace(/^INFO: apps: /, "") ?? "nothing said");
+  check(`the next server takes ${tied ? "the tie back and " : ""}the marker away`, !st.ties[port2] && !sh("ls /data/local/tmp").includes(marker2), s3.said(/took back/)[0]?.replace(/^INFO: apps: /, "") ?? "nothing said");
   await s3.done();
 
   const markersAfter = sh("ls /data/local/tmp").split("\n").filter((l) => l.startsWith("oadx-pads-"));
@@ -763,15 +838,25 @@ try {
   }
   sh(`rm -f ${PHONE_DEX}`);
   for (const s of servers) sh(`rm -f /data/local/tmp/oadx-pads-${s.suffix} /data/local/tmp/oadx-pads-${s.suffix}.new`);
+  // The server killed with kill -9 had a window: where its drag catcher needed the launcher to draw over
+  // other apps (Android 17), it gave that and died with it given. Put back as it was, as a release does.
+  let overlayAfter = overlayState();
+  if (overlayBefore && overlayAfter && overlayAfter.given && !overlayBefore.given) {
+    sh(`cmd appops set ${LAUNCHER} SYSTEM_ALERT_WINDOW ${overlayBefore.mode}; rm -f ${OVERLAY_GIVEN}`);
+    note(`the launcher's drawing over other apps, given by the killed server, is put back: ${overlayAfter.mode} → ${overlayBefore.mode}`);
+    overlayAfter = overlayState();
+  }
+  const overlayKept = !overlayBefore || (overlayAfter?.mode === overlayBefore.mode && overlayAfter.given === overlayBefore.given);
   // GAME_TEST_LOG=<file>: the servers' own logs, for a record.
   if (process.env.GAME_TEST_LOG) fs.writeFileSync(process.env.GAME_TEST_LOG, servers.map((s) => `── ${s.name}\n${s.lines.join("\n")}\n`).join(""));
   const left = inputState(null);
   const displays = Number(sh("dumpsys display | grep -c 'Open Android DeX app'").trim());
   const forwards = adb("forward", "--list").split("\n").filter((l) => servers.some((s) => l.includes(s.name)));
   check(
-    "the phone is left with no pad, tie, display, forward or dex of the test's",
-    left.pads.length === 0 && left.ourTies.length === 0 && displays === 0 && forwards.length === 0 && !sh("ls /data/local/tmp").includes("oadx-game-test"),
-    `${left.pads.length} pads, ${left.ourTies.length} ties, ${displays} displays, ${forwards.length} forwards`,
+    "the phone is left with no pad, tie, display, forward or dex of the test's, and the launcher's overlay as it was",
+    left.pads.length === 0 && left.ourTies.length === 0 && displays === 0 && forwards.length === 0 && !sh("ls /data/local/tmp").includes("oadx-game-test") && overlayKept,
+    `${left.pads.length} pads, ${left.ourTies.length} ties, ${displays} displays, ${forwards.length} forwards, ` +
+      (overlayBefore ? `overlay ${overlayAfter?.mode}${overlayAfter?.given ? " (marked given)" : ""}, before ${overlayBefore.mode}${overlayBefore.given ? " (marked given)" : ""}` : "no launcher"),
   );
 }
 console.log(`\n${passed} passed, ${failed} failed`);

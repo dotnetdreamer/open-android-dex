@@ -190,12 +190,29 @@ the next take its tie back.
 
 **Where the phone will not tie** (no such call for the shell, or a
 `SecurityException`; below Android 15 that is expected), the phone remembers
-it for the run, logs once, and goes by focus as the keyboard does: before
-the pad is made, and at most once a second while its reports come, the
-window's display is made the focused one (`AppTasks.focus` of its top task).
-On such a phone a touch on the phone's own screen takes the pad there until
-the next report a second later. No phone without the tie was at hand: this
-route is written, not run.
+it for the run, logs once, and goes by focus as the keyboard does: a pad's
+input goes to the display with Android's focus. Before the pad is made, and
+again before a report that changes its state — looked at most every 100 ms
+(`CHECK_MS`), a binder call or two — the window's display is made the focused
+one if it is not (`AppTasks.focus` of its top task), and asked whether it is
+now (`AppTasks.focusedDisplay`). On Android 13 and 14 the windows' displays
+are trusted, the focus moves, and a touch on the phone's own screen takes the
+pad's input there for at most those 100 ms.
+
+On Android 12 and older the shell may not make a trusted display, and Android
+never moves a display that is not trusted to the top for its task
+(`TaskDisplayArea.positionChildTaskAt`: "until user tapping this display");
+nor has the shell a call that does (`moveDisplayToTop` is the system's own).
+Only a press on the display moves it (`onPointerDownOutsideFocusLocked`). So
+there a report on a window whose display lacks the focus is **held** — the
+pad let go, nothing written — and the window is told once, until its display
+has the focus again: `{"t":"gamepad","slot":n,"focus":false}`, which it says
+under its title bar as "Click in the window to use your game controller
+here." A click in the window is a press on its display; the next report goes.
+Before this, on a Galaxy A13 (Android 12, 2026-11-12) B pressed on Files'
+window while the Clock's display had the focus went to the Clock (`Delivering
+key … d=404`) and closed it; the focus asked for twice (`setFocusedTask`)
+never moved.
 
 **Where `/dev/uhid` cannot be opened**, the window is told once —
 `{"t":"gamepad","slot":n,"ok":false,"message":…}` — and says under its title
@@ -895,6 +912,45 @@ log ("the mouse is not taken: this window is not the one in use").
   share's card, the touch itself went); 359 Rust tests, `tsc` and the Windows
   check clean.
 
+**On Windows 11** (2026-11-12, `npm run tauri dev` on a PC, the S25 Ultra's
+calculator in a window over Wi‑Fi; keys and the mouse injected with
+`SendInput` — scan codes, side buttons, the wheel — the window in front
+first):
+
+- `cargo test` did not start on Windows: the test binary needs Common
+  Controls 6 (`TaskDialogIndirect`), which only the app's own manifest asked
+  for. build.rs now has the linker make that manifest for every binary the
+  package links; 366 passed.
+- Keys pressed the calculator's buttons and were not typed (1 gave "77" with
+  its repeats, no key reached the phone; with F8 off the same key typed "1");
+  F8 on and off with their notes; the key under Esc took the mouse — hidden,
+  kept in the picture — and Esc gave it back where it was; Alt+Tab let the
+  fingers go while its key was still held and gave the mouse back; a key let
+  go while the ☰ menu was open was let go before the menu closed; side
+  buttons, the wheel, Ctrl and Alt as controls; AltGr, that window alone on a
+  German layout, did not fire the Ctrl control and a plain Ctrl did.
+- Two faults, fixed: with the mouse taken Alt+F4 did nothing — Windows' own
+  handling ignores it while the window holds the capture — it now gives the
+  mouse back first, as Esc does, and asks "Close Calculator?"; and the editor
+  opened behind the game (a window built on another thread is shown without
+  being put in front): it is brought forward once built. The rest of the
+  editor's flow went with real clicks and keys.
+- The phone's half on the S25 over Wi‑Fi: **38 passed, 0 failed**, after two
+  fixes to the test, not the app (adb's shell output has CRLF on Windows; One
+  UI 9's calculator, its keys found by uiautomator's bounds).
+
+**Android 12, the focus route** (2026-11-13): the A13's run of the phone's
+half the day before had B on Files' window close the Clock (above, "Where the
+phone will not tie"). On the SDK's Pixel 6 emulator (API 31, read-only,
+headless), where the shell too is refused a trusted display and the tie: with
+the server as it was, B pressed on Files' window while the Clock's display had
+the focus closed nothing, and Files' window had no input at all (the event
+log's `input_interaction`: the Clock's only); with the hold, the phone's half
+**30 passed, 0 failed** — B held and nothing closed, Files' window told
+`{"t":"gamepad","slot":0,"focus":false}`, and after a press on Files' display
+B closed Files while the Clock stayed. The test reads the hat from the kernel
+(`getevent -il`) where dumpsys input prints no axis value (below Android 15).
+
 Not yet:
 
 - **A real controller.** None was at hand (none attached to the Mac on
@@ -902,21 +958,19 @@ Not yet:
   over Bluetooth): gilrs reading one on a Mac and on Windows, and PlayStation
   or Switch pads mapping as Xbox ones, are not verified. Everything after the reader — the table, the window in front, the
   wire, the phone's pad — is, through the hook. So is "Game controller
-  connected." only as far as the code that says it.
+  connected." only as far as the code that says it, and "Click in the window
+  to use your game controller here." only as far as the phone's word for it.
+  None on Windows either (2026-11-12: its reader started, 0 connected).
 - **The desktop's controller.** scrcpy's `--gamepad=uhid` and the SDL
   variable were seen on its command line and in its log; a controller pressing
   anything on the phone's desktop, and staying quiet while another window is in
   front, were not tried.
-- **Windows: type-checked only** (the whole app, from the Mac). Someone at a
-  Windows PC should try first: F8 on and off; W A S D and a held key; the
-  right button taking the mouse (hidden, kept in the picture, coming back on
-  Esc, Alt+Tab, the Windows key, a click on another window, F11); the wheel on
-  a control; Alt bound to a control while Alt+F4 still closes; the menu's two
-  items; and the editor opening over the window, at the right place on a
-  screen scaled to 150 %. Raw input for looking around is left for then.
-  Nothing here can run it: the Mac's one Windows VM (Parallels) no longer
-  starts, its activation expired, and CI builds only when started by hand and
-  runs no tests on any system.
+- **Windows, the rest** (what ran is above): the right button's look; the
+  mouse given back on the Windows key, a click on another window and F11; the
+  editor at the right place on a screen scaled to 150 %, and over a real game
+  (Ludo Wala's window was covered by a Google Play Games sheet); Win+L, not
+  pressed for real — another session was using that PC's screen. Raw input
+  for looking around is left for then.
 - **A Mac's real keyboard and mouse**, the rest: `flagsChanged:` for a bound
   Shift, and a taken mouse given back on ⌘Tab and on the window's ✕, were not
   seen; the mouse's events were posted at the HID level, not a hand on a mouse.
@@ -924,8 +978,10 @@ Not yet:
   pictures (WKWebView decoded the still); the drag, Done turning the controls
   on and bringing the game forward, Export into Downloads and Show, Import of
   that file and of a broken one, were looked at only in the browser preview.
-- **The tie refused** (below Android 15): the focus route is written, not run.
-  No phone without the tie was at hand. Nor a phone that refuses `/dev/uhid`.
+- **The focus route, the rest**: the hold ran on the Android 12 emulator
+  only — the A13 was away — and Android 13 and 14, where the windows' displays
+  are trusted and the focus is expected to move, were not tried. Nor a phone
+  that refuses `/dev/uhid`.
 - **A game that turns landscape inside a tall window**, and an online game:
   the two played above are tall and were played offline.
 - **When a key's release never comes**, none of the three cases was seen with
@@ -933,9 +989,9 @@ Not yet:
   (if it never says a key is down, nothing is let go by it, and the lock,
   sleep and menu paths still are), its session notifications, Windows'
   `GetAsyncKeyState`, `WM_WTSSESSION_CHANGE` and `WM_POWERBROADCAST`.
-- **Every Windows statement in this record is read, not run**: the side
-  buttons' capture, a key's character never typed, Alt+Space, the input
-  method put aside, the screen lock and sleep, the foreground flag.
+- **Windows statements read, not run**: Alt+Space, the input method put
+  aside, the screen lock and sleep, the foreground flag. (The side buttons and
+  a key's character never typed ran on 2026-11-12.)
 - **A Mac's Input Monitoring prompt**: where a keyboard or a receiver also
   describes itself as a game device, gilrs opening it in this app — and SDL in
   scrcpy's — may raise macOS's "receive keystrokes" prompt by surprise. Not

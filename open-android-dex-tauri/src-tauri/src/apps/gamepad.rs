@@ -403,6 +403,9 @@ fn pass(sent: &mut live::Sent) {
 /// The phone refused a controller (its window said so): the note under its title bar.
 pub const REFUSED: &str = "Your phone doesn't let a computer add a game controller.";
 
+/// The phone holds a controller's input until the window is clicked (its window said so).
+pub const CLICK_FIRST: &str = "Click in the window to use your game controller here.";
+
 /// Reading real controllers: gilrs (doc/game-mode.md, "A controller is the
 /// phone's own") — Windows.Gaming.Input on Windows, IOKit HID on a Mac.
 #[cfg(any(windows, target_os = "macos"))]

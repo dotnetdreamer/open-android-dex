@@ -264,7 +264,10 @@ files", "Received 3 of 5 files", "Couldn't receive report.pdf" and why,
 "Opened a link from Galaxy S24" with Copy link, "Received a link from…" with
 Open and Copy link,
 "Copied from…" with the first 80 characters. A picture carries the phone's
-512 px preview, never the file. Where the system shows none — a Mac
+512 px preview, never the file. Windows pops one of this app's own banners at
+a time: shown while another is up, a notification would go straight into the
+notification center unseen, so it waits for that banner to go and then pops
+(`notifications/banners.rs`). Where the system shows none — a Mac
 development run, a Linux computer, notifications turned off — the window's
 own toast says it, and the Photos tab lists it either way: the last 30
 arrivals, files and links across runs (`send-recent.json`), text for this
@@ -716,6 +719,31 @@ switched off on this bench.
     passed, 0 failed** on the cable and **42 passed, 0 failed** over Wi‑Fi;
     the combined run in the app 18 of 18 on its second try; 359 Rust tests,
     `tsc` and the Windows check clean.
+- **On Windows 11** (2026-11-12, `npm run tauri dev` on a PC, a Galaxy A13 —
+  Android 12, One UI 4 — on its cable):
+  - The share sheet showed the entry ("Open Andro… / Send to co…"), and the
+    card said "Saved to Downloads on" the PC's name.
+  - Files landed in Downloads with the downloaded mark (`ZoneId=3` in each
+    one's `Zone.Identifier` stream); a second copy as "name (2)"; a name
+    ending in dots as `oadx-dots.txt`, marked; a picture byte for byte.
+  - A link opened in the default browser and a second within 3 s was offered
+    instead; text reached the clipboard.
+  - The notifications' buttons, pressed in the notification center: Show in
+    folder, Open, Copy link.
+  - The Photos tab: Change… opened the folder picker in front of the app, owned
+    by its window; a OneDrive folder showed its note.
+  - The second of two notifications 1.5 s apart popped no banner; it was in
+    the notification center. Windows' own doing (`banners.rs`, plain toasts
+    under this app's identity and PowerShell's): one shown later popped. Fixed
+    by holding ours one banner at a time: on 2026-11-13, in the app, two texts
+    shared 1.5 s apart from the Android 12 emulator, the second banner popped
+    200 ms after the first one's went, on Windows' word that it had.
+  - `send-test.mjs` had built no sharing app on Windows — it skipped the whole
+    file half and still said all passed. It builds one now (`d8.bat` and
+    `apksigner.bat` through cmd.exe, `jar` for `zip`) and says SKIP when it
+    cannot; and its check that a tap outside the card leaves it reads Android
+    12's `mResumedActivity`. No clean full run on Windows since: the A13's
+    cable was taken in the middle of one.
 
 Not yet:
 
@@ -736,9 +764,9 @@ Not yet:
   - Shortcut types (`.lnk`, `.url`, `.library-ms`, `.desktop`, `.terminal`)
     land under their own names; the downloaded mark is what guards them, as
     it guards a browser's download.
-- The fixes not run here: a Windows run of the downloaded mark at a name that
-  ended in dots, the hidden record and the chooser's owner window
-  (type-checked only); kdialog after a zenity that cannot open the display
+- The fixes not run here: the hidden record on Windows (type-checked only; a
+  name that ended in dots and the chooser's owner window ran there on
+  2026-11-12); kdialog after a zenity that cannot open the display
   (no Linux computer); three opens stuck at once and the share refused for it
   (one stuck open is run by the test, below); a fourth files share waiting
   its turn, in the app (unit-tested); a disk filling under the 500 MB floor
@@ -748,8 +776,8 @@ Not yet:
 
 - The real window's Photos tab, looked at: the Mac's front Space belonged to
   another app throughout, and a window out of sight draws nothing to capture.
-- The notifications' buttons pressed (the Mac's Accessibility was not
-  available to the test); a link opened from one; the window's own toast.
+- The notifications' buttons pressed on a Mac (its Accessibility was not
+  available to the test; on Windows they were, above); the window's own toast.
 - "Receive files from my phone" turned off while running (the server let go),
   and the link with one app in a window open: the switch and the Apps tab
   were not pressed. With the desktop open, and with nothing open, the link
@@ -771,8 +799,8 @@ Not yet:
 - A camera photo; another maker's phone; Android 8–10 (the query's other
   branch); two computers on one phone; a work profile.
 - A Linux computer (its notification and folder-chooser branches are a few
-  lines each, read, not run); Windows run. Neither can run here: the Mac's one
-  Windows VM (Parallels) no longer starts, its activation expired, and CI
-  builds only when started by hand and runs no tests on any system.
+  lines each, read, not run).
+- On Windows: the phone's half (`send-test.mjs`) whole and clean, a share
+  sheet other than One UI 4's, Wi‑Fi.
 - Dragging a photo out of the tab (M7): not built — a photo is saved or
   copied instead.
