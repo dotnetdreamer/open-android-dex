@@ -39,9 +39,13 @@ import java.util.Set;
  * included. It is made tied to a display that does not exist, which Android
  * disables it for, so it is never free for a moment; and a window whose display
  * goes leaves its pad disabled by Android itself. Where the phone will not tie
- * one (below Android 15 the shell may not), the window's display is made the
- * focused one before the pad is made, and again at most once a second while its
- * reports come — the keyboard's way here.
+ * one (below Android 15 the shell may not), the pad's input goes wherever the
+ * focus is: the window's display is made the focused one before the pad is
+ * made, and looked at again, at most every {@link #CHECK_MS}, while its reports
+ * change — the keyboard's way here. Android 12 and older make a display the
+ * shell may not trust the focused one only when it is touched: until the window
+ * is clicked, its pad's input is held, never sent to the phone's own screen or
+ * another window's app, and the computer is told.
  *
  * <p>A pad goes when its window ends, when the computer says its controller
  * went, and when the server stops. A server that is killed loses its pads with
@@ -75,8 +79,12 @@ final class AppGamepads {
      * thread waits for it.
      */
     private static final long READY_MS = 500;
-    /** The focus route: the window's display made the focused one again at most this often. */
-    private static final long REFOCUS_MS = 1000;
+    /**
+     * The focus route: whether the window's display has the focus — made so if
+     * it can be — is looked at most this often while reports change. Between
+     * two looks a touch on the phone's own screen takes the pad's input there.
+     */
+    private static final long CHECK_MS = 100;
     private static final File MARKERS = new File("/data/local/tmp");
     private static final String MARKER_PREFIX = "oadx-pads-";
 
@@ -143,7 +151,11 @@ final class AppGamepads {
         /** The window whose display it is tied to (or, on the focus route, aimed at); null before the first. */
         AppWindow owner;
         byte[] last = NEUTRAL;
-        long focusedAt;
+        /** The focus route: when it was last looked whether the owner's display has the focus, and whether it had. */
+        long checkedAt;
+        boolean here;
+        /** The focus route: its input is held for want of the focus, and the computer was told. */
+        boolean held;
         /** Android's id for it, once seen; -1 before. */
         int deviceId = -1;
         /** Destroyed: its reading thread ends. */
@@ -209,17 +221,30 @@ final class AppGamepads {
                 aim(p, w);
                 p.owner = w;
                 p.last = NEUTRAL;
-            } else if (Boolean.FALSE.equals(ties)) {
-                long now = SystemClock.uptimeMillis();
-                if (now - p.focusedAt >= REFOCUS_MS) {
-                    p.focusedAt = now;
-                    w.focusHere();
+                p.held = false;
+            }
+            if (Arrays.equals(report, p.last)) return null;
+            if (Boolean.FALSE.equals(ties) && !focused(p, w)) {
+                // Its input would go to the display that has the focus: the phone's own
+                // screen, or another window's app. Held, and let go there, until this one has it.
+                if (!Arrays.equals(p.last, NEUTRAL)) {
+                    write(p, NEUTRAL);
+                    p.last = NEUTRAL;
                 }
+                if (!p.held) {
+                    p.held = true;
+                    AppServer.log("game controller " + slot + ": the window on display " + w.displayId()
+                            + " does not have the phone's focus; its input waits for a click there");
+                    w.padWaitsForClick(slot);
+                }
+                return null;
             }
-            if (!Arrays.equals(report, p.last)) {
-                write(p, report);
-                p.last = report.clone();
+            if (p.held) {
+                p.held = false;
+                AppServer.log("game controller " + slot + ": the window on display " + w.displayId() + " has the focus now");
             }
+            write(p, report);
+            p.last = report.clone();
         } catch (Exception e) {
             AppServer.log("game controller " + slot + ": " + e.getMessage());
             destroy(p);
@@ -374,8 +399,8 @@ final class AppGamepads {
             tied = unique != null && tie(p.port, unique);
         }
         if (!tied) {
-            p.focusedAt = SystemClock.uptimeMillis();
-            w.focusHere();
+            p.checkedAt = SystemClock.uptimeMillis();
+            p.here = w.focusHere();
         }
         long until = SystemClock.uptimeMillis() + READY_MS;
         int display = w.displayId();
@@ -409,6 +434,21 @@ final class AppGamepads {
         if (!tied) return true;
         Integer at = associatedDisplay(d);
         return at == null || at == display;
+    }
+
+    /**
+     * The focus route: whether {@code w}'s display has the phone's focus, where
+     * {@code p}'s input goes — made so where it can be. Looked at most every
+     * {@link #CHECK_MS}: a binder call or two, and a stick's reports come many
+     * times a second.
+     */
+    private static boolean focused(Pad p, AppWindow w) {
+        long now = SystemClock.uptimeMillis();
+        if (now - p.checkedAt >= CHECK_MS) {
+            p.checkedAt = now;
+            p.here = w.focusHere();
+        }
+        return p.here;
     }
 
     // ── writing to it ──

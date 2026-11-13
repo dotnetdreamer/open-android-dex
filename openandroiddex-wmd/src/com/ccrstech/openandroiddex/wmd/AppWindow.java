@@ -962,16 +962,25 @@ final class AppWindow implements LinuxStreamEncoder.Output, AppVideo.Gate {
     /**
      * This window's display made the focused one, if it is not: where the
      * keyboard goes, and a game controller the phone will not tie to a display
-     * (AppGamepads).
+     * (AppGamepads). Whether it is the focused one now; true where the phone
+     * will not say. Android 12 and older never move a display that is not
+     * trusted to the top for its task ({@code TaskDisplayArea.positionChildTaskAt}):
+     * only a touch on it does. There this stays false until the window is clicked.
      */
-    void focusHere() {
+    boolean focusHere() {
+        int now = AppTasks.focusedDisplay();
+        if (now == displayId) return true;
+        boolean unknown = now < 0;
         int t = topTask;
-        if (t < 0 || AppTasks.focusedDisplay() == displayId) return;
+        if (t < 0) return unknown;
         try {
             AppTasks.focus(t);
         } catch (Throwable e) {
             AppServer.log("window " + serial + ": cannot give it the keyboard (" + e + ")");
+            return unknown;
         }
+        now = AppTasks.focusedDisplay();
+        return now == displayId || now < 0;
     }
 
     /** The display's unique id, spaces and all, as the input system ties a device to it; null if it will not say. */
@@ -993,6 +1002,19 @@ final class AppWindow implements LinuxStreamEncoder.Output, AppVideo.Gate {
         padRefusedSaid = true;
         try {
             wire.json(new JSONObject().put("t", "gamepad").put("slot", slot).put("ok", false).put("message", refused));
+        } catch (Exception ignored) {
+            // the computer's end went
+        }
+    }
+
+    /**
+     * The game controller in {@code slot} is held on this window (AppGamepads):
+     * its display does not have the phone's focus, and only a click in the
+     * window gives it. Said to the computer, which says so under the title bar.
+     */
+    void padWaitsForClick(int slot) {
+        try {
+            wire.json(new JSONObject().put("t", "gamepad").put("slot", slot).put("focus", false));
         } catch (Exception ignored) {
             // the computer's end went
         }
