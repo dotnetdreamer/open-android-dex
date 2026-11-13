@@ -37,7 +37,8 @@ arbitrary until you know what was measured, or what the platform refuses.
 | A window's still | `apps/link.rs` (`still`, `tap`) | the stream's last configuration; the next key frame on request |
 | The native windows | `apps/mac/mod.rs`, `apps/win/mod.rs` | keys and mouse handed to the session, the pointer captured, two menu items |
 | The desktop | `scrcpy.rs` | `--gamepad=uhid` and one environment variable |
-| The tests | `test/game-test.mjs`, the Rust unit tests | the phone's half over the wire; the engine, the format, the keys |
+| The phone as a controller | `PhoneGamepad`, `GamepadView`, `GamepadLink`, `GamepadNotice`, `GamepadActivity` (launcher), `AppController.java`, `apps/controller.rs` | the phone's own screen as one more controller, its notification while game mode is on |
+| The tests | `test/game-test.mjs`, `test/controller-test.mjs`, the Rust unit tests | the phone's half over the wire; the engine, the format, the keys |
 
 ## A controller is the phone's own
 
@@ -260,6 +261,101 @@ scrcpy numbers its UHID devices keyboard, mouse, then gamepads.
 A Linux computer gets controllers in both places scrcpy is the window: the
 desktop, and an Android app's window, each with a display of its own. That is
 all of Game mode there.
+
+## The phone as a controller
+
+While game controls are on in one of a phone's windows — game mode — the
+phone's shade offers the phone's own screen as a controller: "Use your phone
+as a game controller", the touchpad's kind of notification
+(doc/phone-touchpad.md). Each Android app's window offers it always, in More
+(☰): "Use phone as game controller" puts it up at once, and gives the phone
+this build's launcher first if it has none that can, as "Use phone as
+touchpad" does. The controller is an Xbox pad's face drawn on the phone's
+screen: two sticks, a d-pad, A B X Y, LB and RB, LT and RT, Back, Start, the
+guide button, and ✕ to put it away.
+
+**Nothing goes through the computer.** What the fingers hold goes from the
+launcher to the phone's app server over loopback — a port of the server's own
+(`AppController`), opened while the computer offers the controller, taking the
+launcher's uid only, with a token handed over through the launcher's provider:
+the touchpad's arrangement (doc/phone-touchpad.md §10) — and into a gamepad the
+server makes on `/dev/uhid` exactly as for a controller of the computer's, in
+a slot of its own (`AppGamepads.PHONE`, 4) that the computer's reports never
+reach. The computer only offers it and says which window is in front; a press
+costs the same over a cable or Wi‑Fi. Rejected: the computer as the way, the
+phone's controller a fifth one of gilrs's — its seats and its window in front
+for free — at the price of a trip from the phone to the computer and back for
+every press, which on Wi‑Fi is tens of milliseconds and uneven.
+
+**Whose it is.** The window the computer last said came to the front
+(`focus`), and still that one while the computer's front is something else of
+its own, a chat or a browser: the phone's controller is for the phone's games,
+where a controller of the computer's may be playing a game of the computer's,
+which is why that one goes only to a phone window in front. The next of the
+phone's windows to come to the front takes it over, with whatever is held — a
+neutral report where it was, then the state where it goes, as any pad is
+moved. With no window in front yet, the only window open, if there is one;
+never a Linux app's. The controller says which app it plays ("Clock — Playing
+on your computer"), or that no window is in front.
+
+**Below Android 15** its pad goes by the focus, as the computer's pads do
+(above, "Where the phone will not tie"): on 13 and 14 the window's display is
+made the focused one; on 12 and older the input is held until the window is
+clicked, and both say so — the window "Click in the window to use your game
+controller here.", the controller "Click once in the game's window on the
+computer to start playing". The controller's window can never take the focus,
+so a touch on it never moves the phone's focus to its own screen: the reason
+it is an overlay, as the touchpad is (doc/phone-touchpad.md §2), and not an
+activity.
+
+**Landscape.** A phone held as a controller is held sideways, so the window
+asks for landscape (`screenOrientation`, sensor landscape), as a game would. A
+phone that does not turn for it gets the controller drawn turned a quarter, for
+a phone held with its top to the left, each finger turned back the same way.
+Two things the turn did, measured on an Android 12 emulator: it gave the app
+under the controller — the home screen — a task of its own for the new shape,
+which the controller took for something new in front of the phone's screen
+and put itself away for; it now looks at the front by app, and only once the
+turn is done (`TURN_MS`). And with the controller closed the screen stayed
+landscape, nothing asking for it any more: a window removed with an exit
+animation goes after it, and Android looks at the screen's orientation again
+only for a window still visible as it goes (`WindowState.removeIfPossible`).
+The controller gives landscape back with a relayout first — where Android does
+look again (`relayoutWindow`) — and goes a frame later.
+
+**What hides it.** Android keeps every app's overlay off the screen while a
+window that asks it to shows anywhere, a window of the computer's included:
+Settings, and on Android 15 and 16 Files too (DocumentsUI's `FilesActivity`
+holds `HIDE_NON_SYSTEM_OVERLAY_WINDOWS`: seen on the Galaxy S24 and an Android
+16 emulator, not on Android 12). While one is open the phone has no controller
+on its screen and nothing to touch; from Android 15 the controller sees it,
+lets go of what was held, says so in a toast, and the phone's windows say
+"Your phone hides the game controller while Settings or a similar screen is
+open". A game is not such a window.
+
+**The fingers** (`GamepadView`). A finger belongs to what it came down on
+until it lifts. A stick is centred where the thumb lands, so no one has to find
+its middle, and follows a thumb that goes past its edge, so turning back
+answers at once; a tenth of its reach is dead; a quick tap that barely moved
+is its click (L3, R3), held 80 ms for a game to see. The d-pad's eight
+directions are where the finger is from its middle, the straight four 60°
+wide. On A B X Y the buttons under the finger as it slides, and between two
+both. Everything else is held while its finger is down. Haptic feedback on
+each press. The way to the server folds stick moves still waiting into the
+latest, never across a button pressed or let go: a quick tap is still a
+press. A connection made again is sent what is held now.
+
+**The notification** is up while game mode is on in any of the phone's
+windows here (`notice`), and goes when the last turns it off, its window
+closes, or the computer stops offering the controller. Like the touchpad's
+offer it is shown only where the launcher may already post notifications: on
+Android 13 and later that is the person's to allow, and the computer does not
+grant it for its windows (revoking it would end the launcher's processes, the
+phone's Linux with them). More's item is always there.
+
+Not done: the phone as a controller on the phone's desktop (scrcpy reads the
+computer's controllers there, and there is no window in front to aim at);
+controls of one's own placing; rumble.
 
 ## Fingers, not a mouse
 
@@ -696,6 +792,19 @@ JSON:
 | --- | --- | --- | --- |
 | `{"t":"gamepad","slot":n,"on":false}` | computer → phone | control | that controller is gone |
 | `{"t":"gamepad","slot":n,"ok":false,"message":…}` | phone → computer | the window's | the phone could not make it |
+| `{"t":"gamepad","slot":n,"focus":false}` | phone → computer | the window's | its input waits for a click in the window (below Android 13) |
+| `{"t":"controllerOn","open":b,"notice":b}` | computer → phone | control | the phone as a controller offered — its notification up while `notice` (game mode) — or with `open`, up now; answered the same, with `ok`, `launcher`, `offered` (the notification is up), `message` |
+| `{"t":"controllerOff"}` | computer → phone | control | no longer offered: the controller and its notification down, its port closed |
+| `{"t":"controller","k":"open" \| "closed" \| "hidden","on":b}` | phone → computer | control | the phone's controller connected, went, or is kept off the phone's screen |
+
+The phone's controller to its server (`AppController`), one JSON object a
+line: `gamepad` (the token) first, then `state` (`b`, the report's buttons;
+`hat`; `lx`, `ly`, `rx`, `ry`; `lt`, `rt`), `hidden` and `top` (answered with
+the task in front of the phone's screen, as the touchpad's). The server to the
+controller: `target` (`pkg`, `label`: what it plays, empty for none), `held`
+(`on`) and `refused` (`message`). The launcher's provider takes
+`gamepad.offer` and `gamepad.open` (`port`, `token`, `notice`) and
+`gamepad.close`.
 
 Both binary types count as someone using the window for the task watcher. An
 older dex ignores both, so a new computer with an old server is merely
@@ -950,6 +1059,42 @@ log's `input_interaction`: the Clock's only); with the hold, the phone's half
 `{"t":"gamepad","slot":0,"focus":false}`, and after a press on Files' display
 B closed Files while the Clock stayed. The test reads the hat from the kernel
 (`getevent -il`) where dumpsys input prints no axis value (below Android 15).
+
+**The phone as a controller** (2026-11-13, Windows, `node
+test/controller-test.mjs`, real taps on the phone's screen with `input`):
+
+- On the SDK's Pixel 6 emulator (Android 12, read-only, headless), auto-rotate
+  off: **27 passed, 0 failed**. Offered, the launcher let draw over other apps;
+  a connection to its port from the shell refused; the notification up with
+  game mode and down without it; up, the screen turning landscape, playing B,
+  the window last in front, then A as it came in front; its B made the phone's
+  pad (slot 4, "by the focus") and was held — nothing closed, A's window told
+  `{"t":"gamepad","slot":4,"focus":false}`, the controller saying to click —
+  until a press on A's display, when B closed Files; the left stick slid right
+  read `ABS_X` 20289 in the kernel while held, 0 after; ✕ closing it, its pad
+  gone; the screen upright again; withdrawn, the app-op back to `default`; the
+  server's stop withdrawing it. The two landscape traps above were found and
+  fixed in these runs. Screenshots of it idle, with A held and with the stick
+  held were looked at.
+- On the Galaxy S24 (SM-S921B, Android 15, One UI 7) over Wi‑Fi debugging,
+  this build's launcher put on with `install -r`: **27 passed, 0 failed** with
+  the Clock as A (Files hides overlays there, above). The pad made tied to the
+  Clock's display, ready in 42 ms; the Clock's window blurred first, and the
+  controller still playing it; One UI's dispatcher delivering B there
+  (`Delivering key to (…): B … d=133`) and the Clock closing, the calculator
+  staying; the pad tied to the calculator's display as it came in front;
+  `ABS_X` 22753 while the stick was held, 0 after. The first run, with Files as
+  A, found Files hiding overlays: the test made no tap and said why.
+- On an Android 16 emulator only the first half ran (its storage too full for
+  more); it found Files hiding overlays there too.
+
+Not yet, for the phone as a controller: the computer's half in the app — the
+notification following game controls on and off in a real window, More's
+item, the notes — and the Mac's menu item, which was not built here; Android
+13 and 14, where the focus moves on its own; a real game played with it; a
+phone that does not turn for the window (the turned drawing was laid out and
+tapped on an emulator before it turned, never looked at); a long session's
+battery.
 
 Not yet:
 

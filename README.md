@@ -248,6 +248,11 @@ your computer. No emulator, and nothing to install twice.
 - **Use a controller.** Plug one into your computer, or pair it, and click
   the game's window. The game sees an ordinary controller, as if it were
   plugged into your phone. It works on the phone's desktop too
+- **Or use your phone as the controller.** While a game's controls are on, a
+  notification on your phone turns its screen into a controller for the game:
+  two sticks, a d-pad and the buttons. ☰ → **Use phone as game controller**
+  opens it from any window. Your presses go straight to the game on the
+  phone, so they are just as quick over Wi‑Fi
 - **Or your keyboard and mouse.** For a game that only has buttons on the
   screen, ☰ → **Set up game controls…** shows the game with a stick, a few
   buttons and an **Aim** on top. Drag each one onto the game's button, then
