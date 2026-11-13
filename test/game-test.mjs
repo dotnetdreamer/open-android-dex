@@ -35,8 +35,10 @@
 // Never a report to a window it did not open, and never a pad left free: the
 // server makes each one tied to a display that does not exist first. The
 // tasks the windows made are taken out of the phone's recent apps at the end;
-// the dex, the forwards and the servers go; and the phone is checked for any
-// pad, tie, display or marker of ours left. About ninety seconds.
+// the dex, the forwards and the servers go; the launcher's drawing over other
+// apps, if a server gave it and died with it given (Android 17's drag
+// catchers), is put back as it was; and the phone is checked for any pad, tie,
+// display or marker of ours left. About ninety seconds.
 //
 // Reads One UI's dispatcher lines in logcat ("Delivering touch to … d=N") where
 // the phone prints them; elsewhere those checks say they could not be made.
@@ -405,6 +407,22 @@ if (!installed.has(A.pkg) || !installed.has(B.pkg)) {
   console.error(`Needs ${A.pkg || "Files"} and ${B.pkg || "a calculator or a clock"} on the phone (give two others: node test/game-test.mjs <serial> <pkg> <pkg>).`);
   process.exit(2);
 }
+
+// ── the launcher's drawing over other apps ──
+
+const LAUNCHER = "com.ccrstech.openandroiddex.launcher";
+const OVERLAY_GIVEN = "/data/local/tmp/oadx-overlay-given";
+/**
+ * The launcher's SYSTEM_ALERT_WINDOW mode, and whether a server marked it as given by one of them
+ * (LauncherOverlay: Android 17's drag catchers on the windows' displays need it); null without the launcher.
+ */
+function overlayState() {
+  if (!installed.has(LAUNCHER)) return null;
+  const mode = (sh(`cmd appops get ${LAUNCHER} SYSTEM_ALERT_WINDOW`).match(/SYSTEM_ALERT_WINDOW: (\w+)/) || [])[1] ?? "default";
+  return { mode, given: sh(`ls ${OVERLAY_GIVEN} 2>/dev/null`).trim() === OVERLAY_GIVEN };
+}
+const overlayBefore = overlayState();
+
 if (!fs.existsSync(DEX)) {
   console.error(`No ${DEX}: build it first (openandroiddex-wmd/build.cmd or build.sh, or npm run apk).`);
   process.exit(2);
@@ -820,15 +838,25 @@ try {
   }
   sh(`rm -f ${PHONE_DEX}`);
   for (const s of servers) sh(`rm -f /data/local/tmp/oadx-pads-${s.suffix} /data/local/tmp/oadx-pads-${s.suffix}.new`);
+  // The server killed with kill -9 had a window: where its drag catcher needed the launcher to draw over
+  // other apps (Android 17), it gave that and died with it given. Put back as it was, as a release does.
+  let overlayAfter = overlayState();
+  if (overlayBefore && overlayAfter && overlayAfter.given && !overlayBefore.given) {
+    sh(`cmd appops set ${LAUNCHER} SYSTEM_ALERT_WINDOW ${overlayBefore.mode}; rm -f ${OVERLAY_GIVEN}`);
+    note(`the launcher's drawing over other apps, given by the killed server, is put back: ${overlayAfter.mode} → ${overlayBefore.mode}`);
+    overlayAfter = overlayState();
+  }
+  const overlayKept = !overlayBefore || (overlayAfter?.mode === overlayBefore.mode && overlayAfter.given === overlayBefore.given);
   // GAME_TEST_LOG=<file>: the servers' own logs, for a record.
   if (process.env.GAME_TEST_LOG) fs.writeFileSync(process.env.GAME_TEST_LOG, servers.map((s) => `── ${s.name}\n${s.lines.join("\n")}\n`).join(""));
   const left = inputState(null);
   const displays = Number(sh("dumpsys display | grep -c 'Open Android DeX app'").trim());
   const forwards = adb("forward", "--list").split("\n").filter((l) => servers.some((s) => l.includes(s.name)));
   check(
-    "the phone is left with no pad, tie, display, forward or dex of the test's",
-    left.pads.length === 0 && left.ourTies.length === 0 && displays === 0 && forwards.length === 0 && !sh("ls /data/local/tmp").includes("oadx-game-test"),
-    `${left.pads.length} pads, ${left.ourTies.length} ties, ${displays} displays, ${forwards.length} forwards`,
+    "the phone is left with no pad, tie, display, forward or dex of the test's, and the launcher's overlay as it was",
+    left.pads.length === 0 && left.ourTies.length === 0 && displays === 0 && forwards.length === 0 && !sh("ls /data/local/tmp").includes("oadx-game-test") && overlayKept,
+    `${left.pads.length} pads, ${left.ourTies.length} ties, ${displays} displays, ${forwards.length} forwards, ` +
+      (overlayBefore ? `overlay ${overlayAfter?.mode}${overlayAfter?.given ? " (marked given)" : ""}, before ${overlayBefore.mode}${overlayBefore.given ? " (marked given)" : ""}` : "no launcher"),
   );
 }
 console.log(`\n${passed} passed, ${failed} failed`);
