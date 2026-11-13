@@ -353,6 +353,27 @@ Android 13 and later that is the person's to allow, and the computer does not
 grant it for its windows (revoking it would end the launcher's processes, the
 phone's Linux with them). More's item is always there.
 
+**What a game sees** is an Xbox 360 pad (`045e:028e`), the same as one
+plugged into the phone, so a game takes it as it takes that one. A game
+drawn in a WebView (a Capacitor app, a page in the browser) gets less than a
+native one, and so would a real pad. Measured inside two such games on the
+Galaxy S24, over DevTools:
+- the d-pad comes as arrow keys (`ArrowLeft`…);
+- A comes as Enter, Android's fallback for a button no one took (the page
+  also gets the button itself, as "Unidentified");
+- B comes as Back;
+- the left stick comes as nothing at all: no keys, no wheel, no scroll. The
+  WebView takes a stick's motion for itself (Chromium scrolls a page with a
+  joystick), so Android makes no arrow keys of it, as it does of the d-pad.
+
+A page that asks `navigator.getGamepads()` gets it all, as "Microsoft X-Box
+360 pad (STANDARD GAMEPAD Vendor: 045e Product: 028e)", standard mapping.
+While it asks, Chromium keeps every button for the Gamepad API and the
+page's keys stop: a game uses one way or the other. In a page nothing has
+touched yet, the first press only takes the window out of touch mode
+(`checkForLeavingTouchModeAndConsume`): the page sees the presses after it.
+Both are Android's and Chromium's, for any controller.
+
 Not done: the phone as a controller on the phone's desktop (scrcpy reads the
 computer's controllers there, and there is no window in front to aim at);
 controls of one's own placing; rumble.
@@ -1118,13 +1139,45 @@ test/controller-test.mjs`, real taps on the phone's screen with `input`):
   first touch, tied in 55 ms. Closing the app, answered Close, left the phone
   with no server, pad, display, controller or notification of ours, and the
   launcher's drawing over other apps `default`.
+- Real games, the same afternoon, in the app on Windows with the S24 over
+  Wi‑Fi (taps on the controller made with `input` on the phone, the windows
+  captured on the computer):
+  - **Kanche** (a three.js game in a Capacitor WebView):
+    - Game controls turned on with More's item clicked by a real mouse, and
+      the editor's first "Set up controls" and "Done".
+    - The notification tapped in the phone's shade put the controller up,
+      playing Kanche.
+    - The d-pad walked Kanche's menus, and A opened Practice yard. In the
+      yard, the d-pad held turned the aim, and A held drew the shot ("Release
+      to flick", pull 38), its release flicking it.
+    - That won the toss, and a shot knocked a marble out of the ring: 1
+      point, 9 in the ring to 8.
+    - B was Back ("Leave the match?"), and right, then A, left the match.
+  - **Ludo Wala** opened in a second window, and the controller went to it.
+    Inside its page over DevTools, the d-pad, A, the left stick and the
+    Gamepad API read as in "What a game sees" above.
+  - **Samsung Internet** with a gamepad tester page:
+    - Every control held while the window was captured, each on its standard
+      button: A B X Y = B0–B3, LB RB LT RT = B4–B7, Back Start = B8 B9, the
+      d-pad = B12–B15, Guide = B16. RT and the d-pad's right were in the
+      column the window's edge cut: lit, every other button at 0.
+    - The left stick ±0.874 on axes 0/1, the right ±1.0 on 2/3, up negative.
+    - L3 and R3 (84 ms clicks, too short to capture) in the kernel's events.
+  - More's "Use phone as game controller" clicked by a real mouse put the
+    controller up for that window, which said so.
+  - The shortened title shows whole in One UI 7's shade.
+  - The controller test again, this build's launcher on: **28 of 28**.
+- The Mac's side (More's item, its debug hook), type-checked on Windows for
+  `aarch64-apple-darwin` (`cargo check`, debug and release, a stand-in C
+  compiler): no errors. Not run on a Mac.
 
-Not yet, for the phone as a controller: More's item clicked by a hand (the
-hook makes the same call), and the Mac's, which was not built here; Android
-13 and 14, where the focus moves on its own; a real game played with it; a
-phone that does not turn for the window (the turned drawing was laid out and
-tapped on an emulator before it turned, never looked at); a long session's
-battery.
+Not yet, for the phone as a controller:
+- Android 13 and 14, where the focus moves on its own: no phone here runs
+  them.
+- The Mac's, run on a Mac.
+- A phone that does not turn for the window (the turned drawing was laid out
+  and tapped on an emulator before it turned, never looked at).
+- A long session's battery.
 
 Not yet:
 
