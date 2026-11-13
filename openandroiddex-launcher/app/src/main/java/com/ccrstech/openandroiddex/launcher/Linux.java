@@ -108,6 +108,11 @@ final class Linux {
      * left margin a full-height one does.
      * The marker dock-positioned holds a layout NUMBER rather than merely
      * existing, so a guest carrying an older layout is lifted exactly once.
+     * 19 = Chromium draws on the phone's GPU when the session's GPU probe
+     * passed: its launch wrapper leaves out --disable-gpu then. The wrappers
+     * are now written on every setup pass rather than by the stamped browser
+     * tune, whose touch-stamp had kept the first ones on every guest that
+     * tuned once — so this bump is what brings the new one to those guests.
      *
      * The app CHOOSER (see {@link #apps}) is deliberately NOT a feature level.
      * A feature bump exists to carry something new INTO guests that are
@@ -118,7 +123,7 @@ final class Linux {
      * brings the script back when a selection CHANGES is {@code apps.done} —
      * see {@link #needsProvision}.
      */
-    static final int FEATURE_LEVEL = 18;
+    static final int FEATURE_LEVEL = 19;
 
     /**
      * Guest binaries whose presence the setup log reports, as
