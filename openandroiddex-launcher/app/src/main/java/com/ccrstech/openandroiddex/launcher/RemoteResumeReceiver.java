@@ -58,6 +58,11 @@ public class RemoteResumeReceiver extends BroadcastReceiver {
                         + action + " — it carries on when Linux opens next");
             }
         }
+        // Samsung's background slowdown as remote access wants it, whichever way
+        // that is. This is what finishes switching it back on when remote access
+        // went off without the permission to: the desktop app keeps it in place
+        // until the switch is back, and sends this right after its exit.
+        SamsungSlowdown.sync(ctx, LinuxRemote.isEnabled(ctx) && LinuxRemote.available(ctx));
         if (!LinuxRemote.isEnabled(ctx) || !LinuxRemote.available(ctx)) return;
         DexLog.step("remote", "resuming remote access after " + action);
         if (!LinuxService.remoteResume(ctx)) offerResume(ctx);

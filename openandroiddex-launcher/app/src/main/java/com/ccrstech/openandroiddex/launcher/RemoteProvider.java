@@ -122,6 +122,9 @@ public class RemoteProvider extends ContentProvider {
         out.put("ok", true);
         out.put("available", LinuxRemote.available(ctx));
         out.put("enabled", LinuxRemote.isEnabled(ctx));
+        // Samsung's background slowdown is switched off by this app and not yet
+        // back on: WRITE_SECURE_SETTINGS must stay until it is (SamsungSlowdown).
+        out.put("slowdownOurs", SamsungSlowdown.ours(ctx));
         out.put("name", LinuxRemote.phoneName(ctx));
         out.put("user", "root");
         out.put("linux", linuxState(ctx));

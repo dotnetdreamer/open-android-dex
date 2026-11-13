@@ -261,6 +261,25 @@ the guest swapped it for a link.
   because a tap is always allowed.
 - **The desktop app no longer takes that exemption away** when the user gave
   it, or while remote access is on. It used to remove it on every unplug.
+- **Samsung's background slowdown is off while remote access is on.** About
+  12 s after an app's last window leaves the screen, One UI's Device Health
+  moves an app that only runs a foreground service onto the phone's small
+  cores, and a desktop a computer starts is born there for life. A Python
+  loop took 4.0 s there and 0.71 s with the slowdown off (Galaxy S24,
+  2026-11-13). `SamsungSlowdown` sets the phone-wide Settings.Global
+  `fgservice_filter_disabled` to 1 when remote access goes on, and puts back
+  what was there when it goes off. While it is on, Samsung slows no app's
+  background services. It needs WRITE_SECURE_SETTINGS, which the desktop app
+  grants over the cable. The desktop app's exit and the window daemon's
+  unplug clean-up leave it in place while remote access is on, while the
+  switch is still the launcher's to put back (`slowdownOurs` in the remote
+  status), and when the status cannot be read, so turning remote access off
+  on the phone puts the switch back with no cable. The undo is a file
+  written before the setting and removed only once the setting reads back
+  as it was, so a killed process or a failed write leaves it to the next
+  try, which RemoteResumeReceiver makes after every exit and boot.
+  `dexremote pair-adb` grants nothing; with the permission left from a
+  desktop session, the launcher still uses it.
 
 ### LinuxService ↔ daemon
 

@@ -1269,10 +1269,15 @@ public final class WmDaemon {
         // WRITE_SECURE_SETTINGS goes the same way: the PC grants it for the session
         // so the launcher can do this undo when this process cannot. A development
         // permission, so taking it back does not kill the app, Linux included.
+        // Not while the launcher still needs it for Samsung's background slowdown
+        // switch, though — the rule restore_phone follows on a normal exit
+        // (launcher_keeps_secure_settings in adb.rs).
+        boolean keep = launcherKeepsSecureSettings();
         sh("appops set " + LAUNCHER + " SYSTEM_ALERT_WINDOW default; "
                 + "appops set " + LAUNCHER + " ACCESS_RESTRICTED_SETTINGS default; "
-                + "cmd appwidget revokebind --package " + LAUNCHER + " --user 0; "
-                + "pm revoke " + LAUNCHER + " android.permission.WRITE_SECURE_SETTINGS");
+                + "cmd appwidget revokebind --package " + LAUNCHER + " --user 0"
+                + (keep ? "" : "; pm revoke " + LAUNCHER + " android.permission.WRITE_SECURE_SETTINGS"));
+        if (keep) log("watchdog: the launcher keeps WRITE_SECURE_SETTINGS for Samsung's slowdown switch");
 
         // The launcher's own Linux, when it is running, is somebody's session: a
         // computer's desktop window carries on over Wi-Fi once the cable is out,
@@ -1498,6 +1503,28 @@ public final class WmDaemon {
             return -1;
         }
     }
+    /**
+     * The launcher still needs WRITE_SECURE_SETTINGS: remote access is on, or
+     * Samsung's background slowdown is still its to switch back on — or the
+     * launcher could not be asked, which counts as both, as in restore_phone.
+     * Asked the way the PC asks, `content call` as the shell.
+     */
+    private static boolean launcherKeepsSecureSettings() {
+        try {
+            String out = sh("content call --uri content://" + LAUNCHER + ".remote --method status");
+            java.util.regex.Matcher m = java.util.regex.Pattern.compile("result=([A-Za-z0-9_-]+)").matcher(out);
+            if (!m.find()) return true;
+            org.json.JSONObject st = new org.json.JSONObject(new String(android.util.Base64.decode(m.group(1),
+                    android.util.Base64.URL_SAFE | android.util.Base64.NO_PADDING | android.util.Base64.NO_WRAP),
+                    java.nio.charset.StandardCharsets.UTF_8));
+            if (!st.optBoolean("ok")) return true;
+            return st.optBoolean("enabled") || st.optBoolean("slowdownOurs");
+        } catch (Throwable t) {
+            log("watchdog: could not ask the launcher about remote access (" + t + ") — it keeps its permission");
+            return true;
+        }
+    }
+
     /** Run a shell command with this process's own authority, stdout back. */
     private static String sh(String cmd) {
         if (cmd == null || cmd.trim().isEmpty()) return "";
