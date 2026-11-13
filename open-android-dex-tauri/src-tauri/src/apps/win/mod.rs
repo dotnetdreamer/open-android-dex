@@ -127,6 +127,12 @@ impl Window {
         }
     }
 
+    /// More's "Use phone as game controller" (apps/controller.rs), as its menu item does it: the debug hook's.
+    #[cfg(debug_assertions)]
+    pub fn use_phone_controller(&self) {
+        self.shared.link.host().controller(self.shared.clone());
+    }
+
     /// Maximised if it is not, back if it is: a gesture on the phone's touchpad.
     pub fn toggle_maximized(&self) {
         let hwnd = self.shared.hwnd();

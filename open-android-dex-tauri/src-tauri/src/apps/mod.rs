@@ -1311,6 +1311,24 @@ pub(crate) fn reconnect_front(_any: bool) -> Result<(), String> {
     Err("no phone windows here".into())
 }
 
+/// The debug hook's `controller`: More's "Use phone as game controller" in
+/// the phone window in front (or, `any`, the newest), as its menu item does it.
+#[cfg(all(debug_assertions, any(windows, target_os = "macos")))]
+pub(crate) fn controller_front(any: bool) -> Result<(), String> {
+    let w = {
+        let all = windows().lock().unwrap();
+        let w = if any { all.values().filter(|w| w.game().is_some()).max_by_key(|w| w.id) } else { all.values().find(|w| w.is_front()) };
+        w.cloned().ok_or("no phone window in front")?
+    };
+    w.use_phone_controller();
+    Ok(())
+}
+
+#[cfg(all(debug_assertions, not(any(windows, target_os = "macos"))))]
+pub(crate) fn controller_front(_any: bool) -> Result<(), String> {
+    Err("no phone windows here".into())
+}
+
 /// What a window of this app asks of it: its news, the clipboard, its sound
 /// menu, a drop. The way the window reaches its phone is the window's own,
 /// and changes: it is asked of the window each time.

@@ -9,6 +9,7 @@
 //! toggle                   game controls, in the phone window in front
 //! setup                    the editor, for the phone window in front
 //! reconnect                its connection made again, the way it goes now
+//! controller               More's "Use phone as game controller" there
 //! key <Code> down|up
 //! button left|right|middle|back|forward down|up
 //! point <x> <y>            the free pointer, display pixels
@@ -103,6 +104,7 @@ fn run(line: &str) -> Result<(), String> {
             Ok(())
         }
         Some("reconnect") => crate::apps::reconnect_front(std::env::var("OADX_GAME_HOOK_ANY").as_deref() == Ok("1")),
+        Some("controller") => crate::apps::controller_front(std::env::var("OADX_GAME_HOOK_ANY").as_deref() == Ok("1")),
         Some("key") => {
             let s = front().ok_or("no phone window in front")?;
             let input = Input::named(w.get(1).ok_or("which key?")?).ok_or("no such key")?;
