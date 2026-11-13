@@ -1085,6 +1085,22 @@ test/controller-test.mjs`, real taps on the phone's screen with `input`):
   staying; the pad tied to the calculator's display as it came in front;
   `ABS_X` 22753 while the stick was held, 0 after. The first run, with Files as
   A, found Files hiding overlays: the test made no tap and said why.
+- On the Galaxy S25 Ultra (SM-S938B, Android 17, One UI 9) over Wi‑Fi
+  debugging, this build's launcher put on with `install -r`, the Clock as A:
+  **26 of 27**. The pad tied to the Clock's display, ready in 31 ms; B
+  delivered there (`d=58`) and the Clock closing; `ABS_X` 22983 while held, 0
+  after; ✕ unplugging it. The one left over was the test's: on Android 17 the
+  windows' drag catchers need the launcher to draw over other apps as well,
+  so it is not taken back until the last window closes — checked after the
+  server's stop now. With the controller closed the screen's orientation came
+  from the home screen again, not the controller's window; the phone's
+  auto-rotate was on by then, so the sensor kept it landscape. A second run
+  found the phone had locked itself: a tap meant for the controller's B landed
+  on the lock screen's emergency call (the dialer opened, nothing was dialled,
+  Back closed it). The test now runs only on an awake, unlocked phone and
+  checks again before every tap. Unlocked, it ran **28 of 28** (the pad ready
+  in 32 ms, nothing asking for landscape once it closed, the launcher's
+  drawing over other apps `default` after the server's stop).
 - On an Android 16 emulator only the first half ran (its storage too full for
   more); it found Files hiding overlays there too.
 
