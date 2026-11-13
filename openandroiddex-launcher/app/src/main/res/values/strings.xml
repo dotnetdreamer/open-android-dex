@@ -441,7 +441,7 @@
     <!-- The phone as a game controller (PhoneGamepad, GamepadNotice): doc/game-mode.md -->
     <string name="gp_channel">Game controller</string>
     <string name="gp_title">Game controller</string>
-    <string name="gp_notice_title">Use your phone as a game controller</string>
+    <string name="gp_notice_title">Use phone as game controller</string>
     <string name="gp_notice_text">Tap to play the game on your computer from this screen</string>
     <string name="gp_playing">Playing on your computer</string>
     <string name="gp_no_window">Bring your game’s window to the front on the computer</string>

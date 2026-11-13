@@ -198,7 +198,7 @@ pub(crate) fn game_controls(id: u64, phone: Option<String>, on: bool) {
     };
     let Some(server) = host::of_phone(&phone) else { return };
     log::info!(
-        "apps [{phone}] game mode {} on the phone: its game controller's notification {}",
+        "apps [{phone}] game mode {}: the phone's game controller notification {}",
         if notice { "on" } else { "off" },
         if notice { "up" } else { "down" }
     );
