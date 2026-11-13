@@ -1088,9 +1088,23 @@ test/controller-test.mjs`, real taps on the phone's screen with `input`):
 - On an Android 16 emulator only the first half ran (its storage too full for
   more); it found Files hiding overlays there too.
 
-Not yet, for the phone as a controller: the computer's half in the app — the
-notification following game controls on and off in a real window, More's
-item, the notes — and the Mac's menu item, which was not built here; Android
+- In the app on Windows (`npm run tauri dev`, the debug build's hook, its
+  `controller` line standing in for More's item: the same call), with the S24
+  over Wi‑Fi debugging and the calculator in a window: the controller offered
+  as the window showed its app; game controls turned on (`toggle`) and the
+  phone's notification up a second later, under the touchpad's, its title cut
+  short by One UI (the English is shorter now: "Use phone as game
+  controller"); turned off, down a second later, the touchpad's staying;
+  More's way putting the controller up on the phone, the window saying "The
+  game controller is on your phone's screen"; then taps on the phone's d-pad
+  moving the calculator's focus in the window here, and its A delivered to the
+  window's display (One UI's `Delivering key … d=135`), the pad made at the
+  first touch, tied in 55 ms. Closing the app, answered Close, left the phone
+  with no server, pad, display, controller or notification of ours, and the
+  launcher's drawing over other apps `default`.
+
+Not yet, for the phone as a controller: More's item clicked by a hand (the
+hook makes the same call), and the Mac's, which was not built here; Android
 13 and 14, where the focus moves on its own; a real game played with it; a
 phone that does not turn for the window (the turned drawing was laid out and
 tapped on an emulator before it turned, never looked at); a long session's
