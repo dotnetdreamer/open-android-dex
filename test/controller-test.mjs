@@ -231,12 +231,23 @@ function settled(frame, at) {
  * overlay off it for a window that asks (Settings; Files on Android 16), named where the dump says.
  */
 function hiddenBy() {
+  // Locked, or dark: a tap there is the lock screen's, whose corner is its emergency call (an S25 run
+  // opened the emergency dialer this way; nothing was dialled).
+  const locked = locks();
+  if (locked) return locked;
   const dump = sh("dumpsys window windows");
   const at = dump.indexOf("Game controller}");
   if (at < 0) return "no controller window";
   if (!dump.slice(at, at + 4000).includes("mForceHideNonSystemOverlayWindow=true")) return null;
   const hider = dump.split(/\n(?=\s*Window #\d+)/).find((b) => /HIDE_NON_SYSTEM_OVERLAY_WINDOWS/.test(b));
   return `kept off the screen for ${hider ? hider.split("\n")[0].trim() : "a window that hides overlays"}`;
+}
+
+/** Null while the phone is awake and unlocked; else which it is not. */
+function locks() {
+  if (!/mWakefulness=Awake/.test(sh("dumpsys power | grep mWakefulness="))) return "the phone's screen is off";
+  if (/isKeyguardShowing=true/.test(sh("dumpsys window | grep isKeyguardShowing"))) return "the phone is locked";
+  return null;
 }
 
 /** Each block of `dump`'s lines whose first line is a device entry naming `name`. */
@@ -345,6 +356,16 @@ async function main() {
   }
   if (!installed.has(LAUNCHER)) throw new Error("no launcher on the phone: open the desktop once, or a window's More → Use phone as game controller");
   if (!installed.has(A.pkg) || !installed.has(B.pkg)) throw new Error(`needs ${A.pkg || "Files"} and ${B.pkg || "a calculator or a clock"} on the phone`);
+  // Never on a locked phone: its taps would land on the lock screen. Woken first, and asked to
+  // unlock, which a phone with no secure lock does.
+  sh("input keyevent KEYCODE_WAKEUP");
+  sh("wm dismiss-keyguard");
+  await sleep(800);
+  const locked = locks();
+  if (locked) {
+    console.error(`${locked}: unlock it and run again. Nothing was changed on it.`);
+    process.exit(2);
+  }
   const overlayBefore = overlay();
   sh(`appops set ${LAUNCHER} SYSTEM_ALERT_WINDOW default`);
   spawnSync(ADB, adbArgs("push", DEX, PHONE_DEX));
@@ -533,8 +554,16 @@ async function main() {
     const gone = await server.waitFor(/game controller 4 gone/, 3000, from);
     const st = await waitInput(server.suffix, (s) => !s.pads.includes(port));
     check("…its pad goes from the phone with it: a controller unplugged", !!gone && !st.pads.includes(port), `${gone ?? "not said"}; pads ${JSON.stringify(st.pads)}`);
-    // Turned back by the phone itself, once nothing asks for landscape: a moment's work again. With
-    // auto-rotate on, how the phone is held decides, and an emulator's never moves: then only said.
+    // Nothing asks the phone's screen for landscape once it is gone: the window that asked is no
+    // longer the orientation's source (one removed after its exit animation stayed it: the doc says).
+    let asking = true;
+    for (let i = 0; i < 20 && asking; i++) {
+      asking = /LastOrientationSource=.*Game controller/.test(sh("dumpsys window displays"));
+      if (asking) await sleep(250);
+    }
+    check("…and nothing asks the phone's screen for landscape any more", !asking);
+    // Turned back by the phone itself: a moment's work again. With auto-rotate on, how the phone is
+    // held decides, and an emulator's never moves: then only said.
     let rotAfter = rotation();
     for (let i = 0; i < 25 && rotAfter !== rotationBefore; i++) {
       await sleep(200);
@@ -552,14 +581,15 @@ async function main() {
     await control.next(said("open"), 8000);
     control.json({ t: "controllerOff" });
     check("withdrawn: the controller goes from the phone", await padGone(5000));
-    await sleep(600);
-    check("…and the launcher no longer draws over other apps: as it was", overlay() !== "allow", overlay());
     control.json({ t: "controllerOn", open: false, notice: false });
     await control.next(on);
     from = server.lines.length;
     control.json({ t: "stop" });
     await Promise.race([server.exited, sleep(8000)]);
     check("the server stopping withdraws it too", server.said(/controller: no longer offered \(the server is stopping\)/, from).length > 0);
+    // Taken back once nothing needs it: on Android 17 the windows' drag catchers need it as well while one is open.
+    await sleep(600);
+    check("…and the launcher no longer draws over other apps: as it was", overlay() !== "allow", overlay());
     b.w.close();
   } finally {
     control?.close();
