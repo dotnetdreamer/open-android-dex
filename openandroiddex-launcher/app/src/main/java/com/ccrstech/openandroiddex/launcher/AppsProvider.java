@@ -59,6 +59,14 @@ import java.util.concurrent.TimeUnit;
  *     a window's menu on the computer asked. {@code pad.close} — no longer offered:
  *     the pad and the notification down; says whether a desktop is up
  *     ({@code desktop}), which the overlay permission is still needed for.</li>
+ * <li>{@code gamepad.offer} {@code {port, token, notice}} — the phone's screen offered as
+ *     a game controller for the computer's windows (PhoneGamepad, GamepadLink): where the
+ *     app server takes it, and whether the notification that opens it is up — the
+ *     computer says one of its windows has game controls on ({@code notice}) — where this
+ *     app may post one ({@code offered}). {@code gamepad.open}, the same and the
+ *     controller up now: a window's menu on the computer asked. {@code gamepad.close} —
+ *     no longer offered: the controller and its notification down; {@code desktop} as
+ *     for {@code pad.close}.</li>
  * <li>{@code drag.watch} {@code {display}} — hear the drags on an app window's
  *     display, and take the one the app server drops on its corner
  *     ({@link PcDrags}); {@code drag.unwatch} {@code {display}} — its window
@@ -240,6 +248,42 @@ public class AppsProvider extends ContentProvider {
                     onMain(() -> {
                         Touchpad.computerGone();
                         TouchpadNotice.hideForComputer(ctx);
+                    });
+                    out.put("ok", true).put("desktop", LauncherActivity.desktopShell() != null);
+                    break;
+                }
+                case "gamepad.offer":
+                case "gamepad.open": {
+                    int port = in.optInt("port", -1);
+                    String key = in.optString("token");
+                    boolean notice = in.optBoolean("notice");
+                    if (port <= 0 || port > 65535 || key.isEmpty()) {
+                        out.put("ok", false).put("message", "no port or token for the game controller");
+                        break;
+                    }
+                    if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.R) {
+                        out.put("ok", false).put("message", "the phone's game controller needs Android 11");
+                        break;
+                    }
+                    boolean open = "gamepad.open".equals(method);
+                    boolean[] done = new boolean[2];
+                    onMain(() -> {
+                        PhoneGamepad.offeredByComputer(port, key);
+                        if (notice) {
+                            done[1] = GamepadNotice.show(ctx);
+                        } else {
+                            GamepadNotice.hide(ctx);
+                        }
+                        done[0] = !open || PhoneGamepad.openForComputer(ctx);
+                    });
+                    out.put("ok", done[0]).put("offered", done[1]);
+                    if (!done[0]) out.put("message", "the game controller could not be opened on the phone");
+                    break;
+                }
+                case "gamepad.close": {
+                    onMain(() -> {
+                        PhoneGamepad.computerGone();
+                        GamepadNotice.hide(ctx);
                     });
                     out.put("ok", true).put("desktop", LauncherActivity.desktopShell() != null);
                     break;

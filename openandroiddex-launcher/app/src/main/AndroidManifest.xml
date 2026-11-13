@@ -467,6 +467,22 @@
             android:resizeableActivity="true"
             android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|density|keyboard|keyboardHidden|navigation|uiMode|locale|layoutDirection|fontScale" />
 
+        <!-- What the game controller's notification opens (GamepadNotice): the phone's
+             own screen up as a game controller for its apps' windows on a computer — an
+             overlay window, see PhoneGamepad and doc/game-mode.md — and gone before it
+             draws, for the touchpad's trampoline's reasons above. -->
+        <activity
+            android:name=".GamepadActivity"
+            android:exported="false"
+            android:label="@string/gp_title"
+            android:launchMode="singleTask"
+            android:taskAffinity="com.ccrstech.openandroiddex.launcher.gamepad"
+            android:theme="@style/Theme.OpenAndroidDeX.Detour"
+            android:excludeFromRecents="true"
+            android:autoRemoveFromRecents="true"
+            android:resizeableActivity="true"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|density|keyboard|keyboardHidden|navigation|uiMode|locale|layoutDirection|fontScale" />
+
         <!-- "Send to computer" in the phone's share menu (SendActivity, SendQueue,
              doc/send-to-computer.md): a card over the app something was shared
              from, never a full screen.
