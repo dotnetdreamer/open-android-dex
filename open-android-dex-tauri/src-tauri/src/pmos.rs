@@ -509,6 +509,8 @@ struct Session {
     window: Mutex<Option<(u64, mpsc::UnboundedSender<Out>)>>,
     /// Set once, when the session ends: why, in the Desktop tab's words; empty when asked to.
     end: watch::Sender<Option<String>>,
+    /// The helper's output has ended: it has exited, or the link has gone.
+    gone: watch::Sender<bool>,
 }
 
 impl Session {
@@ -620,20 +622,43 @@ struct Fit {
 /// smaller and the window shows it larger, the way DeX's is. Plasma's scale
 /// is this screen's, made smaller with it, but never below 1: a desktop drawn
 /// smaller than its own pixels and then enlarged here blurs twice.
+///
+/// After that the screen follows the window (the helper's on_resize), so its
+/// first size is the one the helper gives the window it opens in
+/// (`screen_for`): a window that opens at the size it was made for then asks
+/// the phone for no other.
 fn fit(app: &AppHandle) -> Fit {
     let fallback = Fit { width: 1280, height: 720, scale: 1.0, window: (1280.0, 720.0) };
     let Some(screen) = crate::display::screen_for_desktop(app) else { return fallback };
-    let Some(g) = crate::display::geometry(&screen, CAP) else { return fallback };
+    if crate::display::geometry(&screen, CAP).is_none() {
+        return fallback;
+    }
     let f = screen.frame;
     let cw = f64::from(screen.work_w.saturating_sub(f.left + f.right).max(1));
     let ch = f64::from(screen.work_h.saturating_sub(f.top + f.bottom).max(1));
     let k = (f64::from(CAP) / cw.max(ch)).min(1.0);
-    Fit {
-        width: g.width,
-        height: g.height,
-        scale: (screen.scale * k).clamp(1.0, 4.0),
-        window: ((cw / screen.scale).round(), (ch / screen.scale).round()),
+    let scale = (screen.scale * k).clamp(1.0, 4.0);
+    let window = ((cw / screen.scale).round(), (ch / screen.scale).round());
+    let (width, height) = screen_for(window, scale);
+    Fit { width, height, scale, window }
+}
+
+/// The screen the helper makes for a window of `window` logical pixels
+/// (main.c's on_resize, the same sums): the size as the window says it
+/// (UsbDesktop's sizeFor: whole, within 640 × 400 and 3840 × 2400, even), at
+/// `scale`, at most CAP on its long side; across in whole cells of eight, as
+/// KWin's custom modes are, and down even.
+fn screen_for(window: (f64, f64), scale: f64) -> (u32, u32) {
+    let said = |v: f64, lo: f64, hi: f64| f64::from((v.round().clamp(lo, hi) as u32) & !1);
+    let mut w = said(window.0, 640.0, 3840.0) * scale;
+    let mut h = said(window.1, 400.0, 2400.0) * scale;
+    let k = f64::from(CAP) / w.max(h);
+    if k < 1.0 {
+        w *= k;
+        h *= k;
     }
+    let cells = |v: f64, cell: f64, lo: u32| (((v / cell).round() * cell) as u32).max(lo);
+    (cells(w, 8.0, 640), cells(h, 2.0, 400))
 }
 
 /// The helper on the phone, if it is not the one embedded here, and the
@@ -716,7 +741,7 @@ async fn launch(app: &AppHandle, phone: &Paired) -> Result<(), String> {
 
     let fit = fit(app);
     let command = format!(
-        "exec \"{HELPER_PATH}\" serve --width {} --height {} --scale {:.4}",
+        "exec \"{HELPER_PATH}\" serve --width {} --height {} --scale {:.4} --cap {CAP}",
         fit.width, fit.height, fit.scale
     );
     log::info!("pmos: asking for a {}x{} screen at scale {:.3}", fit.width, fit.height, fit.scale);
@@ -779,6 +804,7 @@ async fn launch(app: &AppHandle, phone: &Paired) -> Result<(), String> {
     }
     let (to_helper, helper_rx) = mpsc::unbounded_channel();
     let (end, _) = watch::channel(None);
+    let (gone, _) = watch::channel(false);
     let s = Arc::new(Session {
         id: phone.id.clone(),
         name: phone.name.clone(),
@@ -788,6 +814,7 @@ async fn launch(app: &AppHandle, phone: &Paired) -> Result<(), String> {
         to_helper,
         window: Mutex::new(None),
         end,
+        gone,
     });
     *session().lock().unwrap() = Some(s.clone());
 
@@ -838,10 +865,10 @@ async fn write_helper(
             _ = end.changed() => break,
         }
     }
-    // Asked to end: the helper takes its screen down, and the channel goes.
+    // Asked to end: the helper takes its screen down. The channel stays open
+    // for its last words (wind_down hangs up once they are said).
     let _ = write.data(&frame(0, br#"{"t":"stop"}"#)[..]).await;
     let _ = write.eof().await;
-    let _ = write.close().await;
 }
 
 async fn read_helper(mut read: russh::ChannelReadHalf, mut buf: Vec<u8>, s: Arc<Session>) {
@@ -874,6 +901,7 @@ async fn read_helper(mut read: russh::ChannelReadHalf, mut buf: Vec<u8>, s: Arc<
             None => break,
         }
     }
+    s.gone.send_replace(true);
     s.finish(if why.is_empty() { "The phone was unplugged, or stopped answering." } else { &why });
 }
 
@@ -898,8 +926,12 @@ async fn wind_down(app: AppHandle, s: Arc<Session>, ssh: Handle<Pin>) {
         }
     }
     let why = end.borrow().clone().unwrap_or_default();
-    // The helper's stop, written by write_helper, a moment to land.
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    // The helper's stop, written by write_helper, and then its end: before it
+    // closes the screen it puts the screen's first mode back and takes its
+    // custom modes away (kscreen-doctor, a second or so), and says so. A
+    // hang-up before that loses its word; with the link gone it is at once.
+    let mut gone = s.gone.subscribe();
+    let _ = tokio::time::timeout(Duration::from_secs(4), gone.wait_for(|g| *g)).await;
     hang_up(&ssh).await;
     {
         let mut slot = session().lock().unwrap();
@@ -1227,5 +1259,19 @@ mod tests {
     fn noise_is_left_out_of_the_log() {
         let text = "\n(openandroiddex-pmos:1): GStreamer-CRITICAL **: x\nopenandroiddex-pmos: video: x264enc\n";
         assert_eq!(phone_lines(text).collect::<Vec<_>>(), vec!["video: x264enc"]);
+    }
+
+    #[test]
+    fn first_screen_is_the_windows() {
+        // A 1512 × 949 screen at 100 %: its window's content, one for one.
+        assert_eq!(screen_for((1496.0, 862.0), 1.0), (1496, 862));
+        // An odd size, as the window would say it: even.
+        assert_eq!(screen_for((1497.0, 863.0), 1.0), (1496, 862));
+        // Across, whole cells of eight, as KWin's custom modes are.
+        assert_eq!(screen_for((1500.0, 862.0), 1.0), (1504, 862));
+        // Past CAP on its long side: made smaller, its shape kept, even.
+        assert_eq!(screen_for((2560.0, 1400.0), 1.0), (1920, 1050));
+        // Plasma's scale makes it that many more pixels.
+        assert_eq!(screen_for((1280.0, 720.0), 1.25), (1600, 900));
     }
 }

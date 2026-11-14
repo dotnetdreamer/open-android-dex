@@ -99,6 +99,7 @@ struct output {
     char *name;
     int32_t x, y;           /* wl_output geometry: where it sits in the compositor's space */
     int32_t lx, ly, lw, lh; /* xdg-output: its logical rectangle */
+    int32_t mw, mh;         /* wl_output: the mode in use, in pixels */
     gboolean logical;
     gboolean before; /* there before our screen was asked for */
 };
@@ -179,6 +180,11 @@ static struct {
     int next_w, next_h;     /* for the sizer; 0 while there is nothing to do */
     gboolean size_quit;
     gint custom;            /* custom modes may be on the screen: put back before it closes */
+    /* The stream's size, which KWin's picture of the screen follows (see restart_stream). */
+    GstElement *sizecaps;   /* the capsfilter after pipewiresrc */
+    gint stream_w, stream_h;
+    gint asked_at;          /* when the window asked (ms_now() + 1), until the picture is that size; then 0 */
+    gint64 t0;
 } app;
 
 static void say(const char *fmt, ...) G_GNUC_PRINTF(1, 2);
@@ -374,7 +380,13 @@ static void output_geometry(void *data, struct wl_output *wl, int32_t x, int32_t
     o->x = x;
     o->y = y;
 }
-static void output_mode(void *data, struct wl_output *wl, uint32_t flags, int32_t w, int32_t h, int32_t r) {}
+static void output_mode(void *data, struct wl_output *wl, uint32_t flags, int32_t w, int32_t h, int32_t r) {
+    struct output *o = data;
+    if (flags & WL_OUTPUT_MODE_CURRENT) {
+        o->mw = w;
+        o->mh = h;
+    }
+}
 static void output_done(void *data, struct wl_output *wl) {}
 static void output_scale(void *data, struct wl_output *wl, int32_t factor) {}
 static void output_name(void *data, struct wl_output *wl, const char *name) {
@@ -691,7 +703,12 @@ static gboolean make_screen(GString *why) {
 /* The scale the screen has now: its pixels over its logical size. */
 static double scale_now(void) {
     struct output *o = our_output();
-    return o && o->logical && o->lw > 0 ? (double)app.width / o->lw : 0;
+    if (!o || !o->logical || o->lw <= 0) return 0;
+    /* The mode in use, which is not always the one asked for: KWin gives a
+     * new screen a custom mode it kept for that name, from a session that
+     * ended without putting its own back (1000x640 for a 1496x862 screen on
+     * 2026-11-14), until the sizer's tidy takes it away. */
+    return (double)(o->mw > 0 ? o->mw : app.width) / o->lw;
 }
 
 /*
@@ -761,8 +778,19 @@ static void close_screen(void) {
  * mode: that many logical pixels at the session's scale, so Plasma gets more
  * room as the window grows rather than a bigger picture of the same room, as
  * DeX does. KWin gives a virtual output a custom mode as it would a monitor
- * (kscreen-doctor's addCustomMode), its stream then carries frames of the new
- * size, the encoder starts over for them, and on_sample tells the window.
+ * (kscreen-doctor's addCustomMode), and Plasma lays the screen out at the new
+ * size, as for a monitor's new resolution.
+ *
+ * The stream does not follow that mode. KWin 6.8 sizes a virtual output's
+ * stream the other way round: the output can be resized
+ * (DrmVirtualOutput::canResize), so the stream offers any size from 200 × 200
+ * to 10000 × 10000 and KWin makes the output whatever size the stream is
+ * agreed at (ScreenCastStream::onStreamParamChanged), never the stream the
+ * output's size. With the mode alone, the stream stayed at its first size and
+ * the new screen came squeezed into it; with the stream alone, KWin resized
+ * the output but Plasma never laid it out again (both on 2026-11-14). So
+ * both: the mode first, then the stream asked for that same size
+ * (restart_stream), which KWin takes for a size the output already has.
  *
  * KWin keeps custom modes, and the mode in use, in kwinoutputconfig.json
  * under the screen's name, and gives them back to the next screen of that
@@ -895,6 +923,52 @@ static gboolean apply_size(int w, int h) {
     return ok;
 }
 
+/* Milliseconds into this run: what fits a gint for the threads to share. */
+static gint ms_now(void) {
+    return (gint)((g_get_monotonic_time() - app.t0) / 1000);
+}
+
+/* The size the stream is asked for, on the capsfilter after pipewiresrc. Any
+ * memory: the GPU path's DMA-BUFs as well as the CPU path's frames. */
+static void ask_stream_size(int w, int h) {
+    g_atomic_int_set(&app.stream_w, w);
+    g_atomic_int_set(&app.stream_h, h);
+    if (!app.sizecaps) return;
+    GstCaps *caps = gst_caps_new_simple("video/x-raw", "width", G_TYPE_INT, w, "height", G_TYPE_INT, h, NULL);
+    gst_caps_set_features(caps, 0, gst_caps_features_new_any());
+    g_object_set(app.sizecaps, "caps", caps, NULL);
+    gst_caps_unref(caps);
+}
+
+/*
+ * The stream at the size the screen now has: on the main loop, once the
+ * sizer has KWin's mode. A new pipeline, built as at the start. Tried first
+ * on 2026-11-14, and worse: renegotiated in place (pipewiresrc reconnects to
+ * KWin's stream, keeps a frame of the old size to send again on a still
+ * screen, and the new size's first frame waited 11 s for the screen's next
+ * change), and taken to READY and back (the first frame came, then nothing
+ * for 7 s, the screen changing or not). Built afresh, the first frame of the
+ * new size comes about 100 ms after the pipeline does, and the rest follow.
+ */
+static void stop_video(void);
+static gboolean start_video(GString *why);
+
+static gboolean restart_stream(gpointer d) {
+    int w = GPOINTER_TO_INT(d) >> 16, h = GPOINTER_TO_INT(d) & 0xffff;
+    if (!app.pipeline || app.finishing) return G_SOURCE_REMOVE;
+    if (w == g_atomic_int_get(&app.stream_w) && h == g_atomic_int_get(&app.stream_h)) return G_SOURCE_REMOVE;
+    stop_video();
+    ask_stream_size(w, h);
+    GString *why = g_string_new(NULL);
+    if (!start_video(why)) {
+        say("size: the picture would not start again at %dx%d: %s", w, h, why->str);
+        send_state("stopped", why->str);
+        finish(1);
+    }
+    g_string_free(why, TRUE);
+    return G_SOURCE_REMOVE;
+}
+
 /* The sizer: one size at a time, the latest the window asked for. */
 static gpointer sizer_main(gpointer d) {
     g_mutex_lock(&app.size_lock);
@@ -907,7 +981,11 @@ static gpointer sizer_main(gpointer d) {
         app.next_w = app.next_h = 0;
         g_mutex_unlock(&app.size_lock);
         gint64 t0 = g_get_monotonic_time();
-        if (apply_size(w, h)) say("size: %dx%d in %d ms", w, h, (int)((g_get_monotonic_time() - t0) / 1000));
+        if (apply_size(w, h)) {
+            say("size: %dx%d in %d ms", w, h, (int)((g_get_monotonic_time() - t0) / 1000));
+            /* w and h are below 2^15: both fit one pointer. */
+            g_idle_add(restart_stream, GINT_TO_POINTER(w << 16 | h));
+        }
         g_mutex_lock(&app.size_lock);
     }
     g_mutex_unlock(&app.size_lock);
@@ -976,6 +1054,8 @@ static void on_resize(const char *json) {
     if (sw == app.asked_w && sh == app.asked_h) return;
     app.asked_w = sw;
     app.asked_h = sh;
+    /* + 1: 0 is "no size on its way". */
+    g_atomic_int_set(&app.asked_at, ms_now() + 1);
     say("size: the window is %dx%d, so the screen is %dx%d", w, h, sw, sh);
     ask_size(sw, sh);
 }
@@ -1226,7 +1306,20 @@ static GstFlowReturn on_sample(GstAppSink *sink, gpointer d) {
         g_atomic_int_set(&app.pw, w);
         g_atomic_int_set(&app.ph, h);
         g_atomic_int_set(&app.need_config, 1);
-        say("video: now %dx%d", w, h);
+        gint at = g_atomic_int_get(&app.asked_at);
+        if (at && g_atomic_int_compare_and_exchange(&app.asked_at, at, 0))
+            say("video: now %dx%d, %d ms after the window asked", w, h, ms_now() + 1 - at);
+        else
+            say("video: now %dx%d", w, h);
+        GstElement *src = app.pipeline ? gst_bin_get_by_name(GST_BIN(app.pipeline), "src") : NULL;
+        GstPad *pad = src ? gst_element_get_static_pad(src, "src") : NULL;
+        GstCaps *caps = pad ? gst_pad_get_current_caps(pad) : NULL;
+        char *text = caps ? gst_caps_to_string(caps) : NULL;
+        say("video: KWin sends %s", text ? text : "?");
+        g_free(text);
+        if (caps) gst_caps_unref(caps);
+        if (pad) gst_object_unref(pad);
+        if (src) gst_object_unref(src);
     }
     if (!g_atomic_int_get(&app.sampled)) {
         g_atomic_int_set(&app.pw, w);
@@ -1321,7 +1414,9 @@ static char *pipeline_desc(const char *enc) {
                                 conv, kbps);
         g_free(conv);
     }
-    char *desc = g_strdup_printf("pipewiresrc name=src do-timestamp=true keepalive-time=%d ! " LEAKY " ! %s ! "
+    /* "size": the screen's size, asked of KWin's stream (restart_stream). */
+    char *desc = g_strdup_printf("pipewiresrc name=src do-timestamp=true keepalive-time=%d ! capsfilter name=size ! "
+                                 LEAKY " ! %s ! "
                                  "h264parse config-interval=-1 ! video/x-h264,stream-format=byte-stream,alignment=au ! "
                                  "appsink name=out sync=false max-buffers=8 enable-last-sample=false",
                                  KEEPALIVE_MS, coder);
@@ -1348,7 +1443,8 @@ static void stop_video(void) {
     gst_element_set_state(app.pipeline, GST_STATE_NULL);
     gst_bus_remove_watch(gst_element_get_bus(app.pipeline));
     gst_object_unref(app.pipeline);
-    app.pipeline = app.appsink = app.encoder_el = NULL;
+    if (app.sizecaps) gst_object_unref(app.sizecaps);
+    app.pipeline = app.appsink = app.encoder_el = app.sizecaps = NULL;
 }
 
 static gboolean start_video(GString *why) {
@@ -1373,6 +1469,8 @@ static gboolean start_video(GString *why) {
         GstPad *in = gst_element_get_static_pad(app.encoder_el, "sink");
         gst_pad_add_probe(in, GST_PAD_PROBE_TYPE_BUFFER, gate, NULL, NULL);
         gst_object_unref(in);
+        app.sizecaps = gst_bin_get_by_name(GST_BIN(p), "size");
+        ask_stream_size(g_atomic_int_get(&app.stream_w), g_atomic_int_get(&app.stream_h));
         app.appsink = gst_bin_get_by_name(GST_BIN(p), "out");
         GstAppSinkCallbacks cb = {0};
         cb.new_sample = on_sample;
@@ -1771,6 +1869,9 @@ static int cmd_serve(void) {
         return 1;
     }
     keep_scale();
+    /* The stream starts at the size the screen was made at. */
+    app.t0 = g_get_monotonic_time();
+    ask_stream_size(app.width, app.height);
     start_sizer();
     app.candidates = encoder_candidates();
     if (!start_video(why)) {
