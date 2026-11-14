@@ -13,6 +13,7 @@ import { deviceName, type AdbState, type LaunchMode, type Phase, type Progress }
 import { useSessions } from "./features/mirror/useSessions";
 import { NotificationsBell } from "./features/notifications/NotificationsBell";
 import { PhotosPanel } from "./features/photos/PhotosPanel";
+import { usePmos } from "./features/pmos/usePmos";
 import { RemotePanel } from "./features/remote/RemotePanel";
 import { WirelessPanel } from "./features/wireless/WirelessPanel";
 import { ContextMenu, type ContextAction } from "./ui/ContextMenu";
@@ -717,6 +718,8 @@ export default function App() {
   /** The stream dropped and scrcpy is bringing it back by itself. */
   const stalled =
     phase.kind === "ready" && sessions[`${phase.device.serial}|desktop`]?.status === "reconnecting";
+  /** A postmarketOS phone on the cable: its own flow, which waits while an Android desktop opens or is open. */
+  const pmos = usePmos(phase.kind === "launching" || phase.kind === "ready");
 
   // ── Files dropped on this window, or pasted in it: into the phone's Downloads ──
   // The phone the page in front shows: the Desktop page's (its desktop's, else
@@ -868,7 +871,7 @@ export default function App() {
         onTab={setTab}
         menu={helpMenu}
         notifications={<NotificationsBell />}
-        desktopBusy={phase.kind === "launching" || switching}
+        desktopBusy={phase.kind === "launching" || switching || pmos.session.kind === "launching"}
       />
       <main className="relative min-h-0 flex-1 overflow-y-auto">
         <div key={tab} className="fade-in min-h-full">
@@ -886,6 +889,7 @@ export default function App() {
               method={method}
               onMethod={setMethod}
               wireless={<WirelessPanel devices={devices} onConnected={onWirelessConnected} />}
+              pmos={pmos}
               actions={{
                 launch: (d) => launch(d),
                 retry,

@@ -50,6 +50,7 @@ access it through the built-in Web viewer in a browser.
 - **Open your phone's desktop in a web browser** on any computer, with nothing to install
 - **Make it yours** with themes, wallpapers, nine languages and a Windows 11 look
 - **Works on almost any Android phone** with Android 8 or newer, not just Samsung
+- **Phones running postmarketOS work too**: plug one in and its Plasma Mobile desktop opens in a window on your computer
 - **Your phone goes back to normal** when you are done
 - **Free and open source**, with no account, no subscription and no root
 
@@ -496,7 +497,7 @@ screen already in front of you, for nothing.
 | | |
 | --- | --- |
 | **Your computer** | Optional. For the PC app: Windows 10 or 11, a Mac (Intel or Apple Silicon), or a 64-bit Linux desktop |
-| **Your phone** | Any Android 8.0 or newer |
+| **Your phone** | Any Android 8.0 or newer. Or a 64-bit phone running postmarketOS with Plasma Mobile, on a USB cable (new, tested on one phone so far) |
 | **A cable** | None for the phone alone. For the PC app: a USB data cable or Wi-Fi. For a monitor: compatible video output and an adapter |
 | **Root** | No |
 | **An account** | No |

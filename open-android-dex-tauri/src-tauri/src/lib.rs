@@ -7,6 +7,7 @@ mod files;
 mod gestures;
 mod hotkeys;
 mod notifications;
+mod pmos;
 mod projection;
 mod quit;
 mod remote;
@@ -121,6 +122,13 @@ pub fn run() {
             remote_desktop::remote_desktop_stream,
             remote_desktop::remote_desktop_reveal,
             remote_usb::remote_desktop_usb,
+            pmos::pmos_status,
+            pmos::pmos_pair,
+            pmos::pmos_forget,
+            pmos::pmos_open,
+            pmos::pmos_close,
+            pmos::pmos_session,
+            pmos::pmos_window_link,
             apps::apps_prepare,
             apps::apps_drop,
             apps::apps_list,
@@ -169,7 +177,10 @@ pub fn run() {
             // would end a desktop or a phone app's window (quit.rs).
             tauri::WindowEvent::CloseRequested { api, .. } => quit::close_requested(window, api),
             // A phone's desktop window takes its local port and its tunnel with it.
-            tauri::WindowEvent::Destroyed => remote_desktop::window_closed(window.label()),
+            tauri::WindowEvent::Destroyed => {
+                remote_desktop::window_closed(window.label());
+                pmos::window_closed(window.label());
+            }
             _ => {}
         })
         .setup(|app| {
@@ -235,6 +246,7 @@ pub fn run() {
                 files::shutdown_all();
                 // Each open desktop window holds the phone awake; say goodbye.
                 remote_desktop::close_all();
+                pmos::close_all();
             }
             _ => {}
         });

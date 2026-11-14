@@ -157,7 +157,12 @@ fn ask_or_quit(app: &AppHandle) {
 fn open_now(app: &AppHandle) -> Open {
     let (desktops, mut apps) = crate::scrcpy::running(app);
     apps.extend(crate::apps::apps_windows().into_iter().map(|w| w.label));
-    let linux_desktops = app.webview_windows().keys().filter(|label| label.starts_with("desktop-")).count();
+    // A postmarketOS phone's desktop (pmos.rs) is a Linux desktop too.
+    let linux_desktops = app
+        .webview_windows()
+        .keys()
+        .filter(|label| label.starts_with("desktop-") || label.starts_with("pmos-"))
+        .count();
     Open { desktops, apps, linux_desktops }
 }
 

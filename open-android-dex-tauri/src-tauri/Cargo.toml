@@ -45,6 +45,13 @@ openandroiddex-remote = { path = "../../openandroiddex-remote" }
 # The ProxyCommand runs before Tauri does and needs a runtime of its own; this
 # is the same tokio Tauri already links.
 tokio = { version = "1", features = ["rt-multi-thread", "sync"] }
+# A postmarketOS phone on the Desktop tab (pmos.rs): SSH over its USB network,
+# the same russh, features and all, that the remote-access crate already
+# builds; and the WebSocket handshake its window's port answers, whose SHA-1
+# and base64 are already in the tree as well.
+russh = { version = "0.64", default-features = false, features = ["ring"] }
+sha1_smol = "1"
+base64 = "0.22"
 
 # Game controllers for the phone apps' windows (apps/gamepad.rs): each system's
 # own reader — Windows.Gaming.Input through the `windows` crate this app has,

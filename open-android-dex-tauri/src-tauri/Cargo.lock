@@ -4182,6 +4182,7 @@ dependencies = [
 name = "open-android-dex-tauri"
 version = "0.3.33"
 dependencies = [
+ "base64 0.22.1",
  "block2",
  "dispatch2",
  "gilrs",
@@ -4197,8 +4198,10 @@ dependencies = [
  "objc2-user-notifications",
  "openandroiddex-remote",
  "qrcode",
+ "russh",
  "serde",
  "serde_json",
+ "sha1_smol",
  "sha2 0.10.9",
  "tauri",
  "tauri-build",
