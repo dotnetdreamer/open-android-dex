@@ -20,11 +20,14 @@ import java.nio.charset.StandardCharsets;
  * both ways        0x01 JSON, UTF-8               — everything that is not a frame or a key
  * phone → computer 0x02 flags u8, pts µs u64, H.264 Annex B   — 1 key frame, 2 codec config
  *                  0x03 package length u8, package, PNG       — an app's icon
+ *                  0x04 bytes                                 — a piece of a file being got; an empty one ends it (AppOffers)
  * computer → phone 0x10                                       — one video frame arrived
  *                  0x20 buttons u8, x u16, y u16, meta u32    — the mouse, display pixels
  *                  0x21 x u16, y u16, h f32, v f32, meta u32  — the wheel, in notches
  *                  0x22 down u8, repeat u8, code u16, meta u32 — a key: Android's code and meta
  *                  0x23 UTF-8                                 — characters typed
+ *                  0x24 count u8, count × (id u8, x u16, y u16) — exactly these fingers are down (doc/game-mode.md)
+ *                  0x25 slot u8, 13-byte report               — a game controller's state; the window that says so owns it
  * </pre>
  * A dropped file's connection is the one exception: its first message says
  * what is coming, and the file's bytes follow it raw (AppDrop).
@@ -36,11 +39,14 @@ final class Wire {
     static final byte JSON = 0x01;
     static final byte VIDEO = 0x02;
     static final byte ICON = 0x03;
+    static final byte PIECE = 0x04;
     static final byte ACK = 0x10;
     static final byte POINTER = 0x20;
     static final byte SCROLL = 0x21;
     static final byte KEY = 0x22;
     static final byte TEXT = 0x23;
+    static final byte TOUCH = 0x24;
+    static final byte GAMEPAD = 0x25;
 
     /** Nothing the computer sends is near this; a key frame the phone sends can be. */
     private static final int MAX_IN = 4 * 1024 * 1024;

@@ -1,9 +1,11 @@
-import { useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { NO_PERMISSIONS_HINT, THIS_COMPUTER, THIS_COMPUTER_CAP } from "../../lib/host";
 import type { DeviceInfo } from "../../lib/types";
 import { Icon, type IconName } from "../../ui/Icon";
 import { Segmented } from "../../ui/kit";
 import { Stage, type Scene } from "../../ui/Stage";
+import { PmosSignIn } from "../pmos/PmosSignIn";
+import type { Pmos } from "../pmos/usePmos";
 import { deviceName, routeName, type AdbState, type Phase, type Progress } from "./model";
 import { UsbGuide } from "./UsbGuide";
 
@@ -55,10 +57,13 @@ interface Props {
   actions: DesktopActions;
   /** The Wi-Fi panel, wired to the launch pipeline by App. */
   wireless: ReactNode;
+  /** A postmarketOS phone, beside the Android flow (usePmos.ts). */
+  pmos?: Pmos;
 }
 
 export function DesktopPage(props: Props) {
-  const view = content(props);
+  const pmos = pmosContent(props);
+  const view = pmos ?? content(props);
   const { root, block, pad, instant } = useGlideToCentre();
   // The Wi-Fi panel has a place of its own, outside the keyed parts that come
   // and go with the state. Its work outlives the states it passes through: a
@@ -66,7 +71,7 @@ export function DesktopPage(props: Props) {
   // pairs by QR appears in the list before the pairing has answered — both
   // change what this screen says, and a panel remounted under them would lose
   // the answer it was waiting for.
-  const wifi = props.phase.kind === "connect" && props.method === "wifi";
+  const wifi = !pmos && props.phase.kind === "connect" && props.method === "wifi";
 
   return (
     <div
@@ -238,6 +243,7 @@ function content(props: Props): View {
               Open desktop
             </button>
           ),
+          top: pmosAlso(props.pmos),
           switcher: true,
         };
       }
@@ -427,6 +433,7 @@ function content(props: Props): View {
                 onClick={actions.closeTop}
               />
             </div>
+            {pmosAlso(props.pmos)}
           </div>
         ),
       };
@@ -451,9 +458,284 @@ function content(props: Props): View {
             </button>
           </>
         ),
+        top: pmosAlso(props.pmos),
       };
     }
   }
+}
+
+// ── a postmarketOS phone ───────────────────────────────────────────────
+
+/**
+ * A postmarketOS phone, when it is the one to show (usePmos.ts): its desktop
+ * opening, open, closed or failed; or the phone on the cable, to sign in to
+ * or to open. Never over an Android desktop that is opening or open, and the
+ * Android screens are left as they are: this comes before them or not at all.
+ * With an Android phone ready, open or just closed as well, that phone's
+ * screen stays, and the postmarketOS phone is a card on it (PmosAlso).
+ */
+function pmosContent(props: Props): View | null {
+  const pm = props.pmos;
+  const { phase, ready, actions } = props;
+  if (!pm || phase.kind === "launching" || phase.kind === "ready") return null;
+  const s = pm.session;
+  const quiet = (phase.kind === "boot" || (phase.kind === "connect" && !phase.error)) && !ready;
+  if (s.kind === "idle" && !(pm.phone && quiet)) return null;
+  const name = pm.name || pm.phone?.name || "Your phone";
+  const canOpen = !!pm.phone?.paired;
+
+  switch (s.kind) {
+    case "launching":
+      return {
+        key: "pmos-launching",
+        scene: "launching",
+        via: "usb",
+        step: s.step,
+        title: "Opening your desktop",
+        lede: <PmosChip name={name} />,
+        top: (
+          <div className="flex flex-col gap-3">
+            <Progressive progress={{ step: Math.min(2, s.step) as 0 | 1 | 2, mode: "open" }} />
+            <p className="caption text-center">
+              Usually a few seconds. The first time takes a little longer while Open Android DeX sets itself up on the
+              phone.
+            </p>
+          </div>
+        ),
+      };
+    case "running":
+      return {
+        key: "pmos-running",
+        scene: "live",
+        via: "usb",
+        step: 3,
+        title: "Your desktop is running",
+        lede: <PmosChip name={name} tone="live" />,
+        actions: (
+          <>
+            <button className="btn btn-primary btn-lg" onClick={pm.show}>
+              <Icon name="monitor" size={16} />
+              Show desktop
+            </button>
+            <button
+              className="btn btn-danger btn-lg"
+              onClick={pm.disconnect}
+              title="Close the desktop and put the phone back to normal"
+            >
+              <Icon name="power" size={16} />
+              Disconnect
+            </button>
+          </>
+        ),
+        top: <p className="caption text-center">The apps you open there stay open on the phone when you disconnect.</p>,
+      };
+    case "failed": {
+      const [first, ...rest] = s.message.split("\n");
+      const more = rest.join("\n").trim();
+      return {
+        key: "pmos-failed",
+        scene: "error",
+        via: "usb",
+        title: "The desktop didn't open",
+        lede: first,
+        actions: (
+          <>
+            {canOpen && (
+              <button className="btn btn-primary btn-lg" onClick={pm.open}>
+                <Icon name="refresh" size={16} />
+                Try again
+              </button>
+            )}
+            <button className="btn btn-secondary btn-lg" onClick={actions.openLog}>
+              <Icon name="doc" size={16} />
+              Open log
+            </button>
+          </>
+        ),
+        top: (
+          <div className="flex flex-col gap-3">
+            {more && (
+              <div className="card px-4 py-3.5">
+                <p className="body whitespace-pre-wrap select-text">{more}</p>
+              </div>
+            )}
+            <p className="caption text-center">
+              Every step of this attempt is in the log.{" "}
+              <button className="link text-[12px]" onClick={pm.dismiss}>
+                Back
+              </button>
+            </p>
+          </div>
+        ),
+      };
+    }
+    case "ended":
+      return {
+        key: "pmos-ended",
+        scene: "ended",
+        via: "usb",
+        title: "The desktop was closed",
+        lede: s.message ?? "Your phone is back to normal.",
+        actions: (
+          <>
+            {canOpen && (
+              <button className="btn btn-primary btn-lg" onClick={pm.open}>
+                <Icon name="play" size={15} />
+                Open desktop again
+              </button>
+            )}
+            <button className="btn btn-secondary btn-lg" onClick={pm.dismiss}>
+              {canOpen ? "Done" : "Use another phone"}
+            </button>
+          </>
+        ),
+      };
+  }
+
+  // Nothing open: the phone on the cable.
+  const phone = pm.phone!;
+  if (!phone.ssh) {
+    return {
+      key: "pmos-no-ssh",
+      scene: "alert",
+      via: "usb",
+      title: "Turn on SSH on your phone",
+      lede: "A postmarketOS phone is plugged in, but it isn't letting computers in. Turn on its SSH, and its desktop opens here.",
+      top: (
+        <div className="card px-4 py-3.5">
+          <p className="section-label mb-2">In a terminal on the phone</p>
+          <pre className="console select-text">
+            {"sudo rc-service sshd start\n# or, on a phone with systemd:\nsudo systemctl start sshd"}
+          </pre>
+        </div>
+      ),
+    };
+  }
+  if (!phone.paired) {
+    return {
+      key: "pmos-sign-in",
+      scene: "allow",
+      via: "usb",
+      title: "Sign in to your phone",
+      lede: "A postmarketOS phone is plugged in. Sign in with the username and password you use on it, just this once, and its desktop opens here.",
+      body: <PmosSignIn busy={pm.signingIn} error={pm.signInError} onSignIn={pm.signIn} />,
+    };
+  }
+  return {
+    key: `pmos-ready-${phone.id}`,
+    scene: "ended",
+    via: "usb",
+    title: `${name} is ready`,
+    lede: "postmarketOS, connected with a USB cable.",
+    actions: (
+      <button className="btn btn-primary btn-lg" onClick={pm.open}>
+        <Icon name="play" size={15} />
+        Open desktop
+      </button>
+    ),
+  };
+}
+
+/** The card for a postmarketOS phone on an Android screen, when there is a phone or a session to show. */
+function pmosAlso(pm: Pmos | undefined): ReactNode {
+  if (!pm) return undefined;
+  const s = pm.session.kind;
+  if (!pm.phone && s !== "launching" && s !== "running") return undefined;
+  return <PmosAlso pm={pm} />;
+}
+
+/**
+ * The postmarketOS phone on an Android phone's screens (ready, running,
+ * closed), which keep the page: its desktop opens from here, after signing in
+ * to it the first time, and while it is open it can be shown or closed. It
+ * can be open beside the Android phone's desktop: each has its own window.
+ */
+function PmosAlso({ pm }: { pm: Pmos }) {
+  const [asking, setAsking] = useState(false);
+  const { phone, session: s, dismiss } = pm;
+  // Closed on purpose while an Android screen has the page: nothing to report,
+  // the phone is simply there to open again.
+  useEffect(() => {
+    if (s.kind === "ended" && !s.message) dismiss();
+  }, [s, dismiss]);
+  const name = pm.name || phone?.name || "postmarketOS phone";
+  const live = s.kind === "running";
+  const busy = s.kind === "launching";
+  let action: ReactNode = null;
+  if (live) {
+    action = (
+      <>
+        <button className="btn btn-secondary" onClick={pm.show}>
+          <Icon name="monitor" size={14} />
+          Show
+        </button>
+        <button className="btn btn-secondary" onClick={pm.disconnect} title="Close its desktop">
+          <Icon name="power" size={14} />
+          Disconnect
+        </button>
+      </>
+    );
+  } else if (busy) {
+    action = (
+      <span className="caption inline-flex items-center gap-2">
+        <span className="spinner" aria-hidden="true" />
+        Opening its desktop…
+      </span>
+    );
+  } else if (phone?.ssh && phone.paired) {
+    action = (
+      <button className="btn btn-secondary" onClick={pm.open}>
+        <Icon name="play" size={14} />
+        Open its desktop
+      </button>
+    );
+  } else if (phone?.ssh && !asking) {
+    action = (
+      <button className="btn btn-secondary" onClick={() => setAsking(true)}>
+        Sign in to it
+      </button>
+    );
+  }
+  const note =
+    phone && !phone.ssh
+      ? "It isn't letting computers in yet: turn on SSH on the phone, and its desktop can open here."
+      : s.kind === "failed" || (s.kind === "ended" && s.message)
+        ? s.message
+        : "";
+  return (
+    <div className="flex flex-col gap-3">
+      <div className="card flex flex-wrap items-center justify-between gap-3 px-4 py-3.5">
+        <div className="min-w-0">
+          <p className="section-label mb-1">{live || busy ? "Also open" : "Also plugged in"}</p>
+          <PmosChip name={name} tone={live ? "live" : busy ? "warn" : undefined} />
+        </div>
+        {action && <div className="flex flex-wrap gap-2">{action}</div>}
+        {note && <p className="caption w-full select-text">{note}</p>}
+      </div>
+      {asking && phone?.ssh && !phone.paired && (
+        <PmosSignIn busy={pm.signingIn} error={pm.signInError} onSignIn={pm.signIn} />
+      )}
+    </div>
+  );
+}
+
+/** The postmarketOS phone and its cable; with a dot for how the session is, while there is one. */
+function PmosChip({ name, tone }: { name: string; tone?: "live" | "warn" }) {
+  return (
+    <span className="mt-0.5 inline-flex items-center gap-2 text-[13.5px]">
+      {tone ? (
+        <span className={`dot ${tone === "live" ? "dot-ok" : "dot-warn dot-live"}`} aria-hidden="true" />
+      ) : (
+        <Icon name="phone" size={15} className="text-[var(--ink-3)]" />
+      )}
+      <span className="font-semibold text-[var(--ink-1)]">{name}</span>
+      <span className="text-[var(--ink-4)]">·</span>
+      <span className="inline-flex items-center gap-1.5">
+        <Icon name="cable" size={14} className="text-[var(--ink-3)]" />
+        postmarketOS on a USB cable
+      </span>
+    </span>
+  );
 }
 
 // ── pieces ─────────────────────────────────────────────────────────────

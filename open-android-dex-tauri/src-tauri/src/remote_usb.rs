@@ -370,7 +370,7 @@ async fn forward(mut tcp: TcpStream, port: u16, token: &str, device: &Device, de
     }
 }
 
-async fn read_head(tcp: &mut TcpStream) -> Option<Vec<u8>> {
+pub(crate) async fn read_head(tcp: &mut TcpStream) -> Option<Vec<u8>> {
     let mut received = Vec::with_capacity(1024);
     let mut chunk = [0u8; 4096];
     let read = async {
@@ -392,7 +392,7 @@ async fn read_head(tcp: &mut TcpStream) -> Option<Vec<u8>> {
     Some(received)
 }
 
-fn head_end(received: &[u8]) -> Option<usize> {
+pub(crate) fn head_end(received: &[u8]) -> Option<usize> {
     received.windows(4).position(|w| w == b"\r\n\r\n").map(|i| i + 4)
 }
 
@@ -410,7 +410,7 @@ fn app_origin(origin: &str, dev: Option<&str>) -> bool {
 /// A page from another site names itself in `Origin`, a DNS-rebinding one
 /// carries its own name in `Host`, and neither knows the token; the app's
 /// page is the only one that gets the URL.
-fn check_request(received: &[u8], port: u16, token: &str, dev: Option<&str>) -> Result<(), &'static str> {
+pub(crate) fn check_request(received: &[u8], port: u16, token: &str, dev: Option<&str>) -> Result<(), &'static str> {
     let end = head_end(received).ok_or("no request")?;
     let head = std::str::from_utf8(&received[..end]).map_err(|_| "not text")?;
     let mut lines = head.split("\r\n");

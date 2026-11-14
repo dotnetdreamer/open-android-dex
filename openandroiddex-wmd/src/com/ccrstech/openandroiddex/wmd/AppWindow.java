@@ -186,6 +186,10 @@ final class AppWindow implements LinuxStreamEncoder.Output, AppVideo.Gate {
     private String lastTop = "";
     /** The keyboard was asked to come here; a key waits for no focus that will never come. */
     private volatile boolean wantsKeys;
+    /** The phone's refusal of a game controller has been said on this window. */
+    private boolean padRefusedSaid;
+    /** Between the computer's blur and its next focus: its game controller reports are dropped. */
+    private volatile boolean padsResting;
     /** When the computer last sent input; the watcher looks closely for a while after it. */
     private volatile long inputAt = SystemClock.uptimeMillis();
     private long watchedAt;
@@ -233,7 +237,20 @@ final class AppWindow implements LinuxStreamEncoder.Output, AppVideo.Gate {
                     // the connection went: as its end, below
                 }
                 if (closing) break;
-                if (wire != w) continue; // another connection has it already
+                if (wire != w) {
+                    // Another connection has it already, maybe before this phone saw the
+                    // last one end. Game controls start clean: their fingers and the
+                    // window's game controllers are let go here, on the thread that reads
+                    // the new one, so nothing the computer sends on it comes before, and
+                    // the computer sends what it holds now. A mouse button or a key held
+                    // stays: a drag goes on across a move between Wi-Fi and the cable.
+                    if (input != null) input.releaseFingers();
+                    server.gamepads().rest(this);
+                    // A blur or focus may have gone into the old one: the computer
+                    // sends reports only to the window in front, so they count again.
+                    padsResting = false;
+                    continue;
+                }
                 if (!waitForComputer(w)) break;
             }
         } catch (Exception e) {
@@ -268,6 +285,8 @@ final class AppWindow implements LinuxStreamEncoder.Output, AppVideo.Gate {
             until = SystemClock.uptimeMillis() + AWAY_MS;
         }
         if (input != null) input.releaseAll();
+        server.gamepads().rest(this);
+        padsResting = false;
         AppServer.log("window " + serial + " (" + pkg + "): the computer's connection went; the app stays on its display for "
                 + AWAY_MS / 1000 + " s, for the computer to come back");
         synchronized (this) {
@@ -464,6 +483,8 @@ final class AppWindow implements LinuxStreamEncoder.Output, AppVideo.Gate {
 
     private void end() {
         closeAll(null);
+        // Its game controllers go before its display: never one left free.
+        server.gamepads().ended(this);
         server.forget(this);
         server.drags().unwatch(this);
         if (input != null) input.releaseAll();
@@ -858,7 +879,8 @@ final class AppWindow implements LinuxStreamEncoder.Output, AppVideo.Gate {
             byte[] d = m.data;
             // Someone using the window, not the window's own bookkeeping: an ack,
             // or the clock's ping every 2 s, which kept the watcher busy for good.
-            if (m.type == Wire.POINTER || m.type == Wire.SCROLL || m.type == Wire.KEY || m.type == Wire.TEXT) {
+            if (m.type == Wire.POINTER || m.type == Wire.SCROLL || m.type == Wire.KEY || m.type == Wire.TEXT
+                    || m.type == Wire.TOUCH || m.type == Wire.GAMEPAD) {
                 inputAt = SystemClock.uptimeMillis();
             }
             switch (m.type) {
@@ -889,6 +911,17 @@ final class AppWindow implements LinuxStreamEncoder.Output, AppVideo.Gate {
                     if (d.length > 0) {
                         keyboardHere();
                         input.text(new String(d, StandardCharsets.UTF_8));
+                    }
+                    break;
+                case Wire.TOUCH:
+                    // Game controls' fingers (doc/game-mode.md): the computer's mouse is silent meanwhile.
+                    if (!droppingIn) input.touches(d);
+                    break;
+                case Wire.GAMEPAD:
+                    // Not between the window's blur and its next focus: a report that crossed the
+                    // blur would hold the pad in a window in the background.
+                    if (d.length >= 1 + AppGamepads.REPORT && !padsResting) {
+                        gamepad(d[0] & 0xff, Arrays.copyOfRange(d, 1, 1 + AppGamepads.REPORT));
                     }
                     break;
                 case Wire.JSON: {
@@ -923,12 +956,87 @@ final class AppWindow implements LinuxStreamEncoder.Output, AppVideo.Gate {
     private void keyboardHere() {
         if (!wantsKeys) return;
         wantsKeys = false;
+        focusHere();
+    }
+
+    /**
+     * This window's display made the focused one, if it is not: where the
+     * keyboard goes, and a game controller the phone will not tie to a display
+     * (AppGamepads). Whether it is the focused one now; true where the phone
+     * will not say. Android 12 and older never move a display that is not
+     * trusted to the top for its task ({@code TaskDisplayArea.positionChildTaskAt}):
+     * only a touch on it does. There this stays false until the window is clicked.
+     */
+    boolean focusHere() {
+        int now = AppTasks.focusedDisplay();
+        if (now == displayId) return true;
+        boolean unknown = now < 0;
         int t = topTask;
-        if (t < 0 || AppTasks.focusedDisplay() == displayId) return;
+        if (t < 0) return unknown;
         try {
             AppTasks.focus(t);
         } catch (Throwable e) {
             AppServer.log("window " + serial + ": cannot give it the keyboard (" + e + ")");
+            return unknown;
+        }
+        now = AppTasks.focusedDisplay();
+        return now == displayId || now < 0;
+    }
+
+    /** The display's unique id, spaces and all, as the input system ties a device to it; null if it will not say. */
+    String displayUniqueId() {
+        VirtualDisplay d = display;
+        if (d == null) return null;
+        try {
+            Object id = Refl.call(d.getDisplay(), "getUniqueId");
+            return id instanceof String ? (String) id : null;
+        } catch (Throwable e) {
+            return null;
+        }
+    }
+
+    /** A game controller's state from the computer (AppGamepads); the phone's refusal said once. */
+    private void gamepad(int slot, byte[] report) {
+        String refused = server.gamepads().report(this, slot, report);
+        if (refused != null) padRefused(slot, refused);
+    }
+
+    /** The phone makes no game controller (AppGamepads): said to the computer, once for this window. */
+    void padRefused(int slot, String refused) {
+        if (padRefusedSaid) return;
+        padRefusedSaid = true;
+        try {
+            wire.json(new JSONObject().put("t", "gamepad").put("slot", slot).put("ok", false).put("message", refused));
+        } catch (Exception ignored) {
+            // the computer's end went
+        }
+    }
+
+    /** Someone is using the window, though not through its connection: the phone's own controller (AppController). */
+    void used() {
+        inputAt = SystemClock.uptimeMillis();
+    }
+
+    /** The app in the window. */
+    String pkg() {
+        return pkg;
+    }
+
+    /** A Linux app's window: the phone's Linux, which no game controller plays. */
+    boolean linux() {
+        return xid != 0;
+    }
+
+    /**
+     * The game controller in {@code slot} is held on this window (AppGamepads):
+     * its display does not have the phone's focus, and only a click in the
+     * window gives it. Said to the computer, which says so under the title bar.
+     */
+    void padWaitsForClick(int slot) {
+        try {
+            wire.json(new JSONObject().put("t", "gamepad").put("slot", slot).put("focus", false));
+        } catch (Exception ignored) {
+            // the computer's end went
         }
     }
 
@@ -946,10 +1054,16 @@ final class AppWindow implements LinuxStreamEncoder.Output, AppVideo.Gate {
             case "focus":
                 // The window came to the front on the computer: the next key is for it.
                 wantsKeys = true;
+                padsResting = false;
+                // And the phone's own controller plays in it (AppController).
+                server.focused(this);
                 break;
             case "blur":
+                padsResting = true;
                 input.releaseAll();
                 input.left();
+                server.gamepads().rest(this);
+                server.blurred(this);
                 break;
             case "leave":
                 // The pointer left the window: nothing under it is hovered any more.

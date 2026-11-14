@@ -41,7 +41,7 @@
 mod frame;
 mod render;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::os::windows::ffi::OsStringExt;
 use std::path::PathBuf;
@@ -73,9 +73,11 @@ use windows::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_R
 use windows::Win32::UI::HiDpi::{
     AdjustWindowRectExForDpi, GetDpiForMonitor, GetDpiForWindow, GetSystemMetricsForDpi, MDT_EFFECTIVE_DPI,
 };
-use windows::Win32::UI::Input::Ime::{ImmGetCompositionStringW, ImmGetContext, ImmReleaseContext, GCS_RESULTSTR};
+use windows::Win32::UI::Input::Ime::{
+    ImmAssociateContext, ImmGetCompositionStringW, ImmGetContext, ImmReleaseContext, GCS_RESULTSTR, HIMC,
+};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetAsyncKeyState, GetDoubleClickTime, GetKeyState, MapVirtualKeyW, ReleaseCapture, SendInput, SetCapture,
+    GetAsyncKeyState, GetCapture, GetDoubleClickTime, GetKeyState, MapVirtualKeyW, ReleaseCapture, SendInput, SetCapture,
     TrackMouseEvent, INPUT,
     INPUT_0, INPUT_MOUSE, MAPVK_VK_TO_CHAR, MOUSEEVENTF_HWHEEL, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP,
     MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_WHEEL,
@@ -88,6 +90,7 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 
 use super::drops;
 use super::fetch::{self, Offer, Taking};
+use super::game::{self, engine::Event as GameEvent, engine::Input as GameInput, engine::MouseButton, engine::WheelWay};
 use super::keys::{self, Mods, Press};
 use super::link::{self, DisplaySize, Event, Host, Link, NetSpec, Refused, Route, Spec, Surface};
 use super::shape;
@@ -124,6 +127,12 @@ impl Window {
         }
     }
 
+    /// More's "Use phone as game controller" (apps/controller.rs), as its menu item does it: the debug hook's.
+    #[cfg(debug_assertions)]
+    pub fn use_phone_controller(&self) {
+        self.shared.link.host().controller(self.shared.clone());
+    }
+
     /// Maximised if it is not, back if it is: a gesture on the phone's touchpad.
     pub fn toggle_maximized(&self) {
         let hwnd = self.shared.hwnd();
@@ -154,9 +163,11 @@ impl Window {
         self.shared.link.key().to_string()
     }
 
-    /// It is the window the person is using: the one Windows has in front.
+    /// It is the window the person is using: the one Windows has in front, once
+    /// its phone has been told so (WM_ACTIVATE) — Windows changes the foreground
+    /// window before the window hears of it.
     pub fn is_front(&self) -> bool {
-        unsafe { GetForegroundWindow() == self.shared.hwnd() }
+        unsafe { GetForegroundWindow() == self.shared.hwnd() && self.shared.front.load(Ordering::SeqCst) }
     }
 
     /// The way it reaches its phone now: the serial, the server, USB or Wi‑Fi.
@@ -183,6 +194,21 @@ impl Window {
     /// A line in the middle of the window while it has no picture; None takes it away.
     pub fn say(&self, text: Option<String>) {
         Shared::say(&self.shared, text);
+    }
+
+    /// A message on its connection to the phone (a game controller's state).
+    pub fn send(&self, bytes: Vec<u8>) {
+        self.shared.link.send(bytes);
+    }
+
+    /// Which of its connections that goes on (link::Link::generation).
+    pub fn generation(&self) -> u64 {
+        self.shared.link.generation()
+    }
+
+    /// Its game controls, an Android app's window's.
+    pub fn game(&self) -> Option<Arc<game::Session>> {
+        self.shared.game.clone()
     }
 }
 
@@ -454,6 +480,11 @@ struct Shared {
     phone_drag: AtomicBool,
     /// What the phone says a drag it handed over carries, for the window's own thread.
     dragged: Mutex<Option<Option<Offer>>>,
+    /// Its game controls (apps/game): an Android app's window's.
+    game: Option<Arc<game::Session>>,
+    /// The phone was told the window is in front (its focus), and no blur since:
+    /// set after the focus goes, so no controller's report reaches the phone ahead of it.
+    front: AtomicBool,
 }
 
 /// A full-screen window as it was before: its style, where it was, and
@@ -505,6 +536,9 @@ impl Shared {
                 return;
             }
             *label = name.to_string();
+        }
+        if let Some(g) = &self.game {
+            g.named(name);
         }
         let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
         unsafe {
@@ -616,6 +650,62 @@ impl Surface for Shared {
     }
 }
 
+/// What the window's game controls ask of it (apps/game), from their own threads.
+impl game::Shell for Shared {
+    /// The window's own thread takes the pointer and gives it back (WM_APP_GAME).
+    fn capture(&self, on: bool) {
+        unsafe {
+            let _ = PostMessageW(Some(self.hwnd()), WM_APP_GAME, WPARAM(on as usize), LPARAM(0));
+        }
+    }
+
+    fn game_note(&self, text: Option<String>, busy: bool) {
+        Surface::note(self, text, busy);
+    }
+
+    /// The window's own thread puts the input method aside, or back (WM_APP_GAME_ON).
+    fn controls(&self, on: bool) {
+        unsafe {
+            let _ = PostMessageW(Some(self.hwnd()), WM_APP_GAME_ON, WPARAM(on as usize), LPARAM(0));
+        }
+    }
+
+    fn bring_forward(&self) {
+        let hwnd = self.hwnd();
+        unsafe {
+            if IsIconic(hwnd).as_bool() {
+                let _ = ShowWindow(hwnd, SW_RESTORE);
+            }
+            let _ = SetForegroundWindow(hwnd);
+        }
+    }
+
+    /// The client area under the bar, and its monitor's work area, in screen pixels.
+    fn picture_frame(&self) -> Option<game::Frame> {
+        let hwnd = self.hwnd();
+        let (w, h) = self.area();
+        let mut at = POINT { x: 0, y: self.bar_height() };
+        unsafe {
+            if !ClientToScreen(hwnd, &mut at).as_bool() {
+                return None;
+            }
+            let mut info = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
+            if !GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &mut info).as_bool() {
+                return None;
+            }
+            let r = info.rcWork;
+            Some(game::Frame {
+                x: at.x as f64,
+                y: at.y as f64,
+                w: w as f64,
+                h: h as f64,
+                screen: (r.left as f64, r.top as f64, (r.right - r.left) as f64, (r.bottom - r.top) as f64),
+                scale: self.scale() as f64,
+            })
+        }
+    }
+}
+
 enum RenderMsg {
     Video(u8, u64, Vec<u8>),
     Format((u32, u32), (u32, u32)),
@@ -638,6 +728,33 @@ const WM_APP_TAKEN: u32 = WM_APP + 4;
 const WM_APP_CLOSE: u32 = WM_APP + 5;
 /// The phone named the app (Shared::retitle): what a pin of the window is called follows.
 const WM_APP_NAMED: u32 = WM_APP + 6;
+/// Game controls want the pointer taken (wParam 1) or given back (0): from their thread (apps/game).
+const WM_APP_GAME: u32 = WM_APP + 7;
+/// Game controls came on (wParam 1) or went off (0): the input method is put aside meanwhile.
+const WM_APP_GAME_ON: u32 = WM_APP + 8;
+/// While a game control's key is held, Windows' key state is asked about it this often (game::released).
+const GAME_KEYS_TIMER: usize = 5;
+/// After the screen is unlocked or the computer wakes: whether the window is in front is
+/// looked at every 250 ms, this many times, until it is — Windows may give it the
+/// foreground a moment after it says so, and send no WM_ACTIVATE for it.
+const FRONT_TIMER: usize = 6;
+const FRONT_TRIES: u8 = 20;
+/// The session is locked (WM_WTSSESSION_CHANGE): no window of this app is in front of anyone.
+static SESSION_LOCKED: AtomicBool = AtomicBool::new(false);
+/// WinUser.h's: a session's change (WTSRegisterSessionNotification), and the screen locking and unlocking.
+const WM_WTSSESSION_CHANGE: u32 = 0x02B1;
+const WTS_SESSION_LOCK: usize = 0x7;
+const WTS_SESSION_UNLOCK: usize = 0x8;
+/// WinUser.h's: the computer going to sleep, and waking.
+const PBT_APMSUSPEND: usize = 0x4;
+const PBT_APMRESUMEAUTOMATIC: usize = 0x12;
+
+#[link(name = "wtsapi32")]
+extern "system" {
+    /// The window hears of the session locking (WM_WTSSESSION_CHANGE); `flags` 0 is this session only.
+    fn WTSRegisterSessionNotification(hwnd: HWND, flags: u32) -> i32;
+    fn WTSUnRegisterSessionNotification(hwnd: HWND) -> i32;
+}
 const RESIZE_TIMER: usize = 1;
 const NOTE_TIMER: usize = 2;
 /// How long a resize must hold before the phone is asked for it: the phone
@@ -670,6 +787,13 @@ const MENU_PASTE: usize = 4;
 /// More's Phone size and Tablet size (shape.rs): one after the other, a radio pair.
 const MENU_PHONE: usize = 5;
 const MENU_TABLET: usize = 6;
+/// Game controls on and off (F8), and their editor (apps/game).
+const MENU_GAME: usize = 7;
+const MENU_GAME_SETUP: usize = 8;
+/// More's "Use phone as game controller" (apps/controller.rs).
+const MENU_CONTROLLER: usize = 9;
+/// VK_F8: game controls on and off.
+const VK_F8_CODE: u32 = 0x77;
 
 /// Open a window for `spec`; it runs until it is closed. The window shows
 /// at once, with the app's icon and name, and the picture follows.
@@ -862,7 +986,12 @@ fn ui_thread(spec: Spec, host: Arc<dyn Host>, opened: Sender<Result<Arc<Window>,
         menu_open: AtomicBool::new(false),
         phone_drag: AtomicBool::new(false),
         dragged: Mutex::new(None),
+        game: spec.game.clone(),
+        front: AtomicBool::new(false),
     });
+    if let Some(g) = &shared.game {
+        g.attach(shared.link.clone(), shared.clone());
+    }
     let state = Box::new(Ui {
         shared: shared.clone(),
         buttons: 0,
@@ -879,6 +1008,14 @@ fn ui_thread(spec: Spec, host: Arc<dyn Host>, opened: Sender<Result<Arc<Window>,
         note_fades: 0,
         out: Out::No,
         taking: None,
+        game_keys: HashMap::new(),
+        game_vks: HashMap::new(),
+        xbuttons: 0,
+        front_tries: 0,
+        ime_aside: None,
+        captured: false,
+        captured_from: POINT::default(),
+        wheel: 0.0,
     });
     let state_ptr = Box::into_raw(state);
     let title: Vec<u16> = spec.label.encode_utf16().chain(std::iter::once(0)).collect();
@@ -922,6 +1059,10 @@ fn ui_thread(spec: Spec, host: Arc<dyn Host>, opened: Sender<Result<Arc<Window>,
         }
         (*state_ptr).props = taskbar_identity(hwnd, &spec);
         (*state_ptr).pinnable = spec.relaunch.is_some();
+        // The screen locking is as the window losing the keyboard (game controls).
+        if shared.game.is_some() {
+            WTSRegisterSessionNotification(hwnd, 0);
+        }
         // Files from Explorer go to the phone. Let through even to an app run
         // as administrator, which Windows would otherwise keep Explorer's drop from.
         DragAcceptFiles(hwnd, true);
@@ -981,8 +1122,25 @@ fn ui_thread(spec: Spec, host: Arc<dyn Host>, opened: Sender<Result<Arc<Window>,
     unsafe {
         let mut msg = MSG::default();
         while GetMessageW(&mut msg, None, 0, 0).as_bool() {
-            let _ = TranslateMessage(&msg);
+            // AltGr's left Ctrl (scan 0x1D, not extended, right Alt at its time next), seen here
+            // rather than in the window's procedure: a look at the queue delivers messages sent to
+            // the window, which must never come into it while it is handling a key.
+            let altgr = matches!(msg.message, WM_KEYDOWN | WM_SYSKEYDOWN) && (msg.lParam.0 >> 16) & 0x1FF == 0x1D && altgr_follows(msg.time);
+            ALTGR_CTRL.set(altgr);
+            // A key game controls take is never translated: no character typed
+            // into the app (repeats included), no dead key left waiting for the next.
+            let game_key = !altgr
+                && matches!(msg.message, WM_KEYDOWN | WM_SYSKEYDOWN)
+                && msg.hwnd == hwnd
+                && shared.game.as_ref().is_some_and(|g| {
+                    let (scan, extended) = (((msg.lParam.0 >> 16) & 0xFF) as u16, (msg.lParam.0 >> 24) & 1 == 1);
+                    g.is_on() && game::keys::from_windows(scan, extended).is_some_and(|k| g.takes(GameInput::Key(k)))
+                });
+            if !game_key {
+                let _ = TranslateMessage(&msg);
+            }
             DispatchMessageW(&msg);
+            ALTGR_CTRL.set(false);
         }
     }
     shared.link.event(Event::Closed);
@@ -1118,6 +1276,22 @@ struct Ui {
     out: Out,
     /// …and its files, on their way here before Windows' drag can carry them.
     taking: Option<(Offer, Arc<Taking>)>,
+    /// Keys handed to the game controls, by scan code (0xE0nn extended): their
+    /// let-go goes there too. With each, whether Windows' key state has said it
+    /// is down (game::released), and the virtual key to ask it by.
+    game_keys: HashMap<u16, bool>,
+    game_vks: HashMap<u16, u32>,
+    /// Side buttons held for the controls: the capture is the window's until both are let go.
+    xbuttons: u8,
+    /// FRONT_TIMER's looks so far.
+    front_tries: u8,
+    /// The input method's context, put aside while game controls are on (WM_APP_GAME_ON).
+    ime_aside: Option<HIMC>,
+    /// The pointer is taken for a look area (game controls), and where it was before.
+    captured: bool,
+    captured_from: POINT,
+    /// The wheel, added up into notches for a control bound to it.
+    wheel: f32,
 }
 
 /// A drag of the app's carried out of the window, as far as it has got.
@@ -1198,12 +1372,39 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             return DefWindowProcW(hwnd, msg, wp, lp);
         }
         if msg == WM_NCDESTROY {
+            let ui = &*ptr;
+            if ui.shared.game.is_some() {
+                WTSUnRegisterSessionNotification(hwnd);
+            }
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
             drop(Box::from_raw(ptr));
             PostQuitMessage(0);
             return LRESULT(0);
         }
         (*ptr).handle(hwnd, msg, wp, lp)
+    }
+}
+
+/// Whether a key is down now, as Windows' own key state has it — not as the
+/// window's messages say, which miss a release that went to the lock screen,
+/// a menu, or the other Shift.
+fn key_is_down(vk: u32) -> bool {
+    unsafe { (GetAsyncKeyState(vk as i32) as u16 & 0x8000) != 0 }
+}
+
+thread_local! {
+    /// The key message being handled is AltGr's left Ctrl, as the window's loop saw it.
+    static ALTGR_CTRL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Whether the message waiting after one sent at `time` is right Alt's, sent
+/// at that time too: that left Ctrl is AltGr's (game::keys::altgr_ctrl). Only
+/// from the window's loop, never its procedure (a look delivers sent messages).
+fn altgr_follows(time: u32) -> bool {
+    unsafe {
+        let mut next = MSG::default();
+        PeekMessageW(&mut next, None, 0, 0, PM_NOREMOVE).as_bool()
+            && game::keys::altgr_ctrl(next.message, next.wParam.0 as u32, next.lParam.0 as i64, next.time, time)
     }
 }
 
@@ -1322,7 +1523,322 @@ impl Ui {
 
     fn pointer(&self, x: i32, y: i32) {
         let (dx, dy) = self.shared.to_display(x, y);
+        // Game controls: where the free pointer is; the phone hears no mouse.
+        if let Some(g) = self.game_on() {
+            if !self.captured {
+                g.event(GameEvent::Pointer { x: dx, y: dy });
+            }
+            return;
+        }
         self.shared.send(wire::pointer(self.buttons, dx, dy, mods().meta()));
+    }
+
+    // ── game controls (apps/game) ──
+
+    /// The window's game controls, while they are on.
+    fn game_on(&self) -> Option<Arc<game::Session>> {
+        self.shared.game.as_ref().filter(|g| g.is_on()).cloned()
+    }
+
+    fn game_button_of(msg: u32) -> MouseButton {
+        match msg {
+            WM_LBUTTONDOWN | WM_LBUTTONUP | WM_LBUTTONDBLCLK => MouseButton::Left,
+            WM_RBUTTONDOWN | WM_RBUTTONUP | WM_RBUTTONDBLCLK => MouseButton::Right,
+            _ => MouseButton::Middle,
+        }
+    }
+
+    /// A mouse button for game controls: a left click with the pointer free is
+    /// a finger where it is (its Pointer went first); any other button, or any
+    /// while the pointer is taken, its control's if it has one, else nothing.
+    fn game_button(&self, g: &game::Session, button: MouseButton, down: bool) {
+        let input = GameInput::Mouse(button);
+        if (button == MouseButton::Left && !g.captured()) || g.captured() || g.takes(input) {
+            g.event(GameEvent::Input { input, down });
+        }
+    }
+
+    /// The wheel, `notches` up, while game controls are on: a control's tap for
+    /// each whole notch, if one has the wheel; nothing reaches the app either way.
+    fn game_wheel(&mut self, notches: f32) {
+        let Some(g) = self.game_on() else { return };
+        self.wheel += notches;
+        while self.wheel.abs() >= 1.0 {
+            let input = GameInput::Wheel(if self.wheel > 0.0 { WheelWay::Up } else { WheelWay::Down });
+            self.wheel -= self.wheel.signum();
+            if g.takes(input) {
+                g.event(GameEvent::Input { input, down: true });
+                g.event(GameEvent::Input { input, down: false });
+            }
+        }
+    }
+
+    /// A key down for game controls: F8 alone turns them on and off; while
+    /// they are on, Esc gives back a taken mouse, and a key a control has is
+    /// that control's — by its scan code, the key's place — once however long
+    /// it is held. True if it was theirs.
+    fn game_key_down(&mut self, hwnd: HWND, vk: u32, lp: LPARAM) -> bool {
+        let Some(g) = self.shared.game.clone() else { return false };
+        let scan = ((lp.0 >> 16) & 0xFF) as u16;
+        let extended = (lp.0 >> 24) & 1 == 1;
+        let repeat = (lp.0 >> 30) & 1 == 1;
+        let code = if extended { 0xE000 | scan } else { scan };
+        if self.game_keys.contains_key(&code) {
+            return true; // its repeat
+        }
+        let m = mods();
+        if m.win {
+            return false; // the Windows key's shortcuts are Windows'
+        }
+        // F8 is the controls' only where this game has them set up (else the app's), and then never reaches the app.
+        if vk == VK_F8_CODE && g.shortcut_is_ours() {
+            if !repeat {
+                g.toggle();
+            }
+            return true;
+        }
+        // A key that went to the phone before the controls came on lets go there too.
+        if !g.is_on() || self.keys_down.contains(&vk) {
+            return false;
+        }
+        // AltGr comes as left Ctrl and then right Alt, at one time: that left Ctrl is nobody's press.
+        if scan == 0x1D && !extended && ALTGR_CTRL.get() {
+            return false;
+        }
+        let Some(k) = game::keys::from_windows(scan, extended) else { return false };
+        let input = GameInput::Key(k);
+        if (k == game::keys::ESCAPE && g.captured()) || g.takes(input) {
+            // Started with the first key held only: setting it again would start it over,
+            // and keys coming one after another would keep it from ever firing.
+            if self.game_keys.is_empty() {
+                unsafe {
+                    let _ = SetTimer(Some(hwnd), GAME_KEYS_TIMER, game::RECONCILE_EVERY.as_millis() as u32, None);
+                }
+            }
+            // A key whose virtual key another shares is never asked about (keys.rs): only its own release lets it go.
+            let state_vk = game::keys::windows_state_vk(scan, extended, vk);
+            self.game_keys.insert(code, state_vk.is_some_and(key_is_down));
+            if let Some(v) = state_vk {
+                self.game_vks.insert(code, v);
+            }
+            if !repeat {
+                g.event(GameEvent::Input { input, down: true });
+            }
+            return true;
+        }
+        false
+    }
+
+    /// A key's let-go: the game controls', if its press was (AltGr's left Ctrl never was).
+    fn game_key_up(&mut self, lp: LPARAM) -> bool {
+        let scan = ((lp.0 >> 16) & 0xFF) as u16;
+        let extended = (lp.0 >> 24) & 1 == 1;
+        let code = if extended { 0xE000 | scan } else { scan };
+        if self.game_keys.remove(&code).is_none() {
+            return false;
+        }
+        self.game_vks.remove(&code);
+        self.game_let_go(code);
+        true
+    }
+
+    /// A game key's let-go, to the controls, by its scan code (0xE0nn extended).
+    fn game_let_go(&self, code: u16) {
+        if let (Some(g), Some(k)) = (&self.shared.game, game::keys::from_windows(code & 0xFF, (code & 0xE000) != 0)) {
+            g.event(GameEvent::Input { input: GameInput::Key(k), down: false });
+        }
+    }
+
+    /// The controls' held keys checked against Windows' own key state, a few
+    /// times a second while any is held (GAME_KEYS_TIMER): a key whose release
+    /// went elsewhere — the lock screen, a menu, the other Shift — is let go.
+    /// `all`: those Windows' state never showed down too (a menu has closed).
+    fn reconcile(&mut self, hwnd: HWND, all: bool) {
+        let vks = self.game_vks.clone();
+        let mut up = game::released(&mut self.game_keys, |code| vks.get(&code).map(|vk| key_is_down(*vk)));
+        if all {
+            let unknown: Vec<u16> = self.game_keys.iter().filter(|(_, seen)| !**seen).map(|(k, _)| *k).collect();
+            for k in &unknown {
+                self.game_keys.remove(k);
+            }
+            up.extend(unknown);
+        }
+        for code in up {
+            self.game_vks.remove(&code);
+            log::info!("game: a held key's release never came; it is let go");
+            self.game_let_go(code);
+        }
+        if self.game_keys.is_empty() {
+            unsafe {
+                let _ = KillTimer(Some(hwnd), GAME_KEYS_TIMER);
+            }
+        }
+    }
+
+    /// The window is the one the person uses again: the phone hears so before
+    /// `front` is set, which lets a controller's report go to it (gamepad.rs).
+    fn front_again(&mut self) {
+        if self.shared.front.load(Ordering::SeqCst) {
+            return;
+        }
+        self.hand_clipboard_over();
+        self.shared.send(wire::json(&json!({"t": "focus"})));
+        self.shared.front.store(true, Ordering::SeqCst);
+    }
+
+    /// The screen unlocked or the computer awake: in front again if the window
+    /// is the foreground one — now, or within the next five seconds
+    /// (FRONT_TIMER), as Windows may hand it the foreground a moment later.
+    fn front_soon(&mut self, hwnd: HWND) {
+        unsafe {
+            if GetForegroundWindow() == hwnd {
+                self.front_again();
+                return;
+            }
+            self.front_tries = 0;
+            let _ = SetTimer(Some(hwnd), FRONT_TIMER, 250, None);
+        }
+    }
+
+    /// The window is not the one the person uses — another has the keyboard,
+    /// the screen locked, the computer is going to sleep: everything held is let
+    /// go on the phone, game controls' fingers and controllers included, and the
+    /// mouse is given back.
+    fn front_lost(&mut self, hwnd: HWND) {
+        self.shared.front.store(false, Ordering::SeqCst);
+        self.take_pointer(hwnd, false);
+        self.game_keys.clear();
+        self.game_vks.clear();
+        unsafe {
+            let _ = KillTimer(Some(hwnd), GAME_KEYS_TIMER);
+        }
+        if let Some(g) = &self.shared.game {
+            g.blur();
+        }
+        for vk in self.keys_down.drain() {
+            if let Some(code) = keys::android_code(vk, false) {
+                self.shared.send(wire::key(false, 0, code, 0));
+            }
+        }
+        self.shared.send(wire::json(&json!({"t": "blur"})));
+    }
+
+    /// Game controls on: the input method put aside, so a key they have never
+    /// starts a composition (a Japanese keyboard's 半角/全角 is the key under Esc);
+    /// off: put back.
+    fn game_ime(&mut self, hwnd: HWND, on: bool) {
+        unsafe {
+            if on && self.ime_aside.is_none() {
+                self.ime_aside = Some(ImmAssociateContext(hwnd, HIMC::default()));
+            } else if !on {
+                if let Some(himc) = self.ime_aside.take() {
+                    ImmAssociateContext(hwnd, himc);
+                }
+            }
+        }
+    }
+
+    /// The picture's rectangle on screen — the client area under the bar — as
+    /// far as it is on the window's screen: where a taken pointer is kept.
+    fn picture_on_screen(&self, hwnd: HWND) -> RECT {
+        let (w, h) = self.shared.area();
+        let mut corners = [POINT { x: 0, y: self.bar_height() }, POINT { x: w as i32, y: self.bar_height() + h as i32 }];
+        for p in &mut corners {
+            unsafe {
+                let _ = ClientToScreen(hwnd, p);
+            }
+        }
+        let picture = (corners[0].x, corners[0].y, corners[1].x, corners[1].y);
+        // Only the part on the window's screen: a middle past its edge is a point the pointer cannot be put
+        // on, and every putting back would read as a move, a look that never stops.
+        let mut info = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
+        let (left, top, right, bottom) = if unsafe { GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &mut info) }.as_bool() {
+            let m = info.rcMonitor;
+            game::on_screen(picture, (m.left, m.top, m.right, m.bottom))
+        } else {
+            picture
+        };
+        RECT { left, top, right, bottom }
+    }
+
+    /// The pointer taken for looking around — captured, kept in the picture,
+    /// hidden, put back in its middle after each move — or given back where it
+    /// was. Once each way: hiding and showing the cursor are counted. Raw input
+    /// would be finer; it is one registration for the whole process.
+    fn take_pointer(&mut self, hwnd: HWND, on: bool) {
+        if !on {
+            self.give_pointer_back(true);
+            return;
+        }
+        if self.captured {
+            return;
+        }
+        unsafe {
+            if GetForegroundWindow() != hwnd {
+                // Only the window in front takes it, where Esc can reach it: the controls let go instead.
+                if let Some(g) = &self.shared.game {
+                    g.blur();
+                }
+                return;
+            }
+            self.captured = true;
+            let _ = GetCursorPos(&mut self.captured_from);
+            // Taken again by this window, it would be told it lost it (WM_CAPTURECHANGED).
+            if GetCapture() != hwnd {
+                SetCapture(hwnd);
+            }
+            self.clip_to_picture(hwnd);
+            ShowCursor(false);
+            log::info!("game: the mouse is taken for looking around");
+        }
+    }
+
+    /// The pointer back where it was, shown and free. `release`: the capture
+    /// too, unless a button holds it — not when another (a menu) has just taken it.
+    fn give_pointer_back(&mut self, release: bool) {
+        if !self.captured {
+            return;
+        }
+        self.captured = false;
+        unsafe {
+            let _ = ClipCursor(None);
+            ShowCursor(true);
+            if release && self.buttons == 0 && self.xbuttons == 0 {
+                let _ = ReleaseCapture();
+            }
+            let _ = SetCursorPos(self.captured_from.x, self.captured_from.y);
+        }
+        log::info!("game: the mouse is given back");
+    }
+
+    /// The taken pointer kept in the picture, wherever the picture is now, and put in its middle.
+    fn clip_to_picture(&self, hwnd: HWND) {
+        let r = self.picture_on_screen(hwnd);
+        unsafe {
+            let _ = ClipCursor(Some(&r));
+            let _ = SetCursorPos((r.left + r.right) / 2, (r.top + r.bottom) / 2);
+        }
+    }
+
+    /// A move of the taken pointer: its distance from the picture's middle, in
+    /// points, and the pointer put back there. The move that putting back makes is nothing.
+    fn captured_move(&mut self, hwnd: HWND, x: i32, y: i32) {
+        let r = self.picture_on_screen(hwnd);
+        let centre = POINT { x: (r.left + r.right) / 2, y: (r.top + r.bottom) / 2 };
+        let mut p = POINT { x, y };
+        unsafe {
+            let _ = ClientToScreen(hwnd, &mut p);
+        }
+        if p.x == centre.x && p.y == centre.y {
+            return;
+        }
+        if let Some(g) = self.game_on() {
+            let s = self.shared.scale().max(0.5);
+            g.event(GameEvent::Delta { dx: (p.x - centre.x) as f32 / s, dy: (p.y - centre.y) as f32 / s });
+        }
+        unsafe {
+            let _ = SetCursorPos(centre.x, centre.y);
+        }
     }
 
     // ── a drag of the app's, carried out of the window ──
@@ -1331,6 +1847,10 @@ impl Ui {
     /// the app's out of the window — the phone is asked to hand it over, and
     /// the app sees no more of the press.
     fn carrying_out(&mut self, x: i32, y: i32) -> bool {
+        // Game controls' fingers are never a drag carried out.
+        if self.game_on().is_some() {
+            return false;
+        }
         match self.out {
             Out::Asked | Out::Taking | Out::LetGo | Out::Dragging => true,
             Out::No if self.buttons == 1 && self.shared.phone_drag.load(Ordering::SeqCst) && !self.on_picture(x, y) => {
@@ -1439,7 +1959,7 @@ impl Ui {
     /// The Sound button's menu: where the phone's sound plays, Windows' own
     /// popup menu, under the button. Picking from it is the app's to carry
     /// out, off this thread; a note says how it went.
-    fn sound_menu(&self, hwnd: HWND) {
+    fn sound_menu(&mut self, hwnd: HWND) {
         let host = self.shared.link.host().clone();
         let items = host.sound_menu();
         if items.is_empty() {
@@ -1477,6 +1997,8 @@ impl Ui {
             self.shared.menu_open.store(false, Ordering::SeqCst);
             let _ = DestroyMenu(menu);
             self.after_menu(hwnd);
+            // The menu's loop had the keyboard: a game key let go meanwhile is let go now.
+            self.reconcile(hwnd, true);
             // The menu had the mouse: whatever was under it then is not hovered now.
             self.set_hover(Hit::None);
             if let Some(sound::Item::Choice { choice, enabled: true, .. }) = picked.checked_sub(1).and_then(|i| items.get(i)) {
@@ -1505,7 +2027,9 @@ impl Ui {
         if paths.is_empty() {
             return;
         }
-        let on_app = in_client && at.y >= self.bar_height() && self.bar_hit(at.x, at.y) == Hit::None;
+        // Not on the app while game controls have the mouse: to Downloads.
+        let on_app =
+            in_client && at.y >= self.bar_height() && self.bar_hit(at.x, at.y) == Hit::None && self.game_on().is_none();
         let on = on_app.then(|| {
             let (x, y) = self.shared.to_display(at.x, at.y);
             drops::On { key: self.shared.link.key().to_string(), x, y }
@@ -1747,6 +2271,16 @@ impl Ui {
             }
             let _ = AppendMenuW(menu, MF_STRING, MENU_FULL_SCREEN, text);
             let _ = AppendMenuW(menu, MF_STRING, MENU_TOUCHPAD, w!("Use phone as touchpad"));
+            // Game controls, an Android app's (apps/game).
+            if let Some(g) = &self.shared.game {
+                let tick = if g.is_on() { MF_CHECKED } else { MF_UNCHECKED };
+                // F8 is shown, and is theirs, once the game has controls set up; until then it is the app's.
+                let text = if g.shortcut_is_ours() { w!("Game controls\tF8") } else { w!("Game controls") };
+                let _ = AppendMenuW(menu, MF_STRING | tick, MENU_GAME, text);
+                let _ = AppendMenuW(menu, MF_STRING, MENU_GAME_SETUP, w!("Set up game controls…"));
+                // The phone's own screen as a controller for its windows here (apps/controller.rs).
+                let _ = AppendMenuW(menu, MF_STRING, MENU_CONTROLLER, w!("Use phone as game controller"));
+            }
             dark_menus(hwnd, self.shared.dark.load(Ordering::SeqCst));
             // Under the button, and never over it.
             let mut corners = [POINT { x: button.left, y: button.top }, POINT { x: button.right, y: button.bottom }];
@@ -1762,6 +2296,8 @@ impl Ui {
             let chosen = TrackPopupMenuEx(menu, flags.0, corners[0].x, corners[1].y, hwnd, Some(&clear));
             self.shared.menu_open.store(false, Ordering::SeqCst);
             let _ = DestroyMenu(menu);
+            // The menu's loop had the keyboard: a game key let go meanwhile is let go now.
+            self.reconcile(hwnd, true);
             // The menu had the mouse: whatever was under it then is not hovered now.
             self.set_hover(Hit::None);
             if chosen.0 as usize == MENU_FULL_SCREEN {
@@ -1771,6 +2307,17 @@ impl Ui {
                     MENU_PHONE => self.lay_out_as(hwnd, shape::Layout::Phone),
                     MENU_TABLET => self.lay_out_as(hwnd, shape::Layout::Tablet),
                     MENU_TOUCHPAD => self.shared.link.host().touchpad(self.shared.clone()),
+                    MENU_CONTROLLER => self.shared.link.host().controller(self.shared.clone()),
+                    MENU_GAME => {
+                        if let Some(g) = &self.shared.game {
+                            g.toggle();
+                        }
+                    }
+                    MENU_GAME_SETUP => {
+                        if let Some(g) = &self.shared.game {
+                            g.set_up();
+                        }
+                    }
                     MENU_COPY => {
                         // The app's own copy key: what it copies comes to this PC's
                         // clipboard — a picture or a file as a file — and the window says so.
@@ -1878,6 +2425,9 @@ impl Ui {
         if !self.shared.link.close(tell_phone) {
             return;
         }
+        // A taken mouse given back here, shown and no longer kept to the picture: not left to Windows
+        // deactivating the window as it goes.
+        self.give_pointer_back(true);
         // An Android app's next window opens as this one closes.
         if !self.shared.linux {
             if let Some(kept) = self.shape(hwnd) {
@@ -2097,6 +2647,11 @@ impl Ui {
                         let _ = TrackMouseEvent(&mut t);
                         self.tracking = true;
                     }
+                    // Taken for looking around: how far it moved from the picture's middle, and back there.
+                    if self.captured {
+                        self.captured_move(hwnd, x, y);
+                        return LRESULT(0);
+                    }
                     self.last_y = y;
                     if self.buttons != 0 && self.carrying_out(x, y) {
                         return LRESULT(0);
@@ -2128,7 +2683,7 @@ impl Ui {
                             self.top_bar_up_soon(hwnd, BAR_STAYS_MS);
                         }
                     }
-                    if self.buttons == 0 {
+                    if self.buttons == 0 && self.game_on().is_none() {
                         self.shared.send(wire::json(&json!({"t": "leave"})));
                     }
                     LRESULT(0)
@@ -2153,10 +2708,15 @@ impl Ui {
                         }
                         return LRESULT(0);
                     }
-                    if self.buttons == 0 {
+                    if self.buttons == 0 && self.xbuttons == 0 && GetCapture() != hwnd {
                         SetCapture(hwnd);
                     }
                     self.buttons |= Self::button_bit(msg);
+                    if let Some(g) = self.game_on() {
+                        self.pointer(x, y);
+                        self.game_button(&g, Self::game_button_of(msg), true);
+                        return LRESULT(0);
+                    }
                     self.pointer(x, y);
                     LRESULT(0)
                 }
@@ -2180,13 +2740,51 @@ impl Ui {
                         self.out = Out::LetGo;
                     }
                     self.buttons &= !bit;
+                    if let Some(g) = self.game_on() {
+                        self.pointer(x, y);
+                        self.game_button(&g, Self::game_button_of(msg), false);
+                        if self.buttons == 0 && self.xbuttons == 0 && !self.captured {
+                            let _ = ReleaseCapture();
+                        }
+                        return LRESULT(0);
+                    }
                     self.pointer(x, y);
                     if self.buttons == 0 {
                         let _ = ReleaseCapture();
                     }
                     LRESULT(0)
                 }
+                // This window taking the capture again tells it so too: nothing changed hands.
+                WM_CAPTURECHANGED if HWND(lp.0 as *mut core::ffi::c_void) == hwnd => LRESULT(0),
                 WM_CAPTURECHANGED => {
+                    // Something else took the mouse (a menu, Alt+Tab): game controls give it back,
+                    // leaving the capture with whoever has it now.
+                    if self.captured {
+                        self.give_pointer_back(false);
+                        if let Some(g) = &self.shared.game {
+                            g.event(GameEvent::Input { input: GameInput::Key(game::keys::ESCAPE), down: true });
+                        }
+                    }
+                    if let Some(g) = self.game_on() {
+                        // Every button held for the controls (button_bit's): their releases will not come here now.
+                        for (bit, button) in [(1, MouseButton::Left), (2, MouseButton::Right), (4, MouseButton::Middle)] {
+                            if self.buttons & bit != 0 {
+                                self.game_button(&g, button, false);
+                            }
+                        }
+                        self.buttons = 0;
+                    }
+                    // Side buttons held for the controls: their release will not come here now.
+                    if self.xbuttons != 0 {
+                        if let Some(g) = &self.shared.game {
+                            for (bit, button) in [(1, MouseButton::Back), (2, MouseButton::Forward)] {
+                                if self.xbuttons & bit != 0 {
+                                    self.game_button(g, button, false);
+                                }
+                            }
+                        }
+                        self.xbuttons = 0;
+                    }
                     if self.buttons != 0 {
                         self.buttons = 0;
                         let mut pt = POINT::default();
@@ -2198,14 +2796,52 @@ impl Ui {
                     LRESULT(0)
                 }
                 WM_XBUTTONDOWN | WM_XBUTTONUP => {
+                    let back = (wp.0 >> 16) & 0xFFFF == 1;
+                    if let Some(g) = self.game_on() {
+                        let button = if back { MouseButton::Back } else { MouseButton::Forward };
+                        let bit = if back { 1 } else { 2 };
+                        let down = msg == WM_XBUTTONDOWN;
+                        if down {
+                            // The window keeps the mouse until it is let go, as for the other
+                            // buttons: its release comes here wherever the pointer is by then.
+                            if self.xbuttons == 0 && self.buttons == 0 && GetCapture() != hwnd {
+                                SetCapture(hwnd);
+                            }
+                            self.xbuttons |= bit;
+                        } else {
+                            if self.xbuttons & bit == 0 {
+                                return LRESULT(1);
+                            }
+                            self.xbuttons &= !bit;
+                        }
+                        self.game_button(&g, button, down);
+                        if !down && self.xbuttons == 0 && self.buttons == 0 && !self.captured {
+                            let _ = ReleaseCapture();
+                        }
+                        return LRESULT(1);
+                    }
+                    // Held for controls that went off meanwhile: the capture goes with it.
+                    let bit = if back { 1 } else { 2 };
+                    if msg == WM_XBUTTONUP && self.xbuttons & bit != 0 {
+                        self.xbuttons &= !bit;
+                        if self.xbuttons == 0 && self.buttons == 0 && !self.captured {
+                            let _ = ReleaseCapture();
+                        }
+                    }
                     // A mouse's side buttons are Back and Forward, as a real mouse's are on Android.
-                    let code = if (wp.0 >> 16) & 0xFFFF == 1 { keys::code::BACK } else { keys::code::FORWARD };
+                    let code = if back { keys::code::BACK } else { keys::code::FORWARD };
                     self.shared.send(wire::key(msg == WM_XBUTTONDOWN, 0, code, 0));
                     LRESULT(1)
                 }
                 WM_MOUSEWHEEL | WM_MOUSEHWHEEL => {
                     let mut pt = POINT { x: lo(lp), y: hi(lp) };
                     let _ = ScreenToClient(hwnd, &mut pt);
+                    if self.game_on().is_some() {
+                        if msg == WM_MOUSEWHEEL {
+                            self.game_wheel(((wp.0 >> 16) & 0xFFFF) as i16 as f32 / 120.0);
+                        }
+                        return LRESULT(0);
+                    }
                     if pt.y >= self.bar_height() && self.bar_hit(pt.x, pt.y) == Hit::None {
                         let delta = ((wp.0 >> 16) & 0xFFFF) as i16 as f32 / 120.0;
                         let (dx, dy) = self.shared.to_display(pt.x, pt.y);
@@ -2217,8 +2853,27 @@ impl Ui {
                 WM_KEYDOWN | WM_SYSKEYDOWN => {
                     let vk = wp.0 as u32;
                     let m = mods();
-                    // Windows' own: Alt+F4 closes, Alt+Space is the window's menu.
-                    if msg == WM_SYSKEYDOWN && (vk == VK_F4.0 as u32 || (vk == VK_SPACE.0 as u32 && !m.ctrl)) {
+                    // Windows' own: Alt+F4 closes, whatever the controls have. With the mouse taken
+                    // for looking around Windows did nothing with it, the capture this window holds
+                    // standing in its way: the mouse is given back first, as Esc gives it back.
+                    if msg == WM_SYSKEYDOWN && vk == VK_F4.0 as u32 {
+                        if self.captured {
+                            self.give_pointer_back(true);
+                            if let Some(g) = &self.shared.game {
+                                g.event(GameEvent::Input { input: GameInput::Key(game::keys::ESCAPE), down: true });
+                            }
+                        }
+                        return DefWindowProcW(hwnd, msg, wp, lp);
+                    }
+                    // F8, and while they are on the keys the game controls have, are theirs —
+                    // and so is the character such a key would type, repeats included (the
+                    // message loop does not translate it, and none that comes is text).
+                    if self.game_key_down(hwnd, vk, lp) {
+                        self.swallow_char = true;
+                        return LRESULT(0);
+                    }
+                    // Alt+Space is the window's menu — unless Space is a control's, above.
+                    if msg == WM_SYSKEYDOWN && vk == VK_SPACE.0 as u32 && !m.ctrl {
                         return DefWindowProcW(hwnd, msg, wp, lp);
                     }
                     let extended = (lp.0 >> 24) & 1 == 1;
@@ -2262,6 +2917,9 @@ impl Ui {
                 }
                 WM_KEYUP | WM_SYSKEYUP => {
                     let vk = wp.0 as u32;
+                    if self.game_key_up(lp) {
+                        return LRESULT(0);
+                    }
                     if vk == VK_ESCAPE.0 as u32 {
                         self.esc_held = false;
                     }
@@ -2336,20 +2994,61 @@ impl Ui {
                         // brings it forward: one that lost its phone takes that
                         // as being opened again.
                         self.shared.link.host().activated();
-                        self.hand_clipboard_over();
-                        self.shared.send(wire::json(&json!({"t": "focus"})));
+                        self.front_again();
                     } else {
                         if self.full_screen() {
                             self.top_bar_up(hwnd, false);
                         }
-                        for vk in self.keys_down.drain() {
-                            if let Some(code) = keys::android_code(vk, false) {
-                                self.shared.send(wire::key(false, 0, code, 0));
-                            }
-                        }
-                        self.shared.send(wire::json(&json!({"t": "blur"})));
+                        // Alt+Tab, the Windows key, another window: game controls let go, the mouse comes back.
+                        self.front_lost(hwnd);
                     }
                     DefWindowProcW(hwnd, msg, wp, lp)
+                }
+                // The screen locked, the computer going to sleep: as losing the keyboard;
+                // unlocked, awake, and still in front: in front again.
+                WM_WTSSESSION_CHANGE => {
+                    match wp.0 {
+                        WTS_SESSION_LOCK => {
+                            SESSION_LOCKED.store(true, Ordering::SeqCst);
+                            if self.shared.front.load(Ordering::SeqCst) {
+                                self.front_lost(hwnd);
+                            }
+                        }
+                        WTS_SESSION_UNLOCK => {
+                            SESSION_LOCKED.store(false, Ordering::SeqCst);
+                            self.front_soon(hwnd);
+                        }
+                        _ => {}
+                    }
+                    LRESULT(0)
+                }
+                WM_POWERBROADCAST => {
+                    match wp.0 {
+                        PBT_APMSUSPEND if self.shared.front.load(Ordering::SeqCst) => self.front_lost(hwnd),
+                        // Awake behind the lock screen, it is in front of nobody until the unlock.
+                        PBT_APMRESUMEAUTOMATIC if !SESSION_LOCKED.load(Ordering::SeqCst) => self.front_soon(hwnd),
+                        _ => {}
+                    }
+                    LRESULT(1)
+                }
+                WM_TIMER if wp.0 == FRONT_TIMER => {
+                    self.front_tries = self.front_tries.saturating_add(1);
+                    let done = self.shared.front.load(Ordering::SeqCst) || SESSION_LOCKED.load(Ordering::SeqCst) || self.front_tries >= FRONT_TRIES;
+                    if !done && GetForegroundWindow() == hwnd {
+                        self.front_again();
+                    }
+                    if done || self.shared.front.load(Ordering::SeqCst) {
+                        let _ = KillTimer(Some(hwnd), FRONT_TIMER);
+                    }
+                    LRESULT(0)
+                }
+                WM_TIMER if wp.0 == GAME_KEYS_TIMER => {
+                    self.reconcile(hwnd, false);
+                    LRESULT(0)
+                }
+                WM_APP_GAME_ON => {
+                    self.game_ime(hwnd, wp.0 != 0);
+                    LRESULT(0)
                 }
                 WM_SIZE => {
                     let (w, h) = ((lp.0 & 0xFFFF) as u32, ((lp.0 >> 16) & 0xFFFF) as u32);
@@ -2357,9 +3056,22 @@ impl Ui {
                         *self.shared.client.lock().unwrap() = (w, h);
                         self.shared.maximized.store(wp.0 as u32 == SIZE_MAXIMIZED, Ordering::SeqCst);
                         self.shared.repaint();
+                        if self.captured {
+                            self.clip_to_picture(hwnd);
+                        }
                         let _ = SetTimer(Some(hwnd), RESIZE_TIMER, RESIZE_SETTLE_MS, None);
                     }
                     LRESULT(0)
+                }
+                WM_APP_GAME => {
+                    self.take_pointer(hwnd, wp.0 != 0);
+                    LRESULT(0)
+                }
+                // The picture moved or changed size (F11, Win+Arrow, another screen) while the
+                // mouse is taken: it is kept in the picture as it is now.
+                WM_MOVE if self.captured => {
+                    self.clip_to_picture(hwnd);
+                    DefWindowProcW(hwnd, msg, wp, lp)
                 }
                 WM_TIMER if wp.0 == RESIZE_TIMER => {
                     let _ = KillTimer(Some(hwnd), RESIZE_TIMER);

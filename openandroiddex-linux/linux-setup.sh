@@ -998,16 +998,23 @@ EOF
 # -- phase: browser tuning -------------------------------------------------
 # Separate from the install phase because it has to reach guests that already
 # have the browsers: install_browsers only runs while a wanted browser is
-# missing, so anything added here instead of there still lands on guests whose
-# browsers settled long ago. This phase carries its own stamp and a FEATURE
-# bump brings it to everyone.
-tune_browsers() {
-  # Launch wrappers. BOTH browsers' sandboxes want user namespaces, which a
-  # ptrace chroot cannot provide. They live here rather than in the install
-  # phase so that changing them reaches a guest that already has the browsers,
-  # and so a launch from a terminal -- which inherits none of the session
-  # environment linux-rt.sh sets -- still gets the same treatment. Wrapping
-  # beats patching the packages: an apt upgrade cannot undo it.
+# missing. Of the two halves, tune_browsers carries a stamp that only a VERSION
+# change clears, so it runs again only after an install pass; browser_wrappers
+# runs on every setup pass, so a FEATURE bump brings a change to it to everyone.
+#
+# browser_wrappers: the launch wrappers. BOTH browsers' sandboxes want user
+# namespaces, which a ptrace chroot cannot provide. They are not in the install
+# phase so that changing them reaches a guest that already has the browsers,
+# and so a launch from a terminal -- which inherits none of the session
+# environment linux-rt.sh sets -- still gets the same treatment. Wrapping
+# beats patching the packages: an apt upgrade cannot undo it.
+#
+# Deliberately UNSTAMPED, called on every setup pass ahead of tune_browsers
+# (whose update-alternatives needs them in place): they used to be written by
+# tune_browsers alone, and its touch-stamp outlives every FEATURE bump, so a
+# guest that had tuned once kept its first wrappers forever. Two small files,
+# both ours; nothing the user chose lives in them.
+browser_wrappers() {
   mkdir -p rootfs/usr/local/bin || return 1
   cat > rootfs/usr/local/bin/dex-firefox <<'EOF' || return 1
 #!/bin/sh
@@ -1030,12 +1037,20 @@ EOF
 # --no-sandbox: no user namespaces under proot.
 # --disable-dev-shm-usage: /dev/shm exists here but is disk-backed, not the
 #   tmpfs Chromium sizes its shared memory against.
-# --disable-gpu: Xvnc has no GL.
+# --disable-gpu unless the session's GPU probe passed, which is when
+#   linux-rt.sh and linux-win.sh point GL at Zink (doc/linux-gpu.md). Chromium
+#   then draws on the phone's GPU: on a Galaxy S24, CSS animations went from
+#   12 to 38 fps and WebGL from none to 45-50 fps, with scrolling unchanged
+#   (2026-11-12). Without the probe's yes, Xvnc has no GL.
 # --password-store=basic: no gnome-keyring or kwallet in this session.
-exec /usr/bin/chromium --no-sandbox --disable-dev-shm-usage --disable-gpu --password-store=basic "$@"
+GPU=--disable-gpu
+[ "$MESA_LOADER_DRIVER_OVERRIDE" = zink ] && GPU=
+exec /usr/bin/chromium --no-sandbox --disable-dev-shm-usage $GPU --password-store=basic "$@"
 EOF
   chmod 755 rootfs/usr/local/bin/dex-firefox rootfs/usr/local/bin/dex-chromium || return 1
+}
 
+tune_browsers() {
   # Chromium's --no-sandbox is not optional here (no user namespaces under
   # proot), so it permanently earns the "You are using an unsupported
   # command-line flag" banner. Silence it the SUPPORTED way -- the enterprise
@@ -1650,6 +1665,9 @@ if browsers_pending; then
   step_end
   BROWSERS_RAN=1
 fi
+
+# The wrappers on every pass, ahead of the tune -- see browser_wrappers.
+browser_wrappers || fail configure-browsers
 
 # Re-tuned whenever an install pass just ran, not only on the first pass: the
 # tuning is per-browser (Firefox's AutoConfig only lands when Firefox exists)

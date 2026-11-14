@@ -17,7 +17,8 @@
 //! notifications while this computer shows them (notifications/mod.rs) —
 //! for which a server is started on its own, without the warm-up a window
 //! wants ([`ensure_quietly`]), and stopped again when they go off unless the
-//! Apps page has used it meanwhile ([`retire`]). The phone listens for the
+//! Apps page has used it meanwhile ([`retire`]) or "Send to computer" and the
+//! photos hold it (send/mod.rs, [`release_send`]). The phone listens for the
 //! connection that asked, and stops when it goes: a connection made again is
 //! a new one ([`Server::connection`]), asked again. Requests on it are one at a time.
 
@@ -103,6 +104,9 @@ pub struct Server {
     /// notifications: what the phone copies comes to this computer only then,
     /// as it did before notifications started a server of their own.
     for_apps: Arc<AtomicBool>,
+    /// "Send to computer" or the phone's photos have it (send/mod.rs): one more
+    /// reason beside the Apps page's and the notifications' to keep it running.
+    for_send: Arc<AtomicBool>,
 }
 
 impl Server {
@@ -113,6 +117,15 @@ impl Server {
     /// Used by the Apps page or a window, not only by the phone's notifications.
     pub fn for_apps(&self) -> bool {
         self.for_apps.load(Ordering::SeqCst)
+    }
+
+    /// Kept for "Send to computer" and the photos, or no longer.
+    pub fn hold_for_send(&self, on: bool) {
+        self.for_send.store(on, Ordering::SeqCst);
+    }
+
+    pub fn for_send(&self) -> bool {
+        self.for_send.load(Ordering::SeqCst)
     }
 
     /// Which of its control connections is up now: the first is 0, and each
@@ -238,6 +251,20 @@ impl Server {
     /// The pad no longer offered: down on the phone, and its port closed.
     pub fn pad_off(&self) -> Result<(), String> {
         self.send(&json!({"t": "padOff"}))
+    }
+
+    /// The phone's screen as a game controller for its windows here
+    /// (apps/controller.rs): offered on the phone, its notification up while
+    /// `notice` (game mode), or with `open`, up on it now. The phone answers
+    /// `controllerOn` — how it went — and says what the controller does
+    /// (`controller`); its state stays on the phone.
+    pub fn controller_on(&self, open: bool, notice: bool) -> Result<(), String> {
+        self.send(&json!({"t": "controllerOn", "open": open, "notice": notice}))
+    }
+
+    /// The controller no longer offered: down on the phone, its notification too, and its port closed.
+    pub fn controller_off(&self) -> Result<(), String> {
+        self.send(&json!({"t": "controllerOff"}))
     }
 
     /// This computer's clipboard for the phone's next paste, on the phone's own
@@ -374,6 +401,12 @@ impl Server {
                 Err(_) => return Err("the phone did not send its icons".into()),
             }
         }
+    }
+
+    /// A game controller on this computer went: its pad goes from the phone (doc/game-mode.md).
+    #[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
+    pub fn gamepad_gone(&self, slot: u8) {
+        let _ = self.send(&json!({"t": "gamepad", "slot": slot, "on": false}));
     }
 
     fn send(&self, v: &Value) -> Result<(), String> {
@@ -521,6 +554,12 @@ pub fn running(serial: &str) -> Option<Arc<Server>> {
     servers().lock().unwrap().values().find(|s| s.alive() && s.reaches(serial)).cloned()
 }
 
+/// Every phone's server that is up (a game controller's going is told to each).
+#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
+pub fn all_running() -> Vec<Arc<Server>> {
+    servers().lock().unwrap().values().filter(|s| s.alive()).cloned().collect()
+}
+
 /// `phone`'s server, if it is up: whichever way it is reached.
 pub fn of_phone(phone: &str) -> Option<Arc<Server>> {
     servers().lock().unwrap().get(phone).filter(|s| s.alive()).cloned()
@@ -533,12 +572,39 @@ pub fn retire(phone: &str) {
     let retired = {
         let mut servers = servers().lock().unwrap();
         match servers.get(phone) {
-            Some(s) if !s.for_apps() => servers.remove(phone),
+            Some(s) if !s.for_apps() && !s.for_send() => servers.remove(phone),
             _ => None,
         }
     };
     if let Some(s) = retired {
         log::info!("apps [{phone}] the phone's app server stops: notifications were all it was running for");
+        s.stop();
+    }
+}
+
+/// "Send to computer" and the photos no longer want `phone`'s server: it
+/// stops if nothing else does — not the Apps page, not the notifications.
+pub fn release_send(phone: &str) {
+    let _one = starting().lock().unwrap();
+    // Asked under the lock [`retire`] takes: the notifications turned off a moment before, and
+    // their retire seeing this server still held for Send, must not leave it running until exit.
+    let notifications_want = crate::notifications::wants_server();
+    let retired = {
+        let mut servers = servers().lock().unwrap();
+        match servers.get(phone) {
+            Some(s) if s.for_send() => {
+                s.hold_for_send(false);
+                if !s.for_apps() && !notifications_want {
+                    servers.remove(phone)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    };
+    if let Some(s) = retired {
+        log::info!("apps [{phone}] the phone's app server stops: Send to computer was all it was running for");
         s.stop();
     }
 }
@@ -713,6 +779,7 @@ fn start(app: &tauri::AppHandle, serial: &str, phone: &str, warm: bool) -> Resul
         clip_last,
         sound,
         for_apps,
+        for_send: Arc::new(AtomicBool::new(false)),
     })
 }
 
@@ -770,6 +837,7 @@ fn spawn_control_reader(
                             crate::notifications::phone_said(&serial, &phone, &v);
                         }
                         Some("pad") | Some("padOn") => super::pad::said(&serial, &phone, &v),
+                        Some("controller") | Some("controllerOn") => super::controller::said(&serial, &phone, &v),
                         // The server's own log, once the shell it printed to has gone with its cable.
                         Some("log") => log::info!("apps [{serial}] {}", v["line"].as_str().unwrap_or("")),
                         Some("clip") => {

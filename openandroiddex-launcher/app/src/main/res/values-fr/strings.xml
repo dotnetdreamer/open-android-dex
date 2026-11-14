@@ -302,6 +302,18 @@
     <string name="tp_waiting_computer">En attente de l’ordinateur…</string>
     <string name="tp_notice_text_computer">Touchez pour pointer, cliquer et faire défiler dans les applications de votre téléphone sur l’ordinateur</string>
     <string name="tp_hidden">Le pavé tactile est masqué tant que Paramètres ou un écran similaire est ouvert. Il revient dès sa fermeture.</string>
+    <string name="gp_channel">Manette de jeu</string>
+    <string name="gp_title">Manette de jeu</string>
+    <string name="gp_notice_title">Utiliser votre téléphone comme manette</string>
+    <string name="gp_notice_text">Touchez pour jouer au jeu de l’ordinateur depuis cet écran</string>
+    <string name="gp_playing">En jeu sur votre ordinateur</string>
+    <string name="gp_no_window">Mettez la fenêtre de votre jeu au premier plan sur l’ordinateur</string>
+    <string name="gp_held">Cliquez une fois dans la fenêtre du jeu sur l’ordinateur pour commencer à jouer</string>
+    <string name="gp_refused">Votre téléphone ne laisse pas l’ordinateur ajouter une manette</string>
+    <string name="gp_hidden">La manette est masquée tant que Paramètres ou un écran similaire est ouvert. Elle revient dès sa fermeture.</string>
+    <string name="gp_no_game">Aucun jeu n’est ouvert sur un ordinateur : la manette n’a rien à faire jouer.</string>
+    <string name="gp_no_overlay">La manette a besoin de l’autorisation de s’afficher par-dessus les autres applications.</string>
+    <string name="gp_failed">Impossible d’ouvrir la manette.</string>
     <string name="st_phonepad">Le téléphone comme pavé tactile</string>
     <string name="st_phonepad_sub">Une notification sur votre téléphone transforme son écran en pavé tactile pour ce bureau</string>
     <string name="st_phonepad_note">Ouvrez-le depuis cette notification, ou depuis Pavé tactile dans les réglages rapides. Un doigt pointe et clique, deux font défiler, trois lancent les gestes ci-dessous.</string>
@@ -693,4 +705,35 @@ Si vous la désactivez plus tard, Android forcera la fermeture de Linux et le bu
     <!-- ── Linux app windows ── -->
     <string name="lw_opening">Ouverture de %1$s…</string>
     <string name="lw_close_window">Fermer la fenêtre</string>
+
+    <!-- ── Send to computer ── -->
+    <string name="sc_label">Envoyer à l’ordinateur</string>
+    <string name="sc_looking">Recherche de votre ordinateur…</string>
+    <string name="sc_preparing">Préparation…</string>
+    <string name="sc_sending">Envoi vers %s…</string>
+    <string name="sc_waiting">En attente de %s…</string>
+    <string name="sc_count">%1$d sur %2$d</string>
+    <string name="sc_saved">Enregistré dans Téléchargements sur %s</string>
+    <string name="sc_saved_some">%1$d sur %2$d enregistrés dans Téléchargements sur %3$s</string>
+    <string name="sc_opened">Ouvert sur %s</string>
+    <string name="sc_sent">Envoyé à %s</string>
+    <string name="sc_copied">Copié dans le presse-papiers de %s</string>
+    <string name="sc_copied_hint">Vous pouvez le coller là-bas.</string>
+    <string name="sc_none_title">Aucun ordinateur n’est connecté</string>
+    <string name="sc_none_body">Ouvrez Open Android DeX sur votre ordinateur et connectez ce téléphone. Puis renvoyez-le.</string>
+    <string name="sc_silent_title">Votre ordinateur n’a pas répondu</string>
+    <string name="sc_silent_body">Vérifiez qu’Open Android DeX y est toujours ouvert, puis réessayez.</string>
+    <string name="sc_off">« Envoyer à l’ordinateur » est désactivé sur %s</string>
+    <string name="sc_failed">Ce n’est pas arrivé</string>
+    <string name="sc_failed_lost">La connexion à %s a été perdue. Renvoyez-le.</string>
+    <string name="sc_failed_space">Il n’y a pas assez de place sur %s.</string>
+    <string name="sc_failed_read">Ce téléphone n’a pas pu lire %1$d sur %2$d.</string>
+    <string name="sc_failed_busy">%s est occupé. Renvoyez-le dans une minute.</string>
+    <string name="sc_failed_stuck">Ce téléphone ouvre encore des fichiers précédents. Réessayez dans une minute.</string>
+    <string name="sc_nothing">Il n’y a rien à envoyer ici</string>
+    <string name="sc_too_much_text">C’est trop de texte à envoyer en une fois</string>
+    <string name="sc_too_many">Envoyez au plus %d éléments à la fois</string>
+    <string name="sc_try_again">Réessayer</string>
+    <string name="sc_close">Fermer</string>
+    <string name="sc_cancel">Annuler</string>
 </resources>

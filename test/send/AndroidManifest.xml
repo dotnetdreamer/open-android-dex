@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- A throwaway sharing app for test/send-test.mjs: installed by the test,
+     used to share files of its own to the launcher's "Send to computer", and
+     uninstalled by the test. Its files are private: only the share's grant lets
+     anyone else read them. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.ccrstech.openandroiddex.sendtest"
+    android:versionCode="1"
+    android:versionName="1">
+    <uses-sdk android:minSdkVersion="26" android:targetSdkVersion="35" />
+    <!-- Only for its knocks on the computer's port, as any app with the Internet may knock. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <application android:label="oadx send test">
+        <provider
+            android:name=".Files"
+            android:authorities="com.ccrstech.openandroiddex.sendtest.files"
+            android:exported="false"
+            android:grantUriPermissions="true" />
+        <activity
+            android:name=".Share"
+            android:exported="true"
+            android:excludeFromRecents="true"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
+    </application>
+</manifest>

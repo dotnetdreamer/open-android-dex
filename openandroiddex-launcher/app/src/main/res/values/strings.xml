@@ -438,6 +438,19 @@
     <string name="tp_waiting_computer">Waiting for the computer…</string>
     <string name="tp_notice_text_computer">Tap to point, click and scroll in your phone’s apps on the computer</string>
     <string name="tp_hidden">The touchpad is hidden while Settings or a similar screen is open. It comes back when that closes.</string>
+    <!-- The phone as a game controller (PhoneGamepad, GamepadNotice): doc/game-mode.md -->
+    <string name="gp_channel">Game controller</string>
+    <string name="gp_title">Game controller</string>
+    <string name="gp_notice_title">Use phone as game controller</string>
+    <string name="gp_notice_text">Tap to play the game on your computer from this screen</string>
+    <string name="gp_playing">Playing on your computer</string>
+    <string name="gp_no_window">Bring your game’s window to the front on the computer</string>
+    <string name="gp_held">Click once in the game’s window on the computer to start playing</string>
+    <string name="gp_refused">Your phone doesn’t let the computer add a game controller</string>
+    <string name="gp_hidden">The game controller is hidden while Settings or a similar screen is open. It comes back when that closes.</string>
+    <string name="gp_no_game">No game is open on a computer, so there is nothing for the controller to play.</string>
+    <string name="gp_no_overlay">The game controller needs permission to draw over other apps.</string>
+    <string name="gp_failed">The game controller could not be opened.</string>
 
     <!-- Phone: who owns the Home button -->
     <string name="lx_home_title">Bring Home back here?</string>
@@ -1048,4 +1061,39 @@ If you switch this off again later, Android force-closes Linux and the desktop r
     <string name="lw_opening">Opening %1$s…</string>
     <!-- The taskbar menu of a Linux app's window: asks the app to close it. -->
     <string name="lw_close_window">Close window</string>
+
+    <!-- ── Send to computer ── -->
+    <!-- The entry in the phone's share menu, under the app's icon; and the card
+         that comes up over the app it was shared from. %s / %1$s / %3$s are the
+         computer's own name, as its owner set it ("IK's MacBook Pro"): never
+         quoted or declined. "Downloads" is the computer's Downloads folder. -->
+    <string name="sc_label">Send to computer</string>
+    <string name="sc_looking">Looking for your computer…</string>
+    <string name="sc_preparing">Getting it ready…</string>
+    <string name="sc_sending">Sending to %s…</string>
+    <string name="sc_waiting">Waiting for %s…</string>
+    <string name="sc_count">%1$d of %2$d</string>
+    <string name="sc_saved">Saved to Downloads on %s</string>
+    <string name="sc_saved_some">%1$d of %2$d saved to Downloads on %3$s</string>
+    <string name="sc_opened">Opened on %s</string>
+    <string name="sc_sent">Sent to %s</string>
+    <string name="sc_copied">Copied to the clipboard on %s</string>
+    <string name="sc_copied_hint">Paste it there.</string>
+    <string name="sc_none_title">No computer is connected</string>
+    <string name="sc_none_body">Start Open Android DeX on your computer and connect this phone. Then send again.</string>
+    <string name="sc_silent_title">Your computer didn\'t answer</string>
+    <string name="sc_silent_body">Check that Open Android DeX is still open there, then try again.</string>
+    <string name="sc_off">Send to computer is turned off on %s</string>
+    <string name="sc_failed">It didn\'t arrive</string>
+    <string name="sc_failed_lost">The connection to %s was lost. Send it again.</string>
+    <string name="sc_failed_space">There isn\'t enough room on %s.</string>
+    <string name="sc_failed_read">This phone couldn\'t read %1$d of %2$d.</string>
+    <string name="sc_failed_busy">%s is busy. Send it again in a minute.</string>
+    <string name="sc_failed_stuck">This phone is still opening earlier files. Try again in a minute.</string>
+    <string name="sc_nothing">There\'s nothing here to send</string>
+    <string name="sc_too_much_text">That\'s too much text to send at once</string>
+    <string name="sc_too_many">Send up to %d things at a time</string>
+    <string name="sc_try_again">Try again</string>
+    <string name="sc_close">Close</string>
+    <string name="sc_cancel">Cancel</string>
 </resources>

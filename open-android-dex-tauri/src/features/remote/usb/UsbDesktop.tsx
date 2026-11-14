@@ -99,6 +99,7 @@ export function UsbDesktop({
   start,
   host,
   onLost,
+  smooth = false,
 }: {
   url: string;
   /** How the window gets there, as its pill says it: USB, Wireless debugging, Wi-Fi, Remote, Remote (relay). */
@@ -111,6 +112,12 @@ export function UsbDesktop({
   host: DesktopHost;
   /** The stream went without the phone saying why: the cable, most likely. */
   onLost: () => void;
+  /**
+   * Scale the picture smoothly, for a desktop whose size is not the window's
+   * (a postmarketOS phone's, pmos.rs). The Linux desktop follows its window,
+   * so its pixels are shown one for one, and sharp when they are not.
+   */
+  smooth?: boolean;
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [phase, setPhase] = useState<Phase>({ kind: "connecting" });
@@ -623,7 +630,7 @@ export function UsbDesktop({
         ref={canvasRef}
         tabIndex={0}
         className="absolute inset-0 h-full w-full outline-none"
-        style={{ objectFit: "contain", imageRendering: "pixelated", touchAction: "none" }}
+        style={{ objectFit: "contain", imageRendering: smooth ? "auto" : "pixelated", touchAction: "none" }}
         aria-label={`The Linux desktop on ${name}`}
       />
       {covered && (

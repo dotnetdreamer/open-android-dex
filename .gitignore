@@ -14,6 +14,10 @@ openandroiddex-launcher/*/build/
 # by open-android-dex-tauri/.gitignore.)
 openandroiddex-remote/target/
 
+# test/send-test.mjs builds a throwaway sharing app from test/send/ (aapt2,
+# javac, d8, apksigner) and removes it when it is done; a run cut short leaves it.
+test/send/build/
+
 # IDE, per-machine
 .idea/
 .vscode/

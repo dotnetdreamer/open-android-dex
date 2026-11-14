@@ -21,6 +21,11 @@ pub struct PhoneAnswer {
     /// The phone can run Linux, so it can do remote access.
     pub available: bool,
     pub enabled: bool,
+    /// The phone's launcher has Samsung's background slowdown switched off and
+    /// has yet to switch it back on, which needs WRITE_SECURE_SETTINGS: what
+    /// was granted over the cable must stay until then. False from a launcher
+    /// too old to say.
+    pub slowdown_ours: bool,
     pub name: String,
     pub user: String,
     /// ready, installing, missing, failed (the setup stopped; a retry in the

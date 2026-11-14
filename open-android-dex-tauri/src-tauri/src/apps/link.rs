@@ -66,6 +66,9 @@ pub struct Spec {
     /// The phone's notification it was opened from (its key): the app opens at
     /// what that is about — the conversation — rather than at its front screen.
     pub notif: Option<String>,
+    /// Its game controls (apps/game): an Android app's window's; None for a Linux window and the probe.
+    #[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
+    pub game: Option<Arc<super::game::Session>>,
 }
 
 /// What a window says about itself to the app.
@@ -260,6 +263,9 @@ pub trait Host: Send + Sync {
     /// More's "Use phone as touchpad": the phone's screen up as the touchpad
     /// of its windows here (apps/pad.rs); `window` hears how it went.
     fn touchpad(&self, window: Arc<dyn Surface>);
+    /// More's "Use phone as game controller": the phone's screen up as a game
+    /// controller for its windows here (apps/controller.rs); `window` hears how it went.
+    fn controller(&self, window: Arc<dyn Surface>);
     /// More's Copy, sent to the app as its copy key: whatever the phone
     /// copies next comes here as anything it copies does, and `window` says
     /// so — or that nothing was.
@@ -312,7 +318,28 @@ pub struct Link {
     clock_offset_us: AtomicI64,
     best_rtt_us: AtomicU64,
     host: Arc<dyn Host>,
+    /// The stream's last codec configuration (SPS and PPS): what a still needs before its key frame.
+    config: Mutex<Option<Vec<u8>>>,
+    /// Waiting for the next key frame: the game controls' editor, for its still.
+    stills: Mutex<Vec<Sender<Vec<u8>>>>,
+    /// The picture since its last key frame, as it passed: the still when no
+    /// new key frame comes. A picture that does not change sends nothing, and
+    /// many games stop drawing once their window loses the keyboard.
+    last_still: Mutex<Option<Gop>>,
 }
+
+/// A key frame with the configuration it came with, and the frames after it.
+struct Gop {
+    config: Vec<u8>,
+    frames: Vec<Vec<u8>>,
+    bytes: usize,
+    /// A new key frame was asked for, the frames having grown past [`GOP_MAX`].
+    asked: bool,
+}
+
+/// How much of the picture is kept after its key frame before a new key frame
+/// is asked for (and twice that, with none coming, before it is let go).
+const GOP_MAX: usize = 8 << 20;
 
 impl Link {
     /// A link, and the other end of what it sends: for [`start`].
@@ -338,14 +365,98 @@ impl Link {
             clock_offset_us: AtomicI64::new(i64::MIN),
             best_rtt_us: AtomicU64::new(u64::MAX),
             host,
+            config: Mutex::new(None),
+            stills: Mutex::new(Vec::new()),
+            last_still: Mutex::new(None),
         };
         (Arc::new(link), rx)
+    }
+
+    /// The picture as it is now, for the game controls' editor: the stream's
+    /// configuration and the next key frame, which the phone is asked for — or
+    /// why not, after `wait`.
+    #[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
+    pub fn still(&self, wait: Duration) -> Result<(Vec<u8>, Vec<Vec<u8>>), String> {
+        let rx = self.ask_still();
+        self.still_from(rx, wait)
+    }
+
+    /// The phone asked for a key frame now; [`Link::still_from`] waits for it.
+    /// Asked before the editor's window opens, while the game still draws.
+    pub fn ask_still(&self) -> Receiver<Vec<u8>> {
+        let (tx, rx) = mpsc::channel();
+        self.stills.lock().unwrap().push(tx);
+        self.send(wire::json(&json!({"t": "keyframe"})));
+        rx
+    }
+
+    /// The configuration and the frames to decode for the picture now: the key
+    /// frame asked for with [`Link::ask_still`] or — none coming in time — the
+    /// last key frame and every frame after it.
+    pub fn still_from(&self, rx: Receiver<Vec<u8>>, wait: Duration) -> Result<(Vec<u8>, Vec<Vec<u8>>), String> {
+        // With the picture kept, a game that draws answers at once; one that doesn't is not waited for long.
+        let kept = self.last_still.lock().unwrap().is_some();
+        let wait = if kept { wait.min(Duration::from_millis(300)) } else { wait };
+        match rx.recv_timeout(wait) {
+            Ok(key) => Ok((self.config.lock().unwrap().clone().unwrap_or_default(), vec![key])),
+            Err(_) => self
+                .last_still
+                .lock()
+                .unwrap()
+                .as_ref()
+                .map(|g| (g.config.clone(), g.frames.clone()))
+                .ok_or_else(|| "the phone sent no picture in time".to_string()),
+        }
+    }
+
+    /// A piece of the picture, as it passes to the window: the configuration
+    /// kept, a key frame handed to whoever waits for one.
+    fn tap(&self, flags: u8, data: &[u8]) {
+        if flags & wire::VIDEO_CONFIG != 0 {
+            *self.config.lock().unwrap() = Some(data.to_vec());
+        } else if flags & wire::VIDEO_KEY != 0 {
+            let config = self.config.lock().unwrap().clone().unwrap_or_default();
+            *self.last_still.lock().unwrap() = Some(Gop { config, frames: vec![data.to_vec()], bytes: data.len(), asked: false });
+            let waiting = std::mem::take(&mut *self.stills.lock().unwrap());
+            for tx in waiting {
+                let _ = tx.send(data.to_vec());
+            }
+        } else {
+            let ask = {
+                let mut kept = self.last_still.lock().unwrap();
+                match kept.as_mut() {
+                    Some(g) if g.bytes > 2 * GOP_MAX => {
+                        *kept = None;
+                        false
+                    }
+                    Some(g) => {
+                        g.frames.push(data.to_vec());
+                        g.bytes += data.len();
+                        let ask = g.bytes > GOP_MAX && !g.asked;
+                        g.asked |= ask;
+                        ask
+                    }
+                    None => false,
+                }
+            };
+            if ask {
+                self.send(wire::json(&json!({"t": "keyframe"})));
+            }
+        }
     }
 
     pub fn send(&self, bytes: Vec<u8>) {
         if let Some(tx) = self.out.lock().unwrap().as_ref() {
             let _ = tx.send(bytes);
         }
+    }
+
+    /// Which connection the window's messages go on: one more each time it is
+    /// made again (cable ↔ Wi‑Fi, or the same way back). The phone starts each
+    /// with nothing held, so whatever is held is sent again on a new one.
+    #[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
+    pub fn generation(&self) -> u64 {
+        self.generation.load(Ordering::SeqCst)
     }
 
     /// What the phone's server calls this window: how a notification of its
@@ -736,6 +847,7 @@ fn read_loop(
                         let _ = a.send(ack_bytes.clone());
                     }
                 }
+                link.tap(flags, data);
                 surface.video(flags, pts, data.to_vec());
             }
             wire::JSON => {
@@ -759,6 +871,17 @@ fn read_loop(
                         }
                     }
                     Some("drag") => surface.dragging(v["on"].as_bool() == Some(true)),
+                    // The phone could not make a game controller (doc/game-mode.md): said once per window.
+                    Some("gamepad") if v["ok"].as_bool() == Some(false) => {
+                        log::warn!("apps: {}: the phone made no game controller: {}", surface.label(), v["message"]);
+                        surface.note(Some(super::gamepad::REFUSED.into()), false);
+                    }
+                    // The phone holds the controller's input: the window's display does not have its
+                    // focus, which below Android 13 only a click there gives (doc/game-mode.md).
+                    Some("gamepad") if v["focus"].as_bool() == Some(false) => {
+                        log::info!("apps: {}: the game controller waits for a click in the window", surface.label());
+                        surface.note(Some(super::gamepad::CLICK_FIRST.into()), false);
+                    }
                     Some("dragged") => surface.dragged(fetch::Offer::parse(&v)),
                     Some("video") => {
                         let coded = (v["w"].as_u64().unwrap_or(0) as u32, v["h"].as_u64().unwrap_or(0) as u32);
@@ -859,6 +982,7 @@ mod tests {
         fn pick_sound(&self, _choice: sound::Choice, _window: Arc<dyn Surface>) {}
         fn dropped(&self, _paths: Vec<PathBuf>, _on: Option<super::super::drops::On>, _window: Arc<dyn Surface>) {}
         fn touchpad(&self, _window: Arc<dyn Surface>) {}
+        fn controller(&self, _window: Arc<dyn Surface>) {}
         fn copying(&self, _window: Arc<dyn Surface>) {}
     }
 

@@ -271,13 +271,14 @@ pub async fn remote_pair_usb(app: AppHandle, serial: String, enable: bool) -> Re
     .map_err(|e| e.to_string())?
 }
 
-/// Is remote access switched on on this phone? Asked by the end-of-session
-/// clean-up, which must not take away the battery exemption remote access
-/// lives on. Any failure reads as "no", which is what the clean-up did before.
-pub fn phone_remote_enabled(app: &AppHandle, serial: &str) -> bool {
+/// Remote access as the phone reports it, or None when that cannot be read —
+/// no answer, or one that says it failed. Asked by the end-of-session
+/// clean-up, which must not take away what remote access lives on, and reads
+/// None as "on" for exactly that reason (restore_phone).
+pub fn phone_remote_status(app: &AppHandle, serial: &str) -> Option<PhoneAnswer> {
     content_call(app, serial, "status", &serde_json::json!({}))
-        .map(|a| a.enabled)
-        .unwrap_or(false)
+        .ok()
+        .filter(|a| a.ok)
 }
 
 // ── opening things ─────────────────────────────────────────────────────────

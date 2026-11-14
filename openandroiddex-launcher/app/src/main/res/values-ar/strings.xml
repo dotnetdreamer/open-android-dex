@@ -302,6 +302,18 @@
     <string name="tp_waiting_computer">في انتظار الكمبيوتر…</string>
     <string name="tp_notice_text_computer">انقر لتشير وتنقر وتمرّر في تطبيقات هاتفك على الكمبيوتر</string>
     <string name="tp_hidden">تُخفى لوحة اللمس ما دامت الإعدادات أو شاشة مشابهة مفتوحة، وتعود عند إغلاقها.</string>
+    <string name="gp_channel">يد التحكم</string>
+    <string name="gp_title">يد التحكم</string>
+    <string name="gp_notice_title">استخدم هاتفك كيد تحكم للألعاب</string>
+    <string name="gp_notice_text">انقر لتلعب اللعبة التي على الكمبيوتر من هذه الشاشة</string>
+    <string name="gp_playing">تلعب على الكمبيوتر</string>
+    <string name="gp_no_window">اجلب نافذة لعبتك إلى المقدمة على الكمبيوتر</string>
+    <string name="gp_held">انقر مرة واحدة في نافذة اللعبة على الكمبيوتر لتبدأ اللعب</string>
+    <string name="gp_refused">لا يسمح هاتفك للكمبيوتر بإضافة يد تحكم للألعاب</string>
+    <string name="gp_hidden">تُخفى يد التحكم ما دامت الإعدادات أو شاشة مشابهة مفتوحة، وتعود عند إغلاقها.</string>
+    <string name="gp_no_game">لا توجد لعبة مفتوحة على أي كمبيوتر، فلا شيء تلعبه يد التحكم.</string>
+    <string name="gp_no_overlay">تحتاج يد التحكم إذنًا بالعرض فوق التطبيقات الأخرى.</string>
+    <string name="gp_failed">تعذّر فتح يد التحكم.</string>
     <string name="st_phonepad">الهاتف كلوحة لمس</string>
     <string name="st_phonepad_sub">إشعار على هاتفك يحوّل شاشته إلى لوحة لمس لسطح المكتب هذا</string>
     <string name="st_phonepad_note">افتحها من ذلك الإشعار، أو من «لوحة اللمس» في الإعدادات السريعة. إصبع واحد يشير وينقر، وإصبعان للتمرير، وثلاثة تنفّذ الإيماءات أدناه.</string>
@@ -705,4 +717,35 @@
     <!-- ── Linux app windows ── -->
     <string name="lw_opening">جارٍ فتح %1$s…</string>
     <string name="lw_close_window">إغلاق النافذة</string>
+
+    <!-- ── Send to computer ── -->
+    <string name="sc_label">إرسال إلى الكمبيوتر</string>
+    <string name="sc_looking">جارٍ البحث عن الكمبيوتر…</string>
+    <string name="sc_preparing">جارٍ التجهيز…</string>
+    <string name="sc_sending">جارٍ الإرسال إلى %s…</string>
+    <string name="sc_waiting">في انتظار %s…</string>
+    <string name="sc_count">%1$d من %2$d</string>
+    <string name="sc_saved">تم الحفظ في مجلد التنزيلات على %s</string>
+    <string name="sc_saved_some">تم حفظ %1$d من %2$d في مجلد التنزيلات على %3$s</string>
+    <string name="sc_opened">تم الفتح على %s</string>
+    <string name="sc_sent">تم الإرسال إلى %s</string>
+    <string name="sc_copied">تم النسخ إلى حافظة %s</string>
+    <string name="sc_copied_hint">الصقه هناك.</string>
+    <string name="sc_none_title">لا يوجد كمبيوتر متصل</string>
+    <string name="sc_none_body">افتح Open Android DeX على الكمبيوتر وصِل هذا الهاتف، ثم أرسل مرة أخرى.</string>
+    <string name="sc_silent_title">لم يستجب الكمبيوتر</string>
+    <string name="sc_silent_body">تأكد من أن Open Android DeX لا يزال مفتوحًا هناك، ثم حاول مرة أخرى.</string>
+    <string name="sc_off">«إرسال إلى الكمبيوتر» متوقف على %s</string>
+    <string name="sc_failed">لم يصل</string>
+    <string name="sc_failed_lost">انقطع الاتصال بـ %s. أرسله مرة أخرى.</string>
+    <string name="sc_failed_space">لا توجد مساحة كافية على %s.</string>
+    <string name="sc_failed_read">تعذّر على هذا الهاتف قراءة %1$d من %2$d.</string>
+    <string name="sc_failed_busy">%s مشغول. أرسله مرة أخرى بعد دقيقة.</string>
+    <string name="sc_failed_stuck">لا يزال هذا الهاتف يفتح ملفات سابقة. حاول مرة أخرى بعد دقيقة.</string>
+    <string name="sc_nothing">لا يوجد شيء لإرساله هنا</string>
+    <string name="sc_too_much_text">هذا نص أطول من أن يُرسل دفعة واحدة</string>
+    <string name="sc_too_many">أرسل %d عنصرًا كحد أقصى في كل مرة</string>
+    <string name="sc_try_again">حاول مرة أخرى</string>
+    <string name="sc_close">إغلاق</string>
+    <string name="sc_cancel">إلغاء</string>
 </resources>

@@ -239,6 +239,41 @@ dropped by an adb server of another version, and everything it posts is gone
 from the phone when it ends; run it on an AVD started with `-read-only` to
 leave the AVD's texts and call log as they were.
 
+"Send to computer" and the Photos tab (`doc/send-to-computer.md`) have their
+phone's half checked the same way:
+
+```sh
+node test/send-test.mjs [serial] [--photos|--share]
+```
+
+It runs the app server from the dex and speaks its `send` link as the computer
+does. The photos half needs nothing installed: the link's hello, a second link
+taking the first one's place, a snapshot (newest first, the camera's and the
+screenshots' folders only), a picture moved into `Pictures/Screenshots` arriving
+as new with a thumbnail no longer than 512, a pushed file staying out until it
+is scanned, an original byte for byte and from the middle, `changed` and
+`gone`, a picture removed going, `older` and `all` paging through without a
+repeat or a gap, `status`, and looking stopped. The share half needs this
+build's launcher (a desktop session installs it, or `adb install -r` of
+`app-debug.apk`): the share entry turned on and back by the computer's switch,
+text, then a throwaway sharing app built from `test/send/` with the SDK's own
+tools and signed with the launcher's tracked debug key — installed, used,
+uninstalled — sharing private files of its own (one, three, an empty one, a
+hostile name, 64 MB), each taken byte for byte though the shell could never
+read them itself; a file that says it is smaller than it is (its size passed
+on as a hint, every byte taken); a file whose opening the provider holds past
+the launcher's 50 s (given up on, and a share meanwhile still arrives — this
+one takes about a minute); what a sloppy or
+hostile app shares (Strings or another Parcelable as the stream: the launcher
+stays up); a link with a preview picture beside it; a tap outside the card
+before its files are open (only when the card is in front on an awake,
+unlocked screen; skipped otherwise); thousands of knocks on the port, then a
+share; a share taken back on its card; a link dropped half way; no computer; a
+computer that takes no shares. The test's pictures, its rows in the media
+store, the dex and the app are gone when it ends, and the share entry is as it
+was found. With no serial given it runs only when exactly one device is
+attached, and stops otherwise: it never runs on whatever adb picks.
+
 The phone's screen as the touchpad of its apps' windows on the computer
 (`doc/phone-touchpad.md`, §10) has its phone's half checked the same way:
 
@@ -263,6 +298,67 @@ going dark and lit again; an app put in front on the phone's screen, and ✕,
 each putting the pad away; and withdrawn, the app-op as it was. It puts the
 launcher's app-op back to what it found.
 
+Game mode (`doc/game-mode.md`) has its phone's half checked the same way:
+
+```sh
+node test/game-test.mjs [serial] [app A] [app B]
+```
+
+With no serial it runs only where adb sees exactly one device, and says so
+otherwise. An app is `package` or `package/activity`; A defaults to Files (DocumentsUI),
+B to the first calculator the phone has. It runs the app server from the dex,
+opens both in windows and sends what the computer sends. A controller's state
+on A's window makes an Xbox 360 pad on the phone, with that key layout, tied
+to A's display; a report on B's window moves the same pad to B's, and its hat
+moves the calculator's focus; B pressed on A's window closes A while B's
+display has the focus, and B stays; A's end takes its pad and tie away; blur
+lets the pad go, still tied, and a report after the blur is dropped until the
+window's focus; a second slot comes and goes with the control connection's
+word; closing B takes its pad; the server's marker names its ports; stop
+leaves no pad, tie or marker; and a server killed with `kill -9` leaves its
+tie, which the next server takes back. Then game controls' fingers: three
+held together (the dispatcher's DOWN, POINTER_DOWN ×2, POINTER_UP ×2, UP, in
+order), 7 held while 8 is tapped leaving "87" in the calculator's formula, a
+mouse move among fingers dropped, twenty fingers with ids 40 to 59 (past
+Android's last pointer id, 31, and more than the 16 it takes: never more
+than 16 down, all let go, the next finger a new gesture's first, nothing
+refused), and blur lifting them. Then a second connection attaching to B
+while the first holds a finger and the hat: the phone lets go of both,
+closes the first, and takes the second's state; and a third attaching while
+the second holds an ordinary mouse press, which stays down until the third
+lets it go. The order is read from One UI's `Delivering touch` lines in logcat, and
+the formula with `uiautomator`; a phone that prints neither has those checks
+said and skipped. It never sends a report to a window it did not open, takes
+the tasks its windows made out of the phone's recent apps, and checks the
+phone has no pad, tie, display, forward or dex of its own left. There is no
+browser-page mode: on someone's own phone it would leave a tab and a history
+entry.
+
+The phone's screen as a game controller for those windows
+(`doc/game-mode.md`, "The phone as a controller") is checked the same way:
+
+```sh
+node test/controller-test.mjs [serial] [app A] [app B]
+```
+
+It needs this build's launcher on the phone. A defaults to Files, which B
+closes, B to a calculator or the clock; where Files keeps every overlay off the
+screen (Android 15 and later) give an A that does not, such as the clock. It
+runs the app server from the dex, opens both in windows, and offers the
+controller on the control wire: the launcher let draw over other apps; a
+connection to its port from anything but the launcher refused; its
+notification up while game mode is said to be on, and down after (where the
+launcher may post one); up, the phone's screen turned landscape, playing the
+window last in front and then the one that comes in front. Then real taps on
+the controller, read from its own layout line in logcat: its B makes the
+phone's own pad (slot 4) for A and reaches A's app — closing it, or One UI's
+dispatcher saying so — held below Android 13 until a press on A's display, and
+A's window told; its left stick moves the pad's stick while the finger is down
+(the kernel's `ABS_X`); ✕ closes it and its pad goes; the screen upright again
+(with auto-rotate off); withdrawn, the app-op as it was; and the server's stop
+withdrawing it. It never taps while the controller is kept off the screen,
+where a tap would land on whatever is under it, and says why instead.
+
 The window daemon's answer to `DESKTOP` — which display is the desktop
 (`doc/custom-titlebar-v2.md`, issue #11) — is a rule over the task tree, and that
 rule is checked on a computer's JVM, with a JDK:
@@ -279,5 +375,5 @@ install makes, the display the desktop was last seen on while that display holds
 task, then none at all — not the other display's app.
 
 Everything else needs a device. `doc/web-viewer.md`, `doc/remote-access.md`,
-`doc/usb-desktop.md`, `doc/apps-on-pc.md` and `doc/phone-notifications.md`
-list what is still unverified there.
+`doc/usb-desktop.md`, `doc/apps-on-pc.md`, `doc/phone-notifications.md` and
+`doc/game-mode.md` list what is still unverified there.

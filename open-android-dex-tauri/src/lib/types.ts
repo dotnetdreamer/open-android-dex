@@ -289,3 +289,27 @@ export interface RemoteUsbStatus {
   /** This computer is already paired with it. */
   pairedHere: boolean;
 }
+
+/** A postmarketOS phone on the USB cable (pmos.rs, pmos_status). */
+export interface PmosPhone {
+  /** Which phone, by its SSH host key; empty while its SSH is not answering. */
+  id: string;
+  /** Its SSH answers. */
+  ssh: boolean;
+  /** This computer has signed in to it before. */
+  paired: boolean;
+  name?: string | null;
+  user?: string | null;
+  os?: string | null;
+}
+
+/** Where a postmarketOS phone's desktop is (pmos.rs, the "pmos:session" event). */
+export interface PmosSessionEvent {
+  id: string;
+  state: "launching" | "running" | "ended" | "failed";
+  /** While launching: connecting (0), putting the helper on the phone (1), starting the screen (2). */
+  step?: number;
+  /** Why it ended or failed; none when it was closed on purpose. */
+  message?: string;
+  name: string;
+}

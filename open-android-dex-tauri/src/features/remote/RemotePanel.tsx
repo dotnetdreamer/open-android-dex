@@ -7,6 +7,7 @@ import type { DeviceInfo, RemotePhone, RemoteProbe, RemoteUsbStatus } from "../.
 import { Icon } from "../../ui/Icon";
 import { Menu, MenuItem } from "../../ui/kit";
 import { Stage } from "../../ui/Stage";
+import { PmosLinuxCard } from "../pmos/PmosLinuxCard";
 
 /**
  * Phone Linux over SSH: the phones this computer can log in to, and the two
@@ -217,6 +218,8 @@ export function RemotePanel({ devices }: { devices: DeviceInfo[] }) {
           or mobile data.
         </p>
       </header>
+
+      <PmosLinuxCard />
 
       {list.length > 0 && (
         <section className="stagger flex flex-col gap-2.5">

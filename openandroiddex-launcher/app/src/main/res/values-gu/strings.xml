@@ -302,6 +302,18 @@
     <string name="tp_waiting_computer">કમ્પ્યુટરની રાહ જોવાઈ રહી છે…</string>
     <string name="tp_notice_text_computer">કમ્પ્યુટર પર તમારા ફોનની ઍપમાં પોઇન્ટ, ક્લિક અને સ્ક્રોલ કરવા ટૅપ કરો</string>
     <string name="tp_hidden">સેટિંગ્સ કે તેના જેવી સ્ક્રીન ખુલ્લી હોય ત્યાં સુધી ટચપૅડ છુપાયેલું રહે છે. તે બંધ થતાં ટચપૅડ પાછું આવે છે.</string>
+    <string name="gp_channel">ગેમ કંટ્રોલર</string>
+    <string name="gp_title">ગેમ કંટ્રોલર</string>
+    <string name="gp_notice_title">તમારા ફોનને ગેમ કંટ્રોલર તરીકે વાપરો</string>
+    <string name="gp_notice_text">આ સ્ક્રીન પરથી કમ્પ્યુટર પરની ગેમ રમવા ટૅપ કરો</string>
+    <string name="gp_playing">તમારા કમ્પ્યુટર પર રમાઈ રહી છે</string>
+    <string name="gp_no_window">કમ્પ્યુટર પર તમારી ગેમની વિન્ડો આગળ લાવો</string>
+    <string name="gp_held">રમવાનું શરૂ કરવા કમ્પ્યુટર પર ગેમની વિન્ડોમાં એક વાર ક્લિક કરો</string>
+    <string name="gp_refused">તમારો ફોન કમ્પ્યુટરને ગેમ કંટ્રોલર ઉમેરવા દેતો નથી</string>
+    <string name="gp_hidden">સેટિંગ્સ કે તેના જેવી સ્ક્રીન ખુલ્લી હોય ત્યાં સુધી ગેમ કંટ્રોલર છુપાયેલું રહે છે. તે બંધ થતાં કંટ્રોલર પાછું આવે છે.</string>
+    <string name="gp_no_game">કોઈ કમ્પ્યુટર પર કોઈ ગેમ ખુલ્લી નથી, તેથી કંટ્રોલર પાસે રમવા જેવું કંઈ નથી.</string>
+    <string name="gp_no_overlay">ગેમ કંટ્રોલરને બીજી ઍપ ઉપર દોરવાની પરવાનગી જોઈએ છે.</string>
+    <string name="gp_failed">ગેમ કંટ્રોલર ખૂલી શક્યું નહીં.</string>
     <string name="st_phonepad">ટચપૅડ તરીકે ફોન</string>
     <string name="st_phonepad_sub">તમારા ફોન પરનું નોટિફિકેશન તેની સ્ક્રીનને આ ડેસ્કટોપનું ટચપૅડ બનાવી દે છે</string>
     <string name="st_phonepad_note">તેને એ નોટિફિકેશનથી, અથવા ઝડપી સેટિંગ્સમાં ટચપૅડથી ખોલો. એક આંગળી પોઇન્ટ અને ક્લિક કરે છે, બે સ્ક્રોલ કરે છે, અને ત્રણ નીચેના જેસ્ચર ચલાવે છે.</string>
@@ -693,4 +705,35 @@
     <!-- ── Linux app windows ── -->
     <string name="lw_opening">%1$s ખુલી રહ્યું છે…</string>
     <string name="lw_close_window">વિન્ડો બંધ કરો</string>
+
+    <!-- ── Send to computer ── -->
+    <string name="sc_label">કમ્પ્યુટર પર મોકલો</string>
+    <string name="sc_looking">તમારું કમ્પ્યુટર શોધી રહ્યું છે…</string>
+    <string name="sc_preparing">તૈયાર થઈ રહ્યું છે…</string>
+    <string name="sc_sending">%s પર મોકલી રહ્યું છે…</string>
+    <string name="sc_waiting">%s ની રાહ જોઈ રહ્યું છે…</string>
+    <string name="sc_count">%2$d માંથી %1$d</string>
+    <string name="sc_saved">%s પર Downloads માં સેવ થયું</string>
+    <string name="sc_saved_some">%3$s પર Downloads માં %2$d માંથી %1$d સેવ થયા</string>
+    <string name="sc_opened">%s પર ખોલ્યું</string>
+    <string name="sc_sent">%s પર મોકલ્યું</string>
+    <string name="sc_copied">%s ના ક્લિપબોર્ડ પર કૉપિ થયું</string>
+    <string name="sc_copied_hint">ત્યાં પેસ્ટ કરો.</string>
+    <string name="sc_none_title">કોઈ કમ્પ્યુટર કનેક્ટ નથી</string>
+    <string name="sc_none_body">તમારા કમ્પ્યુટર પર Open Android DeX ખોલો અને આ ફોન કનેક્ટ કરો. પછી ફરી મોકલો.</string>
+    <string name="sc_silent_title">તમારા કમ્પ્યુટરે જવાબ ન આપ્યો</string>
+    <string name="sc_silent_body">ત્યાં Open Android DeX હજુ ખુલ્લું છે કે નહીં તે તપાસો, પછી ફરી પ્રયાસ કરો.</string>
+    <string name="sc_off">%s પર “કમ્પ્યુટર પર મોકલો” બંધ છે</string>
+    <string name="sc_failed">તે પહોંચ્યું નહીં</string>
+    <string name="sc_failed_lost">%s સાથેનું કનેક્શન તૂટી ગયું. તેને ફરી મોકલો.</string>
+    <string name="sc_failed_space">%s પર પૂરતી જગ્યા નથી.</string>
+    <string name="sc_failed_read">આ ફોન %2$d માંથી %1$d વાંચી શક્યો નહીં.</string>
+    <string name="sc_failed_busy">%s અત્યારે વ્યસ્ત છે. એક મિનિટ પછી તેને ફરી મોકલો.</string>
+    <string name="sc_failed_stuck">આ ફોન હજુ અગાઉની ફાઇલો ખોલી રહ્યો છે. એક મિનિટ પછી ફરી પ્રયાસ કરો.</string>
+    <string name="sc_nothing">અહીં મોકલવા માટે કંઈ નથી</string>
+    <string name="sc_too_much_text">એક સાથે મોકલવા માટે આ ઘણું વધારે લખાણ છે</string>
+    <string name="sc_too_many">એક વખતે વધુમાં વધુ %d વસ્તુઓ મોકલો</string>
+    <string name="sc_try_again">ફરી પ્રયાસ કરો</string>
+    <string name="sc_close">બંધ કરો</string>
+    <string name="sc_cancel">રદ કરો</string>
 </resources>

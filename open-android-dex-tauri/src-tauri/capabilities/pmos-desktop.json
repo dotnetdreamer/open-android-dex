@@ -1,0 +1,13 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "pmos-desktop",
+  "description": "A postmarketOS phone's desktop window (pmos.rs, PmosDesktop.tsx): the app's own page, which shows the phone's video and sends it the mouse and keyboard. It logs, goes full screen with F11, and closes itself; it has no clipboard or files of the phone's yet.",
+  "windows": ["pmos-*"],
+  "permissions": [
+    "core:default",
+    "log:default",
+    "core:window:allow-set-fullscreen",
+    "core:window:allow-set-focus",
+    "core:window:allow-close"
+  ]
+}

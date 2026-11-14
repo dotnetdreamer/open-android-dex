@@ -431,6 +431,11 @@ bytes:
 | `0x21` | computer → phone | x u16, y u16, h f32, v f32, meta u32 — the wheel, in notches |
 | `0x22` | computer → phone | down u8, repeat u8, code u16, meta u32 — a key, Android's code and meta |
 | `0x23` | computer → phone | UTF-8 — characters typed |
+| `0x24` | computer → phone | count u8, then count × (id u8, x u16, y u16) — game controls' fingers, exactly these down |
+| `0x25` | computer → phone | slot u8, 13-byte report — a game controller's state; the window that says so owns it |
+
+The last two, and the `gamepad` JSON that goes with them, are Game mode's:
+doc/game-mode.md.
 
 A window's JSON: `open` (package or Linux window, size, dpi, fps, `direct`,
 what closing does, the window's `key`, and the notification it opens at,
@@ -467,7 +472,17 @@ Download), or `taken` false, `why` (`refused`, `cannot`) and each file so
 ("Dropping files"). A file this computer
 takes from the phone is the same the other way: `get` (the offer's number and
 the item's), the phone's `get` with its name, type and size (-1 unknown), and
-its bytes, raw, until the connection closes.
+its bytes in pieces (`0x04`), then an empty piece: the end mark, without
+which a file is cut short whatever its size said. It lands in the offer's
+own folder as a file sent to the computer lands in Downloads — its name and
+its part made exclusively, never a file that was there written into — and a
+drag let go of before it became the computer's own goes into Downloads the
+same way.
+
+Two more first messages belong to "Send to computer" and the Photos tab
+(doc/send-to-computer.md, "The wire"): `send`, a computer's standing link for
+what the phone shares and for its photos, and `photo`, one picture's
+original, its bytes raw after the answer.
 
 Each window's connection is its own adb stream, side by side on the one USB or
 Wi-Fi link, so one app's key frame never waits behind another's.

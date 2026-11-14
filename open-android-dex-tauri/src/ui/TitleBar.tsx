@@ -4,7 +4,7 @@ import { IS_MAC, TITLEBAR_LEAD } from "../lib/host";
 import { Icon } from "./Icon";
 import { Segmented } from "./kit";
 
-export type Tab = "desktop" | "apps" | "linux";
+export type Tab = "desktop" | "apps" | "linux" | "photos";
 
 /**
  * The window's top strip: the app's name, the switch between the things it
@@ -47,6 +47,7 @@ export function TitleBar({
           { value: "desktop", label: "Desktop", icon: "laptop", busy: desktopBusy && tab !== "desktop" },
           { value: "apps", label: "Apps", icon: "apps" },
           { value: "linux", label: "Linux", icon: "terminal" },
+          { value: "photos", label: "Photos", icon: "image" },
         ]}
       />
       <div className={`flex flex-1 items-center justify-end gap-1 ${IS_MAC ? "pr-2.5" : ""}`}>

@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The game controller notification's status-bar icon (GamepadNotice): a pad's body with
+     a d-pad on the left and two buttons on the right cut out of it. One solid shape, so it
+     reads at 24dp and the system can tint it like any other small icon. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:fillType="evenOdd"
+        android:pathData="M7.5,6h9a5.5,5.5 0,0 1,5.4 4.5l0.9,5.2a2.8,2.8 0,0 1,-4.9 2.3l-2,-2.5h-7.8l-2,2.5a2.8,2.8 0,0 1,-4.9 -2.3l0.9,-5.2a5.5,5.5 0,0 1,5.4 -4.5z
+            M6.25,9.25v1.5h-1.5v1.5h1.5v1.5h1.5v-1.5h1.5v-1.5h-1.5v-1.5z
+            M15.5,10a1,1 0,1 0,2 0a1,1 0,1 0,-2 0z
+            M17.5,12.5a1,1 0,1 0,2 0a1,1 0,1 0,-2 0z" />
+</vector>

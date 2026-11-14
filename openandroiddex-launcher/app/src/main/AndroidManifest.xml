@@ -467,6 +467,68 @@
             android:resizeableActivity="true"
             android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|density|keyboard|keyboardHidden|navigation|uiMode|locale|layoutDirection|fontScale" />
 
+        <!-- What the game controller's notification opens (GamepadNotice): the phone's
+             own screen up as a game controller for its apps' windows on a computer — an
+             overlay window, see PhoneGamepad and doc/game-mode.md — and gone before it
+             draws, for the touchpad's trampoline's reasons above. -->
+        <activity
+            android:name=".GamepadActivity"
+            android:exported="false"
+            android:label="@string/gp_title"
+            android:launchMode="singleTask"
+            android:taskAffinity="com.ccrstech.openandroiddex.launcher.gamepad"
+            android:theme="@style/Theme.OpenAndroidDeX.Detour"
+            android:excludeFromRecents="true"
+            android:autoRemoveFromRecents="true"
+            android:resizeableActivity="true"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|density|keyboard|keyboardHidden|navigation|uiMode|locale|layoutDirection|fontScale" />
+
+        <!-- "Send to computer" in the phone's share menu (SendActivity, SendQueue,
+             doc/send-to-computer.md): a card over the app something was shared
+             from, never a full screen.
+
+             Declared DISABLED. The computer's half on the phone (the app server,
+             AppSend) enables it the first time a computer that takes shares links,
+             and sets it back when one that does not links — so a phone that only
+             ever runs this launcher on its own never grows a share entry that can
+             do nothing. The meta-data is the version of what the entry speaks to
+             that server, read from the package manager without waking this app.
+
+             It owns a task of its own, out of Recents, for the reason
+             SettingsActivity spells out: with the launcher's affinity it would
+             join the desktop's task. singleTask: a second share while the card
+             is up always reaches it (onNewIntent) — standard, a task brought to
+             front could swallow the new share's intent. It must NOT be listed in
+             CaptionService.isDesktopTask: unlisted, a task of ours wears no
+             caption, which is right for a card. No screenOrientation (a
+             translucent activity with one crashes on Android 8). -->
+        <activity
+            android:name=".SendActivity"
+            android:enabled="false"
+            android:exported="true"
+            android:label="@string/sc_label"
+            android:theme="@style/Theme.OpenAndroidDeX.Send"
+            android:launchMode="singleTask"
+            android:taskAffinity="com.ccrstech.openandroiddex.launcher.send"
+            android:excludeFromRecents="true"
+            android:autoRemoveFromRecents="true"
+            android:resizeableActivity="true"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|density|keyboard|keyboardHidden|navigation|uiMode|locale|layoutDirection|fontScale">
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="*/*" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.SEND_MULTIPLE" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="*/*" />
+            </intent-filter>
+            <meta-data
+                android:name="com.ccrstech.openandroiddex.send"
+                android:value="1" />
+        </activity>
+
         <!-- Trampoline for the widget flow's two system detours (the bind
              confirmation, the provider's configure screen). It exists only to
              own a TASK: an activity started FOR A RESULT lands in the CALLER's

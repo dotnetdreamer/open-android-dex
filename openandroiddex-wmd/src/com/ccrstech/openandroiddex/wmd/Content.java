@@ -26,7 +26,10 @@ import java.lang.reflect.Method;
  *
  * <p>The shell reads what it was granted: a drag's items, which the launcher
  * passes on as they are dropped on it (PcDrags), and a clip's, which the
- * clipboard grants whichever package reads it.
+ * clipboard grants whichever package reads it. What was shared to the
+ * launcher's "Send to computer" needs no grant: the launcher opens it and
+ * hands the open file over (AppSend). The media store is held for longer, as
+ * a {@link Source}: the phone's pictures are asked of it once a second.
  */
 final class Content {
 
@@ -131,6 +134,34 @@ final class Content {
         }
     }
 
+    /**
+     * A provider held until closed, for many queries: the media store, which
+     * the phone's pictures are asked of once a second (AppPhotos). Acquiring
+     * it is a binder round trip each time; holding it is a reference only.
+     */
+    static final class Source implements Closeable {
+        private final Held held;
+
+        private Source(Held held) {
+            this.held = held;
+        }
+
+        /** {@code uri}'s rows, the selection, sort and limit in {@code args} (ContentResolver.QUERY_ARG_*). */
+        Cursor query(Uri uri, String[] projection, android.os.Bundle args) throws IOException {
+            return (Cursor) call(held.provider, "query", uri, projection, args);
+        }
+
+        @Override
+        public void close() {
+            held.close();
+        }
+    }
+
+    /** {@code authority}'s provider, held until the source is closed. */
+    static Source source(String authority) throws IOException {
+        return new Source(Held.acquire(Uri.parse("content://" + authority)));
+    }
+
     /** What {@code uri} is called, how big it is and its type: whatever its provider says. */
     static Described describe(Uri uri) {
         Described d = new Described();
@@ -168,6 +199,11 @@ final class Content {
      * release's interface has it.
      */
     private static Object call(Object provider, String what, Uri uri, Object arg) throws IOException {
+        return call(provider, what, uri, arg, null);
+    }
+
+    /** As above; {@code args}, a query's Bundle of selection, sort and limit. */
+    private static Object call(Object provider, String what, Uri uri, Object arg, android.os.Bundle args) throws IOException {
         String shell = PhoneContext.SHELL_PACKAGE;
         for (Method m : provider.getClass().getMethods()) {
             if (!m.getName().equals(what)) continue;
@@ -195,9 +231,9 @@ final class Content {
                     break;
                 case "query":
                     // (attribution, uri, projection, args, signal) · (pkg, tag, uri, …) · (pkg, uri, …)
-                    if (attributed && p.length == 5) a = new Object[]{attribution, uri, arg, null, null};
-                    else if (p.length == 6 && p[0] == String.class && p[1] == String.class) a = new Object[]{shell, null, uri, arg, null, null};
-                    else if (p.length == 5 && p[0] == String.class && p[1] == Uri.class) a = new Object[]{shell, uri, arg, null, null};
+                    if (attributed && p.length == 5) a = new Object[]{attribution, uri, arg, args, null};
+                    else if (p.length == 6 && p[0] == String.class && p[1] == String.class) a = new Object[]{shell, null, uri, arg, args, null};
+                    else if (p.length == 5 && p[0] == String.class && p[1] == Uri.class) a = new Object[]{shell, uri, arg, args, null};
                     else continue;
                     break;
                 default:

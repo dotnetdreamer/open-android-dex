@@ -62,6 +62,39 @@ final class AppInput {
     private int lastY;
     /** The press carries a drop in (AppWindow.dropIn): it is the drop's to let go, where the drop goes. */
     private boolean carrying;
+    /** A hover has been sent and not ended: only then does the pointer leaving say so. */
+    private boolean hovering;
+
+    // game controls' fingers (doc/game-mode.md), as Android last heard of them
+    /** One finger down: the pointer id Android knows it by, and where it is. */
+    private static final class Finger {
+        final int pid;
+        int x;
+        int y;
+
+        Finger(int pid, int x, int y) {
+            this.pid = pid;
+            this.x = x;
+            this.y = y;
+        }
+    }
+
+    /** By the computer's id for it. */
+    private final java.util.HashMap<Integer, Finger> fingers = new java.util.HashMap<>();
+    /** The same fingers by pointer id: each is given the lowest one free, as a touchscreen's driver does. */
+    private final java.util.TreeMap<Integer, Finger> byPointer = new java.util.TreeMap<>();
+    private long touchDownTime;
+    private long touchRefusedSaidAt;
+    /**
+     * Fingers at once, and the highest pointer id: Android's input layer
+     * refuses a motion event with more pointers than MAX_POINTERS (16) or a
+     * pointer id above MAX_POINTER_ID (31) — both measured on a Galaxy S24,
+     * Android 15 (doc/game-mode.md). The computer holds at most 10.
+     */
+    static final int MAX_FINGERS = 16;
+    static final int MAX_POINTER_ID = 31;
+    /** The only device id the injected fingers need: a consistent one. */
+    private static final int TOUCH_DEVICE = 0;
 
     /** When each held key went down: a key's events carry its own down time. */
     private final Map<Integer, Long> keysDown = new HashMap<>();
@@ -94,6 +127,8 @@ final class AppInput {
      * modifiers — Shift-click extends a selection only if the click says Shift.
      */
     synchronized void pointer(int x, int y, int want, int meta) {
+        // Fingers are down: a mouse event among them would be refused, or end them (doc/game-mode.md).
+        if (!fingers.isEmpty()) return;
         long now = SystemClock.uptimeMillis();
         boolean moved = x != lastX || y != lastY;
         lastX = x;
@@ -162,13 +197,14 @@ final class AppInput {
 
     /** The pointer left the window: whatever was under it stops showing it hovered. */
     synchronized void left() {
-        if (buttons != 0) return;
+        if (buttons != 0 || !hovering || !fingers.isEmpty()) return;
         long now = SystemClock.uptimeMillis();
         motion(MotionEvent.ACTION_HOVER_EXIT, now, now, lastX, lastY, 0, 0, 0);
     }
 
     /** The wheel, in notches (fractions for a touchpad): {@code v} up is positive, {@code h} right. */
     synchronized void scroll(int x, int y, float h, float v, int meta) {
+        if (!fingers.isEmpty()) return;
         long now = SystemClock.uptimeMillis();
         MotionEvent.PointerCoords c = coords(x, y, 0f);
         c.setAxisValue(MotionEvent.AXIS_HSCROLL, h);
@@ -182,6 +218,7 @@ final class AppInput {
 
     /** Everything let go: the window lost the keyboard, or the computer went away. All but a press carrying a drop in ({@link #carry}). */
     synchronized void releaseAll() {
+        if (!fingers.isEmpty()) touches(new byte[]{0});
         if (buttons != 0 && !carrying) pointer(lastX, lastY, 0, 0);
         // A key's let-go takes the modifiers pressed here with it: those are not let go twice.
         for (Integer code : keysDown.keySet().toArray(new Integer[0])) {
@@ -190,6 +227,8 @@ final class AppInput {
     }
 
     private void motion(int action, long down, long now, int x, int y, int state, int actionButton, int meta) {
+        if (action == MotionEvent.ACTION_HOVER_MOVE) hovering = true;
+        else if (action == MotionEvent.ACTION_HOVER_EXIT || action == MotionEvent.ACTION_DOWN) hovering = false;
         boolean pressed = state != 0 && action != MotionEvent.ACTION_UP;
         MotionEvent e = MotionEvent.obtain(down, now, action, 1,
                 new MotionEvent.PointerProperties[]{mouse()},
@@ -214,6 +253,140 @@ final class AppInput {
         c.pressure = pressure;
         c.size = 1f;
         return c;
+    }
+
+    // ── fingers: game controls (doc/game-mode.md) ──
+
+    /**
+     * Exactly these fingers are down now: Wire's 0x24, a count and then each
+     * finger's id u8, x u16, y u16 in the display's pixels. What changed since
+     * the last is turned into Android's sequence, as a touchscreen's driver
+     * would: the fingers that went first (POINTER_UP, or UP for the last), then
+     * the new ones (DOWN for the first, else POINTER_DOWN), then one MOVE with
+     * all of them if any that stayed has moved. A count of 0 lifts everything.
+     *
+     * <p>One stream per display: a mouse button held is let go first, a hover
+     * ended, and the mouse is silent while a finger is down ({@link #pointer}).
+     */
+    synchronized void touches(byte[] d) {
+        java.util.TreeMap<Integer, int[]> want = new java.util.TreeMap<>();
+        int count = d.length > 0 ? d[0] & 0xff : 0;
+        for (int i = 0; i < count && want.size() < MAX_FINGERS; i++) {
+            int at = 1 + i * 5;
+            if (at + 5 > d.length) break;
+            want.put(d[at] & 0xff, new int[]{Wire.u16(d, at + 1), Wire.u16(d, at + 3)});
+        }
+        // Whatever the mouse held is let go: its stream and the fingers' are one on this display.
+        if (buttons != 0 && !carrying) pointer(lastX, lastY, 0, 0);
+        if (fingers.isEmpty() && !want.isEmpty()) left();
+        fingersTo(want);
+    }
+
+    /**
+     * Game controls' fingers lifted, and nothing else: a mouse button or a key
+     * held stays as it is — a drag goes on across a connection made again
+     * (AppWindow's clean slate).
+     */
+    synchronized void releaseFingers() {
+        if (!fingers.isEmpty()) fingersTo(new java.util.TreeMap<>());
+    }
+
+    /** The fingers down made exactly {@code want}: computer's id → x, y. */
+    private void fingersTo(java.util.TreeMap<Integer, int[]> want) {
+        long now = SystemClock.uptimeMillis();
+        for (Integer id : fingers.keySet().toArray(new Integer[0])) {
+            if (want.containsKey(id)) continue;
+            Finger f = fingers.get(id);
+            boolean ok = byPointer.size() == 1
+                    ? touch(MotionEvent.ACTION_UP, now)
+                    : touch(MotionEvent.ACTION_POINTER_UP | (indexOf(f.pid) << MotionEvent.ACTION_POINTER_INDEX_SHIFT), now);
+            if (!ok) {
+                // Android still has this finger down, the last one included: the cancel carries it.
+                refused("a finger's lift", now);
+                return;
+            }
+            fingers.remove(id);
+            byPointer.remove(f.pid);
+        }
+        for (java.util.Map.Entry<Integer, int[]> e : want.entrySet()) {
+            if (fingers.containsKey(e.getKey())) continue;
+            int pid = 0;
+            while (byPointer.containsKey(pid)) pid++;
+            if (pid > MAX_POINTER_ID) break;
+            boolean first = byPointer.isEmpty();
+            Finger f = new Finger(pid, e.getValue()[0], e.getValue()[1]);
+            fingers.put(e.getKey(), f);
+            byPointer.put(pid, f);
+            if (first) touchDownTime = now;
+            boolean ok = first
+                    ? touch(MotionEvent.ACTION_DOWN, now)
+                    : touch(MotionEvent.ACTION_POINTER_DOWN | (indexOf(pid) << MotionEvent.ACTION_POINTER_INDEX_SHIFT), now);
+            if (!ok) {
+                // Android never had this one: the cancel carries only the fingers it has.
+                fingers.remove(e.getKey());
+                byPointer.remove(pid);
+                refused("a finger going down", now);
+                return;
+            }
+        }
+        boolean moved = false;
+        for (java.util.Map.Entry<Integer, int[]> e : want.entrySet()) {
+            Finger f = fingers.get(e.getKey());
+            if (f == null) continue;
+            if (f.x != e.getValue()[0] || f.y != e.getValue()[1]) {
+                f.x = e.getValue()[0];
+                f.y = e.getValue()[1];
+                moved = true;
+            }
+        }
+        if (moved && !touch(MotionEvent.ACTION_MOVE, now)) refused("the fingers' move", now);
+    }
+
+    /**
+     * Android would not take one of the fingers' events: the gesture is
+     * cancelled for the app and forgotten here, so this side and the phone's
+     * agree that nothing is down. The computer's next state starts anew.
+     */
+    private void refused(String what, long now) {
+        if (now - touchRefusedSaidAt > 10_000) {
+            touchRefusedSaidAt = now;
+            AppServer.log("touch refused on display " + display + " (" + what + ", " + byPointer.size()
+                    + " fingers down): the gesture is cancelled");
+        }
+        if (!byPointer.isEmpty()) touch(MotionEvent.ACTION_CANCEL, now);
+        fingers.clear();
+        byPointer.clear();
+    }
+
+    /** Its place among the fingers down: the pointer index in an event. */
+    private int indexOf(int pid) {
+        int i = 0;
+        for (int k : byPointer.keySet()) {
+            if (k == pid) return i;
+            i++;
+        }
+        return -1;
+    }
+
+    /** One event with every finger down now, in ascending pointer id. False if Android would not take it. */
+    private boolean touch(int action, long now) {
+        int n = byPointer.size();
+        MotionEvent.PointerProperties[] props = new MotionEvent.PointerProperties[n];
+        MotionEvent.PointerCoords[] coords = new MotionEvent.PointerCoords[n];
+        int i = 0;
+        for (Finger f : byPointer.values()) {
+            MotionEvent.PointerProperties p = new MotionEvent.PointerProperties();
+            p.id = f.pid;
+            p.toolType = MotionEvent.TOOL_TYPE_FINGER;
+            props[i] = p;
+            coords[i] = coords(f.x, f.y, 1f);
+            i++;
+        }
+        MotionEvent e = MotionEvent.obtain(touchDownTime, now, action, n, props, coords,
+                0, 0, 1f, 1f, TOUCH_DEVICE, 0, InputDevice.SOURCE_TOUCHSCREEN, 0);
+        boolean ok = injected(e, INJECT_ASYNC);
+        e.recycle();
+        return ok;
     }
 
     // ── the keyboard ──
@@ -436,15 +609,22 @@ final class AppInput {
     }
 
     private void inject(InputEvent e, int mode) {
+        injected(e, mode);
+    }
+
+    /** Into the window's display; false if Android would not take it (it checks an event before it queues it). */
+    private boolean injected(InputEvent e, int mode) {
         try {
             Refl.callSig(e, "setDisplayId", new Class<?>[]{int.class}, display);
-            Refl.callSig(manager(), "injectInputEvent", new Class<?>[]{InputEvent.class, int.class}, e, mode);
+            Object ok = Refl.callSig(manager(), "injectInputEvent", new Class<?>[]{InputEvent.class, int.class}, e, mode);
+            return !Boolean.FALSE.equals(ok);
         } catch (Refl.WmError err) {
             long now = SystemClock.uptimeMillis();
             if (now - refusedSaidAt > 10_000) {
                 refusedSaidAt = now;
                 AppServer.log("input refused on display " + display + " (" + err.getMessage() + ")");
             }
+            return false;
         }
     }
 }

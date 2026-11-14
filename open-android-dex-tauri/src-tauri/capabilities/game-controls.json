@@ -1,0 +1,9 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "game-controls",
+  "description": "A phone game's controls editor (apps/game/editor.rs): its own page, whose only call of the window's own is to close it (the warning's Cancel). Its commands are the app's own; files are written and shown from Rust, and each command answers only the editor of a window that is open.",
+  "windows": ["game-*"],
+  "permissions": [
+    "core:window:allow-close"
+  ]
+}

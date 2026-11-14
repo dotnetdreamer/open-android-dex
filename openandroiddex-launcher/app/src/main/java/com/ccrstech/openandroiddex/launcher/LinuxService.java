@@ -345,7 +345,10 @@ public class LinuxService extends Service {
                     // The host stops itself when it finds remote access switched
                     // off behind its back; with it gone this service may have
                     // nothing left to be foreground for.
-                    if (!remote.running() && !LinuxRemote.isEnabled(LinuxService.this)) idleStopQueued();
+                    if (!remote.running() && !LinuxRemote.isEnabled(LinuxService.this)) {
+                        SamsungSlowdown.sync(LinuxService.this, false);
+                        idleStopQueued();
+                    }
                 });
             }
 
@@ -427,6 +430,9 @@ public class LinuxService extends Service {
         // remote access off brings it up when it is on. start() is a no-op
         // while it is running.
         boolean remoteWanted = LinuxRemote.isEnabled(this) && LinuxRemote.available(this);
+        // Ahead of remote.start(), so the sshd it starts is born on the big
+        // cores too. Every switch of remote access comes through here.
+        SamsungSlowdown.sync(this, remoteWanted);
         if (remoteWanted && !ACTION_REMOTE_OFF.equals(action) && !ACTION_UNINSTALL.equals(action)) {
             remote.start();
             // RemoteResumeReceiver's "paused — tap to resume", if one is up:
@@ -451,6 +457,9 @@ public class LinuxService extends Service {
             if (intent.getBooleanExtra(EXTRA_FROM_NOTIFICATION, false)) {
                 LinuxRemote.setEnabled(this, false);
             }
+            // Again, now that the notification's Off has landed — unless an On
+            // overtook it.
+            SamsungSlowdown.sync(this, LinuxRemote.isEnabled(this) && LinuxRemote.available(this));
             remote.stop();
             // stop() is asynchronous; idle once it has had its moment.
             mainHandler.postDelayed(this::idleStopQueued, 5000);
@@ -691,6 +700,7 @@ public class LinuxService extends Service {
         // (files/linux-remote is outside the container): reinstalling and
         // switching remote access back on brings every one of them back.
         LinuxRemote.setEnabled(this, false);
+        SamsungSlowdown.sync(this, false);
         remote.stop();
         wipe();
         Linux.setUninstalled(this, true);
@@ -1001,6 +1011,7 @@ public class LinuxService extends Service {
             // NOT waited and NOT setsid'd: it stays a child of this app so a
             // force-stop (DeX session end) tears the whole container down; the
             // service staying foreground is what keeps it alive until then.
+            String cores = coreGroupForLinux("the desktop");
             runtimeUp = true;
             runtimeSpawnedAt = android.os.SystemClock.elapsedRealtime();
             runtimeProc = pb.start();
@@ -1014,7 +1025,7 @@ public class LinuxService extends Service {
             // still allowed to make noise. It retries while the guest boots.
             if (withSound) LinuxAudio.start(LinuxAudio.DESKTOP);
             goForeground(getString(R.string.ln_label));
-            DexLog.step("linux", "runtime started " + w + "x" + h);
+            DexLog.step("linux", "runtime started " + w + "x" + h + " in " + cores);
         } catch (Exception e) {
             runtimeUp = false;
             DexLog.step("linux", "runtime start error: " + e);
@@ -1263,13 +1274,14 @@ public class LinuxService extends Service {
             LinuxGpu.env(this, pb.environment());
             pb.redirectErrorStream(true);
             pb.redirectOutput(new File(dir, "win.log"));
+            String cores = coreGroupForLinux("the window session");
             Process p = pb.start();
             winInput = p.getOutputStream();
             liveWin = p;
             LinuxGpu.reportVerdict(pb.environment(), new File(dir, "win.log"));
             LinuxAudio.start(LinuxAudio.WINDOWS);
             goForeground(getString(R.string.ln_label));
-            DexLog.step("linux", "window session started " + w + "x" + h + " at " + dpi + " dpi");
+            DexLog.step("linux", "window session started " + w + "x" + h + " at " + dpi + " dpi in " + cores);
             return true;
         } catch (Exception e) {
             DexLog.step("linux", "window session start error: " + e);
@@ -1355,6 +1367,100 @@ public class LinuxService extends Service {
         } catch (Exception e) {
             DexLog.warn("stream", "wake lock", e);
         }
+    }
+
+    /**
+     * The Android core group this process is in and how many of the phone's
+     * cores it may use, with a warning when that is half of them or fewer. Call
+     * it just before starting a Linux session: every process started from here
+     * is born into this group and stays in it for life, because Android moves
+     * this process between groups, never its children.
+     *
+     * Counted rather than named, because the names differ by phone. On a Galaxy
+     * S24 (One UI 7) "/background" and Samsung's "/moderate" are both cores 0-3
+     * of ten, the small ones, and Linux there ran 5–6x slower than on
+     * "/foreground", 0-8 (2026-11-12). A restricted launcher stays in
+     * "/background": Android refuses it startForeground without throwing
+     * (logcat: "not allowed due to bg restriction"), so goForeground has
+     * nothing to report — and the desktop app's exit used to leave it so.
+     *
+     * An unrestricted one is in "/moderate" about 12 s after its last window
+     * leaves the screen, so a desktop a computer starts is born on the small
+     * cores all the same. That is Samsung's Device Health (com.sec.android
+     * .sdhms): it flags an app whose processes are at best running a foreground
+     * service (ActivityManager.setFGSFilter, system-only), and a flagged app's
+     * foreground-service processes get scheduling group 5, CPUSET_SP_MODERATE:
+     * those four cores, an energy-saving profile, low disk priority. Read from
+     * the S24's services.jar and SDHMS, 2026-11-13. Nothing this app may do
+     * lifts it. A foreground broadcast does not: the process is still only a
+     * foreground service while it handles one. Nor does another of our
+     * processes ending a foreground service: Samsung's adjuster clears the flag
+     * then, but Android 15's never tells it the state before. Both were tried
+     * on the S24. Exempt are apps holding audio focus or playing sound, system
+     * uids, a list Samsung sends, and every app while the phone-wide
+     * Settings.Global "fgservice_filter_disabled" is 1 — which SamsungSlowdown
+     * sets while remote access is on.
+     */
+    private String coreGroupForLinux(String what) {
+        String group = firstLine("/proc/self/cpuset");
+        String allowed = "";
+        try (java.io.BufferedReader r = new java.io.BufferedReader(
+                new java.io.FileReader("/proc/self/status"))) {
+            for (String line; (line = r.readLine()) != null; ) {
+                if (line.startsWith("Cpus_allowed_list:")) {
+                    allowed = line.substring("Cpus_allowed_list:".length()).trim();
+                    break;
+                }
+            }
+        } catch (Exception ignored) {
+            // Nothing to count; nothing to say then.
+        }
+        int mine = cpuCount(allowed);
+        int all = cpuCount(firstLine("/sys/devices/system/cpu/present"));
+        String where = (group.isEmpty() ? "an unknown core group" : group)
+                + (mine > 0 && all > 0 ? ", " + mine + " of " + all + " cores" : "");
+        if (mine > 0 && all > 0 && mine * 2 <= all) {
+            boolean restricted = false;
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                try {
+                    restricted = getSystemService(android.app.ActivityManager.class).isBackgroundRestricted();
+                } catch (Exception ignored) {
+                }
+            }
+            DexLog.warn("linux", what + " starts on " + mine + " of the phone's " + all + " cores ("
+                    + group + ")" + (restricted ? " because the launcher's background use is restricted" : "")
+                    + " — it stays on them until it is restarted");
+        }
+        return where;
+    }
+
+    /** The first line of a small file, trimmed, or "" when it cannot be read. */
+    private static String firstLine(String path) {
+        try (java.io.BufferedReader r = new java.io.BufferedReader(new java.io.FileReader(path))) {
+            String line = r.readLine();
+            return line != null ? line.trim() : "";
+        } catch (Exception e) {
+            return "";
+        }
+    }
+
+    /** How many CPUs a kernel list such as "0-3,6" names; 0 when it is not one. */
+    static int cpuCount(String list) {
+        int n = 0;
+        for (String part : list.split(",")) {
+            part = part.trim();
+            if (part.isEmpty()) continue;
+            int dash = part.indexOf('-');
+            try {
+                int from = Integer.parseInt(dash < 0 ? part : part.substring(0, dash));
+                int to = dash < 0 ? from : Integer.parseInt(part.substring(dash + 1));
+                if (to < from) return 0;
+                n += to - from + 1;
+            } catch (NumberFormatException e) {
+                return 0;
+            }
+        }
+        return n;
     }
 
     // ── foreground plumbing ──

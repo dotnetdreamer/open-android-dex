@@ -5,3 +5,8 @@
 # (openandroiddex-launcher/.gitattributes says the same for its Gradle wrapper,
 # for exactly this reason.)
 *.sh text eol=lf
+
+# `npm run tauri dev` writes the app's Cargo.toml back with LF endings every time
+# it starts (the Tauri CLI's manifest rewrite). Checked out with CRLF on Windows
+# (core.autocrlf), git then lists it as modified with no change in it: LF here too.
+open-android-dex-tauri/src-tauri/Cargo.toml text eol=lf

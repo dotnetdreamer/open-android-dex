@@ -104,6 +104,13 @@ pub struct MirrorOptions {
     /// Two-way clipboard sync. Off adds --no-clipboard-autosync.
     #[serde(default = "default_true")]
     pub clipboard_autosync: bool,
+    /// This computer's game controllers as gamepads on the phone (`--gamepad=uhid`,
+    /// doc/game-mode.md "On the desktop"): a desktop's only, and only once its
+    /// preparation saw the phone's shell open /dev/uhid; never where
+    /// stream-config.json says `gamepad: off` (`wants_gamepad`). They speak only
+    /// while scrcpy's window is in front. Never set by the frontend.
+    #[serde(default)]
+    pub gamepad: bool,
     /// An audio-only companion (`--no-video --no-window --no-control`), the
     /// process that carries the desktop's sound so that "where sound plays"
     /// can change without tearing the desktop down — see
@@ -318,6 +325,11 @@ fn build_args(opts: &MirrorOptions) -> Vec<String> {
     if let Some(bind) = &opts.mouse_bind {
         args.push(format!("--mouse-bind={bind}"));
     }
+    // Game controllers as the phone's own (doc/game-mode.md). scrcpy numbers its
+    // UHID devices keyboard, mouse, then gamepads, so --mouse=uhid does not clash.
+    if opts.gamepad {
+        args.push("--gamepad=uhid".into());
+    }
     if let Some(codec) = &opts.video_codec {
         args.push(format!("--video-codec={codec}"));
     }
@@ -484,6 +496,14 @@ fn spawn_scrcpy(app: &AppHandle, opts: &MirrorOptions) -> Result<Child, String> 
     let server = bin.join("scrcpy-server");
     if server.is_file() {
         cmd.env("SCRCPY_SERVER_PATH", &server);
+    }
+    // A controller used for a game on this computer must not press Back and A
+    // on the phone's desktop behind it. scrcpy asks SDL to read controllers in
+    // the background (sdl_hints.c); with this in its environment SDL refuses
+    // that hint — scrcpy logs "Could not allow joystick background events",
+    // which is the proof — and controllers speak only while its window is in front.
+    if opts.gamepad {
+        cmd.env("SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS", "0");
     }
     let adb_path = bin.join(adb::exe_name("adb"));
     if adb_path.exists() {
@@ -1621,11 +1641,60 @@ fn device_sdk(app: &AppHandle, serial: &str) -> Option<u32> {
     .and_then(|out| out.trim().parse().ok())
 }
 
+/// Game controllers on the phone's desktop: on unless the stored config says
+/// `gamepad: off` — no Settings row yet; a way out for a phone that misbehaves.
+fn stored_gamepad(map: &HashMap<String, String>) -> bool {
+    map.get("gamepad").map(String::as_str) != Some("off")
+}
+
+/// Per phone ([`uhid_key`]): whether its shell could open /dev/uhid, as the
+/// session's preparation last saw it (`preflight_input`) — false too once a
+/// session's output named a uhid failure. scrcpy's server ends the session when
+/// a gamepad's /dev/uhid will not open, so a controller is never offered before.
+fn uhid_seen() -> &'static Mutex<HashMap<String, bool>> {
+    static SEEN: std::sync::OnceLock<Mutex<HashMap<String, bool>>> = std::sync::OnceLock::new();
+    SEEN.get_or_init(Default::default)
+}
+
+/// Whose /dev/uhid it is: the phone's (`ro.serialno`), whichever way adb
+/// reaches it — a failure on the cable holds for the same phone over Wi‑Fi.
+fn uhid_key(app: &AppHandle, serial: &str) -> String {
+    adb::restore_key(app, serial)
+}
+
+/// Game controllers for this session (doc/game-mode.md, "On the desktop"): a
+/// session with a display of its own — the desktop, or a scrcpy app window (a
+/// Linux computer's phone apps) — never a phone-screen mirror or the sound's
+/// companion; never where the stored config says `gamepad: off`; and only on a
+/// phone whose shell was seen to open /dev/uhid, and has not failed a gamepad
+/// since in this run.
+fn wants_gamepad(opts: &MirrorOptions, map: &HashMap<String, String>, uhid: Option<bool>) -> bool {
+    opts.new_display.is_some() && !opts.audio_only && stored_gamepad(map) && uhid == Some(true)
+}
+
+/// What a preparation saw of /dev/uhid on `serial`, kept with what came before:
+/// a phone that failed a gamepad in this run stays without them — an open that
+/// works is not a gamepad that does.
+fn remember_uhid(seen: &mut HashMap<String, bool>, serial: &str, opened: bool) {
+    let v = seen.entry(serial.to_string()).or_insert(opened);
+    *v = *v && opened;
+}
+
+/// Whether scrcpy's output names a failure of /dev/uhid (UhidManager's).
+fn names_uhid_failure(tail: &str) -> bool {
+    let t = tail.to_lowercase();
+    t.contains("uhidmanager") || (t.contains("/dev/uhid") && (t.contains("exception") || t.contains("failed") || t.contains("denied")))
+}
+
 fn apply_stored_config(app: &AppHandle, opts: &mut MirrorOptions) {
+    let map = load_config(app);
+    // Read for every kind of session, before the desktops-only rest.
+    let phone = uhid_key(app, &opts.serial);
+    let uhid = uhid_seen().lock().unwrap().get(&phone).copied();
+    opts.gamepad = wants_gamepad(opts, &map, uhid);
     if opts.app_package.is_some() || opts.new_display.is_none() {
         return;
     }
-    let map = load_config(app);
     // Before the size: how large a display this phone's encoder takes is
     // remembered per codec.
     match map.get("codec").map(String::as_str) {
@@ -1821,6 +1890,7 @@ fn audio_companion_options(serial: &str, dup: bool) -> MirrorOptions {
         video_codec: None,
         video_encoder: None,
         clipboard_autosync: true,
+        gamepad: false,
         audio_only: true,
         window: None,
         base_dpi: None,
@@ -1960,6 +2030,11 @@ fn reconcile_audio_session(app: &AppHandle, serial: &str) {
     // stop grace). Teardown holds AUDIO_RECONCILE too, so a spawn past a dead
     // desktop would still be caught and stopped — this re-check just keeps
     // that from being a spawn at all when the desktop ended mid-reconcile.
+    // The desktop's own scrcpy goes first (`desktop_starting`).
+    let until = Instant::now() + Duration::from_secs(8);
+    while desktop_starting(app, serial) && Instant::now() < until {
+        thread::sleep(Duration::from_millis(100));
+    }
     let desktop_still_live = sound_shown_here(app, serial);
     if !desktop_still_live {
         log::info!("audio [{serial}] the desktop ended mid-reconcile — no companion");
@@ -1973,6 +2048,21 @@ fn reconcile_audio_session(app: &AppHandle, serial: &str) {
         ),
         Err(e) => log::warn!("audio [{serial}] companion did not start: {e}"),
     }
+}
+
+/// `serial`'s desktop scrcpy is running and has no display yet: its server has
+/// not connected. The audio companion waits for that. Two scrcpy starting
+/// together race for the first port of 27183:27199 and push the same server
+/// file; over Wi-Fi alone on a Galaxy S24 the companion lost ("bind: Address
+/// already in use", "Aborted", "Server connection failed") and nothing started
+/// it again, so the desktop had no sound.
+fn desktop_starting(app: &AppHandle, serial: &str) -> bool {
+    let state = app.state::<MirrorState>();
+    let map = state.0.lock().unwrap();
+    map.get(&format!("{serial}|desktop")).is_some_and(|s| {
+        s.display_id.load(Ordering::SeqCst) < 0
+            && s.child.lock().unwrap().try_wait().map(|st| st.is_none()).unwrap_or(false)
+    })
 }
 
 /// Phones whose apps are open in windows of their own (apps/mod.rs). Their
@@ -4050,7 +4140,8 @@ fn fallback_options(opts: &MirrorOptions) -> Option<MirrorOptions> {
         || opts.mouse_mode.is_some()
         || opts.max_fps > 0
         || opts.video_bit_rate_mbps > 0
-        || opts.fitted;
+        || opts.fitted
+        || opts.gamepad;
     if !strippable {
         return None;
     }
@@ -4082,6 +4173,8 @@ fn fallback_options(opts: &MirrorOptions) -> Option<MirrorOptions> {
         // /dev/uhid from the shell uid. Dropping it costs the custom cursors
         // and keeps the desktop.
         mouse_mode: None,
+        // A UHID gamepad has the same two needs; the desktop matters more than a controller.
+        gamepad: false,
         max_fps: 0,
         video_bit_rate_mbps: 0,
         ..opts.clone()
@@ -4185,6 +4278,14 @@ fn monitor(
             // fall through to cleanup: no reconnect loop for a configuration
             // that has already proved it cannot start
         } else if !intentional && opts.auto_reconnect && !success {
+            // A game controller's /dev/uhid failed and took the session with it:
+            // the sessions after this one go without controllers on this phone.
+            if opts.gamepad && names_uhid_failure(&output_tail(&output, 30)) {
+                log::warn!("mirror [{key}] a game controller could not be made on the phone; the desktop comes back without them");
+                let phone = uhid_key(&app, &opts.serial);
+                uhid_seen().lock().unwrap().insert(phone, false);
+                opts.gamepad = false;
+            }
             emit_status(
                 &app,
                 MirrorEvent {
@@ -4460,6 +4561,8 @@ struct Probe {
     release: String,
     sdk: Option<u32>,
     refused: bool,
+    /// The shell opened /dev/uhid.
+    uhid: bool,
 }
 
 /// The first two lines are the getprops, in the order they were asked for;
@@ -4478,6 +4581,7 @@ fn read_probe(out: &str) -> Probe {
         release,
         sdk,
         refused: lowered.contains("inject_events") || lowered.contains("securityexception"),
+        uhid: out.lines().any(|l| l.trim() == "oadx-uhid-ok"),
     }
 }
 
@@ -4498,7 +4602,10 @@ fn preflight_input(app: &AppHandle, opts: &MirrorOptions) -> Result<(), String> 
             "-s",
             opts.serial.as_str(),
             "shell",
+            // And whether the shell can open /dev/uhid, which a game controller
+            // on the desktop needs (opened and closed: nothing is made).
             "getprop ro.build.version.release; getprop ro.build.version.sdk; \
+             (: <> /dev/uhid) 2>/dev/null && echo oadx-uhid-ok; \
              input keyevent 0 2>&1",
         ],
     );
@@ -4519,7 +4626,10 @@ fn preflight_input(app: &AppHandle, opts: &MirrorOptions) -> Result<(), String> 
         release,
         sdk,
         refused,
+        uhid,
     } = read_probe(&out);
+    let phone = uhid_key(app, &opts.serial);
+    remember_uhid(&mut uhid_seen().lock().unwrap(), &phone, uhid);
 
     if refused {
         log::error!(
@@ -4610,6 +4720,16 @@ pub fn start_mirror(app: AppHandle, mut options: MirrorOptions) -> Result<Sessio
     // back a desktop that streams and ignores you, which is worse than a
     // desktop that never started.
     preflight_input(&app, &options)?;
+    // Game controllers, now that the preparation has asked about /dev/uhid.
+    let phone = uhid_key(&app, &options.serial);
+    let uhid = uhid_seen().lock().unwrap().get(&phone).copied();
+    options.gamepad = wants_gamepad(&options, &load_config(&app), uhid);
+    if options.new_display.is_some() && !options.audio_only {
+        log::info!(
+            "game controllers in this session: {}",
+            if options.gamepad { "yes" } else if uhid == Some(false) { "no, the phone's shell cannot open /dev/uhid, or a gamepad failed there" } else { "no" }
+        );
+    }
 
     sweep_orphan_servers(&app, &options.serial);
 
@@ -5387,6 +5507,63 @@ mod tests {
         let args = build_args(&opts);
         assert!(args.iter().any(|a| a == "--window-width=804"));
         assert!(args.iter().any(|a| a == "--window-height=1542"));
+    }
+
+    /// Game controllers (doc/game-mode.md): the desktop takes them as the
+    /// phone's own, the audio companion never does, and the stored config can
+    /// turn them off; a desktop that will not start drops them first.
+    #[test]
+    fn a_desktop_takes_game_controllers_and_the_audio_companion_does_not() {
+        let mut opts: MirrorOptions = serde_json::from_value(serde_json::json!({
+            "serial": "X",
+            "newDisplay": "1920x1080/160",
+        }))
+        .expect("desktop options");
+        // Never from the frontend: the session decides.
+        assert!(!opts.gamepad && !build_args(&opts).iter().any(|a| a.starts_with("--gamepad")));
+        let on = HashMap::new();
+        let mut off = HashMap::new();
+        off.insert("gamepad".to_string(), "off".to_string());
+        assert!(stored_gamepad(&on) && !stored_gamepad(&off));
+        // A desktop whose phone's shell was seen to open /dev/uhid, and nothing else.
+        assert!(wants_gamepad(&opts, &on, Some(true)));
+        assert!(!wants_gamepad(&opts, &on, Some(false)), "the shell cannot open /dev/uhid");
+        assert!(!wants_gamepad(&opts, &on, None), "not asked yet");
+        assert!(!wants_gamepad(&opts, &off, Some(true)), "gamepad: off");
+        let mirror: MirrorOptions = serde_json::from_value(serde_json::json!({ "serial": "X" })).expect("mirror options");
+        assert!(!wants_gamepad(&mirror, &on, Some(true)), "a phone-screen mirror");
+        let mut app_window = opts.clone();
+        app_window.app_package = Some("com.example".into());
+        assert!(wants_gamepad(&app_window, &on, Some(true)), "a scrcpy app window has a display of its own (a Linux computer's games)");
+        assert!(!wants_gamepad(&app_window, &off, Some(true)));
+        assert!(!wants_gamepad(&audio_companion_options("X", true), &on, Some(true)));
+        // A phone that failed a gamepad stays without them for the run, whatever the next preparation sees.
+        let mut seen = HashMap::new();
+        remember_uhid(&mut seen, "X", true);
+        assert_eq!(seen.get("X"), Some(&true));
+        seen.insert("X".to_string(), false); // a session's output named a uhid failure
+        remember_uhid(&mut seen, "X", true);
+        assert_eq!(seen.get("X"), Some(&false));
+        remember_uhid(&mut seen, "Y", false);
+        assert_eq!(seen.get("Y"), Some(&false));
+        opts.gamepad = wants_gamepad(&opts, &on, Some(true));
+        assert!(build_args(&opts).iter().any(|a| a == "--gamepad=uhid"));
+        assert!(!build_args(&audio_companion_options("X", true)).iter().any(|a| a.starts_with("--gamepad")));
+        let fallback = fallback_options(&opts).expect("strippable");
+        assert!(!fallback.gamepad);
+        // A session's output that names /dev/uhid's failure, and one that does not.
+        assert!(names_uhid_failure(
+            "ERROR: Controller error\njava.io.IOException: android.system.ErrnoException: open failed: EACCES (Permission denied)\n\tat com.genymobile.scrcpy.control.UhidManager.open(UhidManager.java:82)"
+        ));
+        assert!(!names_uhid_failure("ERROR: Could not open video stream\nINFO: Device disconnected"));
+    }
+
+    #[test]
+    fn the_preparation_says_whether_the_shell_opens_dev_uhid() {
+        assert!(read_probe("15\n35\noadx-uhid-ok\n").uhid);
+        assert!(!read_probe("15\n35\n").uhid);
+        let p = read_probe("15\n35\noadx-uhid-ok\n");
+        assert_eq!((p.release.as_str(), p.sdk, p.refused), ("15", Some(35), false));
     }
 
     /// The companion runs with --no-control, and scrcpy refuses to start with

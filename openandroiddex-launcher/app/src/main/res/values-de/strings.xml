@@ -302,6 +302,18 @@
     <string name="tp_waiting_computer">Warte auf den Computer…</string>
     <string name="tp_notice_text_computer">Tippen, um in den Apps Ihres Telefons auf dem Computer zu zeigen, zu klicken und zu scrollen</string>
     <string name="tp_hidden">Das Touchpad ist ausgeblendet, solange „Einstellungen“ oder ein ähnlicher Bildschirm geöffnet ist. Danach erscheint es wieder.</string>
+    <string name="gp_channel">Gamecontroller</string>
+    <string name="gp_title">Gamecontroller</string>
+    <string name="gp_notice_title">Telefon als Gamecontroller nutzen</string>
+    <string name="gp_notice_text">Tippen, um das Spiel auf dem Computer von diesem Bildschirm aus zu spielen</string>
+    <string name="gp_playing">Wird auf Ihrem Computer gespielt</string>
+    <string name="gp_no_window">Holen Sie das Fenster Ihres Spiels auf dem Computer nach vorn</string>
+    <string name="gp_held">Klicken Sie einmal in das Fenster des Spiels auf dem Computer, um loszuspielen</string>
+    <string name="gp_refused">Ihr Telefon lässt den Computer keinen Gamecontroller hinzufügen</string>
+    <string name="gp_hidden">Der Gamecontroller ist ausgeblendet, solange „Einstellungen“ oder ein ähnlicher Bildschirm geöffnet ist. Danach erscheint er wieder.</string>
+    <string name="gp_no_game">Auf keinem Computer ist ein Spiel geöffnet, also hat der Controller nichts zu spielen.</string>
+    <string name="gp_no_overlay">Der Gamecontroller braucht die Berechtigung, über anderen Apps zu zeichnen.</string>
+    <string name="gp_failed">Der Gamecontroller konnte nicht geöffnet werden.</string>
     <string name="st_phonepad">Telefon als Touchpad</string>
     <string name="st_phonepad_sub">Eine Benachrichtigung auf deinem Telefon macht seinen Bildschirm zum Touchpad für diesen Desktop</string>
     <string name="st_phonepad_note">Öffne es über diese Benachrichtigung oder über „Touchpad“ in den Schnelleinstellungen. Ein Finger zeigt und klickt, zwei scrollen, drei lösen die Gesten unten aus.</string>
@@ -697,4 +709,35 @@ Wenn du sie später wieder abschaltest, erzwingt Android das Beenden von Linux u
     <!-- ── Linux app windows ── -->
     <string name="lw_opening">%1$s wird geöffnet…</string>
     <string name="lw_close_window">Fenster schließen</string>
+
+    <!-- ── Send to computer ── -->
+    <string name="sc_label">An Computer senden</string>
+    <string name="sc_looking">Computer wird gesucht…</string>
+    <string name="sc_preparing">Wird vorbereitet…</string>
+    <string name="sc_sending">Wird an %s gesendet…</string>
+    <string name="sc_waiting">Warten auf %s…</string>
+    <string name="sc_count">%1$d von %2$d</string>
+    <string name="sc_saved">In „Downloads“ auf %s gespeichert</string>
+    <string name="sc_saved_some">%1$d von %2$d in „Downloads“ auf %3$s gespeichert</string>
+    <string name="sc_opened">Auf %s geöffnet</string>
+    <string name="sc_sent">An %s gesendet</string>
+    <string name="sc_copied">In die Zwischenablage auf %s kopiert</string>
+    <string name="sc_copied_hint">Sie können es dort einfügen.</string>
+    <string name="sc_none_title">Kein Computer verbunden</string>
+    <string name="sc_none_body">Öffnen Sie Open Android DeX auf Ihrem Computer und verbinden Sie dieses Telefon. Senden Sie es dann erneut.</string>
+    <string name="sc_silent_title">Ihr Computer hat nicht geantwortet</string>
+    <string name="sc_silent_body">Prüfen Sie, ob Open Android DeX dort noch geöffnet ist, und versuchen Sie es erneut.</string>
+    <string name="sc_off">„An Computer senden“ ist auf %s ausgeschaltet</string>
+    <string name="sc_failed">Nicht angekommen</string>
+    <string name="sc_failed_lost">Die Verbindung zu %s wurde unterbrochen. Senden Sie es erneut.</string>
+    <string name="sc_failed_space">Auf %s ist nicht genug Platz.</string>
+    <string name="sc_failed_read">Dieses Telefon konnte %1$d von %2$d nicht lesen.</string>
+    <string name="sc_failed_busy">%s ist gerade ausgelastet. Senden Sie es in einer Minute erneut.</string>
+    <string name="sc_failed_stuck">Dieses Telefon öffnet noch frühere Dateien. Versuchen Sie es in einer Minute erneut.</string>
+    <string name="sc_nothing">Hier gibt es nichts zu senden</string>
+    <string name="sc_too_much_text">Das ist zu viel Text auf einmal</string>
+    <string name="sc_too_many">Senden Sie höchstens %d Elemente auf einmal</string>
+    <string name="sc_try_again">Erneut versuchen</string>
+    <string name="sc_close">Schließen</string>
+    <string name="sc_cancel">Abbrechen</string>
 </resources>

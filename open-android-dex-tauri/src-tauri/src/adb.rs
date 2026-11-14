@@ -1785,9 +1785,27 @@ pub fn restore_phone(app: &tauri::AppHandle, serial: &str) {
     script.push_str(&format!(
         "appops set {LAUNCHER_PACKAGE} SYSTEM_ALERT_WINDOW default; \
          appops set {LAUNCHER_PACKAGE} ACCESS_RESTRICTED_SETTINGS default; \
-         cmd appwidget revokebind --package {LAUNCHER_PACKAGE} --user 0; \
-         pm revoke {LAUNCHER_PACKAGE} android.permission.WRITE_SECURE_SETTINGS; "
+         cmd appwidget revokebind --package {LAUNCHER_PACKAGE} --user 0; "
     ));
+    //    Remote access as the phone reports it, read once for the three things
+    //    below that remote access needs. Unreadable counts as on: each of them
+    //    then stays one session longer, while taking one away from a phone
+    //    whose remote access IS on would cut it off — and the next exit that
+    //    can read it tidies up.
+    let remote = crate::remote::phone_remote_status(app, serial);
+    let remote_on = remote.as_ref().map_or(true, |a| a.enabled);
+    if remote.is_none() {
+        log::warn!("{serial}: could not read remote access — keeping what it needs");
+    }
+    //    WRITE_SECURE_SETTINGS stays while the launcher needs it — see
+    //    launcher_keeps_secure_settings.
+    if launcher_keeps_secure_settings(remote.as_ref()) {
+        log::info!("{serial}: the launcher keeps WRITE_SECURE_SETTINGS for Samsung's background slowdown switch");
+    } else {
+        script.push_str(&format!(
+            "pm revoke {LAUNCHER_PACKAGE} android.permission.WRITE_SECURE_SETTINGS; "
+        ));
+    }
 
     // 3a. the touchpad notification's permission, Android 13 and later — but only
     //     when it was ours to give (grant_post_notifications). A runtime permission's
@@ -1805,8 +1823,8 @@ pub fn restore_phone(app: &tauri::AppHandle, serial: &str) {
     //     the platform re-evaluates it on its own and there is no "unset".
     //     Collected here but run LAST, after step 5's broadcast — see there.
     let mut power_undo = String::new();
-    for op in BACKGROUND_OPS {
-        power_undo.push_str(&format!("appops set {LAUNCHER_PACKAGE} {op} default; "));
+    for (op, mode) in background_ops_undo(app, serial, remote_on) {
+        power_undo.push_str(&format!("appops set {LAUNCHER_PACKAGE} {op} {mode}; "));
     }
     // …but only when it was ours to remove. "Unrestricted" battery that the
     // user chose on the phone is what keeps Remote access alive with no PC
@@ -1817,7 +1835,7 @@ pub fn restore_phone(app: &tauri::AppHandle, serial: &str) {
     // quietly take away what the user had just asked for.
     if !power_exemption_is_ours(app, serial) {
         log::info!("{serial}: battery exemption was the user's own — left in place");
-    } else if crate::remote::phone_remote_enabled(app, serial) {
+    } else if remote_on {
         log::info!("{serial}: remote access is on — keeping the battery exemption it needs");
     } else {
         power_undo.push_str(&format!(
@@ -2089,6 +2107,15 @@ fn install_apk(app: &tauri::AppHandle, serial: &str, apk: &str) -> Result<(), St
 /// available trade: Android offers no way to re-sign an installed package, and
 /// a desktop that cannot start is worse than one that forgets its settings.
 fn install_launcher(app: &tauri::AppHandle, serial: &str, apk: &str) -> Result<(), String> {
+    let installed = install_launcher_once(app, serial, apk);
+    if installed.is_ok() {
+        // "Send to computer" looks at the new launcher once: its share entry may be had now.
+        crate::send::launcher_installed(serial);
+    }
+    installed
+}
+
+fn install_launcher_once(app: &tauri::AppHandle, serial: &str, apk: &str) -> Result<(), String> {
     let err = match install_apk(app, serial, apk) {
         Ok(()) => return Ok(()),
         Err(e) => e,
@@ -2186,6 +2213,42 @@ fn bundled_apk_sha256(apk: &std::path::Path) -> Option<String> {
 /// phone's is not this build, and never while its Linux is running: an install
 /// stops the package, and that Linux with it.
 pub(crate) fn ensure_launcher(app: &tauri::AppHandle, serial: &str) -> Result<(), String> {
+    ensure_launcher_with(
+        app,
+        serial,
+        "the phone's touchpad",
+        "Close Linux on your phone first: setting up the touchpad would end it.",
+        "The touchpad couldn't be set up",
+    )
+}
+
+/// The same, for the phone's screen as a game controller: More's "Use phone
+/// as game controller", pressed by a person (apps/controller.rs).
+pub(crate) fn ensure_launcher_for_controller(app: &tauri::AppHandle, serial: &str) -> Result<(), String> {
+    ensure_launcher_with(
+        app,
+        serial,
+        "the phone's game controller",
+        "Close Linux on your phone first: setting up the game controller would end it.",
+        "The game controller couldn't be set up",
+    )
+}
+
+/// The same, for "Send to computer"'s entry in the phone's share menu: the
+/// Photos tab's Set it up / Update it, pressed by a person (send/mod.rs).
+pub(crate) fn ensure_launcher_for_send(app: &tauri::AppHandle, serial: &str) -> Result<(), String> {
+    ensure_launcher_with(
+        app,
+        serial,
+        "Send to computer",
+        "Close Linux on your phone first: updating Open Android DeX there would end it.",
+        "Open Android DeX couldn't be put on your phone",
+    )
+}
+
+/// [`ensure_launcher`]'s body: `what` it is for, in the log; `linux`, the
+/// sentence while the phone's Linux runs; `failed`, how a failure starts.
+fn ensure_launcher_with(app: &tauri::AppHandle, serial: &str, what: &str, linux: &str, failed: &str) -> Result<(), String> {
     let apk = bin_dir(app)?.join("openandroiddex-launcher.apk");
     if !apk.exists() {
         return Err("This copy of Open Android DeX has no phone app to install.".into());
@@ -2195,9 +2258,9 @@ pub(crate) fn ensure_launcher(app: &tauri::AppHandle, serial: &str) -> Result<()
         return Ok(());
     }
     if linux_running {
-        return Err("Close Linux on your phone first: setting up the touchpad would end it.".into());
+        return Err(linux.into());
     }
-    log::info!("installing {} for the phone's touchpad", apk.display());
+    log::info!("installing {} for {what}", apk.display());
     let (done, asked) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false)));
     watch_for_install_prompt(app, serial, done.clone(), asked.clone());
     let installed = install_launcher(app, serial, &apk.to_string_lossy());
@@ -2206,16 +2269,17 @@ pub(crate) fn ensure_launcher(app: &tauri::AppHandle, serial: &str) -> Result<()
         if asked.load(Ordering::SeqCst) {
             "Your phone is asking about installing Open Android DeX. Answer it on the phone, then try again.".into()
         } else {
-            log::warn!("{LAUNCHER_PACKAGE} did not install for the phone's touchpad: {e}");
-            not_installed(&e)
+            log::warn!("{LAUNCHER_PACKAGE} did not install for {what}: {e}");
+            not_installed(&e, failed)
         }
     })
 }
 
-/// Why the launcher did not install, as the one line a window's note has.
-/// What adb said is the log's: this computer's path to the APK is in it, and
-/// a phone's stack trace, and the desktop's own words for it run to a paragraph.
-fn not_installed(err: &str) -> String {
+/// Why the launcher did not install, as the one line a window's note has —
+/// `failed`, then why. What adb said is the log's: this computer's path to the
+/// APK is in it, and a phone's stack trace, and the desktop's own words for it
+/// run to a paragraph.
+fn not_installed(err: &str, failed: &str) -> String {
     let why = if is_install_restricted(err) {
         "your phone doesn't allow installs from a computer (on Xiaomi: Developer options → Install via USB)"
     } else if err.contains("INSUFFICIENT_STORAGE") || err.contains("not enough space") {
@@ -2223,9 +2287,9 @@ fn not_installed(err: &str) -> String {
     } else if is_signature_conflict(err) {
         "uninstall Open Android DeX on your phone, then try again"
     } else {
-        return "The touchpad couldn't be set up on your phone".into();
+        return if failed.ends_with("on your phone") { failed.to_string() } else { format!("{failed} on your phone") };
     };
-    format!("The touchpad couldn't be set up: {why}")
+    format!("{failed}: {why}")
 }
 
 /// What the phone has of the launcher: whether its installed APK is this very
@@ -2592,8 +2656,108 @@ pub fn adb_start_launcher(
 }
 
 /// The app-ops that decide whether the launcher may do anything while it is not
-/// the foreground app. Granted on deploy, put back to `default` on exit.
+/// the foreground app. Granted on deploy, put back on exit by
+/// [`background_ops_undo`].
 const BACKGROUND_OPS: [&str; 2] = ["RUN_IN_BACKGROUND", "RUN_ANY_IN_BACKGROUND"];
+
+/// Whether the end of a session leaves the launcher the WRITE_SECURE_SETTINGS
+/// it granted: while remote access is on, the launcher keeps Samsung's
+/// background slowdown switched off with it, and switches the slowdown back on
+/// with it when remote access goes off on the phone, with no cable
+/// (SamsungSlowdown). So it stays while remote access is on, while the
+/// slowdown is still the launcher's to switch back on (`slowdown_ours`), and
+/// when remote access could not be read at all. WmDaemon's unplug clean-up
+/// follows the same rule.
+fn launcher_keeps_secure_settings(remote: Option<&dexremote::usb::PhoneAnswer>) -> bool {
+    remote.map_or(true, |a| a.enabled || a.slowdown_ours)
+}
+
+/// Key prefix in the per-serial restore map: how the user had restricted one of
+/// [`BACKGROUND_OPS`] on the phone before this app allowed it.
+const BACKGROUND_OP_KEY: &str = "background_op_before:";
+
+/// A mode the phone's own battery settings write to restrict an app. `allow` is
+/// Android's own default for both ops, and the only mode that is not one.
+fn is_background_restriction(mode: &str) -> bool {
+    matches!(mode, "ignore" | "deny" | "foreground")
+}
+
+/// The restriction `cmd appops get <package> <op>` reports for `op`, if any.
+///
+/// The package's own line only (`RUN_ANY_IN_BACKGROUND: ignore`, possibly with
+/// more after it); a `Uid mode:` line is not ours to put back. `allow` and "No
+/// operations." are no restriction, and nor is `default`: only this app's
+/// earlier exits ever wrote that — see [`background_ops_undo`].
+fn background_op_restriction(out: &str, op: &str) -> Option<String> {
+    let prefix = format!("{op}: ");
+    let mode = out
+        .lines()
+        .find_map(|l| l.trim().strip_prefix(prefix.as_str()))?
+        .split(|c: char| c == ';' || c.is_whitespace())
+        .next()?;
+    is_background_restriction(mode).then(|| mode.to_string())
+}
+
+/// Record which of [`BACKGROUND_OPS`] the user had restricted, from the
+/// `cmd appops get` answers in `out`. Only ever adds, like [`remember_grant`]:
+/// a reconnect's deploy reads this app's own `allow`, which says nothing about
+/// the user, and a successful exit clears the record.
+fn remember_background_restrictions(app: &tauri::AppHandle, serial: &str, out: &str) {
+    let found: Vec<(String, String)> = BACKGROUND_OPS
+        .iter()
+        .filter_map(|op| {
+            background_op_restriction(out, op).map(|mode| (format!("{BACKGROUND_OP_KEY}{op}"), mode))
+        })
+        .collect();
+    if found.is_empty() {
+        return;
+    }
+    log::info!("{serial}: the launcher's background use was restricted on the phone — put back on exit");
+    let mut map = load_restore_map(app);
+    map.entry(restore_key(app, serial)).or_default().extend(found);
+    save_restore_map(app, &map);
+}
+
+/// What the exit sets each of [`BACKGROUND_OPS`] to: the user's own restriction
+/// when one was recorded, and otherwise `allow`, Android's default for both.
+///
+/// Never `default`, which earlier builds wrote meaning "as it was". Android
+/// reads anything but `allow` for RUN_ANY_IN_BACKGROUND as restricted
+/// (`backgroundRestricted=true` in `dumpsys activity processes`), and it then
+/// refuses the launcher the foreground without throwing. Linux started after
+/// that, from another computer with no desktop session running, was born in
+/// the phone's background core group and stayed there for its whole life: on
+/// a Galaxy S24, four small cores of ten, 5–6x slower (2026-11-12). Writing
+/// `allow` also heals a phone those builds left like that.
+///
+/// A recorded restriction loses to Remote access being on, the rule the doze
+/// whitelist follows too: remote access cannot run under it.
+fn background_ops_undo(app: &tauri::AppHandle, serial: &str, remote_on: bool) -> Vec<(&'static str, String)> {
+    let saved = load_restore_map(app).remove(&restore_key(app, serial)).unwrap_or_default();
+    let mut undo: Vec<(&'static str, String)> = BACKGROUND_OPS
+        .iter()
+        .map(|op| {
+            let mode = saved
+                .get(&format!("{BACKGROUND_OP_KEY}{op}"))
+                // It goes into a shell command: only a known mode does.
+                .filter(|mode| is_background_restriction(mode))
+                .cloned()
+                .unwrap_or_else(|| "allow".to_string());
+            (*op, mode)
+        })
+        .collect();
+    if undo.iter().any(|(_, mode)| mode != "allow") {
+        if remote_on {
+            log::info!("{serial}: remote access is on — the launcher keeps its background use");
+            for (_, mode) in &mut undo {
+                *mode = "allow".to_string();
+            }
+        } else {
+            log::info!("{serial}: putting back the launcher's background restriction");
+        }
+    }
+    undo
+}
 
 /// Take the launcher out of every power-saving bucket the shell can reach.
 ///
@@ -2679,6 +2843,16 @@ fn exempt_from_power_saving(app: &tauri::AppHandle, serial: &str) {
         ],
     );
 
+    // Read before they are allowed, so the exit can put back a restriction the
+    // user chose on the phone. An unanswered read records nothing, and the
+    // exit then writes `allow` — what nearly every phone has anyway.
+    let before = BACKGROUND_OPS
+        .iter()
+        .map(|op| format!("cmd appops get {LAUNCHER_PACKAGE} {op}"))
+        .collect::<Vec<_>>()
+        .join("; ");
+    let before = run_adb_quiet(app, &["-s", serial, "shell", &before]).unwrap_or_default();
+    remember_background_restrictions(app, serial, &before);
     let ops = BACKGROUND_OPS
         .iter()
         .map(|op| format!("cmd appops set {LAUNCHER_PACKAGE} {op} allow"))
@@ -3224,6 +3398,52 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_launcher_keeps_its_settings_permission_while_it_needs_it() {
+        use dexremote::usb::PhoneAnswer;
+        // Remote access unreadable: kept, the next exit tidies up.
+        assert!(launcher_keeps_secure_settings(None));
+        let off: PhoneAnswer = serde_json::from_str(r#"{"ok":true,"enabled":false,"slowdownOurs":false}"#).unwrap();
+        assert!(!launcher_keeps_secure_settings(Some(&off)));
+        let on = PhoneAnswer { enabled: true, ..off.clone() };
+        assert!(launcher_keeps_secure_settings(Some(&on)));
+        // Off, but the slowdown is still the launcher's to switch back on.
+        let owed: PhoneAnswer = serde_json::from_str(r#"{"ok":true,"enabled":false,"slowdownOurs":true}"#).unwrap();
+        assert!(owed.slowdown_ours);
+        assert!(launcher_keeps_secure_settings(Some(&owed)));
+        // A launcher too old to say: off is off.
+        let old: PhoneAnswer = serde_json::from_str(r#"{"ok":true,"enabled":false}"#).unwrap();
+        assert!(!launcher_keeps_secure_settings(Some(&old)));
+    }
+
+    #[test]
+    fn only_a_users_restriction_of_background_use_is_put_back() {
+        const ANY: &str = "RUN_ANY_IN_BACKGROUND";
+        const RUN: &str = "RUN_IN_BACKGROUND";
+        // The Galaxy S24 (Android 15), 2026-11-13, as earlier exits left it:
+        // `default`, which Android reads as restricted. Not the user's, so the
+        // exit writes `allow` over it.
+        let ours = "RUN_IN_BACKGROUND: default\nRUN_ANY_IN_BACKGROUND: default\n";
+        assert_eq!(background_op_restriction(ours, ANY), None);
+        assert_eq!(background_op_restriction(ours, RUN), None);
+        // An app nothing has touched, the same phone.
+        assert_eq!(background_op_restriction("No operations.\nDefault mode: allow\n", ANY), None);
+        // Restricted on the phone, as that phone prints it; CRLF as adb on
+        // Windows may hand it over, and a line with more after the mode.
+        let user = "RUN_IN_BACKGROUND: ignore; time=+1h2m ago\r\nRUN_ANY_IN_BACKGROUND: ignore\r\n";
+        assert_eq!(background_op_restriction(user, ANY).as_deref(), Some("ignore"));
+        assert_eq!(background_op_restriction(user, RUN).as_deref(), Some("ignore"));
+        // A uid-wide mode is not the package's, and not ours to put back.
+        let uid = "Uid mode: RUN_ANY_IN_BACKGROUND: ignore\nRUN_ANY_IN_BACKGROUND: allow\n";
+        assert_eq!(background_op_restriction(uid, ANY), None);
+        // One op's line never answers for the other.
+        assert_eq!(background_op_restriction("RUN_ANY_IN_BACKGROUND: ignore\n", RUN), None);
+        assert_eq!(background_op_restriction("RUN_IN_BACKGROUND: deny\n", ANY), None);
+        assert!(!is_background_restriction("allow"));
+        assert!(!is_background_restriction("default"));
+        assert!(!is_background_restriction("ignore; rm -rf /"));
+    }
+
+    #[test]
     fn the_child_limit_answer_reads_every_way_a_phone_answers() {
         const MAX: &str = "max_phantom_processes";
         let knobs = |out: &str| match read_child_limit_answer(out).0 {
@@ -3511,13 +3731,18 @@ unrelated_key=7
                     \tat android.util.ExceptionUtils.wrap(ExceptionUtils.java:34)";
         let other =
             "adb: failed to install C:\\x\\openandroiddex-launcher.apk: Failure [INSTALL_FAILED_INTERNAL_ERROR]";
+        let pad = "The touchpad couldn't be set up";
         let said = [
-            not_installed(full),
-            not_installed("Failure [INSTALL_FAILED_INSUFFICIENT_STORAGE]"),
-            not_installed(&install_restricted_help(REAL_RESTRICTED)),
-            not_installed("Failure [INSTALL_FAILED_UPDATE_INCOMPATIBLE: Package signatures do not match]"),
-            not_installed(other),
+            not_installed(full, pad),
+            not_installed("Failure [INSTALL_FAILED_INSUFFICIENT_STORAGE]", pad),
+            not_installed(&install_restricted_help(REAL_RESTRICTED), pad),
+            not_installed("Failure [INSTALL_FAILED_UPDATE_INCOMPATIBLE: Package signatures do not match]", pad),
+            not_installed(other, pad),
         ];
+        // Send to computer's Set it up says it in its own words.
+        let send = "Open Android DeX couldn't be put on your phone";
+        assert_eq!(not_installed(other, send), send);
+        assert_eq!(not_installed(full, send), format!("{send}: your phone is out of space"));
         assert_eq!(said[0], "The touchpad couldn't be set up: your phone is out of space");
         assert_eq!(said[1], said[0]);
         assert!(said[2].contains("doesn't allow installs from a computer"), "{}", said[2]);

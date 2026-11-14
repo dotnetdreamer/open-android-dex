@@ -302,6 +302,18 @@
     <string name="tp_waiting_computer">Aguardando o computador…</string>
     <string name="tp_notice_text_computer">Toque para apontar, clicar e rolar nos apps do telefone no computador</string>
     <string name="tp_hidden">O touchpad fica oculto enquanto as Definições ou um ecrã semelhante estiverem abertos. Volta quando fecharem.</string>
+    <string name="gp_channel">Controle de jogo</string>
+    <string name="gp_title">Controle de jogo</string>
+    <string name="gp_notice_title">Use o telefone como controle de jogo</string>
+    <string name="gp_notice_text">Toque para jogar o jogo do computador por esta tela</string>
+    <string name="gp_playing">Jogando no seu computador</string>
+    <string name="gp_no_window">Traga a janela do jogo para a frente no computador</string>
+    <string name="gp_held">Clique uma vez na janela do jogo no computador para começar a jogar</string>
+    <string name="gp_refused">Seu telefone não deixa o computador adicionar um controle de jogo</string>
+    <string name="gp_hidden">O controle fica oculto enquanto as Configurações ou uma tela parecida estiverem abertas. Volta quando fecharem.</string>
+    <string name="gp_no_game">Nenhum jogo está aberto em um computador, então o controle não tem o que jogar.</string>
+    <string name="gp_no_overlay">O controle de jogo precisa de permissão para aparecer sobre outros apps.</string>
+    <string name="gp_failed">Não foi possível abrir o controle de jogo.</string>
     <string name="st_phonepad">Telefone como touchpad</string>
     <string name="st_phonepad_sub">Uma notificação no telefone transforma a tela dele em um touchpad para este desktop</string>
     <string name="st_phonepad_note">Abra pela notificação ou por Touchpad nas configurações rápidas. Um dedo aponta e clica, dois rolam, e três executam os gestos abaixo.</string>
@@ -697,4 +709,35 @@ Se desativar isto mais tarde, o Android força o encerramento do Linux e o ambie
     <!-- ── Linux app windows ── -->
     <string name="lw_opening">A abrir %1$s…</string>
     <string name="lw_close_window">Fechar janela</string>
+
+    <!-- ── Send to computer ── -->
+    <string name="sc_label">Enviar para o computador</string>
+    <string name="sc_looking">À procura do seu computador…</string>
+    <string name="sc_preparing">A preparar…</string>
+    <string name="sc_sending">A enviar para %s…</string>
+    <string name="sc_waiting">À espera de %s…</string>
+    <string name="sc_count">%1$d de %2$d</string>
+    <string name="sc_saved">Guardado nas Transferências de %s</string>
+    <string name="sc_saved_some">%1$d de %2$d guardados nas Transferências de %3$s</string>
+    <string name="sc_opened">Aberto em %s</string>
+    <string name="sc_sent">Enviado para %s</string>
+    <string name="sc_copied">Copiado para a área de transferência de %s</string>
+    <string name="sc_copied_hint">Pode colá-lo lá.</string>
+    <string name="sc_none_title">Nenhum computador ligado</string>
+    <string name="sc_none_body">Abra o Open Android DeX no seu computador e ligue este telemóvel. Depois envie novamente.</string>
+    <string name="sc_silent_title">O seu computador não respondeu</string>
+    <string name="sc_silent_body">Verifique se o Open Android DeX continua aberto no computador e tente novamente.</string>
+    <string name="sc_off">«Enviar para o computador» está desativado em %s</string>
+    <string name="sc_failed">Não chegou</string>
+    <string name="sc_failed_lost">A ligação a %s perdeu-se. Envie novamente.</string>
+    <string name="sc_failed_space">Não há espaço suficiente em %s.</string>
+    <string name="sc_failed_read">Este telemóvel não conseguiu ler %1$d de %2$d.</string>
+    <string name="sc_failed_busy">%s está ocupado. Envie novamente daqui a um minuto.</string>
+    <string name="sc_failed_stuck">Este telemóvel ainda está a abrir ficheiros anteriores. Tente novamente daqui a um minuto.</string>
+    <string name="sc_nothing">Não há nada aqui para enviar</string>
+    <string name="sc_too_much_text">É demasiado texto para enviar de uma vez</string>
+    <string name="sc_too_many">Envie no máximo %d itens de cada vez</string>
+    <string name="sc_try_again">Tentar novamente</string>
+    <string name="sc_close">Fechar</string>
+    <string name="sc_cancel">Cancelar</string>
 </resources>

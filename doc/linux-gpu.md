@@ -274,6 +274,22 @@ short process per session start.
 
 - The copy's ceiling: MIT-SHM by memfd (the way `X11.java` already reads
   windows) instead of XPutImage would take a copy off every frame.
-- The browsers and VS Code still start with `--disable-gpu` / software WebRender,
-  set when Xvnc had no GL at all. Whether they gain on Zink is worth measuring.
+- Chromium uses the GPU since feature level 19: its wrapper (`dex-chromium`,
+  written by `browser_wrappers` in linux-setup.sh) leaves out `--disable-gpu`
+  when the session's probe passed. Measured on the S24 at 1600x900, two runs
+  each (2026-11-12): CSS animations 12–13 → 38 fps, WebGL none → 45–50 fps,
+  scrolling (~48 fps) and canvas 2D unchanged, the same CPU. ANGLE picked Zink
+  on RADV by itself.
+  On the S25 Ultra (Adreno 830, Turnip), through the wrapper, desktop on 6 of
+  8 cores, one run off and two on (2026-11-13): CSS animations 17 → 43–44 fps,
+  WebGL none → 44–50 fps, scrolling the same (47–50 fps) on about half the CPU
+  (0.96 → 0.55 cores). But canvas 2D 58 → 45–47 fps, a plain page's scroll
+  (Wikipedia) 60 → 47 fps, 1080p60 VP9 video 11% → 27% of frames dropped,
+  and pages load about 0.3 s later. The GPU path tops out near 45–50 fps, and
+  this CPU gets past that without it: the copy above is what holds it back.
+  Kept on all the same, the user's call: the CPU it frees is worth more than
+  the frames it costs. The window session (`:2`) draws on the GPU too (the
+  same wrapper; its GPU process loads Turnip). Eight minutes of CSS and WebGL
+  held steady with no crash. Firefox (software WebRender) and VS Code
+  (`--disable-gpu`) still start and run; they are unchanged and unmeasured.
 - A display path with DRI3 would let finished frames skip the CPU entirely.
