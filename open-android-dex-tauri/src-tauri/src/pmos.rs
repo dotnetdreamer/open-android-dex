@@ -46,6 +46,46 @@ use tokio::sync::{mpsc, watch};
 const ADDRESS: Ipv4Addr = Ipv4Addr::new(172, 16, 42, 1);
 const SSH_PORT: u16 = 22;
 
+/// A test over Wi-Fi, with no cable: `OADX_PMOS_ADDRESS` names the phone on
+/// this computer's network (`192.168.2.27`, or `redmi-note-7.local`) and is
+/// used in place of the cable's address. The phone then counts as there for
+/// as long as its SSH answers; everything else is as it is on the cable.
+fn wifi_address() -> Option<&'static str> {
+    static WIFI: OnceLock<Option<String>> = OnceLock::new();
+    WIFI.get_or_init(|| {
+        let a = std::env::var("OADX_PMOS_ADDRESS").ok().map(|a| a.trim().to_string()).filter(|a| !a.is_empty());
+        if let Some(a) = &a {
+            log::info!("pmos: looking for the phone at {a} on Wi-Fi (OADX_PMOS_ADDRESS), not on the USB network");
+        }
+        a
+    })
+    .as_deref()
+}
+
+/// Which network the phone is looked for on, for the log.
+fn network() -> &'static str {
+    if wifi_address().is_some() {
+        "Wi-Fi"
+    } else {
+        "USB network"
+    }
+}
+
+/// Where the phone's SSH is: on the cable, or at the Wi-Fi address a test gave.
+async fn ssh_address() -> Result<SocketAddr, String> {
+    let Some(host) = wifi_address() else { return Ok(SocketAddr::from((ADDRESS, SSH_PORT))) };
+    let found: Vec<SocketAddr> = tokio::net::lookup_host((host, SSH_PORT))
+        .await
+        .map_err(|e| format!("The phone's address {host} didn't resolve ({e})."))?
+        .collect();
+    found
+        .iter()
+        .find(|a| a.is_ipv4())
+        .or(found.first())
+        .copied()
+        .ok_or_else(|| format!("The phone's address {host} didn't resolve."))
+}
+
 /// The helper, for aarch64 postmarketOS (openandroiddex-pmos/build.sh).
 static HELPER: &[u8] = include_bytes!("../../../openandroiddex-pmos/prebuilt/openandroiddex-pmos-aarch64");
 /// Where it lives on the phone. Under the user's home: nothing here needs root.
@@ -119,6 +159,15 @@ fn client_seed(app: &AppHandle) -> Result<[u8; 32], String> {
     let path = config_file(app, KEY_FILE).ok_or("there is no settings folder to keep a key in")?;
     if let Ok(text) = std::fs::read_to_string(&path) {
         if let Some(seed) = dexremote::sshkey::parse_private_pem(&text) {
+            // ssh -i refuses a key others can read; one written before this
+            // was made owner-only is made so now.
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                if std::fs::metadata(&path).is_ok_and(|m| m.permissions().mode() & 0o077 != 0) {
+                    let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+                }
+            }
             return Ok(seed);
         }
     }
@@ -130,17 +179,30 @@ fn client_seed(app: &AppHandle) -> Result<[u8; 32], String> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
-    std::fs::write(&path, dexremote::sshkey::private_pem(&seed, &public, &key_comment()))
-        .map_err(|e| format!("could not keep this computer's key: {e}"))?;
+    let mut file = std::fs::OpenOptions::new();
+    file.write(true).create(true).truncate(true);
+    // Owner-only, as ssh insists for a key. Windows' OpenSSH checks the ACL
+    // instead, which a file in the user's profile inherits in a form it takes.
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut file, 0o600);
+    std::io::Write::write_all(
+        &mut file.open(&path).map_err(|e| format!("could not keep this computer's key: {e}"))?,
+        dexremote::sshkey::private_pem(&seed, &public, &key_comment()).as_bytes(),
+    )
+    .map_err(|e| format!("could not keep this computer's key: {e}"))?;
     Ok(seed)
 }
 
-/// What the key is called in the phone's authorized_keys: whose it is.
+/// What the key is called in the phone's authorized_keys: whose it is. The
+/// computer's own name (macOS and Linux export no HOSTNAME to an app).
 fn key_comment() -> String {
-    let host = std::env::var("COMPUTERNAME")
-        .or_else(|_| std::env::var("HOSTNAME"))
-        .unwrap_or_default();
-    let host: String = host.chars().filter(|c| c.is_ascii_alphanumeric() || "-_.".contains(*c)).take(40).collect();
+    let host = std::env::var("COMPUTERNAME").unwrap_or_else(|_| crate::send::computer_name());
+    let host: String = host
+        .chars()
+        .map(|c| if c.is_whitespace() { '-' } else { c })
+        .filter(|c| c.is_ascii_alphanumeric() || "-_.".contains(*c))
+        .take(40)
+        .collect();
     if host.is_empty() {
         "open-android-dex".into()
     } else {
@@ -180,9 +242,13 @@ async fn connect(want: Option<&str>) -> Result<(Handle<Pin>, String), String> {
         nodelay: true,
         ..Default::default()
     });
-    let tcp = tokio::time::timeout(Duration::from_secs(3), TcpStream::connect(SocketAddr::from((ADDRESS, SSH_PORT))))
+    let address = ssh_address().await?;
+    let tcp = tokio::time::timeout(Duration::from_secs(3), TcpStream::connect(address))
         .await
-        .map_err(|_| "The phone didn't answer on its USB network.".to_string())?
+        .map_err(|_| {
+            if wifi_address().is_some() { "The phone didn't answer on Wi-Fi." } else { "The phone didn't answer on its USB network." }
+                .to_string()
+        })?
         .map_err(|e| format!("The phone didn't let this computer in over SSH ({e}). Is SSH turned on there?"))?;
     let _ = tcp.set_nodelay(true);
     let handler = Pin { want: want.map(str::to_string), seen: seen.clone() };
@@ -257,6 +323,10 @@ async fn run(ssh: &Handle<Pin>, command: &str, input: Option<&[u8]>, limit: Dura
 /// route it would send to the phone from. A UDP socket's connect sends
 /// nothing, so this costs the phone nothing, and its sshd logs nothing.
 fn link_up() -> bool {
+    // On Wi-Fi there is always a route: whether its SSH answers says the rest.
+    if wifi_address().is_some() {
+        return true;
+    }
     let Ok(socket) = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)) else { return false };
     if socket.connect((ADDRESS, 9)).is_err() {
         return false;
@@ -313,12 +383,12 @@ pub async fn pmos_status(app: AppHandle) -> Option<PmosPhone> {
                     Some(key)
                 }
                 Err(e) => {
-                    log::info!("pmos: a phone is on the USB network, and its SSH: {e}");
+                    log::info!("pmos: a phone is on the {}, and its SSH: {e}", network());
                     None
                 }
             };
             if key.is_some() && cached.is_none() {
-                log::info!("pmos: a phone is on the USB network");
+                log::info!("pmos: a phone is on the {}", network());
             }
             *seen().lock().unwrap() = Some(Seen { host_key: key.clone(), at: Instant::now() });
             key
@@ -875,7 +945,7 @@ fn open_window(app: &AppHandle, s: &Session, fit: &Fit) -> Result<(), String> {
     }
     let dev = if tauri::is_dev() { app.config().build.dev_url.clone() } else { None };
     WebviewWindowBuilder::new(app, &s.label, WebviewUrl::App(format!("index.html#pmos={}", s.id).into()))
-        .title(format!("{} — postmarketOS · USB", s.name))
+        .title(format!("{} — postmarketOS · {}", s.name, if wifi_address().is_some() { "Wi-Fi" } else { "USB" }))
         .inner_size(fit.window.0.max(640.0), fit.window.1.max(400.0))
         .min_inner_size(640.0, 400.0)
         .center()
@@ -1142,6 +1212,15 @@ mod tests {
         assert_eq!(field(about, "model"), "Xiaomi Redmi Note 7");
         assert_eq!(field(about, "os"), "postmarketOS edge");
         assert_eq!(field(about, "missing"), "");
+    }
+
+    #[test]
+    fn key_comment_is_safe_inside_single_quotes() {
+        // pmos_pair puts the key's line in single quotes in a shell command on
+        // the phone; a computer called "IK's M1" must not end them.
+        let c = key_comment();
+        assert!(c.starts_with("open-android-dex"), "{c}");
+        assert!(c.chars().all(|ch| ch.is_ascii_alphanumeric() || "-_.@".contains(ch)), "{c}");
     }
 
     #[test]

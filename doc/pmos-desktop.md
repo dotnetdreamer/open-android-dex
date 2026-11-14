@@ -170,9 +170,59 @@ after the window says hello: 45–115 ms.
   it was locked, so it can't tell whether the phone is locked; the session's
   `org.freedesktop.ScreenSaver.GetActive` answered correctly when tried the
   same day.
-- The window does not resize the phone's screen: it is the size of this
-  computer's screen, and the window scales it. KWin's virtual outputs take
-  custom modes, so following the window is possible later.
 - Not here yet: the clipboard, files dropped on the window, sound, the Android
   flow's Wi-Fi. A hardware encoder (Venus) would lift the frame rate; on this
   phone its driver needs work first.
+
+## Following the window
+
+The screen starts at this computer's screen size (above), and then follows
+the window as DeX's does: the window says its size in its own logical pixels
+(`resize`, which `UsbDesktop` already sends the phone's Linux, and in
+`hello`), and the helper makes the screen that many logical pixels at the
+session's scale, at most `--cap` pixels on its long side (default: the first
+size's). Plasma gets more room as the window grows, not a bigger picture of
+the same room. Widths are whole multiples of 8, heights even.
+
+How: KWin gives a virtual output a custom mode as it would a monitor.
+`kscreen-doctor output.Virtual-OpenAndroidDeX.addCustomMode.W.H.60000.full`,
+then `mode.WxH@60`, on its own thread in the helper (each run is a Qt start
+on the phone). The stream renegotiates, `x264enc` starts over with a key
+frame, and `on_sample` sees the new caps and sends the window a new `video`
+message first, as the phone's Linux does after a resize.
+
+KWin keeps custom modes, and the mode in use, in `kwinoutputconfig.json`
+under the output's name. Left there, the next session of that name (any
+computer, any version of the helper) could open at this window's last size.
+So the helper puts the first mode back and removes its custom modes before
+the screen closes, and tidies leftovers from a session that died as it
+starts.
+
+Checked on 2026-11-14 (Redmi Note 7, KWin 6.8.2, kscreen 6.8.3), by hand
+over SSH while a session from the old helper ran: a 1600×900 custom mode
+(KWin made it 59.95 Hz) was taken, the screen went from 1920×1040 to
+1600×900 (1264×711 logical at 1.267), the old helper's pipeline carried on
+with no error, and the window showed the new screen; `kwinoutputconfig.json`
+then held the custom mode as the mode in use. Putting 1920×1040 back and
+`removeCustomMode.0` left it clean. Not yet checked: whether KWin hands a
+kept custom mode to the next screen of that name (the helper does not count
+on either answer). The helper's code for all of this was written on a Mac
+without Docker and has not been compiled or run yet; `build.sh` builds it.
+
+## Testing over Wi-Fi
+
+`OADX_PMOS_ADDRESS=<address>` (an IP or a name such as `redmi-note-7.local`)
+in the app's environment looks for the phone there instead of on the cable,
+for a computer the phone is not plugged into; the phone counts as there
+while its SSH answers. It is a test switch, not the Wi-Fi the Android flow
+has: there is no discovery, and signing in over Wi-Fi trusts the network for
+the first host key. postmarketOS's sshd listens on Wi-Fi too, and the phone
+announces `_ssh._tcp` over mDNS under its hostname.
+
+On 2026-11-14 the app on a Mac (macOS 26, M1 Pro, Retina 3024×1964) used it
+with the same Redmi on Wi-Fi: found 0.15–0.6 s after the app started; signed
+in (typed by a person); the desktop opened by itself after each app restart,
+1.5–1.7 s from the app starting to the first frame; a helper from the
+killed app ended on the phone. The key file had been written readable by
+everyone (0644), which `ssh -i` refuses, and its comment carried no computer
+name on macOS (no `HOSTNAME` in an app's environment): both fixed.

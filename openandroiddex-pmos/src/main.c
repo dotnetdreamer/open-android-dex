@@ -21,11 +21,13 @@
  *
  *   openandroiddex-pmos version
  *   openandroiddex-pmos probe
- *   openandroiddex-pmos serve --width W --height H --scale S [--encoder E] [--convert gl|cpu]
+ *   openandroiddex-pmos serve --width W --height H --scale S [--cap C] [--encoder E] [--convert gl|cpu]
  *   openandroiddex-pmos snapshot --width W --height H --scale S --out F.png [--wait SECONDS]
  *
  * W and H are the screen's size in pixels (KWin makes its mode that size), S
- * the scale Plasma draws it at.
+ * the scale Plasma draws it at. After that the screen follows the window: its
+ * size in the window's logical pixels, at scale S, at most C pixels on its
+ * long side (W or H, whichever is longer, when C is not given).
  */
 #define _GNU_SOURCE
 #include <ctype.h>
@@ -107,8 +109,9 @@ static struct {
     gboolean finishing;
 
     /* what the computer asked for */
-    int width, height; /* logical pixels */
+    int width, height; /* the screen's first size, in pixels: the mode KWin makes it with */
     double scale;
+    int cap; /* the most pixels the screen gets on its long side */
     char *name;
     char *forced_encoder;
     /* How the picture becomes the encoder's: on the GPU (gl) or the CPU (cpu). */
@@ -166,6 +169,16 @@ static struct {
     gint64 last_rx;
 
     GDBusConnection *bus;
+
+    /* The screen following its window (see apply_size). */
+    char *out_name;         /* the screen's name, as kscreen-doctor knows it */
+    int asked_w, asked_h;   /* the size the window's last word came to, in pixels */
+    GThread *sizer;         /* kscreen-doctor takes a moment: not on the main loop */
+    GMutex size_lock;
+    GCond size_cond;
+    int next_w, next_h;     /* for the sizer; 0 while there is nothing to do */
+    gboolean size_quit;
+    gint custom;            /* custom modes may be on the screen: put back before it closes */
 } app;
 
 static void say(const char *fmt, ...) G_GNUC_PRINTF(1, 2);
@@ -682,6 +695,36 @@ static double scale_now(void) {
 }
 
 /*
+ * kscreen-doctor with `args` (settings, or -o), its stdout in `out` when
+ * asked for. Any thread: it only waits for the program. Qt is told where it
+ * is, since under SSH it would look for X first.
+ */
+static gboolean kscreen(const char *const *args, char **out) {
+    GPtrArray *argv = g_ptr_array_new();
+    g_ptr_array_add(argv, (gpointer) "kscreen-doctor");
+    for (const char *const *a = args; *a; a++) g_ptr_array_add(argv, (gpointer)*a);
+    g_ptr_array_add(argv, NULL);
+    gchar **env = g_environ_setenv(g_get_environ(), "QT_QPA_PLATFORM", "wayland", TRUE);
+    GError *err = NULL;
+    gint status = 0;
+    gchar *errout = NULL;
+    gboolean ok = g_spawn_sync(NULL, (gchar **)argv->pdata, env,
+                               G_SPAWN_SEARCH_PATH | (out ? 0 : G_SPAWN_STDOUT_TO_DEV_NULL), NULL, NULL, out,
+                               &errout, &status, &err);
+    if (!ok) {
+        say("kscreen-doctor: %s", err ? err->message : "?");
+        g_clear_error(&err);
+    } else if (status != 0) {
+        say("kscreen-doctor %s: %s", args[0], errout ? g_strstrip(errout) : "?");
+        ok = FALSE;
+    }
+    g_free(errout);
+    g_strfreev(env);
+    g_ptr_array_free(argv, TRUE);
+    return ok;
+}
+
+/*
  * KWin makes the screen at the size and scale asked for (the size is its
  * mode, in pixels), and then gives it the scale it remembers for a screen of
  * that name (kwinoutputconfig.json): the first computer's, for every computer
@@ -693,21 +736,8 @@ static void keep_scale(void) {
     if (have <= 0 || !o || !o->name || fabs(have - app.scale) < 0.01) return;
     char setting[160];
     g_snprintf(setting, sizeof setting, "output.%s.scale.%.3f", o->name, app.scale);
-    gchar *argv[] = {"kscreen-doctor", setting, NULL};
-    /* Qt is told where it is: under SSH it would look for X first. */
-    gchar **env = g_environ_setenv(g_get_environ(), "QT_QPA_PLATFORM", "wayland", TRUE);
-    GError *err = NULL;
-    gint status = 0;
-    gchar *errout = NULL;
-    if (!g_spawn_sync(NULL, argv, env, G_SPAWN_SEARCH_PATH | G_SPAWN_STDOUT_TO_DEV_NULL, NULL, NULL, NULL, &errout,
-                      &status, &err)) {
-        say("scale: kscreen-doctor: %s", err ? err->message : "?");
-        g_clear_error(&err);
-    } else if (status != 0) {
-        say("scale: kscreen-doctor %s: %s", setting, errout ? g_strstrip(errout) : "?");
-    }
-    g_free(errout);
-    g_strfreev(env);
+    const char *const args[] = {setting, NULL};
+    kscreen(args, NULL);
     gint64 deadline = g_get_monotonic_time() + 3 * G_USEC_PER_SEC;
     while (fabs(scale_now() - app.scale) >= 0.01 && g_get_monotonic_time() < deadline)
         if (dispatch_for(100) < 0) break;
@@ -721,6 +751,233 @@ static void close_screen(void) {
         app.stream = NULL;
     }
     if (app.display) wl_display_flush(app.display);
+}
+
+/* ── the screen following its window ───────────────────────────────────── */
+
+/*
+ * The window says its size ("resize", and in "hello"), in its own logical
+ * pixels, as it does to the phone's Linux. Here that becomes the screen's
+ * mode: that many logical pixels at the session's scale, so Plasma gets more
+ * room as the window grows rather than a bigger picture of the same room, as
+ * DeX does. KWin gives a virtual output a custom mode as it would a monitor
+ * (kscreen-doctor's addCustomMode), its stream then carries frames of the new
+ * size, the encoder starts over for them, and on_sample tells the window.
+ *
+ * KWin keeps custom modes, and the mode in use, in kwinoutputconfig.json
+ * under the screen's name, and gives them back to the next screen of that
+ * name: whatever computer opens it next would start at this window's last
+ * size. So the screen goes back to the mode it was made with, and the custom
+ * modes go, before it closes; and a session that ended without that is
+ * tidied by the next one, as it starts.
+ */
+
+struct mode_info {
+    int index, w, h;
+};
+
+/* kscreen-doctor colours its words even into a pipe. */
+static void strip_escapes(char *s) {
+    char *w = s;
+    for (const char *r = s; *r; r++) {
+        if (r[0] == '\x1b' && r[1] == '[') {
+            r += 2;
+            while (*r && !(*r >= '@' && *r <= '~')) r++;
+            if (!*r) break;
+            continue;
+        }
+        *w++ = *r;
+    }
+    *w = 0;
+}
+
+/*
+ * The screen's custom modes as KWin has them now, by index, and the size of
+ * the mode in use (0 × 0 if it could not be read). From kscreen-doctor -o:
+ *   Output: 1 Virtual-OpenAndroidDeX …
+ *       Modes:  1:1920x1040@60.00*!  2:1600x900@59.95
+ *       Custom modes:
+ *           0: 1600x900@59.95
+ */
+static GArray *screen_modes(int *cur_w, int *cur_h) {
+    GArray *custom = g_array_new(FALSE, FALSE, sizeof(struct mode_info));
+    *cur_w = *cur_h = 0;
+    char *out = NULL;
+    const char *const list[] = {"-o", NULL};
+    if (!kscreen(list, &out) || !out) {
+        g_free(out);
+        return custom;
+    }
+    strip_escapes(out);
+    gboolean ours = FALSE, in_custom = FALSE;
+    gchar **lines = g_strsplit(out, "\n", -1);
+    for (gchar **l = lines; *l; l++) {
+        const char *t = *l;
+        while (*t == ' ' || *t == '\t') t++;
+        if (g_str_has_prefix(t, "Output:")) {
+            char name[128] = "";
+            ours = sscanf(t, "Output: %*d %127s", name) == 1 && strcmp(name, app.out_name) == 0;
+            in_custom = FALSE;
+            continue;
+        }
+        if (!ours) continue;
+        if (g_str_has_prefix(t, "Modes:")) {
+            for (const char *p = t + 6; (p = strchr(p, ':')); p++) {
+                int w, h;
+                char rate[32];
+                if (sscanf(p + 1, "%dx%d@%31s", &w, &h, rate) == 3 && strchr(rate, '*')) {
+                    *cur_w = w;
+                    *cur_h = h;
+                }
+            }
+            in_custom = FALSE;
+        } else if (g_str_has_prefix(t, "Custom modes:")) {
+            in_custom = TRUE;
+        } else if (in_custom) {
+            struct mode_info m;
+            if (sscanf(t, "%d: %dx%d", &m.index, &m.w, &m.h) == 3) g_array_append_val(custom, m);
+            else in_custom = FALSE;
+        }
+    }
+    g_strfreev(lines);
+    g_free(out);
+    return custom;
+}
+
+/*
+ * Make the screen w × h: its own first mode for that size, a custom one for
+ * any other; and every other custom mode taken away, so that there is only
+ * ever the one to put back. The sizer's thread, or the main one at the end.
+ */
+static gboolean apply_size(int w, int h) {
+    gboolean first = w == app.width && h == app.height;
+    int cur_w, cur_h;
+    GArray *custom = screen_modes(&cur_w, &cur_h);
+    gboolean have = FALSE;
+    for (guint i = 0; i < custom->len; i++) {
+        struct mode_info *m = &g_array_index(custom, struct mode_info, i);
+        if (m->w == w && m->h == h) have = TRUE;
+    }
+    if (custom->len) g_atomic_int_set(&app.custom, 1);
+    if (!first && !have) {
+        char add[160];
+        g_snprintf(add, sizeof add, "output.%s.addCustomMode.%d.%d.60000.full", app.out_name, w, h);
+        const char *const args[] = {add, NULL};
+        g_atomic_int_set(&app.custom, 1);
+        if (!kscreen(args, NULL)) {
+            say("size: KWin didn't take a %dx%d mode", w, h);
+            g_array_free(custom, TRUE);
+            return FALSE;
+        }
+        /* Where KWin put it in its list: the ones to take away are counted again. */
+        g_array_free(custom, TRUE);
+        custom = screen_modes(&cur_w, &cur_h);
+    }
+    GPtrArray *set = g_ptr_array_new_with_free_func(g_free);
+    if (cur_w != w || cur_h != h) g_ptr_array_add(set, g_strdup_printf("output.%s.mode.%dx%d@60", app.out_name, w, h));
+    guint left = 0;
+    /* Highest index first: each one taken away moves the ones after it down.
+     * The first size has a mode of its own, so none of them stays for it. */
+    for (guint i = custom->len; i-- > 0;) {
+        struct mode_info *m = &g_array_index(custom, struct mode_info, i);
+        if (!first && m->w == w && m->h == h) left++;
+        else g_ptr_array_add(set, g_strdup_printf("output.%s.removeCustomMode.%d", app.out_name, m->index));
+    }
+    gboolean ok = TRUE;
+    if (set->len) {
+        g_ptr_array_add(set, NULL);
+        ok = kscreen((const char *const *)set->pdata, NULL);
+        if (!ok) say("size: KWin didn't make the screen %dx%d", w, h);
+    }
+    if (ok && !left) g_atomic_int_set(&app.custom, 0);
+    g_ptr_array_free(set, TRUE);
+    g_array_free(custom, TRUE);
+    return ok;
+}
+
+/* The sizer: one size at a time, the latest the window asked for. */
+static gpointer sizer_main(gpointer d) {
+    g_mutex_lock(&app.size_lock);
+    while (!app.size_quit) {
+        if (!app.next_w) {
+            g_cond_wait(&app.size_cond, &app.size_lock);
+            continue;
+        }
+        int w = app.next_w, h = app.next_h;
+        app.next_w = app.next_h = 0;
+        g_mutex_unlock(&app.size_lock);
+        gint64 t0 = g_get_monotonic_time();
+        if (apply_size(w, h)) say("size: %dx%d in %d ms", w, h, (int)((g_get_monotonic_time() - t0) / 1000));
+        g_mutex_lock(&app.size_lock);
+    }
+    g_mutex_unlock(&app.size_lock);
+    return NULL;
+}
+
+static void ask_size(int w, int h) {
+    if (!app.sizer) return;
+    g_mutex_lock(&app.size_lock);
+    app.next_w = w;
+    app.next_h = h;
+    g_cond_signal(&app.size_cond);
+    g_mutex_unlock(&app.size_lock);
+}
+
+static void start_sizer(void) {
+    struct output *o = our_output();
+    if (!o || !o->name) {
+        say("size: the screen has no name to give kscreen-doctor, so it keeps its size");
+        return;
+    }
+    app.out_name = g_strdup(o->name);
+    app.asked_w = app.width;
+    app.asked_h = app.height;
+    app.sizer = g_thread_new("sizer", sizer_main, NULL);
+    /* Left over from a session that ended without putting its mode back. */
+    ask_size(app.width, app.height);
+}
+
+/* Before the screen closes: the mode it was made with, and no custom modes left behind. */
+static void stop_sizer(void) {
+    if (!app.sizer) return;
+    g_mutex_lock(&app.size_lock);
+    app.size_quit = TRUE;
+    g_cond_signal(&app.size_cond);
+    g_mutex_unlock(&app.size_lock);
+    g_thread_join(app.sizer);
+    app.sizer = NULL;
+    if (g_atomic_int_get(&app.custom) && !app.closed && apply_size(app.width, app.height))
+        say("size: back to %dx%d", app.width, app.height);
+}
+
+/* The window's size, in its logical pixels: the screen's, in pixels at the session's scale. */
+static void on_resize(const char *json) {
+    char v[32];
+    if (!app.sizer || !json_raw(json, "w", v, sizeof v)) return;
+    int w = atoi(v);
+    if (!json_raw(json, "h", v, sizeof v)) return;
+    int h = atoi(v);
+    if (w < 100 || h < 100 || w > 16384 || h > 16384) return;
+    double pw = w * app.scale, ph = h * app.scale;
+    double k = app.cap / MAX(pw, ph);
+    if (k < 1) {
+        pw *= k;
+        ph *= k;
+    }
+    /* Across, whole cells of eight (KWin's custom modes are CVT's, which rounds
+     * to those); down, even, for the encoder's 4:2:0. */
+    int sw = MAX(640, (int)lround(pw / 8) * 8);
+    int sh = MAX(400, (int)lround(ph / 2) * 2);
+    /* Within a few pixels of the first size is the first size, its own mode. */
+    if (abs(sw - app.width) <= 8 && abs(sh - app.height) <= 8) {
+        sw = app.width;
+        sh = app.height;
+    }
+    if (sw == app.asked_w && sh == app.asked_h) return;
+    app.asked_w = sw;
+    app.asked_h = sh;
+    say("size: the window is %dx%d, so the screen is %dx%d", w, h, sw, sh);
+    ask_size(sw, sh);
 }
 
 /* ── input ─────────────────────────────────────────────────────────────── */
@@ -955,11 +1212,23 @@ static void send_video_config(void) {
 static GstFlowReturn on_sample(GstAppSink *sink, gpointer d) {
     GstSample *sample = gst_app_sink_pull_sample(sink);
     if (!sample) return GST_FLOW_EOS;
-    if (!g_atomic_int_get(&app.sampled)) {
-        GstStructure *s = gst_caps_get_structure(gst_sample_get_caps(sample), 0);
-        int w = 0, h = 0;
+    int w = 0, h = 0;
+    GstCaps *sample_caps = gst_sample_get_caps(sample);
+    GstStructure *s = sample_caps ? gst_caps_get_structure(sample_caps, 0) : NULL;
+    if (s) {
         gst_structure_get_int(s, "width", &w);
         gst_structure_get_int(s, "height", &h);
+    }
+    if (g_atomic_int_get(&app.sampled) && w > 0 && h > 0 &&
+        (w != g_atomic_int_get(&app.pw) || h != g_atomic_int_get(&app.ph))) {
+        /* The screen took a new size (on_resize): the encoder has started over
+         * with a key frame, and the window hears of the size before it. */
+        g_atomic_int_set(&app.pw, w);
+        g_atomic_int_set(&app.ph, h);
+        g_atomic_int_set(&app.need_config, 1);
+        say("video: now %dx%d", w, h);
+    }
+    if (!g_atomic_int_get(&app.sampled)) {
         g_atomic_int_set(&app.pw, w);
         g_atomic_int_set(&app.ph, h);
         g_atomic_int_set(&app.sampled, 1);
@@ -1216,6 +1485,8 @@ static void on_hello(const char *json) {
     g_atomic_int_set(&app.attached, 1);
     send_state("running", NULL);
     force_keyframe();
+    /* A window that comes back may have been resized meanwhile. */
+    on_resize(json);
 }
 
 static void on_text(const char *json) {
@@ -1242,8 +1513,10 @@ static void on_text(const char *json) {
         release_all();
     } else if (strcmp(t, "stop") == 0) {
         finish(0);
+    } else if (strcmp(t, "resize") == 0) {
+        on_resize(json);
     }
-    /* "hb" only feeds the watchdog; "resize" is not taken: the screen is the computer's, not the window's. */
+    /* "hb" only feeds the watchdog. */
 }
 
 static void on_message(guint8 kind, const guint8 *p, gsize n) {
@@ -1359,6 +1632,7 @@ static gboolean parse_args(int argc, char **argv) {
         i++;
         if (strcmp(a, "--width") == 0) app.width = atoi(v);
         else if (strcmp(a, "--height") == 0) app.height = atoi(v);
+        else if (strcmp(a, "--cap") == 0) app.cap = atoi(v);
         else if (strcmp(a, "--scale") == 0) app.scale = g_ascii_strtod(v, NULL);
         else if (strcmp(a, "--name") == 0) {
             g_free(app.name);
@@ -1377,6 +1651,8 @@ static gboolean parse_args(int argc, char **argv) {
         say("a screen of %dx%d at %.2f is not one to make", app.width, app.height, app.scale);
         return FALSE;
     }
+    if (app.cap <= 0) app.cap = MAX(app.width, app.height);
+    app.cap = CLAMP(app.cap, 640, 7680);
     return TRUE;
 }
 
@@ -1495,10 +1771,12 @@ static int cmd_serve(void) {
         return 1;
     }
     keep_scale();
+    start_sizer();
     app.candidates = encoder_candidates();
     if (!start_video(why)) {
         say("%s", why->str);
         send_state("failed", why->str);
+        stop_sizer();
         close_screen();
         return 1;
     }
@@ -1527,6 +1805,7 @@ static int cmd_serve(void) {
     release_all();
     g_atomic_int_set(&app.attached, 0);
     stop_video();
+    stop_sizer();
     close_screen();
     wl_display_disconnect(app.display);
     say("done");
