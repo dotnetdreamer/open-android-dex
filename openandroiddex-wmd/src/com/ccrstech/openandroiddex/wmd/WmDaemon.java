@@ -32,10 +32,12 @@ import java.util.List;
  *
  *   PING                                      -> OK <uid>
  *   LIST <display>                            -> TASK <ix> <id> … (topmost first) / END
+ *                                                (… pkg activity minW minH defaultMinDp)
  *   STRIP <display> <task> <px>               -> OK          reserve a caption inset
  *   UNSTRIP <display> <task>                  -> OK          release it
  *   MOVE <display> <task> <x> <y>             -> OK <l> <t> <r> <b>
  *   BOUNDS <display> <task> <l> <t> <r> <b>   -> OK          instant, per-frame drag
+ *   SIZE <display> <task> <l> <t> <r> <b> <px> -> OK         instant, per-frame resize + strip
  *   RESIZE <display> <task> <l> <t> <r> <b> <px> -> OK       animated one-shot + re-strip
  *   FRONT <display> <task>                    -> OK
  *   FOCUSABLE <display> <task> <0|1>          -> OK
@@ -61,6 +63,8 @@ import java.util.List;
  *   KEY <display> <keycode>                   -> OK          one key, to what has the keyboard
  *   FOCUS <display>                           -> OK [<task>] the keyboard back to <display>
  *   TOP <display>                             -> OK <task> <pkg> | OK -1 -   what is in front
+ *   SHAPE <display> <name>                    -> OK <seq>    the pointer's shape there (CSS name)
+ *   SHAPEWAIT <display> <seq> <ms>            -> OK <seq> <name>  …once it is not <seq> (PC)
  *   BYE                                       -> (closes)
  *   ERR <reason>                              on any failure
  *
@@ -155,6 +159,7 @@ public final class WmDaemon {
             // client went away mid-command; per-connection state dies with it
         } finally {
             PadPointer.dropOwnedBy(socket);
+            Shapes.dropOwnedBy(socket);
         }
     }
 
@@ -175,10 +180,11 @@ public final class WmDaemon {
      * once the PC has gone quiet; the launcher only ever READS it (ARMED), and its uid
      * is shared with the Linux guest, where any program the user installs runs. REQGET
      * and REQACK drain the launcher's own requests to the PC, so the launcher has no use
-     * for them, and a guest that could ack would make taskbar presses vanish.
+     * for them, and a guest that could ack would make taskbar presses vanish. SHAPEWAIT
+     * is the PC's half of SHAPE, and holds a connection open while it waits.
      */
-    private static final java.util.Set<String> PC_ONLY =
-            new java.util.HashSet<>(java.util.Arrays.asList("ARM", "REQGET", "REQACK"));
+    private static final java.util.Set<String> PC_ONLY = new java.util.HashSet<>(
+            java.util.Arrays.asList("ARM", "REQGET", "REQACK", "SHAPEWAIT"));
 
     /** The launcher's app id, once looked up; -1 before that. See isLauncher. */
     private static volatile int launcherAppId = -1;
@@ -570,6 +576,71 @@ public final class WmDaemon {
                 Wm.setBounds(wct, t.token, want);
                 Wm.applyTransaction(wct);
                 out.println("OK");
+                return;
+            }
+
+            case "SIZE": {
+                // One frame of a resize by a window's edge (the launcher's ResizeEdges):
+                // bounds AND caption strip in one applyTransaction, so the app relayouts
+                // once per frame rather than twice, and with no transition, so it can be
+                // sent every frame — what AOSP's FluidResizeTaskPositioner does. The drag
+                // ends with RESIZE, whose transition re-crops the window on a shell that
+                // did not follow.
+                Wm.TaskRec t = Wm.taskById(i(a, 1), i(a, 2));
+                Rect want = new Rect(i(a, 3), i(a, 4), i(a, 5), i(a, 6));
+                if (want.isEmpty()) {
+                    out.println("ERR empty bounds rejected");   // see BOUNDS
+                    return;
+                }
+                int px = a.length > 7 ? i(a, 7) : 0;
+                Rect app = new Rect(want);
+                if (px > 0) app.top += px;
+                Object wct = Wm.newTransaction();
+                Wm.setBounds(wct, t.token, want);
+                Wm.setAppBounds(wct, t.token, app);
+                Wm.applyTransaction(wct);
+                out.println("OK");
+                return;
+            }
+
+            case "SHAPE": {
+                // "SHAPE <display> <name>" — the pointer's shape over <display>, a CSS
+                // cursor name: the launcher says so as it moves over a window's resize
+                // edge and off it again. Held until the connection that set it closes
+                // (Shapes). Open to the launcher's uid, guest included: the worst a guest
+                // can do with it is change the computer's cursor.
+                if (a.length < 3) {
+                    out.println("ERR no shape");
+                    return;
+                }
+                try {
+                    out.println("OK " + Shapes.set(i(a, 1), a[2], conn));
+                } catch (IllegalArgumentException e) {
+                    out.println("ERR " + e.getMessage());
+                }
+                return;
+            }
+
+            case "SHAPEWAIT": {
+                // "SHAPEWAIT <display> <seq> <ms>" — the PC's half: the shape once it is no
+                // longer number <seq>, or what it still is after <ms> (at most
+                // Shapes.WAIT_MAX_MS). One thread per connection, so a wait here holds
+                // only its own.
+                long seen;
+                try {
+                    seen = Long.parseLong(a[2]);
+                } catch (Exception e) {
+                    out.println("ERR bad seq");
+                    return;
+                }
+                long ms = a.length > 3 ? i(a, 3) : 0L;
+                try {
+                    String[] now = Shapes.await(i(a, 1), seen, ms);
+                    out.println("OK " + now[0] + " " + now[1]);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    out.println("ERR interrupted");
+                }
                 return;
             }
 

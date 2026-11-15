@@ -81,6 +81,21 @@ final class DesktopPointer implements PadTarget {
     private static float lastX;
     private static float lastY;
 
+    /** The pad in front, main thread only: the one {@link #shape} changes. */
+    private static DesktopPointer showing;
+
+    /**
+     * What the pointer is over wants a pointer of its own — a window's resize edge
+     * ({@link ResizeEdges}) its double arrow — or the arrow again. Main thread.
+     */
+    static void shape(int role) {
+        DesktopPointer p = showing;
+        if (p != null) p.setRole(role);
+    }
+
+    /** The DexCursors role drawn now. */
+    private int role = DexCursors.ROLE_ARROW;
+
     private final Context ctx;
     private final int display;
     private final WmClient wm = new WmClient();
@@ -154,6 +169,7 @@ final class DesktopPointer implements PadTarget {
     @Override
     public void show() {
         shown = true;
+        showing = this;
         addArrow();
         Op hover = new Op(MOVE);
         hover.x = Math.round(x);
@@ -169,7 +185,9 @@ final class DesktopPointer implements PadTarget {
     void hide() {
         if (!shown) return;
         shown = false;
+        if (showing == this) showing = null;
         buttons = 0;
+        role = DexCursors.ROLE_ARROW;
         removeArrow();
         queue(new Op(LEAVE));
         lastDisplay = display;
@@ -204,6 +222,32 @@ final class DesktopPointer implements PadTarget {
         if (arrow == null && daemonArrow == null) return;
         removeArrow();
         addArrow();
+    }
+
+    /**
+     * Draw {@code next} instead, in place: the window keeps its place in the stack and only
+     * its picture, size and hot spot change — a remove and an add per edge crossed would be
+     * two window transactions each time the pointer brushes a window's border.
+     */
+    private void setRole(int next) {
+        if (next == role) return;
+        role = next;
+        if (!shown) return;
+        if (daemonArrow != null) {
+            DexCursors.Sprite s = DexCursors.sprite(ctx, role, densityDpi);
+            if (s == null) return;
+            sprite = s;
+            drawByDaemon();
+            return;
+        }
+        if (arrow == null || arrowLp == null) return;
+        DexCursors.Sprite s = DexCursors.sprite(ctx, role, densityDpi);
+        if (s == null) return;
+        sprite = s;
+        ((ArrowView) arrow).setBitmap(s.bitmap);
+        arrowLp.width = s.bitmap.getWidth();
+        arrowLp.height = s.bitmap.getHeight();
+        place();
     }
 
     // ── what the pad does ──
@@ -396,7 +440,7 @@ final class DesktopPointer implements PadTarget {
      */
     private void addArrow() {
         if (arrow != null || daemonArrow != null) return;
-        sprite = DexCursors.arrow(ctx, densityDpi);
+        sprite = DexCursors.sprite(ctx, role, densityDpi);
         if (sprite == null) return;
         Display d = displayObject();
         if (d == null) return;
@@ -548,11 +592,17 @@ final class DesktopPointer implements PadTarget {
 
     /** The arrow: one bitmap, drawn at the window's corner. */
     private static final class ArrowView extends View {
-        private final Bitmap bitmap;
+        private Bitmap bitmap;
 
         ArrowView(Context ctx, Bitmap bitmap) {
             super(ctx);
             this.bitmap = bitmap;
+        }
+
+        void setBitmap(Bitmap next) {
+            bitmap = next;
+            requestLayout();
+            invalidate();
         }
 
         @Override

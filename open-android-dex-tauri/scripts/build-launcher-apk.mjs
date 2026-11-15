@@ -25,7 +25,7 @@
 
 import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { copyFileSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs'
 import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -253,4 +253,57 @@ if (process.env.SKIP_SCRCPY_SERVER === '1') {
   }
   stage(builtServer, bundledServer)
   console.log(`[scrcpy-server] bundled ${statSync(bundledServer).size} bytes → ${bundledServer}`)
+}
+
+// ── scrcpy's client, with the phone's pointer shapes ────────────────────────
+// The program on this computer, with openandroiddex-scrcpy/pointer-shapes.patch: the
+// desktop window's cursor takes the shape the phone asks for, a double arrow over a
+// window's resize edge (doc/window-resize.md). Not built here — that is SDL and FFmpeg
+// from source, minutes the first time (openandroiddex-scrcpy/build-client.sh) — but
+// staged when it has been built for this computer, so a dev run uses it. Without it the
+// release's own client stays, and the cursor stays an arrow over window edges.
+//
+// Replaced by a rename, never copied over: a scrcpy still running from an earlier dev
+// run keeps the file it was started from, where writing into it would kill it.
+const clientTarget = {
+  'darwin-arm64': 'macos-aarch64',
+  'darwin-x64': 'macos-x86_64',
+  'linux-x64': 'linux-x86_64',
+  'win32-x64': 'win64',
+}[`${process.platform}-${process.arch}`]
+const clientExe = onWindows ? 'scrcpy.exe' : 'scrcpy'
+const builtClient = clientTarget && join(scrcpyDir, 'build', 'client', clientTarget, clientExe)
+if (builtClient && existsSync(builtClient)) {
+  const places = [resolve(here, '..', 'src-tauri', 'resources', 'bin', clientExe)]
+  for (const profile of ['debug', 'release']) {
+    const bin = resolve(here, '..', 'src-tauri', 'target', profile, 'resources', 'bin')
+    if (existsSync(bin)) places.push(join(bin, clientExe))
+  }
+  for (const to of places) {
+    try {
+      mkdirSync(dirname(to), { recursive: true })
+      copyFileSync(builtClient, `${to}.new`)
+      chmodSync(`${to}.new`, 0o755)
+      renameSync(`${to}.new`, to)
+      console.log(`[scrcpy-client] pointer shapes: staged ${to}`)
+    } catch (e) {
+      console.warn(`[scrcpy-client] could not stage ${to} (${e.code}) — restart the dev app`)
+    }
+  }
+} else {
+  // CI lays its own build straight into resources/bin; say what is there, not a guess.
+  const bundled = resolve(here, '..', 'src-tauri', 'resources', 'bin', clientExe)
+  let shapes = false
+  try {
+    shapes = readFileSync(bundled).includes('Pointer shapes: read from stdin')
+  } catch {
+    // no client bundled at all: the build's own checks say so
+  }
+  console.log(
+    shapes
+      ? `[scrcpy-client] ${bundled} already takes pointer shapes`
+      : `[scrcpy-client] the bundled client does not take pointer shapes — the cursor stays an\n` +
+          `               arrow over window edges (openandroiddex-scrcpy/build-client.sh ` +
+          `${clientTarget || '<target>'} builds one, which the next run stages)`
+  )
 }

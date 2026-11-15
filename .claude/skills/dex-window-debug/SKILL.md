@@ -48,11 +48,12 @@ arrow as a root SurfaceFlinger layer, kept only while that connection is open) �
 header of `WmDaemon.java` for the full list. Where the pad's arrow is:
 `dumpsys SurfaceFlinger | grep -A4 "Layer (Touchpad pointer"` (`pos=`).
 
-`LIST` returns **topmost first**, 17 whitespace fields:
+`LIST` returns **topmost first**, 20 whitespace fields (17 from a daemon built before
+the task minimum was added):
 
 ```
-TASK ix id display mode actType vis  l t r b   al at ar ab   pkg activity
-                                     └ bounds ┘ └ appBounds ┘
+TASK ix id display mode actType vis  l t r b   al at ar ab   pkg activity  minW minH defMinDp
+                                     └ bounds ┘ └ appBounds ┘               └ TaskInfo, -1 = none ┘
 ```
 
 `appBounds.top > bounds.top` means a caption strip is reserved. Field 15 is the package —

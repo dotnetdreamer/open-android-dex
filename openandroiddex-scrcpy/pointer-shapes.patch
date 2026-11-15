@@ -1,0 +1,180 @@
+diff --git a/app/meson.build b/app/meson.build
+index 1c2021a..40c9ad8 100644
+--- a/app/meson.build
++++ b/app/meson.build
+@@ -29,6 +29,7 @@ src = [
+     'src/opengl.c',
+     'src/options.c',
+     'src/packet_merger.c',
++    'src/pointer_shape.c',  # Open Android DeX: pointer shapes from stdin
+     'src/receiver.c',
+     'src/recorder.c',
+     'src/scrcpy.c',
+diff --git a/app/src/pointer_shape.c b/app/src/pointer_shape.c
+new file mode 100644
+index 0000000..eb72005
+--- /dev/null
++++ b/app/src/pointer_shape.c
+@@ -0,0 +1,104 @@
++#include "pointer_shape.h"
++
++#include <stdint.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <SDL3/SDL_mouse.h>
++#include <SDL3/SDL_thread.h>
++
++#include "events.h"
++#include "util/log.h"
++
++#define SC_POINTER_SHAPE_ENV "SCRCPY_POINTER_SHAPES"
++
++static const struct {
++    const char *name;
++    SDL_SystemCursor id;
++} shapes[] = {
++    {"default", SDL_SYSTEM_CURSOR_DEFAULT},
++    {"text", SDL_SYSTEM_CURSOR_TEXT},
++    {"wait", SDL_SYSTEM_CURSOR_WAIT},
++    {"crosshair", SDL_SYSTEM_CURSOR_CROSSHAIR},
++    {"progress", SDL_SYSTEM_CURSOR_PROGRESS},
++    {"nwse-resize", SDL_SYSTEM_CURSOR_NWSE_RESIZE},
++    {"nesw-resize", SDL_SYSTEM_CURSOR_NESW_RESIZE},
++    {"ew-resize", SDL_SYSTEM_CURSOR_EW_RESIZE},
++    {"ns-resize", SDL_SYSTEM_CURSOR_NS_RESIZE},
++    {"move", SDL_SYSTEM_CURSOR_MOVE},
++    {"not-allowed", SDL_SYSTEM_CURSOR_NOT_ALLOWED},
++    {"pointer", SDL_SYSTEM_CURSOR_POINTER},
++};
++
++// Created on first use and kept for the life of the process. Only touched on
++// the main thread, which SDL requires of every cursor function.
++static SDL_Cursor *cursors[SDL_SYSTEM_CURSOR_COUNT];
++
++static void SDLCALL
++set_shape(void *userdata) {
++    SDL_SystemCursor id = (SDL_SystemCursor) (intptr_t) userdata;
++    if (id == SDL_SYSTEM_CURSOR_DEFAULT) {
++        // The one scrcpy started with, whatever the platform made it
++        SDL_SetCursor(SDL_GetDefaultCursor());
++        return;
++    }
++    if (!cursors[id]) {
++        cursors[id] = SDL_CreateSystemCursor(id);
++        if (!cursors[id]) {
++            LOGW("Pointer shapes: no system cursor %d: %s", (int) id,
++                 SDL_GetError());
++            return;
++        }
++    }
++    SDL_SetCursor(cursors[id]);
++}
++
++static int SDLCALL
++run_reader(void *data) {
++    (void) data;
++    char line[128];
++    while (fgets(line, sizeof(line), stdin)) {
++        size_t len = strcspn(line, "\r\n");
++        line[len] = '\0';
++        if (strncmp(line, "shape ", 6)) {
++            continue;
++        }
++        const char *name = line + 6;
++        for (size_t i = 0; i < ARRAY_LEN(shapes); ++i) {
++            if (!strcmp(name, shapes[i].name)) {
++                // Not waited for: the main thread may be busy for a frame, and
++                // a newer line will replace this one anyway. Refused once the
++                // event loop has ended, which is exactly right.
++                sc_run_on_main_thread(set_shape,
++                                      (void *) (intptr_t) shapes[i].id, false);
++                break;
++            }
++        }
++    }
++    return 0;
++}
++
++bool
++sc_pointer_shape_start(void) {
++    const char *on = getenv(SC_POINTER_SHAPE_ENV);
++    if (!on || strcmp(on, "1")) {
++        return false;
++    }
++
++    // Detached: it may block on stdin until the process exits, and nothing
++    // has to wait for it.
++    SDL_Thread *thread = SDL_CreateThread(run_reader, "scrcpy-shape", NULL);
++    if (!thread) {
++        LOGW("Pointer shapes: could not start the reader: %s", SDL_GetError());
++        return false;
++    }
++    SDL_DetachThread(thread);
++
++    // Read by Open Android DeX to know this build listens: a stock scrcpy
++    // never prints it. Flushed, because stdout is a pipe to that app and
++    // scrcpy unbuffers it only on Windows: elsewhere this line would wait in
++    // the buffer for kilobytes more output.
++    LOGI("Pointer shapes: read from stdin");
++    fflush(stdout);
++    return true;
++}
+diff --git a/app/src/pointer_shape.h b/app/src/pointer_shape.h
+new file mode 100644
+index 0000000..22f4954
+--- /dev/null
++++ b/app/src/pointer_shape.h
+@@ -0,0 +1,27 @@
++#ifndef SC_POINTER_SHAPE_H
++#define SC_POINTER_SHAPE_H
++
++#include "common.h"
++
++#include <stdbool.h>
++
++/**
++ * Pointer shapes asked for by the program that started scrcpy (Open Android
++ * DeX).
++ *
++ * With --mouse=sdk the computer draws the pointer over the video, so a shape
++ * the device would show (a resize arrow over a window's edge) can only appear
++ * if the computer's own cursor changes. When SCRCPY_POINTER_SHAPES=1 is in the
++ * environment, a thread reads stdin line by line, and each "shape <name>" sets
++ * the window's cursor to the system cursor of that CSS name ("default",
++ * "ew-resize", "ns-resize", "nwse-resize", "nesw-resize", ...). Anything else
++ * on stdin is ignored, and EOF ends the thread.
++ *
++ * Without the variable nothing is read, and scrcpy behaves exactly as before.
++ *
++ * Returns true if the reader was started.
++ */
++bool
++sc_pointer_shape_start(void);
++
++#endif
+diff --git a/app/src/scrcpy.c b/app/src/scrcpy.c
+index 0967e5d..682d22a 100644
+--- a/app/src/scrcpy.c
++++ b/app/src/scrcpy.c
+@@ -23,6 +23,7 @@
+ #include "hwdec.h"
+ #include "keyboard_sdk.h"
+ #include "mouse_sdk.h"
++#include "pointer_shape.h"
+ #include "recorder.h"
+ #include "screen.h"
+ #include "sdl_hints.h"
+@@ -1036,6 +1037,12 @@ aoa_complete:
+         }
+     }
+ 
++    if (options->window && options->control) {
++        // Open Android DeX: the device's pointer shapes on this computer's
++        // cursor, when the variable asks for them (pointer_shape.h)
++        sc_pointer_shape_start();
++    }
++
+     ret = event_loop(s, options->window);
+ 
+     // Reject all new runnables, and execute the pending ones now

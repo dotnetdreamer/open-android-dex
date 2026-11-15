@@ -540,6 +540,15 @@ final class DexCursors {
      * pointer on that display to defer to — so it is drawn as DeX, the default.
      */
     static Sprite arrow(Context ctx, int densityDpi) {
+        return sprite(ctx, ROLE_ARROW, densityDpi);
+    }
+
+    /**
+     * {@link #arrow}, for any role: the touchpad's pointer over a window's resize edge
+     * ({@link ResizeEdges}) is the double arrow in the same style, size and colour.
+     */
+    static Sprite sprite(Context ctx, int role, int densityDpi) {
+        if (role < 0 || role >= ROLE_COUNT || role == ROLE_NONE) role = ROLE_ARROW;
         String style = style(ctx);
         if (STYLE_SYSTEM.equals(style)) style = STYLE_DEX;
         DexTheme theme = DexTheme.of(ctx);
@@ -552,7 +561,7 @@ final class DexCursors {
                 || DexPrefs.getBool(ctx, DexPrefs.KEY_CURSOR_SHADOW, DexPrefs.DEF_CURSOR_SHADOW);
         float wanted = BASE_DP * (densityDpi / 160f) * look.scale * (size(ctx) / 100f);
         try {
-            return sprite(ROLE_ARROW, look, fill, line, shadow, wanted);
+            return sprite(role, look, fill, line, shadow, wanted);
         } catch (Throwable t) {
             return null;
         }

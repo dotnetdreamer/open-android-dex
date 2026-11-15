@@ -23,6 +23,14 @@ source at that release with one change by this project,
 `openandroiddex-scrcpy/display-scale.patch` (a resizable display follows its
 window in the computer screen's pixels). The files it changes say so.
 
+Neither is `scrcpy` (`scrcpy.exe` on Windows), the client: it is built from
+scrcpy's source at that release, by scrcpy's own release scripts, with one
+change by this project, `openandroiddex-scrcpy/pointer-shapes.patch` (the
+desktop window's cursor takes the shape the phone asks for, such as a double
+arrow over a window's resize edge). The files it changes say so. Everything
+else in the release archive — adb, the Windows libraries, the images — is the
+release's own.
+
 The scrcpy release archive also carries the libraries listed under
 "Libraries bundled by scrcpy" below, which are **not** Apache-2.0. On macOS and
 Linux the build is statically linked, so those libraries are inside the `scrcpy`

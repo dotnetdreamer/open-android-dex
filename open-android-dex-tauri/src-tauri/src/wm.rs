@@ -258,6 +258,16 @@ impl WmClient {
         self.ok("HOME")
     }
 
+    /// The pointer's shape over `display` once it is no longer number `seen` (-1 the
+    /// first time), or what it still is after `wait_ms`: `(seq, name)`, a CSS cursor name
+    /// the launcher set as the pointer crossed a window's resize edge
+    /// (doc/window-resize.md). `None` when the daemon did not answer, or predates the verb.
+    ///
+    /// `wait_ms` must stay under [`IO_TIMEOUT`], or the read gives up before the answer.
+    pub fn shape_wait(&self, display: i32, seen: i64, wait_ms: u32) -> Option<(i64, String)> {
+        parse_shape(&self.request(&format!("SHAPEWAIT {display} {seen} {wait_ms}"))?)
+    }
+
     /// Close the front-most app window, launcher excepted, without the task API.
     pub fn close_top(&self) -> bool {
         self.ok("CLOSETOP")
@@ -373,7 +383,21 @@ impl WmClient {
     }
 }
 
-/// `TASK ix id display mode actType vis l t r b al at ar ab pkg activity` — 17 fields.
+/// `OK <seq> <name>`, the daemon's answer to SHAPEWAIT.
+fn parse_shape(reply: &str) -> Option<(i64, String)> {
+    let mut parts = reply.strip_prefix("OK ")?.split_whitespace();
+    let seq = parts.next()?.parse().ok()?;
+    let name = parts.next()?;
+    // It goes on to scrcpy's stdin as a word of its own: never anything but a cursor name.
+    if !name.chars().all(|c| c.is_ascii_lowercase() || c == '-') {
+        return None;
+    }
+    Some((seq, name.to_string()))
+}
+
+/// `TASK ix id display mode actType vis l t r b al at ar ab pkg activity` — the first 17
+/// fields, all this reads. A newer daemon sends three more after them (the task's minimum
+/// size, for the launcher's resize edges), so never require exactly 17.
 ///
 /// Field order is load-bearing and easy to get wrong by one: index 14 is the app-bounds
 /// bottom, index 15 is the package. Reading 14 as the package renders window titles as a
@@ -528,6 +552,18 @@ mod tests {
     use super::*;
 
     #[test]
+    fn parses_a_shape_and_refuses_anything_that_is_not_a_cursor_name() {
+        assert_eq!(parse_shape("OK 7 ew-resize"), Some((7, "ew-resize".to_string())));
+        assert_eq!(parse_shape("OK 0 default"), Some((0, "default".to_string())));
+        assert_eq!(parse_shape("ERR no such shape"), None);
+        assert_eq!(parse_shape("OK 7"), None);
+        assert_eq!(parse_shape("OK x ew-resize"), None);
+        // It is written to scrcpy's stdin: nothing that could be a second line or a word.
+        assert_eq!(parse_shape("OK 7 ew-resize;quit"), None);
+        assert_eq!(parse_shape("OK 7 EW"), None);
+    }
+
+    #[test]
     fn parses_a_task_line() {
         let t = parse_task(
             "TASK 0 957 18 5 1 1 549 178 1605 955 549 212 1605 955 \
@@ -541,6 +577,20 @@ mod tests {
         assert_eq!(t.app_top, 212);
         assert!(t.is_freeform());
         assert!(t.has_strip(), "app_top 212 > top 178");
+    }
+
+    #[test]
+    fn a_task_line_with_the_minimum_size_after_it_reads_the_same() {
+        // A newer daemon adds minW minH defaultMinDp; the 17 fields before them stand.
+        let t = parse_task(
+            "TASK 0 957 18 5 1 1 549 178 1605 955 549 212 1605 955 \
+             com.android.chrome com.google.android.apps.chrome.Main 900 -1 220",
+        )
+        .expect("should parse");
+        assert_eq!(t.task_id, 957);
+        assert_eq!(t.package, "com.android.chrome");
+        assert_eq!(t.activity, "com.google.android.apps.chrome.Main");
+        assert_eq!((t.left, t.top, t.right, t.bottom), (549, 178, 1605, 955));
     }
 
     #[test]

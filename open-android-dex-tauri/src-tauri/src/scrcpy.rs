@@ -432,11 +432,15 @@ fn branded_exe(app: &AppHandle, exe: &std::path::Path) -> std::path::PathBuf {
     // concurrently (the desktop, its audio companion, mirror windows), and an
     // unconditional remove-and-relink would be a window in which another
     // spawn resolves a name that momentarily is not there. "Superseded" is
-    // inode inequality for a hardlink; for the copy fallback it is a size
-    // change, because a copy's mtime is its own and the sizes of two scrcpy
-    // releases have never matched.
+    // inode inequality for a hardlink; for the copy fallback — only ever made
+    // on ANOTHER volume, where no hardlink can be — it is a size change,
+    // because a copy's mtime is its own. Never size on the same volume: a
+    // Mach-O is padded to whole pages, so two builds of scrcpy routinely come
+    // out the same size — measured with two builds of our client
+    // (pointer-shapes.patch) — and the old link then ran the old build.
     if let Ok(l) = std::fs::metadata(&link) {
-        if (l.dev() == src.dev() && l.ino() == src.ino()) || l.len() == src.len() {
+        let same_volume = l.dev() == src.dev();
+        if (same_volume && l.ino() == src.ino()) || (!same_volume && l.len() == src.len()) {
             return link;
         }
     }
@@ -579,7 +583,15 @@ fn spawn_scrcpy(app: &AppHandle, opts: &MirrorOptions) -> Result<Child, String> 
         args.join(" ")
     );
     cmd.args(args);
-    cmd.stdin(Stdio::null())
+    // The desktop's pointer shapes — a double arrow over a window's resize edge
+    // (pointer_shape.rs). openandroiddex-scrcpy's client reads them from stdin when the
+    // variable is set; a stock client ignores both, and every other session keeps a
+    // closed stdin.
+    let desktop = opts.session_key().ends_with("|desktop");
+    if desktop {
+        cmd.env(crate::pointer_shape::ENV, "1");
+    }
+    cmd.stdin(if desktop { Stdio::piped() } else { Stdio::null() })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     adb::hide_console(&mut cmd);
@@ -682,6 +694,7 @@ fn spawn_output_reader<R: Read + Send + 'static>(
     density: Arc<AtomicI32>,
     display_size: Arc<Mutex<Option<(i32, i32)>>>,
     output: OutputLog,
+    shapes: Arc<AtomicBool>,
     stream: R,
 ) {
     thread::spawn(move || {
@@ -691,6 +704,10 @@ fn spawn_output_reader<R: Read + Send + 'static>(
             let line = line.trim_end().to_string();
             if line.is_empty() {
                 continue;
+            }
+            // Our client, telling us it takes pointer shapes on stdin (pointer_shape.rs).
+            if line.contains(crate::pointer_shape::LISTENING) {
+                shapes.store(true, Ordering::SeqCst);
             }
             if line.contains("ERROR") {
                 log::warn!("scrcpy [{key}] {line}");
@@ -792,6 +809,7 @@ fn register_session(
     let density = Arc::new(AtomicI32::new(requested_density(opts).unwrap_or(-1)));
     let display_size = Arc::new(Mutex::new(None));
     let output: OutputLog = Arc::new(Mutex::new(VecDeque::with_capacity(OUTPUT_KEEP)));
+    let shapes = Arc::new(AtomicBool::new(false));
     if let Some(out) = child.stdout.take() {
         spawn_output_reader(
             app.clone(),
@@ -803,6 +821,7 @@ fn register_session(
             density.clone(),
             display_size.clone(),
             output.clone(),
+            shapes.clone(),
             out,
         );
     }
@@ -817,10 +836,26 @@ fn register_session(
             density.clone(),
             display_size.clone(),
             output.clone(),
+            shapes.clone(),
             err,
         );
     }
+    // Only a desktop's stdin is a pipe (spawn_scrcpy). Dropped — closed — where nothing
+    // will be written to it: the phone draws the pointer itself under --mouse=uhid.
+    let shape_input = child.stdin.take();
     let child = Arc::new(Mutex::new(child));
+    if let Some(stdin) = shape_input {
+        if opts.mouse_mode.as_deref() != Some("uhid") {
+            crate::pointer_shape::watch(
+                key.clone(),
+                display_id.clone(),
+                stop.clone(),
+                child.clone(),
+                stdin,
+                shapes,
+            );
+        }
+    }
     let handle = SessionHandle {
         child: child.clone(),
         stop_requested: stop.clone(),

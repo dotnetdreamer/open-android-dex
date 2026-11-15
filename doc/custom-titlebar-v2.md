@@ -307,7 +307,11 @@ half-covered one, which is a real limitation, not a bug to fix from inside the s
   composited over a task until that task's platform caption is recreated.
 - Minimise is "send to back" — freeform exposes no real minimise;
   `DesktopTasksController#minimizeTask` lives inside SystemUI.
-- Resize by dragging an edge is still One UI's, not ours.
+- ~~Resize by dragging an edge is still One UI's, not ours.~~ Ours since issue #5:
+  wider edges with corners, the pointer's shape over them on the computer's cursor
+  too, and the drag through the daemon — see `window-resize.md`. The same record
+  says why a title-bar drag is an outline on a shell that draws no decor on the
+  display (Android 17 on the S25).
 - `wm.rs` compiles and is unit-tested but nothing calls it yet.
 
 ---
