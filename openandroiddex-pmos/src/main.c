@@ -78,7 +78,7 @@
 #include "zkde-screencast-unstable-v1-client-protocol.h"
 
 /* What `version` prints; pmos.rs compares the whole file's hash, not this. */
-#define VERSION "2"
+#define VERSION "3"
 
 /*
  * Frames sent and not yet acknowledged before new ones stop going into the
@@ -434,7 +434,7 @@ static void adopt_session(void) {
     }
     if (d) closedir(d);
     static const char *const keys[] = {"WAYLAND_DISPLAY", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS", "DISPLAY",
-                                       "XDG_SESSION_TYPE", "XDG_CURRENT_DESKTOP", NULL};
+                                       "XDG_SESSION_TYPE", "XDG_CURRENT_DESKTOP", "PLASMA_PLATFORM", NULL};
     if (best) {
         for (int i = 0; keys[i]; i++) {
             const char *v = environ_get(best, best_len, keys[i]);
@@ -1015,6 +1015,121 @@ static void keep_scale(void) {
     say("scale: KWin had %.3f for this screen, now %.3f", have, scale_now());
 }
 
+/* ── Plasma Mobile's docked mode ─────────────────────────────────────── */
+
+/*
+ * Plasma Mobile shows every app full screen and without a title bar, on all
+ * its screens, unless its Docked Mode is on (the quick setting; the key is
+ * convergenceModeEnabled in plasmamobilerc's [General]). The shell and KWin
+ * follow that file live when it is written with --notify. A computer's
+ * screen wants windows, and the phone wants its phone back afterwards: so
+ * docked mode is on while a computer has the screen, and then as the phone
+ * had it. It is one setting, so the phone's own screen has windows too
+ * meanwhile.
+ *
+ * What the phone had is kept in a file until it is put back, so a session
+ * that ends any other way still puts it back (the guard; `rest` from the
+ * login autostart after a restart), and a second session doesn't take the
+ * first one's "on" for the phone's own.
+ */
+static gboolean plasma_mobile(void) {
+    const char *p = getenv("PLASMA_PLATFORM");
+    return p && g_str_has_prefix(p, "phone");
+}
+
+static char *docked_file(void) {
+    return g_build_filename(g_get_user_cache_dir(), "openandroiddex", "plasma-docked-before", NULL);
+}
+
+/* kreadconfig6 (value NULL; the answer in *out) or kwriteconfig6 --notify on docked mode's key; the 5s on older Plasma. */
+static gboolean docked_config(const char *value, char **out) {
+    for (int v = 6; v >= 5; v--) {
+        char prog[24];
+        g_snprintf(prog, sizeof prog, "%s%d", value ? "kwriteconfig" : "kreadconfig", v);
+        char *path = g_find_program_in_path(prog);
+        if (!path) continue;
+        const char *argv[12];
+        int n = 0;
+        argv[n++] = path;
+        if (value) argv[n++] = "--notify";
+        argv[n++] = "--file";
+        argv[n++] = "plasmamobilerc";
+        argv[n++] = "--group";
+        argv[n++] = "General";
+        argv[n++] = "--key";
+        argv[n++] = "convergenceModeEnabled";
+        if (value) argv[n++] = value;
+        argv[n] = NULL;
+        GError *err = NULL;
+        gint status = 0;
+        gboolean ok = g_spawn_sync(NULL, (gchar **)argv, NULL, out ? 0 : G_SPAWN_STDOUT_TO_DEV_NULL, NULL, NULL, out,
+                                   NULL, &status, &err) &&
+                      status == 0;
+        if (err) {
+            say("%s: %s", prog, err->message);
+            g_clear_error(&err);
+        }
+        g_free(path);
+        return ok;
+    }
+    say("docked mode: the phone has no kwriteconfig6 or kwriteconfig5");
+    return FALSE;
+}
+
+static gboolean rest_autostart(void);
+static void start_guard(void);
+
+/* Docked mode on for this computer's screen, keeping what the phone had. Plasma Mobile only. */
+static void dock(void) {
+    if (!plasma_mobile()) return;
+    char *file = docked_file();
+    char *before = NULL;
+    if (!g_file_get_contents(file, &before, NULL, NULL)) {
+        /* No session left one: this is the phone's own setting. */
+        char *now = NULL;
+        gboolean read = docked_config(NULL, &now);
+        if (read && now && strcmp(g_strstrip(now), "true") == 0) {
+            say("docked mode: on already");
+            read = FALSE;
+        }
+        g_free(now);
+        char *dir = g_path_get_dirname(file);
+        if (read && (g_mkdir_with_parents(dir, 0700) != 0 || !g_file_set_contents(file, "false", -1, NULL))) {
+            say("docked mode: left as it is (nowhere to keep what the phone had)");
+            read = FALSE;
+        }
+        g_free(dir);
+        if (!read) {
+            g_free(file);
+            return;
+        }
+        before = g_strdup("false");
+    }
+    g_strstrip(before);
+    rest_autostart();
+    if (app.guard_fd == 0) start_guard();
+    if (docked_config("true", NULL))
+        say("docked mode: on while this computer has the screen (the phone had it %s)",
+            strcmp(before, "true") == 0 ? "on" : "off");
+    g_free(before);
+    g_free(file);
+}
+
+/* Docked mode back as the phone had it, if a computer's session turned it on. */
+static void undock(void) {
+    char *file = docked_file();
+    char *before = NULL;
+    if (g_file_get_contents(file, &before, NULL, NULL)) {
+        gboolean on = strcmp(g_strstrip(before), "true") == 0;
+        if (docked_config(on ? "true" : "false", NULL)) {
+            unlink(file);
+            say("docked mode: back %s, as the phone had it", on ? "on" : "off");
+        }
+        g_free(before);
+    }
+    g_free(file);
+}
+
 static void wlr_close_screen(void);
 
 static void close_screen(void) {
@@ -1497,29 +1612,39 @@ static gboolean setup_phosh(void) {
     }
     g_free(old);
     g_free(path);
+    ok &= rest_autostart();
+    return ok;
+}
+
+/*
+ * The login autostart that runs `rest`: on Phosh the headless output off
+ * until a computer opens it, on Plasma Mobile docked mode as the phone had it
+ * if a session ended without putting it back (a restart, a flat battery).
+ */
+static gboolean rest_autostart(void) {
     char exe[4096];
     ssize_t n = readlink("/proc/self/exe", exe, sizeof exe - 1);
-    if (n > 0) {
-        exe[n] = 0;
-        char *dir = g_build_filename(g_get_user_config_dir(), "autostart", NULL);
-        char *file = g_build_filename(dir, "com.ccrstech.openandroiddex.pmos-rest.desktop", NULL);
-        char *entry = g_strdup_printf("[Desktop Entry]\n"
-                                      "Type=Application\n"
-                                      "Name=Open Android DeX\n"
-                                      "Comment=Keeps the screen this phone makes for a computer off until a computer "
-                                      "opens it\n"
-                                      "Exec=\"%s\" rest\n"
-                                      "NoDisplay=true\n"
-                                      "OnlyShowIn=Phosh;\n",
-                                      exe);
-        char *had = NULL;
-        if (!g_file_get_contents(file, &had, NULL, NULL) || strcmp(had, entry) != 0)
-            ok &= g_mkdir_with_parents(dir, 0755) == 0 && g_file_set_contents(file, entry, -1, NULL);
-        g_free(had);
-        g_free(entry);
-        g_free(file);
-        g_free(dir);
-    }
+    if (n <= 0) return FALSE;
+    exe[n] = 0;
+    gboolean ok = TRUE;
+    char *dir = g_build_filename(g_get_user_config_dir(), "autostart", NULL);
+    char *file = g_build_filename(dir, "com.ccrstech.openandroiddex.pmos-rest.desktop", NULL);
+    char *entry = g_strdup_printf("[Desktop Entry]\n"
+                                  "Type=Application\n"
+                                  "Name=Open Android DeX\n"
+                                  "Comment=Puts the phone back after a computer's screen: off until a computer opens "
+                                  "it, and Plasma Mobile's docked mode as it was\n"
+                                  "Exec=\"%s\" rest\n"
+                                  "NoDisplay=true\n"
+                                  "OnlyShowIn=Phosh;KDE;\n",
+                                  exe);
+    char *had = NULL;
+    if (!g_file_get_contents(file, &had, NULL, NULL) || strcmp(had, entry) != 0)
+        ok = g_mkdir_with_parents(dir, 0755) == 0 && g_file_set_contents(file, entry, -1, NULL);
+    g_free(had);
+    g_free(entry);
+    g_free(file);
+    g_free(dir);
     return ok;
 }
 
@@ -3196,6 +3321,7 @@ static int cmd_serve(void) {
         close_screen();
         return 1;
     }
+    if (!app.wlr) dock();
     inhibit();
     {
         struct output *o = our_output();
@@ -3225,17 +3351,22 @@ static int cmd_serve(void) {
     stop_video();
     stop_sizer();
     close_screen();
+    /* After the screen has gone, so its windows come to the phone's screen as phone apps. */
+    undock();
     wl_display_disconnect(app.display);
     say("done");
     return app.status;
 }
 
 /*
- * Phosh's headless output off and its shell on the phone's panel. The
- * session's autostart runs this at login (the output comes on with the
- * session), and the guard after serve has gone, however it went.
+ * The phone as it was before a computer: Plasma Mobile's docked mode as the
+ * phone had it, and Phosh's headless output off with its shell on the
+ * phone's panel. The session's autostart runs this at login (the output
+ * comes on with the session), and the guard after serve has gone, however
+ * it went.
  */
 static int cmd_rest(void) {
+    undock();
     GString *why = g_string_new(NULL);
     if (!wayland_connect(why)) {
         say("rest: %s", why->str);

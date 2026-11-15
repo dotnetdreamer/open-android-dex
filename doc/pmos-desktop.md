@@ -301,6 +301,39 @@ unlocked it. Disconnect left the phone with its own screen only.
 - The S24 needed work on the phone, outside this repository, before KWin
   showed anything on its own screen (a KWin shim for its display's buffer
   formats). The window's pill had a bug the S24 found; see usb-desktop.md.
+- Docked mode was first turned on by hand for this test, and stayed on: after
+  Disconnect, the phone's own screen had its apps as windows with title bars
+  too. Since helper 3, the helper turns docked mode on for the session and puts
+  back what the phone had: see [Plasma Mobile's docked mode](#plasma-mobiles-docked-mode).
+
+### Plasma Mobile's docked mode
+
+Plasma Mobile puts every app full screen without a title bar, on all its
+screens, unless its Docked Mode quick setting is on (`convergenceModeEnabled`
+in `plasmamobilerc`'s `[General]`). The shell and KWin follow that file live
+when it is written with `kwriteconfig6 --notify`. So once the stream is up the
+helper writes it on, and once the computer's screen has gone it writes back
+what the phone had. The windows on the computer's screen come to the phone's
+screen when it goes, and turn back into phone apps there. Docked mode is one
+setting for every screen: while a computer is connected, the phone's own
+screen has windows too.
+
+What the phone had is kept in `~/.cache/openandroiddex/plasma-docked-before`
+until it is put back. So the guard puts it back when the helper dies, and the
+autostart entry's `rest` does at the next login after a restart. A second
+session doesn't take the first one's "on" for the phone's own. A phone that
+had docked mode on already is left alone.
+
+Checked on the S24 on 2026-11-15 (helper 3, through the app):
+- The window opening turned docked mode on ("the phone had it off").
+- Disconnect put it back off, and the kept file went.
+- A kill -9 of the helper: the guard put it back off within the same second.
+  The window then reconnected by itself, which turned it on again, as it
+  should while the window is open.
+- `rest` with a kept "off" and no session, run by hand: it wrote it back and
+  removed the file.
+
+The restart case (`rest` from the autostart at login) was not tried.
 
 ## Phosh
 

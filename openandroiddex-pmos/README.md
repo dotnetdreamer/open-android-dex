@@ -50,8 +50,9 @@ pointer and keyboard) and its screens, the outputs, the encoders that open.
 `snapshot` makes the screen, waits, and saves one frame of what Plasma put on
 it (KWin only; on Phosh, `grim -o HEADLESS-1` does it). `serve` speaks the
 framed messages on stdin and stdout that pmos.rs expects, and ends when stdin
-closes or after fifteen seconds without a message. `rest` turns Phosh's
-headless output off and gives the phone's panel the shell back.
+closes or after fifteen seconds without a message. `rest` puts Plasma
+Mobile's docked mode back as the phone had it, and turns Phosh's headless
+output off and gives the phone's panel the shell back.
 
 On Phosh, `serve` also writes two files in the user's home, once: a marked
 block in `~/.phoshdebug` that adds wlroots' headless output to the session
@@ -61,6 +62,15 @@ runs `rest` once `serve` has ended however it ended, and logs to
 `~/.cache/openandroiddex/guard.log`. `~/.cache/openandroiddex/phosh-screen`
 keeps the last size, which `rest` leaves the output at. Why each of these is
 there: doc/pmos-desktop.md, "Phosh".
+
+On Plasma Mobile, `serve` turns on docked mode (`convergenceModeEnabled` in
+`plasmamobilerc`, with kwriteconfig6 --notify) while the computer has the
+screen, so apps there are windows with title bars, and puts back what the phone
+had when it ends. Until then that is kept in
+`~/.cache/openandroiddex/plasma-docked-before`; the guard and the autostart
+entry above (written here too, for Plasma as well as Phosh) put it back if
+`serve` ended without doing so. Docked mode is one setting, so the phone's own
+screen has windows too while a computer is connected.
 
 The phone needs `gst-plugins-base` and `gst-plugins-ugly` (x264), and on
 Plasma `gst-plugin-pipewire`. The Plasma Mobile install on the phone this was
