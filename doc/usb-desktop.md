@@ -264,6 +264,13 @@ pc::Desktop (127.0.0.1:<tunnel port>/stream/<token>, checked) ──▶ the wind
 `· Wi-Fi`, `· Remote` or `· Remote (relay)`, and the pill the same words —
 following the path as it changes, as the bitrate does.
 
+**The pill takes clicks only while it shows.** It shows for 2.5 s when the
+picture comes up and again while the pointer rests at the top edge. Faded
+out, it used to stay clickable: until 2026-11-15 it ate the desktop's clicks
+in the top middle of the window, and could switch the clipboard or full
+screen unseen. On a Galaxy S24's Plasma, the title bar buttons of a window
+snapped to the left half sat exactly there and did nothing.
+
 ## Coming and going
 
 The window opens over adb when the phone is on it; otherwise as video through

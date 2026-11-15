@@ -647,7 +647,13 @@ export function UsbDesktop({
         <div
           className={`pointer-events-none absolute inset-x-0 top-2 flex justify-center transition-opacity duration-200 ${pill ? "opacity-100" : "opacity-0"}`}
         >
-          <div className="toast card-raised pointer-events-auto !w-auto max-w-full !items-center !gap-1 !rounded-full !py-1 !pl-3.5 !pr-1 text-[12px]">
+          {/* Clickable only while shown: faded out, it would still eat the desktop's clicks under it
+              (title bar buttons of a window snapped to the left half sat right there) and could
+              toggle the clipboard or full screen unseen. The canvas below still gets the moves
+              that bring it down. */}
+          <div
+            className={`toast card-raised ${pill ? "pointer-events-auto" : "pointer-events-none"} !w-auto max-w-full !items-center !gap-1 !rounded-full !py-1 !pl-3.5 !pr-1 text-[12px]`}
+          >
             <span className="dot dot-ok mr-1" aria-hidden="true" />
             <span className="font-semibold">{route}</span>
             {stats && (
