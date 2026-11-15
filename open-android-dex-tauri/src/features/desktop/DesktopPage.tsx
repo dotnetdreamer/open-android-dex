@@ -617,7 +617,7 @@ function pmosContent(props: Props): View | null {
       scene: "allow",
       via: "usb",
       title: "Sign in to your phone",
-      lede: "A postmarketOS phone is plugged in. Sign in with the username and password you use on it, just this once, and its desktop opens here.",
+      lede: "A postmarketOS phone is plugged in. Sign in with the username and the password or PIN you use on it, just this once, and its desktop opens here.",
       body: <PmosSignIn busy={pm.signingIn} error={pm.signInError} onSignIn={pm.signIn} />,
     };
   }
