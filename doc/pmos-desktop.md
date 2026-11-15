@@ -335,6 +335,26 @@ Checked on the S24 on 2026-11-15 (helper 3, through the app):
 
 The restart case (`rest` from the autostart at login) was not tried.
 
+More on the S24 the same evening, through the app (helper 3):
+- The window resized through Windows (`SetWindowPos`, no input sent). At
+  1280 × 800 the screen became 1264 × 760 in 716 ms, and the window had its
+  picture 847 ms after it asked. At 1000 × 700 it became 984 × 660 in
+  716 ms, with the picture after 830 ms. Plasma laid the home screen out anew
+  each time.
+- This computer's real mouse and keyboard (`SendInput`, after checking the
+  PC had been idle for 5 minutes): a click on the home screen's handle opened
+  the app drawer, and "term" typed into its search left Terminal. No other
+  input came in between.
+- A taskbar for the computer's screen: a desktop panel (`org.kde.panel`
+  from plasma-desktop, with the task list, tray and clock) can be added to
+  that screen alone through plasmashell's scripting. The task list showed the
+  phone's windows and minimized and restored them. Its app menus (Kickoff,
+  Kicker) never opened. The first Disconnect after it was added ended
+  plasmashell: the phone was left without its home screen and bars until the
+  shell was started again. Earlier disconnects without the panel never did
+  that. So the panel was taken off again, and Plasma Mobile has no taskbar on
+  the computer's screen.
+
 ## Phosh
 
 Phosh's compositor, phoc, is wlroots, and has no virtual outputs to ask for.
