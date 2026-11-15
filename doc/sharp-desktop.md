@@ -25,7 +25,7 @@ is the second half of this record.
 | --- | --- | --- |
 | The fit | `src-tauri/src/display.rs` | the screen, the display's size and Default density, the bit rate, what each phone has taught us |
 | Applying it | `scrcpy.rs` (`apply_stored_config`, `apply_stored_density`, `build_args`) | the command line of every desktop spawn and respawn |
-| Following the window | `openandroiddex-scrcpy` (`display-scale.patch`, `build.mjs`) | scrcpy's server, rebuilt: a window's size asked for in pixels; no density left forced on its displays |
+| Following the window | `openandroiddex-scrcpy` (`display-scale.patch`, `desktop-wake.patch`, `build.mjs`) | scrcpy's server, rebuilt: a window's size asked for in pixels; no density left forced on its displays |
 | …and the screen | `scrcpy.rs` (`watch_window_scale`), `embed::window_scale` | the scale of the screen the window is on; the density with it |
 | …and the window manager | `scrcpy.rs` (`parse_display_resized`, the enforcer's `refit`) | the display's live size; maximised windows kept maximised |
 | Telling the launcher | `adb.rs` (`adb_start_launcher`), `scrcpy.rs` (`watch_window_scale`) | `--ei base_dpi` on every launcher start, and a `DEFAULT_DENSITY` broadcast before a density that follows the window to another screen |
@@ -87,6 +87,20 @@ screen's scale").
   960 / 3 is 320. The broadcast also updates the intent the desktop was
   started with, which a re-creation (a language picked, a reset) reads the
   Default from again.
+- **A phone asleep at the start.** The display shares the phone's display
+  group (`VIRTUAL_DISPLAY_FLAG_DEVICE_DISPLAY_GROUP`, upstream's choice), so
+  made while the phone sleeps it is made OFF, and SurfaceFlinger keeps that
+  first OFF as the display's own (`Setting power mode 0 for a dormant virtual
+  display`). Waking the phone turns the display on, but only as it is then:
+  every capture reset — each resize — hands it a new surface, and
+  SurfaceFlinger builds the display again from that first OFF. Nothing is
+  drawn into it after that: the window went black at the first resize and
+  stayed black through later ones, while the phone itself drew the desktop
+  fine (S25, Android 17, 2026-11-15; `powerMode=OFF` on the virtual display in
+  `dumpsys SurfaceFlinger`, the display ON in `dumpsys display`). Upstream
+  wakes the phone only to mirror its own screen; `desktop-wake.patch` wakes it
+  first for a new display too — WAKEUP, never POWER, before the controller
+  runs, and not with `--no-power-on`.
 
 A resolution picked in Settings is a fixed display, as before, and Linux hosts
 keep the display fitted once (below): X11 and Wayland measure windows
@@ -506,6 +520,18 @@ computer that stops draining the queue), a desktop on a real phone, Android 12
 with captions off (the window keeps its pixels as before), a real desktop on
 Android 11 to 14 ending by Exit or by a real cable pull, and a real cable pull
 anywhere.
+
+A phone asleep at the start (S25, Android 17, 2026-11-15, the client then our
+patched build). Without `desktop-wake.patch`: the desktop started with the
+phone dozing, the splash gave up after 60 s, and after the phone was woken the
+first resizes of the window left it black for good — the phone drew display 12
+fine (`screencap -d`), its encoder restarted and was never fed, the client got
+0 bytes in 65 s. With it, the phone put to sleep the same way first: "the phone
+was asleep, woken first", "Setting power mode 2 for a dormant virtual display"
+(it had been mode 0), the desktop drew after 4.2 s, and after two resizes
+0.5 s apart the virtual display was still ON and about 600 KB of video reached
+the computer in 4 s, the window showing the desktop. Not tried: `--no-power-on`
+(the wake is skipped), `--turn-screen-off` after a wake, Android before 17.
 
 Not yet:
 

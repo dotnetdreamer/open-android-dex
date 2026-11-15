@@ -1,14 +1,17 @@
 #!/usr/bin/env node
 // Build scrcpy's server — the part that runs on the phone — from scrcpy's own
-// source at the release the desktop app bundles, with two changes of ours,
+// source at the release the desktop app bundles, with three changes of ours,
 // applied in this order: display-scale.patch (see doc/sharp-desktop.md,
-// "Following the window") and desktop-splash.patch (doc/desktop-splash.md).
+// "Following the window"), desktop-splash.patch (doc/desktop-splash.md) and
+// desktop-wake.patch (a sleeping phone is woken before its new display is made,
+// or the display goes black at its first resize: see the patch).
 //
 //   node openandroiddex-scrcpy/build.mjs     →  openandroiddex-scrcpy/build/scrcpy-server
 //
-// Only the server is rebuilt. The client stays the stock release from
-// .github/workflows/desktop.yml, which is why the version below MUST match
-// SCRCPY_VERSION there: the client refuses a server of any other version.
+// Only the server is built here. The client is the release's, or ours from
+// build-client.sh (pointer-shapes.patch), at the same version — which is why the
+// version below MUST match SCRCPY_VERSION in .github/workflows/desktop.yml: the
+// client refuses a server of any other version.
 //
 // The recipe is upstream's server/build_without_gradle.sh — aidl, javac, d8 —
 // redone here so it runs on Windows too, and with the SDK found the way
@@ -64,11 +67,12 @@ if (head() !== SCRCPY_COMMIT) {
   console.log(`[1/4] scrcpy v${SCRCPY_VERSION} already in ${relative(process.cwd(), src)}`)
 }
 
-console.log('[2/4] apply display-scale.patch, desktop-splash.patch')
+console.log('[2/4] apply display-scale.patch, desktop-splash.patch, desktop-wake.patch')
 run('git', ['-C', src, 'checkout', '--quiet', '--', '.'])
 run('git', ['-C', src, 'clean', '--quiet', '-fd'])
 run('git', ['-C', src, 'apply', join(here, 'display-scale.patch')])
 run('git', ['-C', src, 'apply', join(here, 'desktop-splash.patch')])
+run('git', ['-C', src, 'apply', join(here, 'desktop-wake.patch')])
 
 // ── the toolchain ─────────────────────────────────────────────────────────
 

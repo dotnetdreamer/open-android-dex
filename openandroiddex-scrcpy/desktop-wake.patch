@@ -1,0 +1,70 @@
+diff --git a/server/src/main/java/com/genymobile/scrcpy/Server.java b/server/src/main/java/com/genymobile/scrcpy/Server.java
+index d7d1a76..d6b19c3 100644
+--- a/server/src/main/java/com/genymobile/scrcpy/Server.java
++++ b/server/src/main/java/com/genymobile/scrcpy/Server.java
+@@ -27,7 +27,9 @@ import com.genymobile.scrcpy.video.VideoSource;
+ import android.annotation.SuppressLint;
+ import android.os.Build;
+ import android.os.Looper;
++import android.os.SystemClock;
+ import android.system.Os;
++import android.view.KeyEvent;
+ 
+ import java.io.File;
+ import java.io.IOException;
+@@ -68,6 +70,44 @@ public final class Server {
+         // not instantiable
+     }
+ 
++    /** Open Android DeX: how long a sleeping phone gets to wake before its new display is made. */
++    private static final long WAKE_WAIT_MS = 2000;
++    /** And how long its screen then gets to finish coming on (upstream's POWER waits 500 ms too). */
++    private static final long WAKE_SETTLE_MS = 500;
++
++    /**
++     * Open Android DeX: wake the phone, if it sleeps, before its new display is made.
++     *
++     * <p>The display shares the phone's display group (VIRTUAL_DISPLAY_FLAG_DEVICE_DISPLAY_GROUP),
++     * so made while the phone sleeps it is made OFF, and SurfaceFlinger keeps that first OFF as the
++     * display's own ("Setting power mode 0 for a dormant virtual display"). Waking the phone later
++     * turns the display on, but only as it is then: every capture reset hands it a new surface —
++     * each resize of a flex display does — and SurfaceFlinger builds the display again from that
++     * first OFF. Nothing is drawn into it after that, and the computer's window stays black (seen
++     * on a Galaxy S25 with Android 17, at the first resize of the window).
++     *
++     * <p>Upstream powers the phone on only to mirror its own screen; a new display needs it as
++     * much. WAKEUP, not POWER, so an awake phone is never put to sleep; before the controller
++     * runs, so a --turn-screen-off that follows is not undone by a wake still on its way. The lock
++     * screen may stay: the display is always unlocked.
++     */
++    private static void wakeForNewDisplay() {
++        if (Device.isScreenOn(0)) {
++            return;
++        }
++        Device.pressReleaseKeycode(KeyEvent.KEYCODE_WAKEUP, 0, Device.INJECT_MODE_ASYNC);
++        long deadline = SystemClock.uptimeMillis() + WAKE_WAIT_MS;
++        while (!Device.isScreenOn(0) && SystemClock.uptimeMillis() < deadline) {
++            SystemClock.sleep(20);
++        }
++        if (Device.isScreenOn(0)) {
++            SystemClock.sleep(WAKE_SETTLE_MS);
++            Ln.i("New display: the phone was asleep, woken first");
++        } else {
++            Ln.w("New display: the phone was asleep and did not wake within " + WAKE_WAIT_MS + " ms");
++        }
++    }
++
+     private static void scrcpy(Options options) throws IOException, ConfigurationException {
+         if (Build.VERSION.SDK_INT < AndroidVersions.API_31_ANDROID_12 && options.getVideoSource() == VideoSource.CAMERA) {
+             Ln.e("Camera mirroring is not supported before Android 12");
+@@ -100,6 +140,10 @@ public final class Server {
+ 
+         Workarounds.apply();
+ 
++        if (video && options.getNewDisplay() != null && options.getPowerOn()) {
++            wakeForNewDisplay();
++        }
++
+         List<AsyncProcessor> asyncProcessors = new ArrayList<>();
+ 
+         DesktopConnection connection = DesktopConnection.open(scid, tunnelForward, video, audio, control, sendDummyByte);

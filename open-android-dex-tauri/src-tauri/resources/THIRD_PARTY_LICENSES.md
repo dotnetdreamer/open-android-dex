@@ -19,9 +19,12 @@ Files, macOS: `scrcpy`, `scrcpy-server`, `LICENSE`
 Files, Linux: `scrcpy`, `scrcpy-server`, `LICENSE`
 
 `scrcpy-server` is not the release's own file: it is built from scrcpy's
-source at that release with one change by this project,
-`openandroiddex-scrcpy/display-scale.patch` (a resizable display follows its
-window in the computer screen's pixels). The files it changes say so.
+source at that release with three changes by this project, in
+`openandroiddex-scrcpy/`: `display-scale.patch` (a resizable display follows
+its window in the computer screen's pixels), `desktop-splash.patch` (the
+desktop opens on a splash rather than a black window) and `desktop-wake.patch`
+(a sleeping phone is woken before the desktop's display is made). The files
+they change say so.
 
 Neither is `scrcpy` (`scrcpy.exe` on Windows), the client: it is built from
 scrcpy's source at that release, by scrcpy's own release scripts, with one
