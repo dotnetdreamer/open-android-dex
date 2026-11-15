@@ -1,12 +1,14 @@
 # A postmarketOS phone's desktop, on the Desktop tab
 
-Plug in a phone running postmarketOS with Plasma Mobile and the Desktop tab
-opens its desktop in a window, the way it opens DeX for an Android phone. The
-desktop is a screen of the phone's own, not a mirror of its display: KWin makes
-a virtual output the size of this computer's screen, Plasma fills it as it
-would a monitor plugged in (wallpaper, dock, app drawer, windows with title
-bars in convergence mode), and the window here shows it and sends it the mouse
-and keyboard. The Linux tab has the same phone as a card at its top.
+Plug in a phone running postmarketOS with Plasma Mobile or Phosh and the
+Desktop tab opens its desktop in a window, the way it opens DeX for an Android
+phone. The desktop is a screen of the phone's own, not a mirror of its display:
+on Plasma, KWin makes a virtual output the size of this computer's screen, and
+Plasma fills it as it would a monitor plugged in (wallpaper, dock, app drawer,
+windows with title bars in convergence mode); on Phosh, wlroots' headless output
+is sized for this computer and Phosh's shell moves onto it (see
+[Phosh](#phosh)). The window here shows it and sends it the mouse and keyboard.
+The Linux tab has the same phone as a card at its top.
 
 This record exists because several of the choices below look arbitrary until
 you know what was measured, on a Redmi Note 7 (Snapdragon 660, postmarketOS
@@ -16,7 +18,7 @@ edge, Plasma 6.8, KWin 6.8.2) on 2026-11-13.
 
 | Piece | File | What it owns |
 | --- | --- | --- |
-| The phone's helper | `openandroiddex-pmos/src/main.c` | the virtual output, the encoder, fake input, the phone's keymap, keeping the phone awake |
+| The phone's helper | `openandroiddex-pmos/src/main.c` | the virtual output (KWin) or headless output (Phosh), the encoder, fake or virtual input, the phone's keymap, keeping the phone awake, putting a Phosh phone back |
 | Building it | `openandroiddex-pmos/build.sh`, `Dockerfile` | an x86_64 Alpine with clang and an aarch64 Alpine sysroot; the binary goes to `prebuilt/` |
 | The computer's end | `src-tauri/src/pmos.rs` | which phone is on the cable, signing in, putting the helper there, the session, the window's WebSocket |
 | The Desktop tab | `src/features/pmos/usePmos.ts`, `DesktopPage.tsx` (`pmosContent`, `PmosAlso`), `PmosSignIn.tsx` | the phone's own flow beside the Android one, and its card on the Android screens |
@@ -274,6 +276,149 @@ the cable rather than Wi-Fi, Plasma's desktop shell rather than Plasma
 Mobile's, any other phone or KWin version. The lock screen lays itself out
 again late, or not at all while the screen grows; once unlocked, Plasma
 follows.
+
+### On a Galaxy S24
+
+On 2026-11-15, a Galaxy S24 (Exynos 2400, postmarketOS edge, KWin 6.8.3,
+Plasma Mobile 6.8.3 in docked mode) on the cable, through the app in
+development and a new identity: sign-in, then the window opened at
+1496 × 862 with KScreen's picker, which went by itself. From the window:
+the app drawer, apps started, typing in a terminal, Alt+F4, Meta+arrows
+(halves side by side), Meta+PageDown, and KWin's title bar buttons on a KDE
+app (minimize, maximize, restore, close). A minimized window came back from
+its icon in the drawer. The phone's power key turned its own screen off and on
+with the window open; the session locked, and the PIN typed into the window
+unlocked it. Disconnect left the phone with its own screen only.
+
+- Plasma Mobile has no taskbar on the computer's screen: the strip at the
+  bottom is the home screen's dock of favourites. Running apps show a dot
+  in the drawer.
+- GNOME (GTK) apps draw their own title bars, with the buttons GNOME's
+  `button-layout` lists. postmarketOS' Phosh setup leaves it at `'appmenu:'`
+  (no buttons). On the S24, an autostart per session sets
+  `'appmenu:minimize,maximize,close'` in Plasma and puts `'appmenu:'` back in
+  Phosh.
+- The S24 needed work on the phone, outside this repository, before KWin
+  showed anything on its own screen (a KWin shim for its display's buffer
+  formats). The window's pill had a bug the S24 found; see usb-desktop.md.
+
+## Phosh
+
+Phosh's compositor, phoc, is wlroots, and has no virtual outputs to ask for.
+What it has, written into phoc itself, is wlroots' headless backend: a session
+started with `WLR_BACKENDS=drm,libinput,headless` has an output `HEADLESS-1`
+beside the phone's panel, that no screen shows. The helper sizes that output
+for this computer, moves Phosh's shell onto it, copies it, and drives it.
+
+**Turning it on, per user, no root.** `phosh-session` sources the user's
+`~/.phoshdebug` before it starts phoc. The first time the helper meets Phosh
+without a headless output it appends a marked block there that adds `headless`
+to `WLR_BACKENDS`, and an autostart entry
+(`~/.config/autostart/com.ccrstech.openandroiddex.pmos-rest.desktop`) that runs
+`openandroiddex-pmos rest` at each login, which turns the output off until a
+computer asks for it. The window then says to log out on the phone once. The
+helper adds the block again only if its marked line is gone, and rewrites the
+autostart entry whenever it differs (it names the helper's own path).
+
+**The shell.** Phosh draws its bar, app grid, lock screen and notifications on
+its primary screen only, and the wallpaper on the others. So the helper makes
+the headless output primary through Phosh's DisplayConfig (Mutter's D-Bus API,
+which Phosh implements), and gives the panel the primary back at the end.
+Things that cost time:
+
+- Only a *persistent* config (method 2) moves Phosh's primary; a temporary one
+  is accepted and the primary flag ignored. Phosh keeps it in memory and saves
+  no file, so nothing of it survives a login.
+- Phosh refuses any change while its lock screen is up ("Can't configure
+  outputs when locked"). The helper waits up to 25 s for the phone to be
+  unlocked, then fails with "The phone is locked. Unlock it…". GNOME's
+  `ScreenSaver.GetActive` said false on Phosh's lock screen; logind's
+  `LockedHint` for the user's seat0 session was right, so that is asked first.
+- Turned on and made primary in one config, the new screen's wallpaper came out
+  zoomed into a portrait crop: Phosh sizes the primary screen's wallpaper from
+  its "usable area", not yet the new screen's. Turned on beside the panel,
+  sized, and then made primary in a second config, it is drawn right.
+
+**phoc dies on a re-enabled headless output, unless.** wlroots 0.19's
+output management asserts (`head_send_state: found`) when a head with a custom
+mode is turned on while a client is bound that has no mode object for it, which
+is every client that bound while it was off, as long as another client (Phosh)
+still holds one from before. phoc aborts and the session ends: it happened
+twice on the S24 before the cause was found, in a private phoc with Phosh
+reproducing it on demand. So the helper lets go of output management, has
+Phosh turn the screen on (DisplayConfig, leaving it out of nothing), waits for
+its `wl_output`, and binds output management again before sizing it. Any other
+program bound to output management while the screen is off and turned on would
+still bring phoc down (none runs in a stock Phosh session; not tried with Phosh
+Mobile Settings open).
+
+**Putting the phone back, even if the helper dies.** A primary screen nobody
+can see would leave the phone's own panel with nothing but its wallpaper. The
+helper puts the panel back and turns the output off as it ends (Phosh's
+DisplayConfig, which turns off what it is not given; wlr-output-management if
+Phosh refuses), and starts a guard of its own (`openandroiddex-pmos guard`, a
+fresh exec in its own session holding the read end of a pipe) that runs `rest`
+when the pipe closes, however the helper ended. Its log is
+`~/.cache/openandroiddex/guard.log`. Checked: `kill -9` of the helper put the
+panel back within the second; the app closed, restarted by `tauri dev`, or
+Disconnect all left the phone as it was.
+
+**The picture and input.** wlr-screencopy into a `wl_shm` buffer of the
+helper's (XBGR8888 on the S24, `RGBx` to GStreamer), copied row by row into an
+`appsrc`, then the same encoder as KWin's. A frame is copied only when the
+screen changes (`copy_with_damage`), and the last one goes again every 250 ms
+while it is still. A new size rebuilds the pipeline, as for KWin. Input: a
+`zwlr_virtual_pointer_v1` tied to the output (absolute moves in the frame's
+pixels), and a `zwp_virtual_keyboard_v1` given the seat's own keymap, with
+modifiers sent by the helper (wlroots does not update them for a virtual
+keyboard). Two of the window's wheel clicks make one notch, wlroots counting
+whole notches.
+
+**The pointer.** A headless output has no cursor plane, so phoc draws its
+pointer into the picture whatever screencopy is told. The helper sends the
+window a cursor of no size, which hides this computer's pointer over the
+picture, and the one seen is phoc's: it follows the app's shapes (a text caret
+over a terminal), and moves at the picture's rate rather than this screen's.
+
+**Windows.** Apps opened from the computer's screen open there, floating with
+title bars. When the session ends phoc moves them to the panel, and they stay
+there when a computer opens the desktop again: Phosh's overview on the
+computer's screen lists them, and choosing one raises it on the phone.
+
+### Results
+
+On 2026-11-15, the Galaxy S24 (postmarketOS edge, Phosh and phoc 0.58.0,
+GStreamer 1.28.7, x264), on its cable (172.16.42.1) and before that through
+`OADX_PMOS_ADDRESS`, the app in development on Windows 11 under a test
+identity. Input went into the window's own handlers over the DevTools protocol
+(`Input.dispatchMouseEvent`/`dispatchKeyEvent`), not a real mouse or keyboard;
+the phone was logged in and unlocked with its PIN through a uinput keyboard on
+the phone.
+
+- Plug-in with the phone signed in to: found at app start, and the desktop
+  opened by itself. With the phone at its greeter (nobody logged in) that
+  failed with "Couldn't reach the phone's desktop (Wayland wayland-0 in
+  /run/user/10000)"; the helper now says "Nobody is logged in on the phone
+  yet…" instead (not re-run). Logged in, "Try again" to the first frame in the
+  window: 1.5 s.
+- The phone locked: the helper said it was waiting; the PIN's Enter came 10 s
+  later, the screen was on 0.8 s after it, and its first frame in the window
+  1.1 s after that.
+- Through the window: a click on the home bar opened the app grid, typing
+  "console" in its search and Enter opened Console on the computer's screen,
+  `echo Hello from the PC` typed and ran (capitals and all), and three wheel
+  notches scrolled its output nine lines. Calculator, Text Editor ("Hello,
+  DeX!") the same way through the test driver.
+- The window resized through Windows (`SetWindowPos`) to 1100 × 700: the screen
+  was 1088 × 660 39 ms after the window asked, its first frame 246 ms after, and
+  Phosh laid it out anew.
+- A still screen: 4 frames a second (the 250 ms resend); the app grid opening,
+  13; 4–6 ms round trip on the cable.
+
+Not tested: a real mouse or keyboard on the window, a scale other than 1, any
+other Phosh phone or Phosh version, Phosh's own docked mode, Plasma again after
+this change (its code path is the same, but was not re-run on the Redmi), and
+a cable pulled.
 
 ## Testing over Wi-Fi
 

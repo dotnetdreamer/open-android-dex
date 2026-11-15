@@ -1,15 +1,17 @@
 //! A phone running postmarketOS, on the Desktop tab: a screen of its own on
-//! the phone, made by its desktop (KDE Plasma), in a window here, the way DeX
-//! gives an Android phone's.
+//! the phone, made by its desktop (KDE Plasma or Phosh), in a window here, the
+//! way DeX gives an Android phone's.
 //!
 //! There is no adb. postmarketOS puts a network on the USB cable instead, on
 //! which the phone is always 172.16.42.1, with SSH. Over that SSH this computer
 //! signs in once with the phone's own password, leaves a key of its own in its
 //! authorized_keys, and from then on needs nothing typed: it puts its helper
 //! on the phone (openandroiddex-pmos, built in that folder and embedded here),
-//! starts it, and talks to it on its stdin and stdout. The helper asks KWin for
-//! a virtual output the size of this computer's screen, which Plasma fills
-//! with a desktop as it would a monitor plugged in, and sends it as H.264; the
+//! starts it, and talks to it on its stdin and stdout. On Plasma the helper
+//! asks KWin for a virtual output the size of this computer's screen, which
+//! Plasma fills with a desktop as it would a monitor plugged in; on Phosh it
+//! sizes wlroots' headless output and makes it Phosh's primary screen (see the
+//! helper's "Phosh" section). Either way it sends the screen as H.264, and the
 //! window sends the mouse and keyboard back.
 //!
 //! The window is the one the phone's Linux uses over adb (UsbDesktop.tsx),

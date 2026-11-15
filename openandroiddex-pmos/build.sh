@@ -22,7 +22,11 @@ MSYS_NO_PATHCONV=1 docker run --rm -v "$HOST_DIR:/src" -w /src "$IMAGE" sh -euc 
   for xml in \
     /usr/share/plasma-wayland-protocols/zkde-screencast-unstable-v1.xml \
     /usr/share/plasma-wayland-protocols/fake-input.xml \
-    /usr/share/wayland-protocols/unstable/xdg-output/xdg-output-unstable-v1.xml; do
+    /usr/share/wayland-protocols/unstable/xdg-output/xdg-output-unstable-v1.xml \
+    /usr/share/wlr-protocols/unstable/wlr-output-management-unstable-v1.xml \
+    /usr/share/wlr-protocols/unstable/wlr-screencopy-unstable-v1.xml \
+    /usr/share/wlr-protocols/unstable/wlr-virtual-pointer-unstable-v1.xml \
+    protocols/virtual-keyboard-unstable-v1.xml; do
     base=$(basename "$xml" .xml)
     wayland-scanner client-header "$xml" "$gen/$base-client-protocol.h"
     wayland-scanner private-code "$xml" "$gen/$base-protocol.c"
