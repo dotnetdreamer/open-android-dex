@@ -432,7 +432,7 @@ fn field<'a>(text: &'a str, key: &str) -> &'a str {
 pub async fn pmos_pair(app: AppHandle, user: String, password: String) -> Result<PmosPhone, String> {
     let user = user.trim().to_string();
     if user.is_empty() || password.is_empty() {
-        return Err("Enter the username and password you use on the phone.".into());
+        return Err("Enter the username and the password or PIN you use on the phone.".into());
     }
     let (mut ssh, host_key) = connect(None).await?;
     let answer = ssh
@@ -441,7 +441,7 @@ pub async fn pmos_pair(app: AppHandle, user: String, password: String) -> Result
         .map_err(|e| format!("SSH to the phone failed: {e}"))?;
     if !answer.success() {
         hang_up(&ssh).await;
-        return Err("That username or password didn't work on the phone.".into());
+        return Err("That username and password or PIN didn't work on the phone.".into());
     }
     let about = run(&ssh, ABOUT, None, Duration::from_secs(10)).await?.out;
     let arch = field(&about, "arch");
