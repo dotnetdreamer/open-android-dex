@@ -252,10 +252,13 @@ jobs:
         # The part of scrcpy that runs on the phone, rebuilt from scrcpy's own
         # source at SCRCPY_VERSION with openandroiddex-scrcpy/display-scale.patch
         # (a desktop that follows its window comes out at the screen's pixels,
-        # not its points) and desktop-splash.patch (the desktop opens on its
-        # splash, not on a black window). The client stays the release download
-        # below; the client refuses a server of any other version, hence the
-        # check. The same script `npm run apk` runs locally.
+        # not its points), desktop-splash.patch (the desktop opens on its
+        # splash, not on a black window) and desktop-wake.patch (a sleeping
+        # phone is woken before the desktop's display is made, or the display
+        # goes black at its first resize). The client is the release download
+        # below, with ours laid over its executable (the scrcpy-client job); it
+        # refuses a server of any other version, hence the check. The same
+        # script `npm run apk` runs locally.
         run: |
           grep -qF "SCRCPY_VERSION = '$SCRCPY_VERSION'" openandroiddex-scrcpy/build.mjs || {
             echo "::error::openandroiddex-scrcpy/build.mjs does not build scrcpy $SCRCPY_VERSION — update it alongside SCRCPY_VERSION"
@@ -326,8 +329,102 @@ jobs:
           if-no-files-found: error
           retention-days: ${{ needs.version.outputs.publish != 'true' && 14 || 0 }}
 
+  scrcpy-client:
+    # scrcpy's client — the program on the computer — with
+    # openandroiddex-scrcpy/pointer-shapes.patch: the desktop window's cursor takes
+    # the shape the phone asks for, a double arrow over a window's resize edge
+    # (doc/window-resize.md, issue #5). The stock client cannot be told a cursor,
+    # and nothing outside its process can set one the same way on every system.
+    # Built by upstream's own release scripts (build-client.sh runs them), on the
+    # runners and with the tools upstream's release.yml uses for each target; each
+    # platform job below lays the one executable over the release it downloads.
+    # Cached on everything that decides the binary, so a run that changed none of
+    # it restores it in seconds instead of building SDL and FFmpeg again.
+    needs: [version]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: linux-x86_64
+            # Upstream's own Linux runner: its glibc is older than ubuntu-24.04's,
+            # so the client runs everywhere the app does.
+            runner: ubuntu-22.04
+          - target: win64
+            # Cross-built with MinGW, as upstream's Windows release is.
+            runner: ubuntu-latest
+          - target: macos-aarch64
+            runner: macos-latest
+          - target: macos-x86_64
+            # Upstream's dependency scripts build for the machine they run on.
+            runner: macos-15-intel
+    runs-on: ${{ matrix.runner }}
+    env:
+      # A portable-only build wants the Windows client and nothing else.
+      WANTED: ${{ (!inputs.windows_portable_only || matrix.target == 'win64') && '1' || '0' }}
+    steps:
+      - uses: actions/checkout@v4
+        if: env.WANTED == '1'
+        with:
+          ref: ${{ needs.version.outputs.publish == 'true' && format('refs/tags/v{0}', needs.version.outputs.version) || github.sha }}
+
+      - name: Restore a client built from the same source
+        id: cache
+        if: env.WANTED == '1'
+        uses: actions/cache@v4
+        with:
+          path: openandroiddex-scrcpy/build/client/${{ matrix.target }}
+          key: scrcpy-client-v1-${{ matrix.target }}-${{ hashFiles('openandroiddex-scrcpy/build.mjs', 'openandroiddex-scrcpy/build-client.sh', 'openandroiddex-scrcpy/pointer-shapes.patch') }}
+
+      - name: Install the build's tools (Linux)
+        if: env.WANTED == '1' && steps.cache.outputs.cache-hit != 'true' && matrix.target == 'linux-x86_64'
+        # upstream release.yml, build-linux-x86_64
+        run: |
+          sudo apt update
+          sudo apt install -y meson ninja-build nasm ffmpeg libavcodec-dev \
+             libavdevice-dev libavformat-dev libavutil-dev libswresample-dev \
+             libusb-1.0-0 libusb-1.0-0-dev libv4l-dev \
+             libasound2-dev libpulse-dev \
+             libaudio-dev libfribidi-dev libjack-dev libsndio-dev libx11-dev libxext-dev \
+             libxrandr-dev libxcursor-dev libxfixes-dev libxi-dev libxss-dev libxtst-dev \
+             libxkbcommon-dev libdrm-dev libva-dev libgbm-dev libgl1-mesa-dev libgles2-mesa-dev \
+             libegl1-mesa-dev libdbus-1-dev libibus-1.0-dev libudev-dev libthai-dev \
+             libpipewire-0.3-dev libwayland-dev libdecor-0-dev liburing-dev
+
+      - name: Install the build's tools (Windows, cross)
+        if: env.WANTED == '1' && steps.cache.outputs.cache-hit != 'true' && matrix.target == 'win64'
+        # upstream release.yml, build-win64
+        run: |
+          sudo apt update
+          sudo apt install -y meson ninja-build nasm \
+             mingw-w64 mingw-w64-tools libz-mingw-w64-dev
+
+      - name: Install the build's tools (macOS)
+        if: env.WANTED == '1' && steps.cache.outputs.cache-hit != 'true' && startsWith(matrix.target, 'macos-')
+        # upstream release.yml, build-macos-*
+        run: brew install meson nasm libiconv zlib automake autoconf libtool
+
+      - name: Build scrcpy's client from source, with our patch
+        if: env.WANTED == '1' && steps.cache.outputs.cache-hit != 'true'
+        env:
+          # Upstream's floor for its macOS builds; the app's own is 11.0.
+          MACOSX_DEPLOYMENT_TARGET: "10.13"
+        run: |
+          grep -qF "SCRCPY_VERSION = '$SCRCPY_VERSION'" openandroiddex-scrcpy/build.mjs || {
+            echo "::error::openandroiddex-scrcpy/build.mjs does not build scrcpy $SCRCPY_VERSION — update it alongside SCRCPY_VERSION"
+            exit 1
+          }
+          bash openandroiddex-scrcpy/build-client.sh ${{ matrix.target }}
+
+      - uses: actions/upload-artifact@v4
+        if: env.WANTED == '1'
+        with:
+          name: scrcpy-client-${{ matrix.target }}
+          path: openandroiddex-scrcpy/build/client/${{ matrix.target }}/*
+          if-no-files-found: error
+          retention-days: 1
+
   build-windows:
-    needs: [version, launcher]
+    needs: [version, launcher, scrcpy-client]
     runs-on: windows-latest
     env:
       # tauri.conf.json's beforeBuildCommand rebuilds the launcher APK and the
@@ -401,6 +498,15 @@ jobs:
             if (Test-Path $p) { Remove-Item -LiteralPath $p -Force }
           }
 
+      - name: Lay scrcpy's client with pointer shapes over the release's
+        # The scrcpy-client job's build of this same release, with
+        # pointer-shapes.patch. Only scrcpy.exe: its DLLs are the release's,
+        # built by the same scripts at the same versions.
+        uses: actions/download-artifact@v4
+        with:
+          name: scrcpy-client-win64
+          path: open-android-dex-tauri/src-tauri/resources/bin
+
       - name: Download phone payloads (launcher APK + wmd dex)
         uses: actions/download-artifact@v4
         with:
@@ -425,6 +531,18 @@ jobs:
           $missing = $required | Where-Object { -not (Test-Path (Join-Path $bin $_)) }
           if ($missing) {
             throw "missing from ${bin}: $($missing -join ', ')"
+          }
+
+          # Ours, not the release's: the pointer shapes are in it (doc/window-resize.md),
+          # and it starts against the release's DLLs.
+          $exe = Join-Path $bin 'scrcpy.exe'
+          $text = [System.Text.Encoding]::ASCII.GetString([System.IO.File]::ReadAllBytes($exe))
+          if (-not $text.Contains('Pointer shapes: read from stdin')) {
+            throw "scrcpy.exe is the release's own, not openandroiddex-scrcpy's (no pointer shapes)"
+          }
+          $version = & $exe --version 2>&1 | Out-String
+          if ($LASTEXITCODE -ne 0 -or -not $version.Contains("scrcpy $env:SCRCPY_VERSION")) {
+            throw "scrcpy.exe does not start against the release's DLLs:`n$version"
           }
 
           # Keep the shipped licence notice honest about what is actually bundled.
@@ -516,7 +634,7 @@ jobs:
           retention-days: 14
 
   build-macos:
-    needs: [version, launcher]
+    needs: [version, launcher, scrcpy-client]
     if: ${{ !inputs.windows_portable_only }}
     # One image, two Rust targets. macos-latest is Apple Silicon and
     # cross-compiles the Intel leg happily; building Intel natively would mean
@@ -628,6 +746,14 @@ jobs:
           chmod +x "$bin/adb" "$bin/scrcpy"
           ls -l "$bin"
 
+      - name: Lay scrcpy's client with pointer shapes over the release's
+        # The scrcpy-client job's build of this same release, for this leg's
+        # architecture, with pointer-shapes.patch.
+        uses: actions/download-artifact@v4
+        with:
+          name: scrcpy-client-macos-${{ matrix.scrcpy_arch }}
+          path: open-android-dex-tauri/src-tauri/resources/bin
+
       - name: Download phone payloads (launcher APK + wmd dex)
         uses: actions/download-artifact@v4
         with:
@@ -639,6 +765,9 @@ jobs:
         run: |
           set -euo pipefail
           bin="open-android-dex-tauri/src-tauri/resources/bin"
+          # upload-artifact keeps no mode bits: the client laid over the release's
+          # arrives without its execute bit.
+          chmod +x "$bin/scrcpy"
 
           missing=()
           for f in adb scrcpy scrcpy-server scrcpy.png disconnected.png \
@@ -648,6 +777,16 @@ jobs:
           if [ ${#missing[@]} -gt 0 ]; then
             echo "::error::missing from $bin: ${missing[*]}"
             exit 1
+          fi
+
+          # Ours, not the release's: the pointer shapes are in it (doc/window-resize.md).
+          grep -aqF "Pointer shapes: read from stdin" "$bin/scrcpy" || {
+            echo "::error::scrcpy is the release's own, not openandroiddex-scrcpy's (no pointer shapes)"
+            exit 1
+          }
+          # …and it starts, where this runner can run it (the Intel leg is cross).
+          if [ "${{ matrix.lipo_arch }}" = "$(uname -m)" ]; then
+            "$bin/scrcpy" --version | grep -qF "scrcpy $SCRCPY_VERSION"
           fi
 
           # Two checks the Windows list has no need of. A cleared execute bit
@@ -718,7 +857,7 @@ jobs:
           retention-days: ${{ needs.version.outputs.publish == 'true' && 1 || 14 }}
 
   build-linux:
-    needs: [version, launcher]
+    needs: [version, launcher, scrcpy-client]
     if: ${{ !inputs.windows_portable_only }}
     # One arch only. scrcpy publishes a single Linux asset (x86_64); there is no
     # aarch64 tarball to pair with an ARM runner, and shipping a Linux build we
@@ -857,6 +996,15 @@ jobs:
           chmod +x "$bin/adb" "$bin/scrcpy"
           ls -l "$bin"
 
+      - name: Lay scrcpy's client with pointer shapes over the release's
+        # The scrcpy-client job's build of this same release, with
+        # pointer-shapes.patch — linked statically, as the release's is, which the
+        # ldd check below holds it to.
+        uses: actions/download-artifact@v4
+        with:
+          name: scrcpy-client-linux-x86_64
+          path: open-android-dex-tauri/src-tauri/resources/bin
+
       - name: Download phone payloads (launcher APK + wmd dex)
         uses: actions/download-artifact@v4
         with:
@@ -868,6 +1016,17 @@ jobs:
         run: |
           set -euo pipefail
           bin="open-android-dex-tauri/src-tauri/resources/bin"
+          # upload-artifact keeps no mode bits: the client laid over the release's
+          # arrives without its execute bit.
+          chmod +x "$bin/scrcpy"
+
+          # Ours, not the release's: the pointer shapes are in it (doc/window-resize.md),
+          # and it starts.
+          grep -aqF "Pointer shapes: read from stdin" "$bin/scrcpy" || {
+            echo "::error::scrcpy is the release's own, not openandroiddex-scrcpy's (no pointer shapes)"
+            exit 1
+          }
+          "$bin/scrcpy" --version | grep -qF "scrcpy $SCRCPY_VERSION"
 
           missing=()
           for f in adb scrcpy scrcpy-server scrcpy.png disconnected.png \

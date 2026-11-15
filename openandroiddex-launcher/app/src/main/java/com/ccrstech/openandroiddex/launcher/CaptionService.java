@@ -270,6 +270,11 @@ public final class CaptionService extends AccessibilityService {
     private WmClient wm;
     /** Undoes the session when the cable is pulled and the window daemon went with it. */
     private UnplugWatch unplug;
+    /**
+     * The windows' resize edges: ours, wider than One UI's, with the pointer's shape over
+     * them (issue #5). Fed by every reconcile pass, see {@link #updateEdges}.
+     */
+    private ResizeEdges edges;
 
     /** a11y window id -> live caption host. */
     /**
@@ -392,7 +397,7 @@ public final class CaptionService extends AccessibilityService {
     }
 
     /** Breadcrumb file: logcat from this uid is unreliable on One UI, a file is not. */
-    private void trace(String what) {
+    void trace(String what) {
         Log.i(TAG, what);
         try (java.io.FileWriter w =
                      new java.io.FileWriter(new java.io.File(getFilesDir(), "caption.log"), true)) {
@@ -471,6 +476,7 @@ public final class CaptionService extends AccessibilityService {
             setServiceInfo(info);
         }
         wm = new WmClient();
+        edges = new ResizeEdges(this);
         running = true;
         android.content.IntentFilter f =
                 new android.content.IntentFilter(LauncherActivity.ACTION_RESTORE);
@@ -536,6 +542,8 @@ public final class CaptionService extends AccessibilityService {
         noCurtain.clear();
         maximized.clear();
         restoreBounds.clear();
+        // Before the client goes: the edges' last word is "the pointer is an arrow again".
+        if (edges != null) edges.clear();
         dropAnchor();
         if (wm != null) {
             // Leave no window permanently inset if we go away.
@@ -813,8 +821,216 @@ public final class CaptionService extends AccessibilityService {
         // A task that closed while still waiting for a host never reaches the sweep above,
         // because it never had a caption to release.
         hostWaitSince.keySet().retainAll(tasks.keySet());
+        updateEdges(display, stack, windows);
         rememberGeometry(display, stack);
         return moved;
+    }
+
+    // ── resize edges (ResizeEdges) ─────────────────────────────────────────
+
+    /**
+     * Put every window's resize edges where the window is now, cut away wherever something
+     * lies in front of it.
+     *
+     * A maximised window has none — its edges are the display's, and a drag there would
+     * only un-maximise it by a sliver — and neither has the widget detour's alert box,
+     * which cannot grow. Where our windows are drawn under the apps (Samsung, untrusted
+     * display) the edges could never be reached, so there are none and One UI's own stay.
+     */
+    private void updateEdges(int display, List<WmClient.Task> stack,
+                             List<AccessibilityWindowInfo> windows) {
+        if (edges == null) return;
+        Display d = getSystemService(android.hardware.display.DisplayManager.class)
+                .getDisplay(display);
+        if (d == null || LauncherActivity.overlaysBuried(d)) {
+            edges.clear();
+            return;
+        }
+        // Off the Display itself, once: this runs on every pass, and displaySize() and
+        // taskbarPx() each make a window context — a round trip to the window manager and a
+        // token held until it is collected — which is fine for a button press, not for a
+        // poll. getRealMetrics is the display's own cached info (trackDensity reads it too).
+        android.util.DisplayMetrics dm = new android.util.DisplayMetrics();
+        d.getRealMetrics(dm);
+        if (dm.widthPixels <= 0 || dm.heightPixels <= 0) return;
+        int taskbar = Math.round(LauncherActivity.TASKBAR_DP * dm.densityDpi / 160f);
+        int[] whole = {0, 0, dm.widthPixels, dm.heightPixels};
+        int[] limits = {0, 0, dm.widthPixels, dm.heightPixels - taskbar};
+        // maxRect's arithmetic, on the same numbers.
+        int[] max = {0, 0, dm.widthPixels - 4, dm.heightPixels - taskbar};
+        android.graphics.Point size = new android.graphics.Point(dm.widthPixels, dm.heightPixels);
+        boolean[] resizable = new boolean[stack.size()];
+        for (int n = 0; n < stack.size(); n++) {
+            WmClient.Task t = stack.get(n);
+            resizable[n] = !near(t, max) && !WidgetDetourActivity.isDetourTask(t.taskId);
+        }
+        List<int[]> covers = covers(windows, stack, whole);
+        covers.add(new int[]{0, size.y - taskbar, size.x, size.y});
+        edges.update(display, density, stack, resizable, covers, whole, limits,
+                !captionless(display));
+    }
+
+    /**
+     * What lies above every desktop window: the taskbar and the shell's other overlays, a
+     * keyboard, and whatever is opened from them — the taskbar's menus and flyouts.
+     *
+     * By z-order rather than by type. Those menus are PopupMenus and PopupWindows of the
+     * taskbar's window, and accessibility reports them as APPLICATION windows with no
+     * parent at all: matched by type, the right-click menu of a taskbar icon was not a
+     * cover, and the bottom edge of the window behind it lay over "Close app" — the
+     * pointer turned into a resize arrow there, and a click would have started a resize
+     * (seen on the S25). Anything stacked above the topmost desktop window is above
+     * every window; that window's own popups count too, so an app's menu that opens at
+     * its own edge keeps that edge's inner sliver.
+     *
+     * And when the topmost window is not in the list at all, everything that is listed is
+     * above it. A modal window — that same menu, a dialog — makes accessibility leave out
+     * every window below it (measured on the S25 with the taskbar menu open: display 10
+     * listed the menu and our edges, and nothing else), so the layer to compare with is
+     * simply not there. Window-shaped entries — a task's own rect, the whole display — are
+     * left out of that rule, for the pass where a window only blinked out of the list.
+     *
+     * Never ours: the accessibility overlays (the edges themselves, the touchpad's arrow,
+     * a Linux app's menus — opened after the edges, so above them anyway) and our title
+     * bars, which are part of their window's top edge.
+     */
+    private List<int[]> covers(List<AccessibilityWindowInfo> windows,
+                               List<WmClient.Task> stack, int[] whole) {
+        AccessibilityWindowInfo top = stack.isEmpty() ? null : appHost(windows, stack.get(0));
+        int above = top != null ? top.getLayer() : Integer.MIN_VALUE;
+        List<int[]> out = new ArrayList<>();
+        android.graphics.Rect r = new android.graphics.Rect();
+        for (AccessibilityWindowInfo w : windows) {
+            int type = w.getType();
+            if (type == AccessibilityWindowInfo.TYPE_ACCESSIBILITY_OVERLAY || isOurs(w)) continue;
+            w.getBoundsInScreen(r);
+            if (r.isEmpty()) continue;
+            boolean system = type == AccessibilityWindowInfo.TYPE_SYSTEM
+                    || type == AccessibilityWindowInfo.TYPE_INPUT_METHOD
+                    || type == AccessibilityWindowInfo.TYPE_SPLIT_SCREEN_DIVIDER
+                    || type == AccessibilityWindowInfo.TYPE_MAGNIFICATION_OVERLAY;
+            boolean cover = system || w.getLayer() > above;
+            if (cover && !system && top == null && windowShaped(r, stack, whole)) cover = false;
+            if (cover) out.add(new int[]{r.left, r.top, r.right, r.bottom});
+        }
+        return out;
+    }
+
+    /** A rect that is a desktop window's own, or the whole display (the desktop itself). */
+    private static boolean windowShaped(android.graphics.Rect r, List<WmClient.Task> stack,
+                                        int[] whole) {
+        if (Math.abs(r.left - whole[0]) <= 2 && Math.abs(r.top - whole[1]) <= 2
+                && Math.abs(r.right - whole[2]) <= 2 && Math.abs(r.bottom - whole[3]) <= 2) {
+            return true;
+        }
+        for (WmClient.Task t : stack) {
+            if (Math.abs(r.left - t.left) <= 2 && Math.abs(r.top - t.top) <= 2
+                    && Math.abs(r.right - t.right) <= 2 && Math.abs(r.bottom - t.bottom) <= 2) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** Run {@code work} on the daemon's client thread, if there is a client: whether there was. */
+    boolean daemon(java.util.function.Consumer<WmClient> work) {
+        final WmClient client = wm;
+        if (client == null) return false;
+        client.post(() -> work.accept(client));
+        return true;
+    }
+
+    /** Reconcile now rather than at the next tick: a drag has just put a window somewhere. */
+    void kick() {
+        if (!running) return;
+        main.removeCallbacks(reconcile);
+        main.post(reconcile);
+    }
+
+    int captionPx(int taskId) {
+        return captionHeight(taskId);
+    }
+
+    /**
+     * An edge has been grabbed: the window comes to the front, as a click on it would, and
+     * stops being maximised or snapped — the rect a later ▢ restores to is the one this
+     * drag leaves.
+     */
+    void grabbed(int taskId) {
+        maximized.remove(taskId);
+        restoreBounds.remove(taskId);
+        final int display = desktopDisplayId;
+        boolean top = !lastStack.isEmpty() && lastStack.get(0).taskId == taskId;
+        if (!top && wm != null) wm.post(() -> wm.front(display, taskId));
+    }
+
+    /**
+     * A drag has just taken the window here. The bar follows at once rather than at the
+     * next poll, so its buttons are never cut off by a window getting narrower under them.
+     */
+    void resizing(int taskId, int[] r) {
+        WmClient.Task t = tasks.get(taskId);
+        if (t == null) return;
+        int px = captionHeight(taskId);
+        t.left = r[0];
+        t.top = r[1];
+        t.right = r[2];
+        t.bottom = r[3];
+        t.appLeft = r[0];
+        t.appTop = r[1] + px;
+        t.appRight = r[2];
+        t.appBottom = r[3];
+        syncCaption(t);
+    }
+
+    /** The drag is over and the window stays at {@code r}. */
+    void resized(int taskId, int[] r) {
+        resizing(taskId, r);
+        trace("resized task " + taskId + " -> " + r[0] + "," + r[1] + "," + r[2] + "," + r[3]);
+    }
+
+    /**
+     * The smallest a drag may make this window, {@code {width, height}} in the desktop's
+     * pixels: what the window manager will hold it to (see {@link ResizeGeometry#minSize}),
+     * as the daemon read it off the task — its own minimum, and the display's default.
+     *
+     * Where the daemon did not send the default (an older one), it comes from the
+     * framework's resource: in the PHONE's pixels, so through dp, as the window manager
+     * takes it. The task's own minimum is never rescaled — the window manager applies the
+     * parsed pixels as they are — and is unknown without the daemon: no outline then
+     * promises less than the platform's default, and the window manager has the last word.
+     */
+    int[] minSize(int taskId) {
+        WmClient.Task t = tasks.get(taskId);
+        int base;
+        if (t != null && t.defaultMinDp > 0) {
+            base = (int) (t.defaultMinDp * density);    // as the window manager rounds it
+        } else {
+            float phone = android.content.res.Resources.getSystem().getDisplayMetrics().density;
+            float scale = phone > 0f ? density / phone : density;
+            base = Math.round(ResizeGeometry.MIN_SIZE_DP * density);
+            try {
+                int id = android.content.res.Resources.getSystem()
+                        .getIdentifier("default_minimal_size_resizable_task", "dimen", "android");
+                if (id != 0) {
+                    base = Math.round(android.content.res.Resources.getSystem().getDimension(id)
+                            * scale);
+                }
+            } catch (RuntimeException ignored) {
+                // no such resource on this build: the AOSP value stands
+            }
+        }
+        return ResizeGeometry.minSize(t != null ? t.minWidth : -1, t != null ? t.minHeight : -1,
+                base, captionHeight(taskId) + px(48));
+    }
+
+    /**
+     * How many times the daemon's client has connected ({@link WmClient#connections}), -1
+     * with no client. Does not wait on a request in flight: safe from the main thread.
+     */
+    int daemonConnections() {
+        final WmClient client = wm;
+        return client != null ? client.connections() : -1;
     }
 
     // ── remembering where each window was left ─────────────────────────────
@@ -1314,13 +1530,17 @@ public final class CaptionService extends AccessibilityService {
         // The field is @hide, hence the reflection, and the whole thing is optional: if it
         // does not land, or an embedded hierarchy never surfaces the title, every picker
         // still rejects our bars on height. This is only ever a second, cheaper filter.
-        try {
-            WindowManager.LayoutParams.class
-                    .getField("accessibilityTitle")
-                    .set(lp, CAPTION_WINDOW_TITLE);
-        } catch (Throwable ignored) {
-        }
+        accessibilityTitle(lp, CAPTION_WINDOW_TITLE);
         return lp;
+    }
+
+    /** The @hide title the accessibility window list reports a window of ours by. */
+    static void accessibilityTitle(WindowManager.LayoutParams lp, CharSequence title) {
+        try {
+            WindowManager.LayoutParams.class.getField("accessibilityTitle").set(lp, title);
+        } catch (Throwable ignored) {
+            // optional — see params
+        }
     }
 
     /**
@@ -1468,6 +1688,15 @@ public final class CaptionService extends AccessibilityService {
             /** Uptime of the last tap that was a tap, not a drag. 0 = no tap pending. */
             private long lastTap;
             private int lastTapX, lastTapY;
+            /**
+             * Whether this display's shell moves a window's picture with its bounds, decided
+             * at each press. Where it does not (no shell caption on the display — the S25 on
+             * Android 17 has no desktop decor there at all), MOVE changes the bounds and the
+             * picture stays put: the window is dragged as an outline and moved once, by a
+             * transition, on release — the edges' own way (ResizeEdges).
+             */
+            private boolean follows = true;
+            private ResizeEdges.Outline outline;
 
             @Override
             public boolean onTouch(View v, android.view.MotionEvent e) {
@@ -1488,9 +1717,27 @@ public final class CaptionService extends AccessibilityService {
                             onMaximise(task);
                             return true;
                         }
+                        // The window as the last poll saw it, not as it was when this bar was
+                        // built: a snap, a maximise or a drag of an edge since then moved it
+                        // without telling this listener, and a grab measured from the old
+                        // corner makes the window jump there on the first move.
+                        WmClient.Task now = tasks.get(task.taskId);
+                        if (now != null) {
+                            task.left = now.left;
+                            task.top = now.top;
+                            task.right = now.right;
+                            task.bottom = now.bottom;
+                        }
                         grabDx = rawX - task.left;
                         grabDy = rawY - task.top;
                         dragging = false;
+                        // A drag whose release never came — a stream that ended without an
+                        // UP — must not leave its outline on the desktop for good.
+                        if (outline != null) {
+                            outline.hide();
+                            outline = null;
+                        }
+                        follows = !captionless(task.displayId);
                         wm.post(() -> wm.front(task.displayId, task.taskId));
                         return true;
                     case android.view.MotionEvent.ACTION_MOVE:
@@ -1506,12 +1753,20 @@ public final class CaptionService extends AccessibilityService {
                         // No surface move here. The bar lives inside the task, so moving
                         // the task moves it — the compositor keeps them together with no
                         // lag and nothing for us to synchronise.
-                        send(rawX - grabDx, rawY - grabDy);
+                        if (follows) {
+                            send(rawX - grabDx, rawY - grabDy);
+                        } else {
+                            showOutline(rawX - grabDx, rawY - grabDy);
+                        }
                         return true;
                     case android.view.MotionEvent.ACTION_UP:
                     case android.view.MotionEvent.ACTION_CANCEL:
                         if (dragging) {
-                            send(rawX - grabDx, rawY - grabDy);   // replay the last point
+                            if (follows) {
+                                send(rawX - grabDx, rawY - grabDy);   // replay the last point
+                            } else {
+                                moveTo(rawX - grabDx, rawY - grabDy);
+                            }
                             dragging = false;
                             lastTap = 0;   // a drag is not half of a double-click
                             return true;
@@ -1545,6 +1800,41 @@ public final class CaptionService extends AccessibilityService {
                 wm.move(task.displayId, task.taskId, x, y);
                 task.left = x;
                 task.top = y;
+            }
+
+            /** The window's own size, at {@code x, y}: where the outline is. */
+            private int[] rectAt(int x, int y) {
+                return new int[]{x, y, x + (task.right - task.left), y + (task.bottom - task.top)};
+            }
+
+            private void showOutline(int x, int y) {
+                if (outline == null) {
+                    outline = new ResizeEdges.Outline(overlayContext(task.displayId),
+                            Math.round(2 * density));
+                }
+                outline.show(rectAt(x, y));
+            }
+
+            /**
+             * The move itself, in one transition: on a shell that does not follow a bare
+             * bounds change, a transition's finish is what puts a window's picture where
+             * its bounds are. The caption strip goes with it, as RESIZE sets both.
+             */
+            private void moveTo(int x, int y) {
+                if (outline != null) {
+                    outline.hide();
+                    outline = null;
+                }
+                final int[] r = rectAt(x, y);
+                final int display = task.displayId;
+                final int id = task.taskId;
+                final int px = captionHeight(id);
+                task.left = r[0];
+                task.top = r[1];
+                task.right = r[2];
+                task.bottom = r[3];
+                wm.post(() -> wm.resize(display, id, r[0], r[1], r[2], r[3], px));
+                kick();
             }
         };
     }

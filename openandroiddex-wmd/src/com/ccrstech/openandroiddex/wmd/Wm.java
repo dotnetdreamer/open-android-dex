@@ -98,14 +98,48 @@ final class Wm {
         String root = "?";     // the task's base activity, as "pkg/cls"
         Object token;          // WindowContainerToken
         Object info;           // the raw RunningTaskInfo
+        /**
+         * The smallest the window manager lets this task be, as it holds it
+         * (Task#adjustForMinimalTaskDimensions, via TaskInfo): the task's own minimum in
+         * pixels, as parsed from its ROOT activity's {@code <layout android:minWidth>} and
+         * applied as is on any display, or -1 for none; and the display's default for a
+         * resizable task, in dp. -1 as well where this build's TaskInfo has no such field.
+         */
+        int minWidth = -1;
+        int minHeight = -1;
+        int defaultMinDp = -1;
 
+        /** 20 tokens; readers that know only the first 17 (older launchers, wm.rs) still work. */
         String line(int index) {
             return "TASK " + index + " " + taskId + " " + displayId + " " + windowingMode
                     + " " + activityType + " " + (visible ? 1 : 0)
                     + " " + bounds.left + " " + bounds.top + " " + bounds.right + " " + bounds.bottom
                     + " " + appBounds.left + " " + appBounds.top + " " + appBounds.right + " " + appBounds.bottom
-                    + " " + pkg + " " + activity;
+                    + " " + pkg + " " + activity
+                    + " " + minWidth + " " + minHeight + " " + defaultMinDp;
         }
+    }
+
+    /** TaskInfo fields this build lacks, looked for once rather than on every list. */
+    private static final java.util.Set<String> MISSING =
+            java.util.concurrent.ConcurrentHashMap.newKeySet();
+
+    /** An int field of a TaskInfo, or -1 where this build has none by that name. */
+    private static int intField(Object info, String name) {
+        if (MISSING.contains(name)) return -1;
+        try {
+            Object v = Refl.field(info, name);
+            return v instanceof Integer ? (Integer) v : -1;
+        } catch (Refl.WmError e) {
+            MISSING.add(name);
+            return -1;
+        }
+    }
+
+    private static void readMinimum(TaskRec t, Object info) {
+        t.minWidth = intField(info, "minWidth");
+        t.minHeight = intField(info, "minHeight");
+        t.defaultMinDp = intField(info, "defaultMinSize");
     }
 
     /**
@@ -183,6 +217,7 @@ final class Wm {
                 t.taskId = (Integer) Refl.field(info, "taskId");
                 t.displayId = (Integer) Refl.field(info, "displayId");
                 t.token = Refl.field(info, "token");
+                readMinimum(t, info);
                 ComponentName top = (ComponentName) Refl.field(info, "topActivity");
                 if (top == null) top = (ComponentName) Refl.field(info, "baseActivity");
                 if (top != null) {
@@ -247,6 +282,7 @@ final class Wm {
         t.displayId = (Integer) Refl.field(info, "displayId");
         t.visible = Boolean.TRUE.equals(Refl.field(info, "isVisible"));
         t.token = Refl.field(info, "token");
+        readMinimum(t, info);
 
         Object config = Refl.field(info, "configuration");
         Object winConfig = Refl.field(config, "windowConfiguration");

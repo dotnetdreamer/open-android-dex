@@ -134,8 +134,10 @@ at your monitor's size, sitting next to your other windows.
   desktop, step through your windows. It is under Touchpad in quick settings
   too
 - **Proper windows.** Every app gets a title bar with close, minimise, maximise
-  and snap left or right. Drag them where you want. Resize them from a corner.
-  Put two apps side by side and get something done
+  and snap left or right. Drag them where you want. On Android 14 and newer,
+  resize them from any edge or corner: the grab area reaches past the window's
+  border, and your pointer turns into a resize arrow over it. Put two apps side by side and get
+  something done
 - **Windows stay where you put them.** Move an app or resize it, and that is
   where it opens next time. Every app remembers its own spot
 - **An app drawer** you can search, and a desktop you can drop shortcuts onto
@@ -714,8 +716,13 @@ OADX_LOG=trace npm run tauri dev
 ```
 
 A fresh clone has an empty `src-tauri/resources/bin/`. Unpack the matching
-scrcpy release into it, flattened, for a local bundle. Rebuilding the native
-prebuilts is rarely needed and requires Docker:
+scrcpy release into it, flattened, for a local bundle. Its client draws the
+pointer as an arrow everywhere; the release build's resize arrows over window
+edges come from scrcpy's client built with our patch, which
+`openandroiddex-scrcpy/build-client.sh <linux-x86_64|win64|macos-aarch64|macos-x86_64>`
+builds (meson, ninja, cmake and nasm; the script says the rest) and every
+`npm run tauri dev` after it stages. Rebuilding the native prebuilts is rarely
+needed and requires Docker:
 
 ```bash
 bash openandroiddex-linux/proot/build.sh    # libproot.so, libloader*.so

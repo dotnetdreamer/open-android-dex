@@ -8,6 +8,7 @@ mod gestures;
 mod hotkeys;
 mod notifications;
 mod pmos;
+mod pointer_shape;
 mod projection;
 mod quit;
 mod remote;

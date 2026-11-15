@@ -40,6 +40,15 @@ final class WmClient {
         int appLeft, appTop, appRight, appBottom;
         String pkg = "";
         String activity = "";
+        /**
+         * What the window manager holds this task to, as the daemon read it off TaskInfo:
+         * the task's own minimum in pixels (its root activity's manifest, applied as is at
+         * any density) or -1 for none, and the display's default in dp. All -1 from a
+         * daemon that does not send them.
+         */
+        int minWidth = -1;
+        int minHeight = -1;
+        int defaultMinDp = -1;
 
         boolean isFreeform() {
             return windowingMode == 5;
@@ -167,11 +176,12 @@ final class WmClient {
 
     /**
      * <pre>
-     * idx  0     1  2  3       4    5       6   7 8 9 10  11 12 13 14  15  16
-     *      TASK  ix id display mode actType vis l t r b   al at ar ab  pkg activity
+     * idx  0     1  2  3       4    5       6   7 8 9 10  11 12 13 14  15  16       17   18   19
+     *      TASK  ix id display mode actType vis l t r b   al at ar ab  pkg activity minW minH defMinDp
      * </pre>
-     * 17 tokens. Getting this off by one is silent and looks like nonsense data —
-     * the window title renders as the app-bounds bottom coordinate.
+     * 17 tokens, or 20 from a daemon that sends the task's minimum size (older ones do
+     * not: the three stay -1). Getting this off by one is silent and looks like nonsense
+     * data — the window title renders as the app-bounds bottom coordinate.
      */
     private static Task parse(String line) {
         String[] p = line.split("\\s+");
@@ -193,6 +203,11 @@ final class WmClient {
             t.appBottom = Integer.parseInt(p[14]);
             t.pkg = p[15];
             t.activity = p[16];
+            if (p.length >= 20) {
+                t.minWidth = Integer.parseInt(p[17]);
+                t.minHeight = Integer.parseInt(p[18]);
+                t.defaultMinDp = Integer.parseInt(p[19]);
+            }
             return t;
         } catch (NumberFormatException e) {
             return null;
@@ -224,6 +239,26 @@ final class WmClient {
     boolean resize(int displayId, int taskId, int l, int t, int r, int b, int px) {
         return ok(request("RESIZE " + displayId + " " + taskId + " "
                 + l + " " + t + " " + r + " " + b + " " + px));
+    }
+
+    /**
+     * One frame of a resize by a window's edge (ResizeEdges): the task rect and its caption
+     * strip ({@code px} tall) together, applied at once with no transition, so it can be
+     * sent per frame. The drag ends with {@link #resize}, which commits it.
+     */
+    boolean size(int displayId, int taskId, int l, int t, int r, int b, int px) {
+        return ok(request("SIZE " + displayId + " " + taskId + " "
+                + l + " " + t + " " + r + " " + b + " " + px));
+    }
+
+    /**
+     * What the pointer should look like over {@code displayId} now, by its CSS name
+     * ("default", "ew-resize", …): the computer draws its own cursor over the desktop and
+     * cannot see a window's edge, so the daemon passes this on to it. Lasts as long as this
+     * connection; the daemon goes back to "default" when it ends.
+     */
+    boolean shape(int displayId, String name) {
+        return ok(request("SHAPE " + displayId + " " + name));
     }
 
     boolean front(int displayId, int taskId) {
@@ -441,9 +476,10 @@ final class WmClient {
 
     /**
      * How many times this client has connected. What the daemon keeps for a connection —
-     * the pointer it draws — ends with it, so a new number means it must be sent again.
+     * the pointer it draws, the shape the computer's cursor takes — ends with it, so a new
+     * number means it must be sent again. Never waits on a request: safe on the main thread.
      */
-    synchronized int connections() {
+    int connections() {
         return connections;
     }
 
@@ -550,8 +586,11 @@ final class WmClient {
     /** Whether the last connect attempt got through, so outages are logged once. */
     private boolean everConnected;
     private boolean reportedFailure;
-    /** Connections made so far. Guarded by this, as everything request() touches is. */
-    private int connections;
+    /**
+     * Connections made so far. Written only under this, as everything request() touches
+     * is; volatile so {@link #connections} can read it without waiting for a request.
+     */
+    private volatile int connections;
 
     private void close() {
         try {
