@@ -19,7 +19,8 @@ edge, Plasma 6.8, KWin 6.8.2) on 2026-11-13.
 | Piece | File | What it owns |
 | --- | --- | --- |
 | The phone's helper | `openandroiddex-pmos/src/main.c` | the virtual output (KWin) or headless output (Phosh), the encoder, fake or virtual input, the phone's keymap, keeping the phone awake, putting a Phosh phone back |
-| Building it | `openandroiddex-pmos/build.sh`, `Dockerfile` | an x86_64 Alpine with clang and an aarch64 Alpine sysroot; the binary goes to `prebuilt/` |
+| KWin's script | `openandroiddex-pmos/src/here.js` | apps opened from a screen showing on that screen (KWin), see [Apps open where they are opened](#apps-open-where-they-are-opened) |
+| Building it | `openandroiddex-pmos/build.sh`, `cstring.sh`, `Dockerfile` | an x86_64 Alpine with clang and an aarch64 Alpine sysroot; here.js embedded as a C string; the binary goes to `prebuilt/` |
 | The computer's end | `src-tauri/src/pmos.rs` | which phone is on the cable, signing in, putting the helper there, the session, the window's WebSocket |
 | The Desktop tab | `src/features/pmos/usePmos.ts`, `DesktopPage.tsx` (`pmosContent`, `PmosAlso`), `PmosSignIn.tsx` | the phone's own flow beside the Android one, and its card on the Android screens |
 | The Linux tab | `src/features/pmos/PmosLinuxCard.tsx` | the same phone: sign in, Open desktop |
@@ -150,6 +151,53 @@ scale is this screen's times the shrink but never below 1, since a desktop
 drawn smaller than its own pixels and then enlarged blurs twice. The GPU path
 is there (`--convert gl`) but not used: the download on this Adreno costs more
 than KWin's own readback plus `videoconvert`.
+
+### The Galaxy S24's cores
+
+On the S24 (Exynos 2400: four 1.96 GHz cores, five at 2.59–2.90 GHz, one at
+3.21 GHz) the encoder was the limit, and not for want of speed. Left to the
+scheduler, x264 ran on the slow cores. Measured on 2026-11-16 in GStreamer
+(Python) on the phone, 1920×1020, moving test patterns, frames a second for
+the whole pipeline including the test source:
+
+| | Any core (as before) | Slow cores only | Fast cores only |
+| --- | --- | --- | --- |
+| x264 ultrafast, 4 sliced threads (as before), moving ball | 18.9 | 12.2 | 47.4 |
+| x264 ultrafast, 1 thread, moving ball | | 10.7 | 79.6 (81.5 on the 3.21 GHz core alone) |
+| x264 1 thread / 4 sliced threads, moving bars | | | 109.4 / 85.2 |
+| x264 1 thread / 4 sliced threads, moving zone plate | | | 65.7 / 26.3 |
+| x264 1 thread / 4 sliced threads, noise | | | 56.3 / 31.7 |
+| `videoconvert` BGRx → I420, 1 thread / 4 threads, moving ball | 115.0 / 35.9 | | |
+| BGRx → NV12 on the CPU / on the GPU (`glcolorconvert` through zink), moving bars | | | 205.8 / 57.8 |
+
+Without the test source's own time, one x264 thread on a fast core encodes
+1920×1020 at about 130 frames a second. Sliced threads lose, probably because
+each slice keeps its core only partly busy and the clocks don't rise (the
+clocks were not watched during the runs). So since
+helper 4 the program runs on all but the slowest cores (`prefer_fast_cores`:
+those whose top clock is the phone's lowest, when there are cores of more
+than one kind), and x264 has one thread. The GPU doesn't encode here: the
+Exynos 2400 encodes video in its MFC block, whose driver this postmarketOS
+port doesn't load (no MFC device among `/dev/video*`, which are all the
+camera's), and converting on the GPU through zink was slower than the CPU.
+The helper logs what it sent every ten seconds while the screen moves
+(`video: N frames a second over 10 s`).
+
+End to end, in a nested KWin on the S24 (`kwin_wayland --virtual` drawing
+through zink like the session's, the helper's screen 1920×1020, a window
+showing a detailed web page dragged across it by a KWin script every 16 ms,
+20 s each, frames counted at the computer's end):
+
+| Helper | Frames a second (lowest to highest second) |
+| --- | --- |
+| before (4 sliced threads, any core) | 32.8 (3–38) |
+| fast cores, 1 thread | 30.4 (3–38) |
+| the same with `--convert gl` (KWin's frames as DMA-BUF, converted on the GPU) | 29.1 (4–37) |
+
+All three stop at about 37: in that nested KWin the frames themselves come no
+faster, so this test can't show the encoder's gain, and the GPU path brought
+none there. Not measured yet: the real session's frame rate with the new
+helper (the person was using the phone).
 
 From the app seeing the phone on the cable to the first frame in the window:
 about one second, including putting a new helper on the phone. A first frame
@@ -318,6 +366,23 @@ screen when it goes, and turn back into phone apps there. Docked mode is one
 setting for every screen: while a computer is connected, the phone's own
 screen has windows too.
 
+The setting alone is not all of docked mode. Plasma Mobile's own switch
+(`MobileShellSettings::setConvergenceModeEnabled`) also runs
+`plasma-mobile-envmanager --apply-settings`, which writes KWin's rules for the
+mode into `~/.config/plasma-mobile/kwinrc` (in docked mode windows can be
+dragged, open centred instead of maximized and have the title bar's buttons;
+outside it none of that) and has KWin reload them. The helper wrote only the
+setting until 2026-11-16, so on the S24 docked mode was on but KWin kept the
+phone's rules: no window could be dragged on the computer's screen
+(`InteractiveWindowMoveEnabled=false` while `convergenceModeEnabled=true`).
+Now it runs the envmanager after each change, with the session's environment
+and `QT_QPA_PLATFORM=offscreen` as `startplasmamobile` does, and also when it
+finds docked mode on already. Checked in a nested KWin set up like Plasma
+Mobile's: the session coming turned KWin's `interactiveWindowMoveEnabled` on,
+its going turned it off and placement back to maximizing. On the S24 the
+envmanager run by hand during a session made the windows on the computer's
+screen movable (`moveable=true`).
+
 What the phone had is kept in `~/.cache/openandroiddex/plasma-docked-before`
 until it is put back. So the guard puts it back when the helper dies, and the
 autostart entry's `rest` does at the next login after a restart. A second
@@ -354,6 +419,155 @@ More on the S24 the same evening, through the app (helper 3):
   shell was started again. Earlier disconnects without the panel never did
   that. So the panel was taken off again, and Plasma Mobile has no taskbar on
   the computer's screen.
+
+### Apps open where they are opened
+
+Plasma Mobile's app drawer and dock switch to an app's window when the app
+has one, on whichever screen that window is
+(`WindowUtil::activateWindowByStorageId`: the app's first window, matched by
+its app id plus `.desktop`). With the computer's screen beside the phone's,
+Brave, Calls and VLC tapped on the computer's screen came up on the phone's
+(found on the S24 on 2026-11-16). Firefox opened on the computer's screen only
+because its window's id (`firefox-esr`) doesn't match its desktop file
+(`org.mozilla.firefox-esr`), so the drawer started it again and KWin placed the
+new window on the screen in use.
+
+So while the computer's screen is up, KWin runs a script of ours, `here.js`
+(the helper writes it to `~/.cache/openandroiddex/kwin-here.js` and loads it
+through `org.kde.kwin.Scripting`; it is unloaded before the screen closes, and
+by the guard's `rest` if the helper dies). When KWin activates a window on one
+screen for something done on the other, the window comes to the screen it was
+asked from:
+
+- From the home screen (the drawer, the dock, a folder): the app's own window
+  on that screen if it has one there; else a new window, if the app's desktop
+  file has a new-window action (`new-window`, `NewWindow`, `new-empty-window`;
+  not for `SingleMainWindow` apps); else that window, moved. Brave and
+  Chromium get a new window, as Firefox did; Calls and VLC, which have no such
+  action, are moved.
+- Any other way (the task switcher, a notification, a link opened from an app
+  on that screen): that window, moved.
+- An app whose new window doesn't come within 8 seconds has its old window
+  moved, unless something else was done meanwhile.
+
+It works in both directions: an app tapped on the phone whose window is on the
+computer's screen comes to the phone the same way.
+
+"Where something was done" needs two signs, because KWin's script API can't
+see input: `windowActivated` comes after KWin has already made the window's
+screen the active one (`Workspace::setActiveWindow`), and a touch moves no
+pointer. The first is the window active just before: a click or a touch
+activates the window under it, the home screen too (checked: the home screen
+is a desktop window that takes the focus, and the drawer opens inside it, not
+as a window of its own). The second is the helper's: it asks how long ago the
+computer last pressed a key or a mouse button. The two have to agree, a press
+within 1.5 s for the computer's screen and none for the phone's, or nothing
+happens. That keeps KWin's own choices (the next window after one was
+minimized or closed, whose "window before" is the minimized one, also
+excluded) and a tap on the phone right after a click on the computer from
+moving anything. On the computer's screen, "from the home screen" also needs
+the pointer to be over the home screen: a notification popup takes no focus,
+so the home screen can be the window before it.
+
+The helper answers on the session bus as `com.ccrstech.openandroiddex.Pmos`
+(`Look`, `NewWindow`, `Note`), to KWin's own connection only. A new window is
+the desktop file's action: over D-Bus (`org.freedesktop.Application.
+ActivateAction`) for a `DBusActivatable` app, else its `Exec` run with the
+session's environment, in a process session of its own, with nothing on the
+helper's stdout (the computer's stream; GLib's own launcher would hand it to
+the app). The script's decisions go to the helper's log as `here:` lines.
+
+What cost time to learn (KWin 6.8.3):
+
+- **A window that keeps its size jumps back.** `sendToOutput` moves it at once,
+  but a configure KWin sent the app just before (for the activation) still
+  holds the old place, and when the app answers it KWin puts the window back
+  there (`XdgToplevelWindow::handleRoleCommit`; only an interactive move
+  updates configures on their way). Five of six same-size moves bounced in
+  testing. The script sends the window again whenever it lands back on its
+  old screen within two seconds; all six then stayed. The first moves tried,
+  of maximized windows (which change size between the two screens), stayed
+  without that.
+- **`moveableAcrossScreens` is false outside docked mode**: it follows KWin's
+  `InteractiveWindowMoveEnabled`, which Plasma Mobile's envmanager turns off
+  in mobile mode. Sending a window to a screen doesn't need it, so the script
+  doesn't ask.
+- **`Scripting.start()` applies every script setting**, as the settings page
+  does, so the helper runs its own script by its object, `/Scripting/ScriptN`.
+  KWin numbers scripts by how many it holds, so after an unload the number can
+  be one in use; the helper looks at `/Scripting`'s children first and uses
+  `start()` only then.
+- **Two shells.** The helper takes the session from the first `plasmashell` it
+  finds, and a nested test session's shell started over SSH did as well as the
+  real one (another session's test hit this on the S24). It now prefers a
+  process whose logind session has a seat. On the S24 the real `plasmashell`
+  had been restarted with `--replace` and belonged to no session, and SSH
+  logins there get none: kded6, ksmserver and KWin were in the seated session
+  `c3`, so the session comes from kded6.
+
+Checked on 2026-11-16 on the S24, in a private nested session (`kwin_wayland
+--virtual` on its own bus and settings, Plasma Mobile's real shell in it on
+both screens, the test helper making the computer's screen, clicks through the
+helper's own fake input, three test apps; nothing of the phone's session was
+used or shown):
+
+| Case | Result |
+| --- | --- |
+| Multi-window app open on the phone, its icon clicked on the computer's screen | its new-window action ran; a new window on the computer's screen, active; the phone kept its own |
+| Single-window app (no action) | moved to the computer's screen, active |
+| App with a window on both screens, clicked again there | its window there came back from minimized; nothing moved or opened |
+| `DBusActivatable` app | `ActivateAction("new-window")`; a new window on the computer's screen |
+| Phone home screen, app only on the computer's screen | moved to the phone; with a window on both, the phone's (the other minimized again) |
+| A click on the computer, then a touch on the phone 277 ms later | nothing moved: the two signs disagreed |
+| A window on the computer's screen asking for a phone window | moved (not a new window): not from the home screen |
+| Home screen active, pointer over another window | moved (not a new window) |
+| A new-window action that opens nothing | the old window moved after 8 s |
+| A window minimized on the computer's screen | KWin activated the next window; nothing moved |
+| Helper stopped / killed (`kill -9`) | the script unloaded / the guard's `rest` unloaded it |
+
+From a click on a drawer icon to the script asking the helper: 95–150 ms.
+Not tested: the phone's real session with Brave, Calls and VLC (the person
+was using the phone), a real touch on the phone's screen (stood in for by
+activating its home screen), the task switcher, a notification popup. Phosh
+was not looked at: the script is KWin's.
+
+### The on-screen keyboard after a session
+
+On the S24 on 2026-11-16, after sessions on the computer's screen, the phone's
+on-screen keyboard (plasma-keyboard, KWin's input method) came up as a strip
+about 160 px wide in the middle of the 393 px screen, showing only "q w e r",
+and stayed that way: nothing on the phone reset it. A new keyboard process
+was right again. plasma-keyboard sizes its window and keys from its window's
+screen (`Screen.width`, `Screen.height`; the keys are 30% of the screen's
+height, the panel at most three times that wide, a phone layout under
+500 px) and tells KWin its keys' rectangle; KWin takes that rectangle as the
+keyboard's size and centres it on the active screen
+(`InputPanelV1Window::resetPosition`). In a nested KWin with plasma-keyboard,
+it kept the size of the screen it was first laid out for when KWin showed it
+on the other (a phone-sized keyboard on a 1080 px screen), but the strip
+itself was not reproduced, so how the phone's got that way is not known.
+
+So when the computer's screen has gone, the helper ends the keyboard process
+with SIGKILL, and KWin starts a new one at once, laid out for the phone: KWin
+starts its input method again whenever it crashes, and gives up only after
+five crashes each within 20 s of the last (`InputMethod::startInputMethod`,
+`m_inputMethodCrashTimer`). The process is found as KWin's child with the
+variable KWin gives its input method alone (`MALIIT_ENABLE_ANIMATIONS`), so
+any keyboard KWin runs is restarted the same way. SIGTERM won't do:
+plasma-keyboard ends cleanly then, and KWin leaves a clean end be (seen on the
+S24). A first version cleared and restored `[Wayland] InputMethod` in kwinrc
+instead; when the setting came only from a system default, `kwriteconfig6
+--delete` left `InputMethod[$d]`, which hid the default, and KWin had no
+keyboard at all. This way touches no setting. The guard restarts the keyboard
+if serve died, unless serve said it had (a `k` on the guard's pipe).
+
+Checked on 2026-11-16 in a nested KWin with plasma-keyboard on the S24: serve
+ending (keyboard 27439 → 27539, one restart, the guard didn't add one); serve
+killed (`kill -9`; the guard's `rest` unloaded the KWin script and the
+keyboard went 30951 → 31118); `[Wayland]` in the private kwinrc unchanged
+both times. Not done during a session: the keyboard moving between the two
+screens mid-session was not reproduced, and the real session's keyboard has
+not yet been restarted this way.
 
 ## Phosh
 

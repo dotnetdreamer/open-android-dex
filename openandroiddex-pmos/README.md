@@ -12,10 +12,12 @@ out, is [`doc/pmos-desktop.md`](../doc/pmos-desktop.md).
 
 | file | |
 | --- | --- |
-| `src/main.c` | the whole program: KWin's virtual output and fake input; Phosh's headless output, screencopy and virtual pointer and keyboard; the phone's keymap, the GStreamer pipeline, the framed messages on stdin and stdout, the inhibitions that keep the phone awake |
+| `src/main.c` | the whole program: KWin's virtual output and fake input; Phosh's headless output, screencopy and virtual pointer and keyboard; the phone's keymap, the GStreamer pipeline, the framed messages on stdin and stdout, the inhibitions that keep the phone awake; on KWin, the session bus service for `here.js` |
+| `src/here.js` | a KWin script, loaded while the computer has the screen, that makes an app opened from a screen show on that screen |
 | `protocols/virtual-keyboard-unstable-v1.xml` | the virtual keyboard protocol, which no Alpine package ships, copied from wlroots 0.19.0 (MIT) |
 | `Dockerfile` | the build environment: x86_64 Alpine with clang and the Wayland scanner, and an aarch64 Alpine sysroot with the phone's libraries |
 | `build.sh` | builds the image once, then the program, into `prebuilt/` |
+| `cstring.sh` | turns `src/here.js` into a C string for the build (`here-js.h`) |
 | `prebuilt/openandroiddex-pmos-aarch64` | what the desktop app embeds (`include_bytes!`) and installs on the phone |
 
 ## Building
@@ -71,6 +73,25 @@ had when it ends. Until then that is kept in
 entry above (written here too, for Plasma as well as Phosh) put it back if
 `serve` ended without doing so. Docked mode is one setting, so the phone's own
 screen has windows too while a computer is connected.
+
+On KWin, `serve` also has KWin run `here.js` (written to
+`~/.cache/openandroiddex/kwin-here.js`, loaded as the script
+`openandroiddex-pmos`) while the computer has the screen: Plasma Mobile's
+drawer switches to an app's window wherever it is, and the script brings it,
+or a new window of the app, to the screen it was opened from. `serve` answers
+the script on the session bus as `com.ccrstech.openandroiddex.Pmos`, opens the
+apps' new-window actions for it, and logs its decisions as `here:` lines. It
+unloads the script before the screen closes, and `rest` (the guard's, if
+`serve` died) unloads one left behind. Why and how: doc/pmos-desktop.md,
+"Apps open where they are opened". When the screen has gone it also has KWin
+start its on-screen keyboard again (it ends the keyboard process, which KWin
+restarts), so the phone's keyboard is laid out for the phone: "The on-screen
+keyboard after a session".
+
+`serve` runs on the phone's fast cores only (all but those with the lowest top
+clock) and encodes with one x264 thread there; it logs the frames it sent
+every ten seconds while the screen moves. Why: doc/pmos-desktop.md, "The
+Galaxy S24's cores".
 
 The phone needs `gst-plugins-base` and `gst-plugins-ugly` (x264), and on
 Plasma `gst-plugin-pipewire`. The Plasma Mobile install on the phone this was

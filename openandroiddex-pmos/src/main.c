@@ -28,6 +28,11 @@
  * or dies (a guard process of its own sees to that), the phone's panel is
  * primary again and the headless output is off. See "Phosh" below.
  *
+ * On KWin, while the computer's screen is up, a script of KWin's own (here.js)
+ * makes an app opened from one screen show on that screen, where Plasma
+ * Mobile's drawer would switch to the app's window on the other. This program
+ * answers it on the session bus. See "What is opened from a screen" below.
+ *
  *   openandroiddex-pmos version
  *   openandroiddex-pmos probe
  *   openandroiddex-pmos serve --width W --height H --scale S [--cap C] [--encoder E] [--convert gl|cpu]
@@ -49,6 +54,7 @@
 #include <linux/input-event-codes.h>
 #include <math.h>
 #include <poll.h>
+#include <sched.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -59,6 +65,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include <gio/gdesktopappinfo.h>
 #include <gio/gio.h>
 #include <glib-unix.h>
 #include <glib.h>
@@ -70,6 +77,7 @@
 #include <xkbcommon/xkbcommon.h>
 
 #include "fake-input-client-protocol.h"
+#include "here-js.h" /* src/here.js as HERE_JS, made by build.sh */
 #include "virtual-keyboard-unstable-v1-client-protocol.h"
 #include "wlr-output-management-unstable-v1-client-protocol.h"
 #include "wlr-screencopy-unstable-v1-client-protocol.h"
@@ -78,7 +86,7 @@
 #include "zkde-screencast-unstable-v1-client-protocol.h"
 
 /* What `version` prints; pmos.rs compares the whole file's hash, not this. */
-#define VERSION "3"
+#define VERSION "4"
 
 /*
  * Frames sent and not yet acknowledged before new ones stop going into the
@@ -268,6 +276,13 @@ static struct {
     int cfg_w, cfg_h;                 /* the size it carries */
     int next_cfg_w, next_cfg_h;       /* asked for while it was on its way */
     int guard_fd;                     /* the guard's pipe: it puts the phone back when this closes */
+
+    /* What is opened from a screen shows there (KWin; see here.js). */
+    gchar **session_env;              /* the session's environment, for the windows opened for it */
+    gint64 pressed_at;                /* the computer's last key or button, g_get_monotonic_time() */
+    char *kwin_name;                  /* KWin's unique name on the bus: only its script is answered */
+    guint here_object, here_owner;
+    gboolean here_loaded;
 } app;
 
 static void say(const char *fmt, ...) G_GNUC_PRINTF(1, 2);
@@ -375,6 +390,48 @@ static gboolean json_raw(const char *json, const char *key, char *out, size_t ca
     return TRUE;
 }
 
+/* ── the fast cores ────────────────────────────────────────────────────── */
+
+/*
+ * Phones mix fast and slow cores, and the scheduler kept the encoder on the
+ * slow ones: on the Galaxy S24, x264 made 19 frames a second at 1920x1020
+ * left to it, and 109 on its fast cores (2026-11-16, moving SMPTE bars, one
+ * thread). So this program, and every thread it starts (GStreamer's
+ * included), runs on all but the slowest cores: those whose top clock is
+ * the lowest of the phone's, when the phone has cores of more than one.
+ */
+static void prefer_fast_cores(void) {
+    long n = sysconf(_SC_NPROCESSORS_CONF);
+    if (n <= 1 || n > CPU_SETSIZE) return;
+    guint64 *top = g_new0(guint64, n);
+    guint64 lo = G_MAXUINT64, hi = 0;
+    for (long i = 0; i < n; i++) {
+        char path[96];
+        g_snprintf(path, sizeof path, "/sys/devices/system/cpu/cpu%ld/cpufreq/cpuinfo_max_freq", i);
+        char *s = NULL;
+        top[i] = g_file_get_contents(path, &s, NULL, NULL) ? g_ascii_strtoull(s, NULL, 10) : 0;
+        g_free(s);
+        if (!top[i]) continue;
+        lo = MIN(lo, top[i]);
+        hi = MAX(hi, top[i]);
+    }
+    if (hi > lo) {
+        cpu_set_t set;
+        CPU_ZERO(&set);
+        GString *which = g_string_new(NULL);
+        for (long i = 0; i < n; i++) {
+            if (top[i] > lo) {
+                CPU_SET((size_t)i, &set);
+                g_string_append_printf(which, "%s%ld", which->len ? "," : "", i);
+            }
+        }
+        if (sched_setaffinity(0, sizeof set, &set) == 0)
+            say("cpus: %s, the fast ones (the slow ones top out at %.2f GHz)", which->str, lo / 1e6);
+        g_string_free(which, TRUE);
+    }
+    g_free(top);
+}
+
 /* ── the session: which Wayland, which bus ─────────────────────────────── */
 
 static char *read_file(const char *path, gsize *len) {
@@ -392,17 +449,54 @@ static const char *environ_get(const char *env, gsize len, const char *key) {
 }
 
 /*
+ * Whether a process belongs to a login session with a seat, the one at the
+ * phone's own screen, as logind sees it. A desktop started from an SSH login
+ * (a nested test session, say) has none, and its shell would otherwise do as
+ * well as the real one. Without logind every process counts as seated.
+ */
+static gboolean seated(GDBusConnection *sys, const char *pid) {
+    if (!sys) return TRUE;
+    GVariant *r = g_dbus_connection_call_sync(sys, "org.freedesktop.login1", "/org/freedesktop/login1",
+                                              "org.freedesktop.login1.Manager", "GetSessionByPID",
+                                              g_variant_new("(u)", (guint32)atoi(pid)), G_VARIANT_TYPE("(o)"),
+                                              G_DBUS_CALL_FLAGS_NONE, 1000, NULL, NULL);
+    if (!r) return FALSE;
+    const char *session = NULL;
+    g_variant_get(r, "(&o)", &session);
+    GVariant *v = g_dbus_connection_call_sync(sys, "org.freedesktop.login1", session, "org.freedesktop.DBus.Properties",
+                                              "Get", g_variant_new("(ss)", "org.freedesktop.login1.Session", "Seat"),
+                                              G_VARIANT_TYPE("(v)"), G_DBUS_CALL_FLAGS_NONE, 1000, NULL, NULL);
+    gboolean yes = FALSE;
+    if (v) {
+        GVariant *seat = NULL;
+        g_variant_get(v, "(v)", &seat);
+        if (g_variant_is_of_type(seat, G_VARIANT_TYPE("(so)"))) {
+            const char *id = NULL;
+            g_variant_get(seat, "(&s&o)", &id, NULL);
+            yes = id && *id;
+        }
+        g_variant_unref(seat);
+        g_variant_unref(v);
+    }
+    g_variant_unref(r);
+    return yes;
+}
+
+/*
  * Over SSH this runs outside the phone's graphical session, so its
  * environment says nothing about it. The session's own programs know: take
  * the Wayland socket, the runtime directory and the session bus from the
- * first of them that is this user's, the shell (Plasma's or Phosh) first.
+ * first of them that is this user's, the shell (Plasma's or Phosh) first, and
+ * one in the session at the phone's screen before any other (see seated).
  */
 static void adopt_session(void) {
     if (getenv("WAYLAND_DISPLAY") && getenv("XDG_RUNTIME_DIR") && getenv("DBUS_SESSION_BUS_ADDRESS")) return;
     static const char *const prefer[] = {"plasmashell", "phosh", "kded6", "ksmserver", "kwin_wayland", NULL};
+    enum { UNSEATED = 1000 };
+    GDBusConnection *sys = g_bus_get_sync(G_BUS_TYPE_SYSTEM, NULL, NULL);
     char *best = NULL;
     gsize best_len = 0;
-    int best_rank = 1000;
+    int best_rank = 2 * UNSEATED;
     DIR *d = opendir("/proc");
     struct dirent *e;
     while (d && (e = readdir(d))) {
@@ -427,19 +521,34 @@ static void adopt_session(void) {
             g_free(env);
             continue;
         }
+        /* logind is asked about the shell and its companions only; any other program is a last resort. */
+        if (rank >= 100 || !seated(sys, e->d_name)) rank += UNSEATED;
+        if (rank >= best_rank) {
+            g_free(env);
+            continue;
+        }
         g_free(best);
         best = env;
         best_len = len;
         best_rank = rank;
     }
     if (d) closedir(d);
-    static const char *const keys[] = {"WAYLAND_DISPLAY", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS", "DISPLAY",
-                                       "XDG_SESSION_TYPE", "XDG_CURRENT_DESKTOP", "PLASMA_PLATFORM", NULL};
+    if (sys) g_object_unref(sys);
+    /* XDG_DATA_DIRS: where the session finds desktop files (Flatpak's exports, say), for here.js's apps. */
+    static const char *const keys[] = {"WAYLAND_DISPLAY",     "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS",
+                                       "DISPLAY",             "XDG_SESSION_TYPE", "XDG_CURRENT_DESKTOP",
+                                       "PLASMA_PLATFORM",     "XDG_DATA_DIRS",    NULL};
     if (best) {
         for (int i = 0; keys[i]; i++) {
             const char *v = environ_get(best, best_len, keys[i]);
             if (v && !getenv(keys[i])) setenv(keys[i], v, 1);
         }
+        /* All of it, for a window opened for the session: an app started from here starts as the drawer's do. */
+        GPtrArray *env = g_ptr_array_new();
+        for (const char *p = best; p < best + best_len; p += strlen(p) + 1)
+            if (strchr(p, '=')) g_ptr_array_add(env, g_strdup(p));
+        g_ptr_array_add(env, NULL);
+        app.session_env = (gchar **)g_ptr_array_free(env, FALSE);
         g_free(best);
     } else {
         /* No program of this user's has a desktop: nobody is logged in (Phosh's greeter is another user's). */
@@ -1079,6 +1188,32 @@ static gboolean docked_config(const char *value, char **out) {
 static gboolean rest_autostart(void);
 static void start_guard(void);
 
+/*
+ * Plasma Mobile's own docked-mode switch (MobileShellSettings::setConvergenceModeEnabled)
+ * also runs plasma-mobile-envmanager --apply-settings, which gives KWin docked mode's rules
+ * (windows can be dragged, open centred rather than maximized, have a title bar's buttons)
+ * or the phone's back, and has KWin reload them. Writing the setting alone left KWin with
+ * the phone's: no window could be dragged on the computer's screen (S24, 2026-11-16).
+ */
+static void apply_docked_rules(void) {
+    char *prog = g_find_program_in_path("plasma-mobile-envmanager");
+    if (!prog) return;
+    gchar **env = app.session_env ? g_strdupv(app.session_env) : g_get_environ();
+    env = g_environ_unsetenv(env, "XDG_ACTIVATION_TOKEN");
+    env = g_environ_unsetenv(env, "DESKTOP_STARTUP_ID");
+    env = g_environ_setenv(env, "QT_QPA_PLATFORM", "offscreen", TRUE); /* as startplasmamobile runs it */
+    const char *argv[] = {prog, "--apply-settings", NULL};
+    gint status = 0;
+    GError *err = NULL;
+    gboolean ok = g_spawn_sync(NULL, (gchar **)argv, env, G_SPAWN_STDOUT_TO_DEV_NULL | G_SPAWN_STDERR_TO_DEV_NULL,
+                               NULL, NULL, NULL, NULL, &status, &err) &&
+                  g_spawn_check_wait_status(status, NULL);
+    if (!ok) say("docked mode: KWin's rules for it weren't applied (%s)", err ? err->message : "the envmanager failed");
+    g_clear_error(&err);
+    g_strfreev(env);
+    g_free(prog);
+}
+
 /* Docked mode on for this computer's screen, keeping what the phone had. Plasma Mobile only. */
 static void dock(void) {
     if (!plasma_mobile()) return;
@@ -1090,6 +1225,8 @@ static void dock(void) {
         gboolean read = docked_config(NULL, &now);
         if (read && now && strcmp(g_strstrip(now), "true") == 0) {
             say("docked mode: on already");
+            /* KWin's rules may still be the phone's (a session that only wrote the setting) */
+            apply_docked_rules();
             read = FALSE;
         }
         g_free(now);
@@ -1108,9 +1245,11 @@ static void dock(void) {
     g_strstrip(before);
     rest_autostart();
     if (app.guard_fd == 0) start_guard();
-    if (docked_config("true", NULL))
+    if (docked_config("true", NULL)) {
+        apply_docked_rules();
         say("docked mode: on while this computer has the screen (the phone had it %s)",
             strcmp(before, "true") == 0 ? "on" : "off");
+    }
     g_free(before);
     g_free(file);
 }
@@ -1122,6 +1261,7 @@ static void undock(void) {
     if (g_file_get_contents(file, &before, NULL, NULL)) {
         gboolean on = strcmp(g_strstrip(before), "true") == 0;
         if (docked_config(on ? "true" : "false", NULL)) {
+            apply_docked_rules();
             unlink(file);
             say("docked mode: back %s, as the phone had it", on ? "on" : "off");
         }
@@ -2446,6 +2586,8 @@ static void axis(uint32_t which, double value) {
 
 /* RFB's button mask, as the window sends it: 1 left, 2 middle, 4 right, 8/16 wheel up/down, 32/64 left/right, 128 back. */
 static void pointer(guint8 mask, int x, int y) {
+    /* A button pressed or let go of: what here.js asks about (not the wheel, not moving). */
+    if ((mask ^ app.buttons) & (1 | 2 | 4 | 128)) app.pressed_at = g_get_monotonic_time();
     if (app.wlr) {
         wlr_pointer(mask, x, y);
         return;
@@ -2574,6 +2716,7 @@ static void type_press(guint code, guint need, gboolean printable) {
  */
 static void key(gboolean down, guint32 keysym) {
     if (app.wlr ? !app.vkeyboard : (!app.fake || app.fake_version < 4)) return;
+    if (down) app.pressed_at = g_get_monotonic_time();
     gpointer was = g_hash_table_lookup(app.keys_down, GUINT_TO_POINTER(keysym));
     if (!down) {
         if (!was) return;
@@ -2776,10 +2919,13 @@ static char *pipeline_desc(const char *enc) {
                                 conv, app.bitrate);
         g_free(conv);
     } else {
+        /* One thread, on a fast core (prefer_fast_cores): on the Galaxy S24 at 1920x1020 that encoded
+         * 56-109 frames a second where four sliced threads made 26-85, and x264 by itself about 130.
+         * Each slice keeps its core only partly busy, so the cores' clocks never went up. */
         char *conv = convert_desc(app.convert && strcmp(app.convert, "gl") == 0 ? "NV12" : "I420");
         coder = g_strdup_printf("%s ! " LEAKY " ! "
                                 "x264enc name=enc tune=zerolatency speed-preset=ultrafast bitrate=%u "
-                                "key-int-max=600 threads=4 sliced-threads=true",
+                                "key-int-max=600 threads=1",
                                 conv, kbps);
         g_free(conv);
     }
@@ -2968,6 +3114,383 @@ static void inhibit(void) {
     }
 }
 
+/* ── What is opened from a screen shows there (KWin) ───────────────────── */
+
+/*
+ * Plasma Mobile's app drawer and dock switch to an app's window when it has
+ * one, on whichever screen that window is. Tapped on the computer's screen,
+ * Brave, Calls or VLC came up on the phone's (Firefox only opened where it was
+ * tapped because its window's id doesn't match its desktop file, so the drawer
+ * started it again). While the computer's screen is up, KWin runs a script of
+ * ours, here.js, that brings such a window to the screen it was asked from, or
+ * opens a new one of the app there: see the script for the rules. KWin's
+ * scripts can't start programs, or see the computer's mouse apart from the
+ * phone's touch, so this program answers it on the session bus:
+ *
+ *   Look(app) → (screen, pressed, windows)  the computer's screen, how many ms
+ *                                           ago the computer last pressed a key
+ *                                           or button, and whether the app's
+ *                                           desktop file has a new-window action
+ *   NewWindow(app) → opened                 that action, as the session would run it
+ *   Note(text)                              a line for this program's log
+ *
+ * Only KWin (the script runs in it) is answered.
+ */
+#define HERE_BUS "com.ccrstech.openandroiddex.Pmos"
+#define HERE_PATH "/com/ccrstech/openandroiddex/Pmos"
+#define HERE_SCRIPT "openandroiddex-pmos"
+
+static const char here_xml[] =
+    "<node><interface name='" HERE_BUS "'>"
+    "<method name='Look'><arg type='s' name='app' direction='in'/><arg type='s' name='screen' direction='out'/>"
+    "<arg type='u' name='pressed' direction='out'/><arg type='b' name='windows' direction='out'/></method>"
+    "<method name='NewWindow'><arg type='s' name='app' direction='in'/><arg type='b' name='opened' direction='out'/></method>"
+    "<method name='Note'><arg type='s' name='text' direction='in'/></method>"
+    "</interface></node>";
+
+/* An app as KWin names a window's (its desktop file, without .desktop): nothing that could be a path. */
+static GDesktopAppInfo *app_info(const char *id) {
+    if (!id || !*id || *id == '.' || strlen(id) > 200) return NULL;
+    for (const char *p = id; *p; p++)
+        if (!g_ascii_isalnum(*p) && *p != '.' && *p != '-' && *p != '_') return NULL;
+    char *file = g_strconcat(id, ".desktop", NULL);
+    GDesktopAppInfo *info = g_desktop_app_info_new(file);
+    g_free(file);
+    return info;
+}
+
+/*
+ * The desktop file's action for another window: "new-window" in the
+ * specification's example and GNOME's apps, "NewWindow" in KDE's,
+ * "new-empty-window" in VS Code's. Not a private window, and none for an app
+ * that says it has a single main window.
+ */
+static const char *new_window_action(GDesktopAppInfo *info) {
+    if (!info || g_desktop_app_info_get_boolean(info, "SingleMainWindow")) return NULL;
+    const char *const *acts = g_desktop_app_info_list_actions(info);
+    for (int i = 0; acts && acts[i]; i++) {
+        char flat[64];
+        gsize n = 0;
+        for (const char *p = acts[i]; *p && n + 1 < sizeof flat; p++)
+            if (g_ascii_isalnum(*p)) flat[n++] = g_ascii_tolower(*p);
+        flat[n] = 0;
+        if (strcmp(flat, "newwindow") == 0 || strcmp(flat, "newemptywindow") == 0 || strcmp(flat, "windownew") == 0)
+            return acts[i];
+    }
+    return NULL;
+}
+
+static void child_setsid(gpointer d) { setsid(); }
+
+static void opened_ended(GPid pid, gint status, gpointer d) {
+    if (!g_spawn_check_wait_status(status, NULL)) say("here: %s ended with status %d", (char *)d, status);
+    g_spawn_close_pid(pid);
+    g_free(d);
+}
+
+/*
+ * Run a desktop action's Exec line as the session would: in the session's
+ * environment, in its own process session (nothing of this program's SSH
+ * login reaches it), with nothing on this program's stdout, which is the
+ * computer's stream. GLib's own launcher would leave that stdout to it.
+ */
+static gboolean spawn_action(GDesktopAppInfo *info, const char *action, GString *why) {
+    const char *file = g_desktop_app_info_get_filename(info);
+    GKeyFile *kf = g_key_file_new();
+    char *group = g_strdup_printf("Desktop Action %s", action);
+    char *exec = NULL, *dir = NULL, *icon = NULL;
+    gchar **words = NULL;
+    GError *err = NULL;
+    gboolean ok = FALSE;
+    if (file && g_key_file_load_from_file(kf, file, G_KEY_FILE_NONE, NULL)) {
+        exec = g_key_file_get_string(kf, group, G_KEY_FILE_DESKTOP_KEY_EXEC, NULL);
+        dir = g_key_file_get_string(kf, G_KEY_FILE_DESKTOP_GROUP, G_KEY_FILE_DESKTOP_KEY_PATH, NULL);
+        icon = g_key_file_get_string(kf, G_KEY_FILE_DESKTOP_GROUP, G_KEY_FILE_DESKTOP_KEY_ICON, NULL);
+    }
+    if (!exec) g_string_assign(why, "its desktop file has no Exec for the action");
+    else if (g_shell_parse_argv(exec, NULL, &words, &err)) {
+        /* The field codes: no files or URLs to give it; the icon, name and file as the specification says. */
+        GPtrArray *argv = g_ptr_array_new_with_free_func(g_free);
+        for (int i = 0; words[i]; i++) {
+            const char *w = words[i];
+            if (w[0] == '%' && w[1] && !w[2]) {
+                if (w[1] == 'i' && icon && *icon) {
+                    g_ptr_array_add(argv, g_strdup("--icon"));
+                    g_ptr_array_add(argv, g_strdup(icon));
+                } else if (w[1] == 'c') {
+                    g_ptr_array_add(argv, g_strdup(g_app_info_get_name(G_APP_INFO(info))));
+                } else if (w[1] == 'k') {
+                    g_ptr_array_add(argv, g_strdup(file));
+                } else if (w[1] == '%') {
+                    g_ptr_array_add(argv, g_strdup("%"));
+                }
+                continue;
+            }
+            GString *s = g_string_new(NULL);
+            for (const char *p = w; *p; p++) {
+                if (p[0] == '%' && p[1] == '%') p++;
+                g_string_append_c(s, *p);
+            }
+            g_ptr_array_add(argv, g_string_free(s, FALSE));
+        }
+        g_ptr_array_add(argv, NULL);
+        if (argv->len > 1) {
+            gchar **env = app.session_env ? g_strdupv(app.session_env) : g_get_environ();
+            /* The session's own start had these; they are not this window's. */
+            env = g_environ_unsetenv(env, "XDG_ACTIVATION_TOKEN");
+            env = g_environ_unsetenv(env, "DESKTOP_STARTUP_ID");
+            const char *home = g_environ_getenv(env, "HOME");
+            int nul = open("/dev/null", O_RDWR | O_CLOEXEC);
+            GPid pid = 0;
+            ok = nul >= 0 && g_spawn_async_with_fds(dir && *dir ? dir : home, (gchar **)argv->pdata, env,
+                                                    G_SPAWN_SEARCH_PATH_FROM_ENVP | G_SPAWN_DO_NOT_REAP_CHILD,
+                                                    child_setsid, NULL, &pid, nul, nul, nul, &err);
+            if (nul >= 0) close(nul);
+            if (ok) g_child_watch_add(pid, opened_ended, g_strdup(g_desktop_app_info_get_filename(info)));
+            else if (!err) g_string_assign(why, "no /dev/null to start it with");
+            g_strfreev(env);
+        } else {
+            g_string_assign(why, "the action's Exec is empty");
+        }
+        g_ptr_array_free(argv, TRUE);
+    }
+    if (err) {
+        g_string_assign(why, err->message);
+        g_clear_error(&err);
+    }
+    g_strfreev(words);
+    g_free(exec);
+    g_free(dir);
+    g_free(icon);
+    g_free(group);
+    g_key_file_unref(kf);
+    return ok;
+}
+
+/* The app's new-window action: over the bus for an app that is started that way, else run here. */
+static gboolean open_new_window(const char *id) {
+    GDesktopAppInfo *info = app_info(id);
+    const char *action = new_window_action(info);
+    gboolean ok = FALSE;
+    GString *why = g_string_new(NULL);
+    if (!action) {
+        g_string_assign(why, info ? "its desktop file has no new-window action" : "no desktop file for it");
+    } else if (g_desktop_app_info_get_boolean(info, "DBusActivatable")) {
+        /* org.freedesktop.Application.ActivateAction; GLib runs nothing here for such an app. */
+        g_desktop_app_info_launch_action(info, action, NULL);
+        ok = TRUE;
+    } else {
+        ok = spawn_action(info, action, why);
+    }
+    if (ok) say("here: %s: opening its \"%s\"", id, action);
+    else say("here: %s: no new window (%s)", id, why->str);
+    g_string_free(why, TRUE);
+    if (info) g_object_unref(info);
+    return ok;
+}
+
+static void here_call(GDBusConnection *c, const char *sender, const char *path, const char *iface,
+                      const char *method, GVariant *params, GDBusMethodInvocation *inv, gpointer d) {
+    if (!app.kwin_name || g_strcmp0(sender, app.kwin_name) != 0) {
+        g_dbus_method_invocation_return_dbus_error(inv, "org.freedesktop.DBus.Error.AccessDenied",
+                                                   "Only KWin's script for the computer's screen asks this.");
+        return;
+    }
+    const char *text = NULL;
+    g_variant_get(params, "(&s)", &text);
+    if (strcmp(method, "Look") == 0) {
+        struct output *o = our_output();
+        gint64 ago = app.pressed_at ? (g_get_monotonic_time() - app.pressed_at) / 1000 : G_MAXUINT32;
+        GDesktopAppInfo *info = *text ? app_info(text) : NULL;
+        gboolean more = new_window_action(info) != NULL;
+        if (info) g_object_unref(info);
+        g_dbus_method_invocation_return_value(
+            inv, g_variant_new("(sub)", o && o->name ? o->name : "", (guint32)MIN(ago, (gint64)G_MAXUINT32), more));
+    } else if (strcmp(method, "NewWindow") == 0) {
+        g_dbus_method_invocation_return_value(inv, g_variant_new("(b)", open_new_window(text)));
+    } else {
+        say("here: %s", text);
+        g_dbus_method_invocation_return_value(inv, NULL);
+    }
+}
+
+static GVariant *kwin_scripting(GDBusConnection *bus, const char *method, GVariant *args, const char *reply,
+                                GError **err) {
+    return g_dbus_connection_call_sync(bus, "org.kde.KWin", "/Scripting", "org.kde.kwin.Scripting", method, args,
+                                       reply ? G_VARIANT_TYPE(reply) : NULL, G_DBUS_CALL_FLAGS_NONE, 3000, NULL, err);
+}
+
+/* KWin unloads ours by its name; TRUE if it had it. */
+static gboolean unload_here(GDBusConnection *bus) {
+    gboolean had = FALSE;
+    GVariant *r = kwin_scripting(bus, "unloadScript", g_variant_new("(s)", HERE_SCRIPT), "(b)", NULL);
+    if (r) {
+        g_variant_get(r, "(b)", &had);
+        g_variant_unref(r);
+    }
+    return had;
+}
+
+/* The service, then the script: KWin reads it from a file, in the cache, written anew each time. */
+static void here_start(void) {
+    if (app.wlr) return;
+    GError *err = NULL;
+    if (!app.bus) app.bus = g_bus_get_sync(G_BUS_TYPE_SESSION, NULL, &err);
+    GVariant *r = app.bus ? g_dbus_connection_call_sync(app.bus, "org.freedesktop.DBus", "/org/freedesktop/DBus",
+                                                        "org.freedesktop.DBus", "GetNameOwner",
+                                                        g_variant_new("(s)", "org.kde.KWin"), G_VARIANT_TYPE("(s)"),
+                                                        G_DBUS_CALL_FLAGS_NONE, 3000, NULL, &err)
+                          : NULL;
+    if (!r) {
+        say("here: apps open where KWin puts them (%s)", err ? err->message : "no session bus");
+        g_clear_error(&err);
+        return;
+    }
+    g_variant_get(r, "(s)", &app.kwin_name);
+    g_variant_unref(r);
+    static const GDBusInterfaceVTable vtable = {here_call, NULL, NULL, {0}};
+    GDBusNodeInfo *node = g_dbus_node_info_new_for_xml(here_xml, NULL);
+    app.here_object = g_dbus_connection_register_object(app.bus, HERE_PATH, node->interfaces[0], &vtable, NULL, NULL, &err);
+    g_dbus_node_info_unref(node);
+    if (!app.here_object) {
+        say("here: apps open where KWin puts them (%s)", err ? err->message : "?");
+        g_clear_error(&err);
+        return;
+    }
+    app.here_owner = g_bus_own_name_on_connection(app.bus, HERE_BUS,
+                                                  G_BUS_NAME_OWNER_FLAGS_REPLACE | G_BUS_NAME_OWNER_FLAGS_ALLOW_REPLACEMENT,
+                                                  NULL, NULL, NULL, NULL);
+    char *dir = g_build_filename(g_get_user_cache_dir(), "openandroiddex", NULL);
+    char *file = g_build_filename(dir, "kwin-here.js", NULL);
+    g_mkdir_with_parents(dir, 0700);
+    gint id = -1;
+    if (g_file_set_contents(file, HERE_JS, -1, &err)) {
+        /* One a session that died left behind goes first: KWin loads a name once. */
+        unload_here(app.bus);
+        /* KWin numbers a script by how many it has (Scripting::loadScript), so after another was
+         * unloaded the number can be one in use, whose /Scripting/ScriptN is that one's. */
+        char *before = NULL;
+        r = g_dbus_connection_call_sync(app.bus, "org.kde.KWin", "/Scripting", "org.freedesktop.DBus.Introspectable",
+                                        "Introspect", NULL, G_VARIANT_TYPE("(s)"), G_DBUS_CALL_FLAGS_NONE, 3000,
+                                        NULL, NULL);
+        if (r) {
+            g_variant_get(r, "(s)", &before);
+            g_variant_unref(r);
+        }
+        r = kwin_scripting(app.bus, "loadScript", g_variant_new("(ss)", file, HERE_SCRIPT), "(i)", &err);
+        if (r) {
+            g_variant_get(r, "(i)", &id);
+            g_variant_unref(r);
+        }
+        char node[48], path[48];
+        g_snprintf(node, sizeof node, "name=\"Script%d\"", id);
+        g_snprintf(path, sizeof path, "/Scripting/Script%d", id);
+        if (id >= 0 && before && !strstr(before, node)) {
+            /* Ours alone; KWin answers once it has read the file. */
+            r = g_dbus_connection_call_sync(app.bus, "org.kde.KWin", path, "org.kde.kwin.Script", "run", NULL, NULL,
+                                            G_DBUS_CALL_FLAGS_NONE, 5000, NULL, &err);
+            if (r) g_variant_unref(r);
+        } else if (id >= 0) {
+            /* start() also applies KWin's script settings (what is on or off), as its settings page does. */
+            say("here: KWin's number %d for the script is another's; starting it with KWin's own", id);
+            r = kwin_scripting(app.bus, "start", NULL, NULL, &err);
+            if (r) g_variant_unref(r);
+        }
+        g_free(before);
+    }
+    if (id >= 0 && !err) {
+        app.here_loaded = TRUE;
+        say("here: KWin runs %s: what is opened from a screen shows there", file);
+        /* If this program dies, the guard's `rest` unloads it. */
+        if (app.guard_fd == 0) start_guard();
+    } else {
+        say("here: KWin would not run %s (%s)", file, err ? err->message : "no script id");
+    }
+    g_clear_error(&err);
+    g_free(file);
+    g_free(dir);
+}
+
+/* ── KWin's on-screen keyboard after a session ─────────────────────────── */
+
+/*
+ * plasma-keyboard, Plasma Mobile's on-screen keyboard (KWin's input method),
+ * sizes itself for one screen and doesn't always follow when it is shown on
+ * another. After sessions on a computer's screen the phone's keyboard was a
+ * narrow strip of its keys, and stayed so until a new keyboard process came
+ * (S24, 2026-11-16). So when the computer's screen has gone, the keyboard
+ * process goes too, and KWin starts a new one, laid out for the phone: KWin
+ * starts its input method again whenever it crashes, and gives up only after
+ * five crashes each within 20 s of the last (InputMethod::startInputMethod).
+ * SIGTERM won't do: plasma-keyboard ends cleanly then, which KWin leaves be.
+ * Nothing of the user's settings is touched.
+ */
+static pid_t kwin_pid(GDBusConnection *bus) {
+    GVariant *r = bus ? g_dbus_connection_call_sync(bus, "org.freedesktop.DBus", "/org/freedesktop/DBus",
+                                                    "org.freedesktop.DBus", "GetConnectionUnixProcessID",
+                                                    g_variant_new("(s)", "org.kde.KWin"), G_VARIANT_TYPE("(u)"),
+                                                    G_DBUS_CALL_FLAGS_NONE, 1000, NULL, NULL)
+                      : NULL;
+    guint32 pid = 0;
+    if (r) {
+        g_variant_get(r, "(u)", &pid);
+        g_variant_unref(r);
+    }
+    return (pid_t)pid;
+}
+
+/* KWin's input method: the child it gave the variable only that one gets (MALIIT_ENABLE_ANIMATIONS). */
+static pid_t input_method_pid(pid_t kwin) {
+    pid_t found = 0;
+    DIR *d = opendir("/proc");
+    struct dirent *e;
+    while (d && !found && (e = readdir(d))) {
+        if (!isdigit((unsigned char)e->d_name[0])) continue;
+        char path[64];
+        g_snprintf(path, sizeof path, "/proc/%s/stat", e->d_name);
+        char *line = read_file(path, NULL);
+        /* pid (comm) state ppid ...: the comm can hold spaces, so from its closing parenthesis */
+        const char *close = line ? strrchr(line, ')') : NULL;
+        int ppid = 0;
+        if (close && sscanf(close + 1, " %*c %d", &ppid) == 1 && ppid == kwin) {
+            g_snprintf(path, sizeof path, "/proc/%s/environ", e->d_name);
+            gsize len = 0;
+            char *env = read_file(path, &len);
+            if (env && environ_get(env, len, "MALIIT_ENABLE_ANIMATIONS") && environ_get(env, len, "WAYLAND_SOCKET"))
+                found = (pid_t)atoi(e->d_name);
+            g_free(env);
+        }
+        g_free(line);
+    }
+    if (d) closedir(d);
+    return found;
+}
+
+static void restart_keyboard(GDBusConnection *bus, const char *who) {
+    pid_t kwin = kwin_pid(bus);
+    pid_t old = kwin > 0 ? input_method_pid(kwin) : 0;
+    if (old <= 0) return; /* no KWin (Phosh, or the session has ended), or no keyboard of its */
+    if (kill(old, SIGKILL) != 0) {
+        say("%s: the on-screen keyboard (%d) could not be started again: %s", who, (int)old, g_strerror(errno));
+        return;
+    }
+    pid_t now = 0;
+    for (int i = 0; i < 30 && (now <= 0 || now == old); i++) {
+        g_usleep(100 * 1000);
+        now = input_method_pid(kwin);
+    }
+    if (now > 0 && now != old) say("%s: the on-screen keyboard started again, for the phone's screen (%d, was %d)", who, (int)now, (int)old);
+    else say("%s: the on-screen keyboard (%d) ended, and KWin hasn't started another yet", who, (int)old);
+}
+
+static void here_stop(void) {
+    if (app.here_loaded && unload_here(app.bus)) say("here: KWin's script stopped");
+    app.here_loaded = FALSE;
+    if (app.here_owner) g_bus_unown_name(app.here_owner);
+    if (app.here_object) g_dbus_connection_unregister_object(app.bus, app.here_object);
+    app.here_owner = app.here_object = 0;
+}
+
 /* ── the computer's messages ───────────────────────────────────────────── */
 
 static void on_hello(const char *json) {
@@ -3109,6 +3632,17 @@ static gboolean on_tick(gpointer d) {
         char *msg = g_strdup_printf("{\"t\":\"stats\",\"fps\":%d,\"kbps\":%d,\"encodeMs\":0}", frames, bytes / 125);
         send_text(msg);
         g_free(msg);
+        /* For the log: every ten seconds that had more than the still screen's resends, what went out. */
+        static int sum, best, kb, ticks;
+        sum += frames;
+        best = MAX(best, frames);
+        kb += bytes / 125;
+        if (++ticks == 10) {
+            if (best > 1000 / KEEPALIVE_MS + 1)
+                say("video: %.1f frames a second over 10 s, %d in the busiest second, %d kb/s", sum / 10.0, best,
+                    kb / 10);
+            sum = best = kb = ticks = 0;
+        }
     }
     return G_SOURCE_CONTINUE;
 }
@@ -3323,6 +3857,7 @@ static int cmd_serve(void) {
     }
     if (!app.wlr) dock();
     inhibit();
+    here_start();
     {
         struct output *o = our_output();
         GString *s = g_string_new("{\"t\":\"ready\",\"output\":");
@@ -3346,6 +3881,8 @@ static int cmd_serve(void) {
     g_unix_signal_add(SIGHUP, on_signal, NULL);
     g_main_loop_run(app.loop);
 
+    /* Before the screen goes: its windows come to the phone's, and that is no one's asking. */
+    here_stop();
     release_all();
     g_atomic_int_set(&app.attached, 0);
     stop_video();
@@ -3353,6 +3890,9 @@ static int cmd_serve(void) {
     close_screen();
     /* After the screen has gone, so its windows come to the phone's screen as phone apps. */
     undock();
+    /* And a keyboard laid out for the phone alone (see restart_keyboard); the guard needn't, then. */
+    if (!app.wlr) restart_keyboard(app.bus, "the computer's screen has gone");
+    if (app.guard_fd > 0 && write(app.guard_fd, "k", 1) != 1) say("guard: couldn't tell it the keyboard is done");
     wl_display_disconnect(app.display);
     say("done");
     return app.status;
@@ -3366,6 +3906,12 @@ static int cmd_serve(void) {
  * it went.
  */
 static int cmd_rest(void) {
+    /* The script a serve that died left in KWin; no session bus, or no KWin (Phosh), is nothing to do. */
+    GDBusConnection *bus = g_bus_get_sync(G_BUS_TYPE_SESSION, NULL, NULL);
+    if (bus) {
+        if (unload_here(bus)) say("rest: KWin's script stopped");
+        g_object_unref(bus);
+    }
     undock();
     GString *why = g_string_new(NULL);
     if (!wayland_connect(why)) {
@@ -3407,8 +3953,10 @@ static int cmd_guard(void) {
     g_free(log);
     g_free(dir);
     char c;
+    gboolean keyboard_done = FALSE; /* serve ended cleanly and saw to the keyboard ('k') */
     for (;;) {
         ssize_t n = read(3, &c, 1);
+        if (n > 0 && c == 'k') keyboard_done = TRUE;
         if (n > 0 || (n < 0 && errno == EINTR)) continue;
         break;
     }
@@ -3418,7 +3966,14 @@ static int cmd_guard(void) {
     say("guard: serve ended at %s", when);
     g_free(when);
     g_date_time_unref(now);
-    return cmd_rest();
+    int status = cmd_rest();
+    /* serve died with the computer's screen up: the keyboard as serve would have left it (restart_keyboard). */
+    GDBusConnection *bus = keyboard_done ? NULL : g_bus_get_sync(G_BUS_TYPE_SESSION, NULL, NULL);
+    if (bus) {
+        restart_keyboard(bus, "guard");
+        g_object_unref(bus);
+    }
+    return status;
 }
 
 int main(int argc, char **argv) {
@@ -3437,6 +3992,8 @@ int main(int argc, char **argv) {
         return 2;
     }
     if (!parse_args(argc, argv)) return 2;
+    /* Before any thread starts (adopt_session's bus has one): they all take this process's cores. */
+    if (strcmp(cmd, "serve") == 0) prefer_fast_cores();
     adopt_session();
     /*
      * A registry of its own, so a hardware encoder this user was only lately
