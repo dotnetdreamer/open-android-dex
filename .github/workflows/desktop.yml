@@ -575,18 +575,52 @@ jobs:
         run: npx tauri build --no-bundle
 
       - name: Create portable zip
+        # The exe, and beside it what bundle.resources lists (adb, scrcpy, the
+        # phone payloads, icons, licences), which the app looks for in a
+        # `resources` folder next to itself. Taken from src-tauri, where the
+        # installer takes them, not from tauri-build's staged copy in
+        # target/release: tauri-build 2.6 finds target/release as OUT_DIR's third
+        # parent, and Cargo 1.100's new build-dir layout put OUT_DIR a level
+        # deeper, so the copy went to target/release/build. This step took the
+        # folder only "if present", and 0.3.34 and 0.3.35 shipped the exe alone.
         shell: pwsh
         run: |
+          $ErrorActionPreference = 'Stop'
           $version = "${{ needs.version.outputs.label }}"
-          $exe_path = "open-android-dex-tauri/src-tauri/target/release/open-android-dex-tauri.exe"
+          $app = "open-android-dex-tauri/src-tauri"
           $zip_name = "Open.Android.DeX_${version}_windows_x64_portable.zip"
 
-          New-Item -ItemType Directory -Path portable -Force
-          Copy-Item $exe_path portable/
-          # Include resources if present
-          $res = "open-android-dex-tauri/src-tauri/target/release/resources"
-          if (Test-Path $res) { Copy-Item $res portable/resources -Recurse }
+          New-Item -ItemType Directory -Path portable -Force | Out-Null
+          Copy-Item "$app/target/release/open-android-dex-tauri.exe" portable/
+
+          # Each entry is a path under src-tauri ("resources/bin"), laid out the
+          # same under portable/, as the installer lays it out beside the exe.
+          $resources = (Get-Content "$app/tauri.conf.json" -Raw | ConvertFrom-Json).bundle.resources
+          if ($resources -isnot [array] -or $resources.Count -eq 0) {
+            throw "bundle.resources in tauri.conf.json is not a list of paths; this step copies only that form"
+          }
+          foreach ($r in $resources) {
+            if ($r -match '[*?\[]') { throw "bundle.resources entry '$r' is a glob; this step copies plain paths only" }
+            $dest = Join-Path portable $r
+            New-Item -ItemType Directory -Path (Split-Path $dest) -Force | Out-Null
+            Copy-Item -LiteralPath (Join-Path $app $r) -Destination $dest -Recurse
+          }
           Compress-Archive -Path portable/* -DestinationPath $zip_name
+
+          # Every file those entries hold is in the zip, or the job fails here
+          # rather than on a user's machine.
+          $src = (Resolve-Path $app).Path
+          $want = @('open-android-dex-tauri.exe') + @(foreach ($r in $resources) {
+            Get-ChildItem -LiteralPath (Join-Path $app $r) -Recurse -File |
+              ForEach-Object { [System.IO.Path]::GetRelativePath($src, $_.FullName) -replace '\\', '/' }
+          })
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $archive = [System.IO.Compression.ZipFile]::OpenRead((Resolve-Path $zip_name).Path)
+          $entries = @($archive.Entries | ForEach-Object { $_.FullName -replace '\\', '/' })
+          $archive.Dispose()
+          $missing = @($want | Where-Object { $_ -notin $entries })
+          if ($missing) { throw "missing from ${zip_name}: $($missing -join ', ')" }
+          Write-Host "${zip_name}: $($entries.Count) entries, all $($want.Count) files present"
 
       # Uploaded, never published: the release is cut once, by the `release`
       # job, after every platform has finished. Publishing from here is what
