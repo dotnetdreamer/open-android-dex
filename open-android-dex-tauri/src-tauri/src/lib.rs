@@ -130,6 +130,8 @@ pub fn run() {
             pmos::pmos_close,
             pmos::pmos_session,
             pmos::pmos_window_link,
+            pmos::pmos_put,
+            pmos::pmos_put_cancel,
             apps::apps_prepare,
             apps::apps_drop,
             apps::apps_list,

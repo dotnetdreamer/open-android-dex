@@ -242,42 +242,45 @@ fn join(dir: &str, name: &str) -> String {
 }
 
 // ── what was dropped ──────────────────────────────────────────────────────
+//
+// Public for the desktop app's postmarketOS phones too (pmos.rs), which copy a
+// drop over a channel of their own rather than SFTP, but walk it the same way.
 
 #[derive(Debug)]
-struct LocalFile {
+pub struct LocalFile {
     /// Under the item: "photos/a.jpg", always with '/'. Empty for an item
     /// that is itself a file.
-    rel: String,
-    path: PathBuf,
-    size: u64,
-    mtime: Option<u32>,
-    mode: u32,
+    pub rel: String,
+    pub path: PathBuf,
+    pub size: u64,
+    pub mtime: Option<u32>,
+    pub mode: u32,
 }
 
 #[derive(Debug)]
-struct LocalDir {
-    rel: String,
-    mtime: Option<u32>,
+pub struct LocalDir {
+    pub rel: String,
+    pub mtime: Option<u32>,
 }
 
 #[derive(Debug)]
-struct Item {
-    name: String,
-    is_dir: bool,
+pub struct Item {
+    pub name: String,
+    pub is_dir: bool,
     /// Parents before children.
-    dirs: Vec<LocalDir>,
-    files: Vec<LocalFile>,
+    pub dirs: Vec<LocalDir>,
+    pub files: Vec<LocalFile>,
     /// The item's own times, for a folder.
-    mtime: Option<u32>,
+    pub mtime: Option<u32>,
 }
 
 #[derive(Debug, Default)]
-struct Plan {
-    items: Vec<Item>,
-    files: u64,
-    bytes: u64,
-    links: u64,
-    unreadable: u64,
+pub struct Plan {
+    pub items: Vec<Item>,
+    pub files: u64,
+    pub bytes: u64,
+    pub links: u64,
+    pub unreadable: u64,
 }
 
 fn mtime_of(m: &std::fs::Metadata) -> Option<u32> {
@@ -307,7 +310,7 @@ fn name_of(path: &Path) -> Option<String> {
 /// Walk what was dropped. A dropped link is followed — someone picked it —
 /// but a link found inside a folder is not, which also keeps a link back up
 /// the tree from walking forever.
-fn plan(paths: &[PathBuf]) -> Result<Plan, PutError> {
+pub fn plan(paths: &[PathBuf]) -> Result<Plan, PutError> {
     let mut plan = Plan::default();
     let mut entries = 0usize;
     for path in paths {

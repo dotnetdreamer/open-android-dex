@@ -26,6 +26,10 @@ MSYS_NO_PATHCONV=1 docker run --rm -v "$HOST_DIR:/src" -w /src "$IMAGE" sh -euc 
     /usr/share/wlr-protocols/unstable/wlr-output-management-unstable-v1.xml \
     /usr/share/wlr-protocols/unstable/wlr-screencopy-unstable-v1.xml \
     /usr/share/wlr-protocols/unstable/wlr-virtual-pointer-unstable-v1.xml \
+    /usr/share/wlr-protocols/unstable/wlr-data-control-unstable-v1.xml \
+    /usr/share/wlr-protocols/unstable/wlr-layer-shell-unstable-v1.xml \
+    /usr/share/wayland-protocols/staging/ext-data-control/ext-data-control-v1.xml \
+    /usr/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml \
     protocols/virtual-keyboard-unstable-v1.xml; do
     base=$(basename "$xml" .xml)
     wayland-scanner client-header "$xml" "$gen/$base-client-protocol.h"

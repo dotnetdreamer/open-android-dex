@@ -21,7 +21,9 @@ import { ALTS, isModifier, keyDown, XK_ISO_LEVEL3_SHIFT } from "./keysym";
  * doing, which is most of why it feels like a local desktop. Keys go as
  * keysyms (keysym.ts), and the window's size goes as the desktop's. The
  * clipboard, files dropped on the window and what Linux sends back are the
- * window's (DesktopRouter.tsx); this is only the guest's end of the clipboard.
+ * window's (DesktopRouter.tsx; a postmarketOS phone's, PmosDesktop.tsx); this
+ * is only the guest's end of the clipboard, and where a point of the window
+ * falls on the desktop.
  *
  * Nothing in the guest reaches this page's code: what comes in is video, a
  * cursor bitmap, clipboard text and a few numbers.
@@ -188,6 +190,7 @@ export function UsbDesktop({
           host.showing(true);
           detach?.();
           detach = host.attach(toGuest);
+          host.point?.(toDesktop);
           void host.clipboard.then((c) => c.connected());
           pillShown = true;
           setPill(true);
@@ -412,6 +415,10 @@ export function UsbDesktop({
       const was = shared;
       shared = msg.share;
       if (live) setShare(msg.share);
+      // The guest is told too, so that off stops its clipboard at its end: a
+      // postmarketOS phone's helper sends nothing while it is off. The phone's
+      // Linux (LinuxStream) ignores a word it doesn't know.
+      send(JSON.stringify({ t: "clipshare", on: msg.share }));
       if (msg.share) return;
       // Off means off: the computer's text, if that is what the guest has,
       // does not stay there to be pasted. The guest's own is left alone.
@@ -426,6 +433,7 @@ export function UsbDesktop({
     const gone = () => {
       detach?.();
       detach = null;
+      host.point?.(null);
       host.showing(false);
     };
 

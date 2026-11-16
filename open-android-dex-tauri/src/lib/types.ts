@@ -274,6 +274,12 @@ export interface PutReport {
   unreadable: number;
   /** Stopped part way; the item in progress was taken back. */
   cancelled: boolean;
+  /**
+   * A postmarketOS phone's only (pmos.rs's PmosPut): the app the drop was let
+   * go over took it; false when nothing there takes files; null when it wasn't
+   * tried.
+   */
+  taken?: boolean | null;
 }
 
 /** What the launcher on a plugged-in phone says about remote access. */

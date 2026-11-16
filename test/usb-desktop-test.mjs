@@ -106,6 +106,66 @@ console.log("keysym.ts");
   check("a key the browser cannot name falls back to its place", press({ key: "Unidentified", code: "KeyZ" }) === 0x7a);
 }
 
+console.log("clipboardShare.ts");
+{
+  // Parameter properties need the transform, not just the stripping Node does by itself.
+  const js = stripTypeScriptTypes(fs.readFileSync(path.join(USB, "..", "clipboardShare.ts"), "utf8"), { mode: "transform" });
+  const file = path.join(tmp, "clipboardShare.mjs");
+  fs.writeFileSync(file, js);
+  const { ClipboardShare } = await import(pathToFileURL(file).href);
+  const window = { front: true, computer: "", writes: [], posts: [], said: [] };
+  const host = {
+    read: async () => window.computer,
+    write: async (t) => {
+      window.writes.push(t);
+      window.computer = t;
+    },
+    post: (m) => window.posts.push(m),
+    focused: () => window.front,
+    say: (t) => window.said.push(t),
+    save: () => {},
+  };
+  const c = new ClipboardShare(host, true);
+  c.connected();
+  await sleep(20);
+  c.fromGuest("copied in front");
+  await sleep(220);
+  check("what the guest copies with the window in front lands here", window.writes.join() === "copied in front", window.writes.join());
+  // The race: copied, and the window sent to the back before the 150 ms are up.
+  c.fromGuest("copied, then away");
+  await sleep(50);
+  window.front = false;
+  await sleep(200);
+  check("the window going to the back within 150 ms keeps it off this computer's clipboard", window.writes.length === 1, window.writes.join(" | "));
+  window.front = true;
+  await c.focus();
+  check("…and it lands when the window comes back, nothing having been copied here", window.writes[1] === "copied, then away", window.writes.join(" | "));
+  c.fromGuest("copied, then away again");
+  await sleep(50);
+  window.front = false;
+  await sleep(200);
+  window.computer = "copied here meanwhile";
+  window.front = true;
+  await c.focus();
+  check(
+    "…but a newer copy here wins: it goes to the guest, and the guest's waiting one is dropped",
+    window.writes.length === 2 && window.posts.at(-1)?.paste === "copied here meanwhile",
+    JSON.stringify(window.posts.at(-1)),
+  );
+  // A postmarketOS phone's window: its own words, and its own limit.
+  const phone = new ClipboardShare(host, true, { name: "the phone", max: 1024 * 1024 });
+  window.computer = "x".repeat(1024 * 1024 + 10);
+  await phone.focus();
+  check("the phone's window names the phone and its limit", window.said.at(-1) === "The clipboard is too large to share with the phone (over 1 MB).", window.said.at(-1));
+  phone.toggle();
+  check("…and says off the phone's way", window.said.at(-1) === "Clipboard not shared with the phone." && window.posts.at(-1)?.share === false);
+  window.computer = "y".repeat(300 * 1024);
+  await new ClipboardShare(host, true).focus();
+  check("Linux keeps Xvnc's 256 KB", window.said.at(-1) === "The clipboard is too large to share with Linux (over 256 KB).", window.said.at(-1));
+  c.dispose();
+  phone.dispose();
+}
+
 // ── the launcher's pure-Java parts, on this JVM ──────────────────────────
 
 const classes = path.join(tmp, "classes");

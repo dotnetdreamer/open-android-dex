@@ -33,11 +33,19 @@
  * Mobile's drawer would switch to the app's window on the other. This program
  * answers it on the session bus. See "What is opened from a screen" below.
  *
+ * The clipboard goes both ways while a window is open (Wayland's data-control,
+ * see "The clipboard"). Files dropped on the window arrive through `receive`,
+ * into the phone's Downloads, over a second channel of the computer's SSH
+ * connection; serve then drops them on the app where they were let go of
+ * ("Files dropped on the window").
+ *
  *   openandroiddex-pmos version
  *   openandroiddex-pmos probe
  *   openandroiddex-pmos serve --width W --height H --scale S [--cap C] [--encoder E] [--convert gl|cpu]
  *   openandroiddex-pmos snapshot --width W --height H --scale S --out F.png [--wait SECONDS]
  *   openandroiddex-pmos rest
+ *   openandroiddex-pmos receive [--part]
+ *   openandroiddex-pmos clip [--set TEXT]
  *
  * W and H are the screen's size in pixels (KWin makes its mode that size), S
  * the scale Plasma draws it at. After that the screen follows the window: its
@@ -45,6 +53,9 @@
  * long side (W or H, whichever is longer, when C is not given). `rest` turns
  * Phosh's headless output off and gives the phone's panel the shell back: the
  * session's autostart runs it at login, and the guard when serve has gone.
+ * `receive` takes files from the computer on stdin (see "Files from the
+ * computer"). `clip` prints the phone's clipboard, or with --set puts TEXT on
+ * it until something else is copied: for looking at the clipboard by hand.
  */
 #define _GNU_SOURCE
 #include <ctype.h>
@@ -61,6 +72,7 @@
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <sys/statvfs.h>
 #include <sys/uio.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -76,9 +88,12 @@
 #include <wayland-client.h>
 #include <xkbcommon/xkbcommon.h>
 
+#include "ext-data-control-v1-client-protocol.h"
 #include "fake-input-client-protocol.h"
 #include "here-js.h" /* src/here.js as HERE_JS, made by build.sh */
 #include "virtual-keyboard-unstable-v1-client-protocol.h"
+#include "wlr-data-control-unstable-v1-client-protocol.h"
+#include "wlr-layer-shell-unstable-v1-client-protocol.h"
 #include "wlr-output-management-unstable-v1-client-protocol.h"
 #include "wlr-screencopy-unstable-v1-client-protocol.h"
 #include "wlr-virtual-pointer-unstable-v1-client-protocol.h"
@@ -86,7 +101,7 @@
 #include "zkde-screencast-unstable-v1-client-protocol.h"
 
 /* What `version` prints; pmos.rs compares the whole file's hash, not this. */
-#define VERSION "4"
+#define VERSION "5"
 
 /*
  * Frames sent and not yet acknowledged before new ones stop going into the
@@ -283,6 +298,28 @@ static struct {
     char *kwin_name;                  /* KWin's unique name on the bus: only its script is answered */
     guint here_object, here_owner;
     gboolean here_loaded;
+
+    /* The clipboard (see "The clipboard"): Wayland's data-control, the standard one or wlroots' older one. */
+    struct ext_data_control_manager_v1 *dc_ext;
+    struct zwlr_data_control_manager_v1 *dc_wlr;
+    struct wl_proxy *dc_device;       /* the seat's device, of whichever of the two */
+    struct clip_offer *clip_now;      /* what the phone's clipboard offers now */
+    struct clip_offer *clip_primary;  /* the selection's, kept only to be let go of */
+    struct clip_source *clip_mine;    /* the computer's text, while it is the phone's clipboard */
+    struct clip_read *clip_reading;   /* the phone's clipboard on its way to the computer */
+    gboolean clip_share;              /* the window's switch is on ("clipshare"): until it says so, nothing goes */
+    gboolean clip_print;              /* `clip`: the phone's clipboard goes to stdout, once */
+
+    /* Files dropped on the window, handed to the app under them (see "Files dropped on the window"). */
+    struct wl_compositor *compositor;
+    struct wl_data_device_manager *ddm;
+    uint32_t ddm_version;
+    struct wl_data_device *data_device;
+    struct wl_data_offer *dnd_offer;  /* one the compositor gave this program's own surface; let go of */
+    struct zwlr_layer_shell_v1 *layer_shell;
+    uint32_t seat_caps;
+    struct wl_pointer *wl_pointer;
+    int last_x, last_y;               /* the computer's pointer, in the picture's pixels */
 } app;
 
 static void say(const char *fmt, ...) G_GNUC_PRINTF(1, 2);
@@ -371,7 +408,7 @@ static void send_state(const char *state, const char *message) {
 /*
  * The value of "key" in a flat JSON object the window wrote: a number, a bare
  * word or a string without escapes. That is every message the window sends
- * this program; "clip", the one with free text in it, is not taken here.
+ * this program but "clip" and "drop", whose free text json_text takes.
  */
 static gboolean json_raw(const char *json, const char *key, char *out, size_t cap) {
     char pat[64];
@@ -388,6 +425,71 @@ static gboolean json_raw(const char *json, const char *key, char *out, size_t ca
     }
     out[n] = 0;
     return TRUE;
+}
+
+static int hex4(const char *p) {
+    int v = 0;
+    for (int i = 0; i < 4; i++) {
+        int d = g_ascii_xdigit_value(p[i]);
+        if (d < 0) return -1;
+        v = v * 16 + d;
+    }
+    return v;
+}
+
+/*
+ * The string value of "key" in a flat JSON object, its escapes undone, as the
+ * window's JSON.stringify wrote it: the clipboard's text, a drop's URIs. NULL
+ * when there is none. A surrogate half without its other half (JSON.stringify
+ * writes those as \uD8xx) becomes U+FFFD; a \u0000 stays, the length says
+ * where the text ends.
+ */
+static GString *json_text(const char *json, const char *key) {
+    char pat[64];
+    g_snprintf(pat, sizeof pat, "\"%s\":", key);
+    const char *p = strstr(json, pat);
+    if (!p) return NULL;
+    p += strlen(pat);
+    while (*p == ' ') p++;
+    if (*p != '"') return NULL;
+    GString *s = g_string_new(NULL);
+    for (p++; *p && *p != '"'; p++) {
+        if (*p != '\\') {
+            g_string_append_c(s, *p);
+            continue;
+        }
+        p++;
+        switch (*p) {
+        case '"':
+        case '\\':
+        case '/': g_string_append_c(s, *p); break;
+        case 'b': g_string_append_c(s, '\b'); break;
+        case 'f': g_string_append_c(s, '\f'); break;
+        case 'n': g_string_append_c(s, '\n'); break;
+        case 'r': g_string_append_c(s, '\r'); break;
+        case 't': g_string_append_c(s, '\t'); break;
+        case 'u': {
+            int c = hex4(p + 1);
+            if (c < 0) goto bad;
+            p += 4;
+            if (c >= 0xD800 && c <= 0xDBFF && p[1] == '\\' && p[2] == 'u') {
+                int lo = hex4(p + 3);
+                if (lo >= 0xDC00 && lo <= 0xDFFF) {
+                    c = 0x10000 + ((c - 0xD800) << 10) + (lo - 0xDC00);
+                    p += 6;
+                }
+            }
+            if (c >= 0xD800 && c <= 0xDFFF) c = 0xFFFD;
+            g_string_append_unichar(s, (gunichar)c);
+            break;
+        }
+        default: goto bad;
+        }
+    }
+    if (*p == '"') return s;
+bad:
+    g_string_free(s, TRUE);
+    return NULL;
 }
 
 /* ── the fast cores ────────────────────────────────────────────────────── */
@@ -720,6 +822,7 @@ static const struct wl_keyboard_listener keyboard_listener = {
 };
 
 static void seat_capabilities(void *d, struct wl_seat *seat, uint32_t caps) {
+    app.seat_caps = caps; /* the pointer's, for a drop (carry) */
     if ((caps & WL_SEAT_CAPABILITY_KEYBOARD) && !app.keyboard) {
         app.keyboard = wl_seat_get_keyboard(seat);
         wl_keyboard_add_listener(app.keyboard, &keyboard_listener, NULL);
@@ -871,12 +974,15 @@ static struct head *headless_head(void) {
     return NULL;
 }
 
+/* `clip` looks at the clipboard only: no fake input device of its own, which KWin would add to the seat. */
+static gboolean clipboard_only;
+
 static void global_add(void *data, struct wl_registry *r, uint32_t name, const char *iface, uint32_t version) {
     g_string_append_printf(app.globals, "%s%s:%u", app.globals->len ? "," : "", iface, version);
     if (strcmp(iface, zkde_screencast_unstable_v1_interface.name) == 0) {
         app.screencast_version = MIN(version, (uint32_t)zkde_screencast_unstable_v1_interface.version);
         app.screencast = wl_registry_bind(r, name, &zkde_screencast_unstable_v1_interface, app.screencast_version);
-    } else if (strcmp(iface, org_kde_kwin_fake_input_interface.name) == 0) {
+    } else if (strcmp(iface, org_kde_kwin_fake_input_interface.name) == 0 && !clipboard_only) {
         app.fake_version = MIN(version, (uint32_t)org_kde_kwin_fake_input_interface.version);
         app.fake = wl_registry_bind(r, name, &org_kde_kwin_fake_input_interface, app.fake_version);
         org_kde_kwin_fake_input_authenticate(app.fake, "Open Android DeX",
@@ -903,6 +1009,18 @@ static void global_add(void *data, struct wl_registry *r, uint32_t name, const c
         app.vp_manager = wl_registry_bind(r, name, &zwlr_virtual_pointer_manager_v1_interface, app.vp_version);
     } else if (strcmp(iface, zwp_virtual_keyboard_manager_v1_interface.name) == 0) {
         app.vk_manager = wl_registry_bind(r, name, &zwp_virtual_keyboard_manager_v1_interface, 1);
+    } else if (strcmp(iface, ext_data_control_manager_v1_interface.name) == 0) {
+        /* The clipboard: the standard data-control (KWin 6.8 has only this one), else wlroots' own. */
+        app.dc_ext = wl_registry_bind(r, name, &ext_data_control_manager_v1_interface, 1);
+    } else if (strcmp(iface, zwlr_data_control_manager_v1_interface.name) == 0) {
+        app.dc_wlr = wl_registry_bind(r, name, &zwlr_data_control_manager_v1_interface, MIN(version, 2u));
+    } else if (strcmp(iface, wl_compositor_interface.name) == 0) {
+        app.compositor = wl_registry_bind(r, name, &wl_compositor_interface, MIN(version, 4u));
+    } else if (strcmp(iface, wl_data_device_manager_interface.name) == 0) {
+        app.ddm_version = MIN(version, 3u);
+        app.ddm = wl_registry_bind(r, name, &wl_data_device_manager_interface, app.ddm_version);
+    } else if (strcmp(iface, zwlr_layer_shell_v1_interface.name) == 0) {
+        app.layer_shell = wl_registry_bind(r, name, &zwlr_layer_shell_v1_interface, MIN(version, 3u));
     } else if (strcmp(iface, wl_output_interface.name) == 0) {
         struct output *o = g_new0(struct output, 1);
         o->global = name;
@@ -2588,6 +2706,9 @@ static void axis(uint32_t which, double value) {
 static void pointer(guint8 mask, int x, int y) {
     /* A button pressed or let go of: what here.js asks about (not the wheel, not moving). */
     if ((mask ^ app.buttons) & (1 | 2 | 4 | 128)) app.pressed_at = g_get_monotonic_time();
+    /* Where the pointer goes back to after a drop has borrowed it (carry). */
+    app.last_x = x;
+    app.last_y = y;
     if (app.wlr) {
         wlr_pointer(mask, x, y);
         return;
@@ -3491,6 +3612,1192 @@ static void here_stop(void) {
     app.here_owner = app.here_object = 0;
 }
 
+/* ── The clipboard ─────────────────────────────────────────────────────── */
+
+/*
+ * Both ways, by the window's rules (clipboardShare.ts): the computer's text
+ * comes as {"t":"clip","text":…} when the window comes to the front, and
+ * what is copied on the phone goes to the window as the same message while
+ * one is open. The window decides whether it lands on the computer's
+ * clipboard; an empty text from it takes back what it gave.
+ *
+ * A Wayland program sees the clipboard only while it has the keyboard, which
+ * this one never has. Data-control is what clipboard managers use instead:
+ * the seat's clipboard at any time, and a way to set it. KWin 6.8 has the
+ * standard one (ext-data-control-v1); wlroots (Phosh) also its own older
+ * one (zwlr-data-control-unstable-v1), the same but for its names.
+ *
+ * Text only, in the types toolkits ask for. What the computer put there
+ * carries a type of this program's own beside them, so that when the phone
+ * says its clipboard is now that, it isn't sent back. The phone's text goes
+ * only once a window is open, only while its switch is on
+ * ({"t":"clipshare","on":…}, which the window says when it shows the picture
+ * and whenever the switch moves), and only when it changes: a window that
+ * opens hands the computer's clipboard over (if it is in front), which the
+ * phone's older one mustn't overwrite.
+ */
+#define CLIP_MINE "application/x-openandroiddex-pmos"
+/* The most the window takes from the phone at once (clipboardShare.ts's COMPUTER_MAX). */
+#define CLIP_MAX (4 << 20)
+static const char *const CLIP_TYPES[] = {"text/plain;charset=utf-8", "UTF8_STRING", "text/plain", "TEXT", "STRING",
+                                         NULL};
+
+struct clip_offer {
+    struct wl_proxy *wl;
+    GPtrArray *types;
+};
+
+struct clip_source {
+    struct wl_proxy *wl;
+    GBytes *text;
+};
+
+struct clip_read {
+    int fd;
+    guint watch, timeout;
+    GByteArray *buf;
+};
+
+struct clip_write {
+    GBytes *text;
+    gsize off;
+};
+
+static gboolean clip_has(struct clip_offer *o, const char *mime) {
+    for (guint i = 0; i < o->types->len; i++)
+        if (strcmp(g_ptr_array_index(o->types, i), mime) == 0) return TRUE;
+    return FALSE;
+}
+
+static void clip_offer_free(struct clip_offer *o) {
+    if (!o) return;
+    if (app.dc_ext) ext_data_control_offer_v1_destroy((struct ext_data_control_offer_v1 *)o->wl);
+    else zwlr_data_control_offer_v1_destroy((struct zwlr_data_control_offer_v1 *)o->wl);
+    g_ptr_array_free(o->types, TRUE);
+    g_free(o);
+}
+
+static void clip_offer_type(struct clip_offer *o, const char *mime) {
+    if (o->types->len < 64) g_ptr_array_add(o->types, g_strdup(mime));
+}
+static void ext_offer_type(void *d, struct ext_data_control_offer_v1 *o, const char *mime) { clip_offer_type(d, mime); }
+static void wlr_offer_type(void *d, struct zwlr_data_control_offer_v1 *o, const char *mime) { clip_offer_type(d, mime); }
+static const struct ext_data_control_offer_v1_listener ext_offer_listener = {.offer = ext_offer_type};
+static const struct zwlr_data_control_offer_v1_listener wlr_offer_listener = {.offer = wlr_offer_type};
+
+static void clip_read_stop(void) {
+    struct clip_read *r = app.clip_reading;
+    if (!r) return;
+    app.clip_reading = NULL;
+    if (r->watch) g_source_remove(r->watch);
+    if (r->timeout) g_source_remove(r->timeout);
+    close(r->fd);
+    g_byte_array_free(r->buf, TRUE);
+    g_free(r);
+}
+
+/* What was copied on the phone, to the window; for `clip`, to stdout. */
+static void clip_arrived(const guint8 *data, gsize len) {
+    if (app.clip_print) {
+        fwrite(data, 1, len, stdout);
+        fflush(stdout);
+        if (app.loop) g_main_loop_quit(app.loop);
+        return;
+    }
+    if (!len || !g_atomic_int_get(&app.attached) || !app.clip_share) return;
+    char *text = g_utf8_make_valid((const char *)data, (gssize)len);
+    GString *s = g_string_sized_new(len + 32);
+    g_string_append(s, "{\"t\":\"clip\",\"text\":");
+    json_string(s, text);
+    g_string_append_c(s, '}');
+    send_frame(KIND_TEXT, s->str, s->len, NULL, 0);
+    say("clipboard: %zu bytes copied on the phone, to the computer", len);
+    g_string_free(s, TRUE);
+    g_free(text);
+}
+
+static gboolean clip_read_more(gint fd, GIOCondition cond, gpointer d) {
+    struct clip_read *r = d;
+    guint8 chunk[65536];
+    for (;;) {
+        ssize_t n = read(fd, chunk, sizeof chunk);
+        if (n > 0) {
+            if (r->buf->len + (gsize)n > CLIP_MAX) {
+                say("clipboard: what was copied on the phone is over %d MB; it stays there", CLIP_MAX >> 20);
+                break;
+            }
+            g_byte_array_append(r->buf, chunk, (guint)n);
+            continue;
+        }
+        if (n < 0 && errno == EINTR) continue;
+        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) return G_SOURCE_CONTINUE;
+        if (n == 0) clip_arrived(r->buf->data, r->buf->len);
+        break;
+    }
+    r->watch = 0; /* this source, which ends with this call */
+    clip_read_stop();
+    return G_SOURCE_REMOVE;
+}
+
+static gboolean clip_read_late(gpointer d) {
+    struct clip_read *r = d;
+    say("clipboard: the app the phone's clipboard is from didn't hand it over");
+    r->timeout = 0;
+    clip_read_stop();
+    if (app.clip_print && app.loop) g_main_loop_quit(app.loop);
+    return G_SOURCE_REMOVE;
+}
+
+/* The phone's clipboard is something new: its text, if it is text the computer didn't put there. */
+static void clip_changed(void) {
+    clip_read_stop();
+    struct clip_offer *o = app.clip_now;
+    if (!o) return; /* emptied: the app it came from has gone; the computer keeps its own */
+    /* Nothing leaves the phone unless a window is there and its switch is on. */
+    if (!app.clip_print && (clip_has(o, CLIP_MINE) || !g_atomic_int_get(&app.attached) || !app.clip_share)) return;
+    const char *mime = NULL;
+    for (int k = 0; CLIP_TYPES[k] && !mime; k++)
+        if (clip_has(o, CLIP_TYPES[k])) mime = CLIP_TYPES[k];
+    if (!mime) {
+        /* A picture, or files: not shared. */
+        if (app.clip_print) {
+            GString *all = g_string_new(NULL);
+            for (guint i = 0; i < o->types->len; i++)
+                g_string_append_printf(all, "%s%s", i ? ", " : "", (char *)g_ptr_array_index(o->types, i));
+            say("clip: the clipboard has no text, only %s", all->len ? all->str : "nothing");
+            g_string_free(all, TRUE);
+        }
+        return;
+    }
+    int p[2];
+    if (pipe2(p, O_CLOEXEC | O_NONBLOCK) != 0) return;
+    if (app.dc_ext) ext_data_control_offer_v1_receive((struct ext_data_control_offer_v1 *)o->wl, mime, p[1]);
+    else zwlr_data_control_offer_v1_receive((struct zwlr_data_control_offer_v1 *)o->wl, mime, p[1]);
+    close(p[1]); /* the request has its own copy */
+    wl_display_flush(app.display);
+    struct clip_read *r = g_new0(struct clip_read, 1);
+    r->fd = p[0];
+    r->buf = g_byte_array_new();
+    r->watch = g_unix_fd_add(p[0], G_IO_IN | G_IO_HUP | G_IO_ERR, clip_read_more, r);
+    r->timeout = g_timeout_add_seconds(5, clip_read_late, r);
+    app.clip_reading = r;
+}
+
+static void clip_offered(struct wl_proxy *wl) {
+    struct clip_offer *o = g_new0(struct clip_offer, 1);
+    o->wl = wl;
+    o->types = g_ptr_array_new_with_free_func(g_free);
+    if (app.dc_ext) ext_data_control_offer_v1_add_listener((struct ext_data_control_offer_v1 *)wl, &ext_offer_listener, o);
+    else zwlr_data_control_offer_v1_add_listener((struct zwlr_data_control_offer_v1 *)wl, &wlr_offer_listener, o);
+}
+
+static void clip_selection(struct wl_proxy *wl) {
+    struct clip_offer *o = wl ? wl_proxy_get_user_data(wl) : NULL;
+    if (app.clip_now && app.clip_now != o && app.clip_now != app.clip_primary) clip_offer_free(app.clip_now);
+    app.clip_now = o;
+    clip_changed();
+}
+
+static void clip_primary_selection(struct wl_proxy *wl) {
+    struct clip_offer *o = wl ? wl_proxy_get_user_data(wl) : NULL;
+    if (app.clip_primary && app.clip_primary != o && app.clip_primary != app.clip_now) clip_offer_free(app.clip_primary);
+    app.clip_primary = o;
+}
+
+static void clip_finished(void) {
+    say("clipboard: the phone's desktop has stopped telling this program about its clipboard");
+    clip_read_stop();
+    if (app.dc_ext) ext_data_control_device_v1_destroy((struct ext_data_control_device_v1 *)app.dc_device);
+    else zwlr_data_control_device_v1_destroy((struct zwlr_data_control_device_v1 *)app.dc_device);
+    app.dc_device = NULL;
+}
+
+static void ext_dev_offer(void *d, struct ext_data_control_device_v1 *dev, struct ext_data_control_offer_v1 *o) {
+    clip_offered((struct wl_proxy *)o);
+}
+static void ext_dev_selection(void *d, struct ext_data_control_device_v1 *dev, struct ext_data_control_offer_v1 *o) {
+    clip_selection((struct wl_proxy *)o);
+}
+static void ext_dev_finished(void *d, struct ext_data_control_device_v1 *dev) { clip_finished(); }
+static void ext_dev_primary(void *d, struct ext_data_control_device_v1 *dev, struct ext_data_control_offer_v1 *o) {
+    clip_primary_selection((struct wl_proxy *)o);
+}
+static const struct ext_data_control_device_v1_listener ext_device_listener = {
+    .data_offer = ext_dev_offer,
+    .selection = ext_dev_selection,
+    .finished = ext_dev_finished,
+    .primary_selection = ext_dev_primary,
+};
+static void wlr_dev_offer(void *d, struct zwlr_data_control_device_v1 *dev, struct zwlr_data_control_offer_v1 *o) {
+    clip_offered((struct wl_proxy *)o);
+}
+static void wlr_dev_selection(void *d, struct zwlr_data_control_device_v1 *dev, struct zwlr_data_control_offer_v1 *o) {
+    clip_selection((struct wl_proxy *)o);
+}
+static void wlr_dev_finished(void *d, struct zwlr_data_control_device_v1 *dev) { clip_finished(); }
+static void wlr_dev_primary(void *d, struct zwlr_data_control_device_v1 *dev, struct zwlr_data_control_offer_v1 *o) {
+    clip_primary_selection((struct wl_proxy *)o);
+}
+static const struct zwlr_data_control_device_v1_listener wlr_device_listener = {
+    .data_offer = wlr_dev_offer,
+    .selection = wlr_dev_selection,
+    .finished = wlr_dev_finished,
+    .primary_selection = wlr_dev_primary,
+};
+
+static void clip_source_free(struct clip_source *s) {
+    if (!s) return;
+    if (app.dc_ext) ext_data_control_source_v1_destroy((struct ext_data_control_source_v1 *)s->wl);
+    else zwlr_data_control_source_v1_destroy((struct zwlr_data_control_source_v1 *)s->wl);
+    g_bytes_unref(s->text);
+    g_free(s);
+}
+
+static gboolean clip_write_more(gint fd, GIOCondition cond, gpointer d) {
+    struct clip_write *w = d;
+    gsize len = 0;
+    const guint8 *data = g_bytes_get_data(w->text, &len);
+    while (w->off < len) {
+        ssize_t n = write(fd, data + w->off, len - w->off);
+        if (n > 0) {
+            w->off += (gsize)n;
+            continue;
+        }
+        if (n < 0 && errno == EINTR) continue;
+        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) return G_SOURCE_CONTINUE;
+        break; /* the app pasting has gone (EPIPE) */
+    }
+    close(fd);
+    g_bytes_unref(w->text);
+    g_free(w);
+    return G_SOURCE_REMOVE;
+}
+
+/* An app on the phone pastes: the computer's text, as much at once as the pipe takes, the rest as it reads. */
+static void clip_send(struct clip_source *s, const char *mime, int fd) {
+    if (strcmp(mime, CLIP_MINE) == 0) {
+        close(fd);
+        return;
+    }
+    struct clip_write *w = g_new0(struct clip_write, 1);
+    w->text = g_bytes_ref(s->text);
+    fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK);
+    if (clip_write_more(fd, G_IO_OUT, w) == G_SOURCE_CONTINUE)
+        g_unix_fd_add(fd, G_IO_OUT | G_IO_ERR | G_IO_HUP, clip_write_more, w);
+}
+
+/* `clip --set`: it holds the clipboard until something else is copied. */
+static gboolean clip_holding;
+
+/* Something else was copied on the phone: the computer's text is no longer there. */
+static void clip_cancelled(struct clip_source *s) {
+    if (app.clip_mine == s) app.clip_mine = NULL;
+    clip_source_free(s);
+    if (clip_holding && app.loop) g_main_loop_quit(app.loop);
+}
+
+static void ext_src_send(void *d, struct ext_data_control_source_v1 *src, const char *mime, int32_t fd) {
+    clip_send(d, mime, fd);
+}
+static void ext_src_cancelled(void *d, struct ext_data_control_source_v1 *src) { clip_cancelled(d); }
+static const struct ext_data_control_source_v1_listener ext_source_listener = {
+    .send = ext_src_send,
+    .cancelled = ext_src_cancelled,
+};
+static void wlr_src_send(void *d, struct zwlr_data_control_source_v1 *src, const char *mime, int32_t fd) {
+    clip_send(d, mime, fd);
+}
+static void wlr_src_cancelled(void *d, struct zwlr_data_control_source_v1 *src) { clip_cancelled(d); }
+static const struct zwlr_data_control_source_v1_listener wlr_source_listener = {
+    .send = wlr_src_send,
+    .cancelled = wlr_src_cancelled,
+};
+
+/* The computer's text, onto the phone's clipboard; none takes back what it gave, if it is still there. */
+static void clip_give(const char *text, gsize len) {
+    if (!app.dc_device) return;
+    if (!len) {
+        if (app.clip_mine) {
+            if (app.dc_ext) ext_data_control_device_v1_set_selection((struct ext_data_control_device_v1 *)app.dc_device, NULL);
+            else zwlr_data_control_device_v1_set_selection((struct zwlr_data_control_device_v1 *)app.dc_device, NULL);
+            clip_source_free(app.clip_mine);
+            app.clip_mine = NULL;
+            say("clipboard: the computer took its text back");
+        }
+        wl_display_flush(app.display);
+        return;
+    }
+    struct clip_source *s = g_new0(struct clip_source, 1);
+    s->text = g_bytes_new(text, len);
+    if (app.dc_ext) {
+        struct ext_data_control_source_v1 *src = ext_data_control_manager_v1_create_data_source(app.dc_ext);
+        ext_data_control_source_v1_add_listener(src, &ext_source_listener, s);
+        s->wl = (struct wl_proxy *)src;
+        ext_data_control_source_v1_offer(src, CLIP_MINE);
+        for (int k = 0; CLIP_TYPES[k]; k++) ext_data_control_source_v1_offer(src, CLIP_TYPES[k]);
+        ext_data_control_device_v1_set_selection((struct ext_data_control_device_v1 *)app.dc_device, src);
+    } else {
+        struct zwlr_data_control_source_v1 *src = zwlr_data_control_manager_v1_create_data_source(app.dc_wlr);
+        zwlr_data_control_source_v1_add_listener(src, &wlr_source_listener, s);
+        s->wl = (struct wl_proxy *)src;
+        zwlr_data_control_source_v1_offer(src, CLIP_MINE);
+        for (int k = 0; CLIP_TYPES[k]; k++) zwlr_data_control_source_v1_offer(src, CLIP_TYPES[k]);
+        zwlr_data_control_device_v1_set_selection((struct zwlr_data_control_device_v1 *)app.dc_device, src);
+    }
+    /* After the new one is set, so the clipboard is never empty between the two. */
+    if (app.clip_mine) clip_source_free(app.clip_mine);
+    app.clip_mine = s;
+    wl_display_flush(app.display);
+    say("clipboard: %zu bytes from the computer, on the phone's clipboard", len);
+}
+
+static void clip_start(void) {
+    if (!app.seat || app.dc_device) return;
+    if (app.dc_ext) {
+        struct ext_data_control_device_v1 *dev = ext_data_control_manager_v1_get_data_device(app.dc_ext, app.seat);
+        ext_data_control_device_v1_add_listener(dev, &ext_device_listener, NULL);
+        app.dc_device = (struct wl_proxy *)dev;
+    } else if (app.dc_wlr) {
+        struct zwlr_data_control_device_v1 *dev = zwlr_data_control_manager_v1_get_data_device(app.dc_wlr, app.seat);
+        zwlr_data_control_device_v1_add_listener(dev, &wlr_device_listener, NULL);
+        app.dc_device = (struct wl_proxy *)dev;
+    } else {
+        say("clipboard: this desktop has no data-control, so the clipboard stays the phone's");
+    }
+}
+
+static void on_clip(const char *json) {
+    GString *text = json_text(json, "text");
+    if (!text) return;
+    clip_give(text->str, text->len);
+    g_string_free(text, TRUE);
+}
+
+/* The window's switch: off, and what is copied on the phone stays on the phone, not read, not sent. */
+static void on_clipshare(const char *json) {
+    char v[16];
+    gboolean on = json_raw(json, "on", v, sizeof v) && strcmp(v, "true") == 0;
+    if (on != app.clip_share) say("clipboard: sharing %s", on ? "on" : "off");
+    app.clip_share = on;
+    if (!on) clip_read_stop(); /* one on its way goes nowhere */
+}
+
+/* ── Files dropped on the window ───────────────────────────────────────── */
+
+/*
+ * The computer copies a drop into the phone's Downloads first (`receive`,
+ * below), then asks for it to be dropped where it was let go of:
+ * {"t":"drop","x":X,"y":Y,"uris":"file:///…\r\n"}, X and Y in the picture's
+ * pixels. Wayland lets a program start a drag only from a button pressed on a
+ * surface of its own. So this program puts eight pixels of its own over
+ * everything at that point (a layer-shell surface), presses the button on them
+ * with its own pointer, starts a drag there carrying the files' URIs, has them
+ * let the pointer through, moves the pointer a pixel and back so the
+ * compositor looks for what is under it, and lets go. The app there takes the
+ * files as it would from its own file manager (a browser's upload, a chat, a
+ * terminal typing the path), or doesn't; either way they are in Downloads.
+ * It answers {"t":"dropped","taken":…,"why":…}.
+ *
+ * The pointer is borrowed for a moment and put back where the computer has
+ * it. This runs on the main loop, so the computer's own messages wait
+ * meanwhile; with a button held on the computer it isn't tried.
+ */
+#define DROP_SIZE 8
+
+static struct {
+    struct wl_surface *surface;
+    struct zwlr_layer_surface_v1 *layer;
+    struct wl_buffer *buffer;
+    struct wl_data_source *source;
+    const char *uris;
+    uint32_t serial, action;
+    gboolean configured, entered, pressed, accepted, agreed, sent, dropped, finished, cancelled, over;
+} drag;
+
+static void dp_enter(void *d, struct wl_pointer *p, uint32_t serial, struct wl_surface *s, wl_fixed_t x, wl_fixed_t y) {
+    if (s && s == drag.surface) drag.entered = TRUE;
+}
+static void dp_leave(void *d, struct wl_pointer *p, uint32_t serial, struct wl_surface *s) {
+    if (s && s == drag.surface) drag.entered = FALSE;
+}
+static void dp_motion(void *d, struct wl_pointer *p, uint32_t t, wl_fixed_t x, wl_fixed_t y) {}
+static void dp_button(void *d, struct wl_pointer *p, uint32_t serial, uint32_t t, uint32_t button, uint32_t state) {
+    if (drag.entered && button == BTN_LEFT && state == WL_POINTER_BUTTON_STATE_PRESSED) {
+        drag.serial = serial;
+        drag.pressed = TRUE;
+    }
+}
+static void dp_axis(void *d, struct wl_pointer *p, uint32_t t, uint32_t axis, wl_fixed_t v) {}
+static void dp_frame(void *d, struct wl_pointer *p) {}
+static void dp_axis_source(void *d, struct wl_pointer *p, uint32_t source) {}
+static void dp_axis_stop(void *d, struct wl_pointer *p, uint32_t t, uint32_t axis) {}
+static void dp_axis_discrete(void *d, struct wl_pointer *p, uint32_t axis, int32_t discrete) {}
+static const struct wl_pointer_listener drop_pointer_listener = {
+    .enter = dp_enter,
+    .leave = dp_leave,
+    .motion = dp_motion,
+    .button = dp_button,
+    .axis = dp_axis,
+    .frame = dp_frame,
+    .axis_source = dp_axis_source,
+    .axis_stop = dp_axis_stop,
+    .axis_discrete = dp_axis_discrete,
+};
+
+/* The compositor's offers to this program's own surface (the drag passing over it): let go of. */
+static void dd_forget(void) {
+    if (app.dnd_offer) wl_data_offer_destroy(app.dnd_offer);
+    app.dnd_offer = NULL;
+}
+static void dd_offer(void *d, struct wl_data_device *dd, struct wl_data_offer *o) {
+    dd_forget();
+    app.dnd_offer = o;
+}
+static void dd_enter(void *d, struct wl_data_device *dd, uint32_t serial, struct wl_surface *s, wl_fixed_t x, wl_fixed_t y,
+                     struct wl_data_offer *o) {}
+static void dd_leave(void *d, struct wl_data_device *dd) { dd_forget(); }
+static void dd_motion(void *d, struct wl_data_device *dd, uint32_t t, wl_fixed_t x, wl_fixed_t y) {}
+static void dd_drop(void *d, struct wl_data_device *dd) { dd_forget(); }
+static void dd_selection(void *d, struct wl_data_device *dd, struct wl_data_offer *o) {
+    if (o && o == app.dnd_offer) dd_forget();
+}
+static const struct wl_data_device_listener drop_device_listener = {
+    .data_offer = dd_offer,
+    .enter = dd_enter,
+    .leave = dd_leave,
+    .motion = dd_motion,
+    .drop = dd_drop,
+    .selection = dd_selection,
+};
+
+/* The URIs to whoever took the drop: a few hundred bytes, waited on for a moment if the pipe is full. */
+static void ds_send(void *d, struct wl_data_source *s, const char *mime, int32_t fd) {
+    const char *p = drag.uris ? drag.uris : "";
+    gsize left = strlen(p);
+    fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK);
+    gint64 until = g_get_monotonic_time() + 2 * G_USEC_PER_SEC;
+    while (left && g_get_monotonic_time() < until) {
+        ssize_t n = write(fd, p, left);
+        if (n > 0) {
+            p += n;
+            left -= (gsize)n;
+        } else if (n < 0 && (errno == EAGAIN || errno == EINTR)) {
+            struct pollfd w = {fd, POLLOUT, 0};
+            poll(&w, 1, 100);
+        } else {
+            break;
+        }
+    }
+    close(fd);
+    drag.sent = left == 0;
+}
+static void ds_target(void *d, struct wl_data_source *s, const char *mime) {
+    drag.accepted = mime != NULL;
+    drag.agreed = drag.accepted && (app.ddm_version < 3 || drag.action);
+}
+static void ds_cancelled(void *d, struct wl_data_source *s) { drag.cancelled = drag.over = TRUE; }
+static void ds_drop_performed(void *d, struct wl_data_source *s) { drag.dropped = TRUE; }
+static void ds_finished(void *d, struct wl_data_source *s) { drag.finished = drag.over = TRUE; }
+static void ds_action(void *d, struct wl_data_source *s, uint32_t a) {
+    drag.action = a;
+    drag.agreed = drag.accepted && a;
+}
+static const struct wl_data_source_listener drop_source_listener = {
+    .target = ds_target,
+    .send = ds_send,
+    .cancelled = ds_cancelled,
+    .dnd_drop_performed = ds_drop_performed,
+    .dnd_finished = ds_finished,
+    .action = ds_action,
+};
+
+static void dl_configure(void *d, struct zwlr_layer_surface_v1 *l, uint32_t serial, uint32_t w, uint32_t h) {
+    zwlr_layer_surface_v1_ack_configure(l, serial);
+    drag.configured = TRUE;
+}
+static void dl_closed(void *d, struct zwlr_layer_surface_v1 *l) {}
+static const struct zwlr_layer_surface_v1_listener drop_layer_listener = {.configure = dl_configure, .closed = dl_closed};
+
+/* A buffer of nothing: fully transparent pixels, zeroes. */
+static struct wl_buffer *clear_buffer(int w, int h) {
+    int fd = memfd_create("openandroiddex-drop", MFD_CLOEXEC);
+    if (fd < 0) return NULL;
+    struct wl_buffer *b = NULL;
+    if (ftruncate(fd, (off_t)w * h * 4) == 0) {
+        struct wl_shm_pool *pool = wl_shm_create_pool(app.shm, fd, w * h * 4);
+        b = wl_shm_pool_create_buffer(pool, 0, w, h, w * 4, WL_SHM_FORMAT_ARGB8888);
+        wl_shm_pool_destroy(pool);
+    }
+    close(fd);
+    return b;
+}
+
+/* The compositor's events until *flag, the drag is over, or `ms` have passed. */
+static gboolean drag_wait(gboolean *flag, int ms) {
+    gint64 until = g_get_monotonic_time() + (gint64)ms * 1000;
+    while (!*flag && !drag.over) {
+        gint64 left = (until - g_get_monotonic_time()) / 1000;
+        if (left <= 0 || dispatch_for((int)MAX(left, 1)) < 0) break;
+    }
+    return *flag;
+}
+
+/* This program's own pointer, borrowed: fake input on KWin, the virtual pointer on wlroots. */
+static void drag_move(int x, int y) {
+    int pw = g_atomic_int_get(&app.pw), ph = g_atomic_int_get(&app.ph);
+    if (app.wlr) {
+        if (!app.vpointer || pw <= 0 || ph <= 0) return;
+        zwlr_virtual_pointer_v1_motion_absolute(app.vpointer, ms32(), (uint32_t)CLAMP(x, 0, pw - 1),
+                                                (uint32_t)CLAMP(y, 0, ph - 1), (uint32_t)pw, (uint32_t)ph);
+        zwlr_virtual_pointer_v1_frame(app.vpointer);
+    } else {
+        double gx, gy;
+        if (app.fake && to_global(x, y, &gx, &gy))
+            org_kde_kwin_fake_input_pointer_motion_absolute(app.fake, wl_fixed_from_double(gx), wl_fixed_from_double(gy));
+    }
+    wl_display_flush(app.display);
+}
+
+static void drag_button(gboolean down) {
+    uint32_t state = down ? WL_POINTER_BUTTON_STATE_PRESSED : WL_POINTER_BUTTON_STATE_RELEASED;
+    if (app.wlr) {
+        zwlr_virtual_pointer_v1_button(app.vpointer, ms32(), BTN_LEFT, state);
+        zwlr_virtual_pointer_v1_frame(app.vpointer);
+    } else {
+        org_kde_kwin_fake_input_button(app.fake, BTN_LEFT, state);
+    }
+    wl_display_flush(app.display);
+}
+
+static gboolean can_carry(void) {
+    return app.compositor && app.shm && app.layer_shell && app.ddm && app.seat &&
+           (app.wlr ? app.vpointer != NULL : app.fake != NULL);
+}
+
+static gboolean carry(int x, int y, const char *uris, GString *why) {
+    struct output *o = our_output();
+    int pw = g_atomic_int_get(&app.pw), ph = g_atomic_int_get(&app.ph);
+    if (!can_carry() || !o || pw <= 0 || ph <= 0) {
+        g_string_assign(why, "this phone's desktop can't hand files to its apps");
+        return FALSE;
+    }
+    if (!(app.seat_caps & WL_SEAT_CAPABILITY_POINTER)) {
+        g_string_assign(why, "the phone's desktop has no pointer to drop with");
+        return FALSE;
+    }
+    if (app.buttons) {
+        g_string_assign(why, "a mouse button was held down on the computer");
+        return FALSE;
+    }
+    x = CLAMP(x, 0, pw - 1);
+    y = CLAMP(y, 0, ph - 1);
+    if (!app.wl_pointer) {
+        app.wl_pointer = wl_seat_get_pointer(app.seat);
+        wl_pointer_add_listener(app.wl_pointer, &drop_pointer_listener, NULL);
+    }
+    if (!app.data_device) {
+        app.data_device = wl_data_device_manager_get_data_device(app.ddm, app.seat);
+        wl_data_device_add_listener(app.data_device, &drop_device_listener, NULL);
+    }
+    memset(&drag, 0, sizeof drag);
+    drag.uris = uris;
+    gint64 t0 = g_get_monotonic_time();
+    gboolean ok = FALSE;
+
+    /* Eight pixels of this program's own over everything, around the point (in the screen's logical units). */
+    double lw = o->logical && o->lw > 0 ? o->lw : pw / app.scale;
+    double lh = o->logical && o->lh > 0 ? o->lh : ph / app.scale;
+    int cx = (int)((x + 0.5) * lw / pw), cy = (int)((y + 0.5) * lh / ph);
+    int left = CLAMP(cx - DROP_SIZE / 2, 0, MAX(0, (int)lw - DROP_SIZE));
+    int top = CLAMP(cy - DROP_SIZE / 2, 0, MAX(0, (int)lh - DROP_SIZE));
+    drag.surface = wl_compositor_create_surface(app.compositor);
+    drag.layer = zwlr_layer_shell_v1_get_layer_surface(app.layer_shell, drag.surface, o->wl,
+                                                       ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY, "openandroiddex-drop");
+    zwlr_layer_surface_v1_add_listener(drag.layer, &drop_layer_listener, NULL);
+    zwlr_layer_surface_v1_set_size(drag.layer, DROP_SIZE, DROP_SIZE);
+    zwlr_layer_surface_v1_set_anchor(drag.layer, ZWLR_LAYER_SURFACE_V1_ANCHOR_TOP | ZWLR_LAYER_SURFACE_V1_ANCHOR_LEFT);
+    zwlr_layer_surface_v1_set_margin(drag.layer, top, 0, 0, left);
+    zwlr_layer_surface_v1_set_exclusive_zone(drag.layer, -1);
+    zwlr_layer_surface_v1_set_keyboard_interactivity(drag.layer, ZWLR_LAYER_SURFACE_V1_KEYBOARD_INTERACTIVITY_NONE);
+    wl_surface_commit(drag.surface);
+    if (!drag_wait(&drag.configured, 1000)) {
+        g_string_assign(why, "the phone's desktop didn't place the drop");
+        goto out;
+    }
+    drag.buffer = clear_buffer(DROP_SIZE, DROP_SIZE);
+    if (!drag.buffer) {
+        g_string_assign(why, "no memory for the drop");
+        goto out;
+    }
+    wl_surface_attach(drag.surface, drag.buffer, 0, 0);
+    wl_surface_damage(drag.surface, 0, 0, DROP_SIZE, DROP_SIZE);
+    wl_surface_commit(drag.surface);
+    wl_display_roundtrip(app.display);
+
+    /* The pointer onto them, the button pressed there. */
+    int nx = x + 1 < pw ? x + 1 : x - 1;
+    drag_move(nx, y);
+    drag_move(x, y);
+    if (!drag_wait(&drag.entered, 600)) {
+        g_string_assign(why, "the drop didn't get the pointer");
+        goto out;
+    }
+    drag_button(TRUE);
+    if (!drag_wait(&drag.pressed, 600)) {
+        drag_button(FALSE);
+        g_string_assign(why, "the drop didn't get the button");
+        goto out;
+    }
+
+    /* The drag, from them, carrying the URIs; then they let the pointer through. */
+    drag.source = wl_data_device_manager_create_data_source(app.ddm);
+    wl_data_source_add_listener(drag.source, &drop_source_listener, NULL);
+    wl_data_source_offer(drag.source, "text/uri-list");
+    if (app.ddm_version >= 3) wl_data_source_set_actions(drag.source, WL_DATA_DEVICE_MANAGER_DND_ACTION_COPY);
+    wl_data_device_start_drag(app.data_device, drag.source, drag.surface, NULL, drag.serial);
+    struct wl_region *none = wl_compositor_create_region(app.compositor);
+    wl_surface_set_input_region(drag.surface, none);
+    wl_region_destroy(none);
+    wl_surface_commit(drag.surface);
+    wl_display_roundtrip(app.display);
+
+    /* A pixel and back: the compositor looks for what is under the pointer as it moves. Apps say
+     * whether they take it as the pointer comes over them, a browser after asking its page. */
+    for (int tries = 0; tries < 3 && !drag.agreed && !drag.over; tries++) {
+        drag_move(nx, y);
+        drag_wait(&drag.agreed, 60);
+        drag_move(x, y);
+        drag_wait(&drag.agreed, tries == 0 ? 500 : 300);
+    }
+    drag_button(FALSE);
+    drag_wait(&drag.over, 3000);
+    ok = drag.dropped && (drag.finished || drag.sent);
+    if (!ok) g_string_assign(why, drag.agreed ? "the app there didn't take it" : "nothing there takes files");
+    say("drop: %s, %d ms", ok ? "taken by the app under it" : why->str, (int)((g_get_monotonic_time() - t0) / 1000));
+out:
+    if (drag.source) wl_data_source_destroy(drag.source);
+    if (drag.layer) zwlr_layer_surface_v1_destroy(drag.layer);
+    if (drag.surface) wl_surface_destroy(drag.surface);
+    if (drag.buffer) wl_buffer_destroy(drag.buffer);
+    memset(&drag, 0, sizeof drag);
+    /* The pointer back where the computer has it (if it has said yet: no pushing into a corner). */
+    if (app.last_x >= 0) drag_move(app.last_x, app.last_y);
+    wl_display_roundtrip(app.display);
+    return ok;
+}
+
+static void on_drop(const char *json) {
+    char v[32];
+    int x = json_raw(json, "x", v, sizeof v) ? atoi(v) : -1;
+    int y = json_raw(json, "y", v, sizeof v) ? atoi(v) : -1;
+    GString *uris = json_text(json, "uris");
+    GString *why = g_string_new(NULL);
+    gboolean taken = FALSE;
+    if (!uris || !g_str_has_prefix(uris->str, "file://") || x < 0 || y < 0)
+        g_string_assign(why, "the drop came without its files or its place");
+    else taken = carry(x, y, uris->str, why);
+    GString *s = g_string_new("{\"t\":\"dropped\",\"taken\":");
+    g_string_append(s, taken ? "true" : "false");
+    if (!taken) {
+        g_string_append(s, ",\"why\":");
+        json_string(s, why->str);
+    }
+    g_string_append_c(s, '}');
+    send_text(s->str);
+    g_string_free(s, TRUE);
+    g_string_free(why, TRUE);
+    if (uris) g_string_free(uris, TRUE);
+}
+
+/* ── Files from the computer: receive ──────────────────────────────────── */
+
+/*
+ * The computer starts `receive` for each drop on its window, on a second
+ * channel of its SSH connection, and hands it the files on stdin in frames
+ * like serve's, whose kind says what each one is:
+ *
+ *   'I' [u8 folder][name]                       an item dropped: a file, or a folder with all in it
+ *   'D' [path]                                  a folder in the item ("photos/raw"), parents first
+ *   'F' [u64 size][i64 mtime][u32 mode][path]   a file in it ("" for an item that is a file),
+ *                                               then its bytes in 'B' frames, `size` in all
+ *   'G' (as 'F')                                the same, answering {"t":"opened"} once the file is made
+ *   'B' [bytes]
+ *   'S'                                         the file's bytes came another way (below): all there now
+ *   'E' [i64 mtime]                             the item is whole
+ *   'X'                                         take the item back (cancelled, or unreadable there)
+ *   'Q'                                         that was all
+ *
+ * A big file's bytes come faster over several channels at once: the phone's
+ * SSH server (dropbear) gives each channel a window of 24 KB, which on a cable
+ * is about 10 MB/s a channel; four together made 30 (S24, 2026-11-16). So the
+ * computer may send a big file's 'G' here, and once it is "opened" (made: the
+ * channels are separate, nothing orders them), its bytes through `receive
+ * --part` processes on channels of their own, each writing its share where it
+ * goes, and then 'S'. Those take:
+ *
+ *   'O' [path]                                  a file this receive made, under Downloads ("trip (1)/a.mp4")
+ *   'P' [u64 offset][bytes]                     bytes of it, at that offset
+ *   'C'                                         that file is done for now: answers {"t":"done"}
+ *   'Q'                                         that was all
+ *
+ * All of it goes into the user's Downloads (XDG_DOWNLOAD_DIR), never over
+ * anything there: an item whose name is taken is called "name (1).ext", as a
+ * browser names a second download, and every file and folder is made with
+ * O_EXCL or mkdir, which refuse a name taken meanwhile, and nothing is
+ * followed through a link. Names are checked a part at a time. An item that
+ * doesn't finish (stdin ending first, 'X', a write that fails) is taken back
+ * whole. It answers in serve's JSON frames: {"t":"ready","dir","free"},
+ * {"t":"claimed","name"} for each item as it is named, {"t":"landed","name",
+ * "uri"} once it is whole, {"t":"undone"}, {"t":"error","message"},
+ * {"t":"bye"}.
+ */
+static struct {
+    int dir_fd;
+    char *dir;
+    char *name;             /* the item's name in Downloads, once it has one */
+    gboolean is_dir;
+    int item_fd;            /* the item's folder */
+    GPtrArray *files, *dirs; /* what the item has made, under Downloads, for taking it back */
+    int file_fd;            /* the file being written */
+    char *file_name;        /* its path in the item, for a message */
+    guint64 size, left;     /* its size, and its bytes still to come here */
+    gint64 mtime;
+} rx = {.dir_fd = -1, .item_fd = -1, .file_fd = -1};
+
+/* A name's extension, where a copy's number goes in front of it: Thunar's rule, as sftp.rs's copy_name. */
+static const char *dot_before(const char *name, const char *before) {
+    for (const char *p = before - 1; p > name; p--)
+        if (*p == '.') return p;
+    return NULL;
+}
+static const char *extension_of(const char *name) {
+    const char *dot = strrchr(name, '.');
+    if (!dot || dot == name || !dot[1]) return NULL;
+    const char *ext = dot + 1;
+    static const char *const packed[] = {"gz", "bz2", "lzma", "lrz", "rpm", "lzo", "xz", "z", NULL};
+    for (int i = 0; packed[i]; i++) {
+        if (g_ascii_strcasecmp(ext, packed[i]) != 0) continue;
+        const char *d2 = dot_before(name, dot);
+        if (d2 && dot - d2 - 1 >= 2 && dot - d2 - 1 <= 5) dot = d2; /* backup.tar.gz */
+        return dot;
+    }
+    if (g_ascii_strcasecmp(ext, "in") == 0) {
+        for (int i = 0; i < 3; i++) {
+            const char *d2 = dot_before(name, dot);
+            if (!d2 || dot - d2 - 1 < 2) break;
+            gboolean another_in = dot - d2 - 1 == 2 && g_ascii_strncasecmp(d2 + 1, "in", 2) == 0;
+            dot = d2;
+            if (!another_in) break;
+        }
+    }
+    return dot;
+}
+
+/* The nth other name for an item already in Downloads: "report (1).pdf", "photos (2)". */
+static char *numbered_name(const char *name, int n, gboolean is_dir) {
+    const char *ext = is_dir ? NULL : extension_of(name);
+    if (!ext) return g_strdup_printf("%s (%d)", name, n);
+    return g_strdup_printf("%.*s (%d)%s", (int)(ext - name), name, n, ext);
+}
+
+static gboolean part_ok(const char *s, gsize n) {
+    if (n == 0 || n > 255 || memchr(s, '/', n) || memchr(s, 0, n)) return FALSE;
+    return !(n == 1 && s[0] == '.') && !(n == 2 && s[0] == '.' && s[1] == '.');
+}
+
+/* A path inside the item, from the computer: parts that are names, never "." or "..", never starting at /. */
+static gboolean path_ok(const char *s) {
+    if (!*s || strlen(s) > 4000) return FALSE;
+    for (const char *p = s;;) {
+        const char *slash = strchr(p, '/');
+        if (!part_ok(p, slash ? (gsize)(slash - p) : strlen(p))) return FALSE;
+        if (!slash) return TRUE;
+        p = slash + 1;
+    }
+}
+
+static void rx_say(const char *t, const char *key, const char *value) {
+    GString *s = g_string_new("{\"t\":");
+    json_string(s, t);
+    if (key) {
+        g_string_append_printf(s, ",\"%s\":", key);
+        json_string(s, value);
+    }
+    g_string_append_c(s, '}');
+    send_text(s->str);
+    g_string_free(s, TRUE);
+}
+
+static void rx_clear(void) {
+    if (rx.file_fd >= 0) close(rx.file_fd);
+    if (rx.item_fd >= 0) close(rx.item_fd);
+    rx.file_fd = rx.item_fd = -1;
+    g_ptr_array_set_size(rx.files, 0);
+    g_ptr_array_set_size(rx.dirs, 0);
+    g_clear_pointer(&rx.name, g_free);
+    g_clear_pointer(&rx.file_name, g_free);
+    rx.left = 0;
+}
+
+/* The item in progress, taken back: its files, then its folders, deepest first. */
+static void rx_undo(void) {
+    if (rx.file_fd >= 0) close(rx.file_fd);
+    if (rx.item_fd >= 0) close(rx.item_fd);
+    rx.file_fd = rx.item_fd = -1;
+    for (guint i = 0; i < rx.files->len; i++) unlinkat(rx.dir_fd, g_ptr_array_index(rx.files, i), 0);
+    for (guint i = rx.dirs->len; i > 0; i--) unlinkat(rx.dir_fd, g_ptr_array_index(rx.dirs, i - 1), AT_REMOVEDIR);
+    if (rx.name) say("receive: %s taken back", rx.name);
+    rx_clear();
+}
+
+static int rx_fail(const char *what, int err) {
+    char *msg = g_strdup_printf("%s couldn't be written on the phone: %s", what, g_strerror(err));
+    say("receive: %s", msg);
+    rx_say("error", "message", msg);
+    g_free(msg);
+    rx_undo();
+    return -1;
+}
+
+static void rx_set_time(int fd, gint64 mtime) {
+    if (fd < 0 || mtime <= 0) return;
+    struct timespec ts[2] = {{.tv_sec = (time_t)mtime}, {.tv_sec = (time_t)mtime}};
+    futimens(fd, ts);
+}
+
+/* The current file has all its bytes. */
+static void rx_file_done(void) {
+    rx_set_time(rx.file_fd, rx.mtime);
+    close(rx.file_fd);
+    rx.file_fd = -1;
+}
+
+static guint64 be64(const guint8 *p) {
+    guint64 v = 0;
+    for (int i = 0; i < 8; i++) v = (v << 8) | p[i];
+    return v;
+}
+
+/* One frame from the computer: 0 to go on, 1 when it is all done, -1 after a failure (said and undone). */
+static int rx_frame(guint8 kind, const guint8 *p, gsize n) {
+    if (kind == 'B') {
+        if (rx.file_fd < 0 || n > rx.left) return rx_fail(rx.name ? rx.name : "a file", EPROTO);
+        for (gsize off = 0; off < n;) {
+            ssize_t w = write(rx.file_fd, p + off, n - off);
+            if (w < 0 && errno == EINTR) continue;
+            if (w <= 0) return rx_fail(rx.file_name ? rx.file_name : rx.name, w < 0 ? errno : EIO);
+            off += (gsize)w;
+        }
+        rx.left -= n;
+        if (!rx.left) rx_file_done();
+        return 0;
+    }
+    if (kind == 'Q') {
+        if (rx.name) rx_undo();
+        rx_say("bye", NULL, NULL);
+        return 1;
+    }
+    if (kind == 'X') {
+        rx_undo();
+        rx_say("undone", NULL, NULL);
+        return 0;
+    }
+    char *text = NULL;
+    gsize head = kind == 'I' ? 1 : kind == 'F' || kind == 'G' ? 20 : 0;
+    if (kind == 'I' || kind == 'D' || kind == 'F' || kind == 'G') {
+        if (n < head) return rx_fail("a file", EPROTO);
+        text = g_strndup((const char *)p + head, n - head);
+        if (strlen(text) != n - head || !g_utf8_validate(text, -1, NULL)) {
+            g_free(text);
+            return rx_fail("a file with an unusable name", EINVAL);
+        }
+    }
+    int result = 0;
+    if (kind == 'I') {
+        if (rx.name) rx_undo(); /* the last one never finished */
+        gboolean is_dir = p[0] != 0;
+        if (!part_ok(text, strlen(text))) {
+            result = rx_fail(text, EINVAL);
+        } else {
+            int err = EEXIST;
+            for (int i = 0; i < 1000 && err == EEXIST; i++) {
+                char *cand = i ? numbered_name(text, i, is_dir) : g_strdup(text);
+                int r = is_dir ? mkdirat(rx.dir_fd, cand, 0755)
+                               : openat(rx.dir_fd, cand, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0644);
+                err = r < 0 ? errno : 0;
+                if (r >= 0) {
+                    rx.name = cand;
+                    rx.is_dir = is_dir;
+                    g_ptr_array_add(is_dir ? rx.dirs : rx.files, g_strdup(cand));
+                    if (is_dir) rx.item_fd = openat(rx.dir_fd, cand, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+                    else rx.file_fd = r;
+                    if (is_dir && rx.item_fd < 0) err = errno;
+                } else {
+                    g_free(cand);
+                }
+            }
+            if (err) result = rx_fail(text, err);
+            else rx_say("claimed", "name", rx.name); /* where --part finds its files */
+        }
+    } else if (kind == 'S') {
+        /* A big file's bytes, written by `receive --part` processes: all of them, or the item fails. */
+        struct stat st;
+        if (rx.file_fd < 0 || !rx.left) result = rx_fail(rx.name ? rx.name : "a file", EPROTO);
+        else if (fstat(rx.file_fd, &st) != 0 || (guint64)st.st_size != rx.size)
+            result = rx_fail(rx.file_name ? rx.file_name : rx.name, EIO);
+        else {
+            rx.left = 0;
+            rx_file_done();
+        }
+    } else if (kind == 'D') {
+        if (!rx.name || !rx.is_dir || !path_ok(text)) result = rx_fail(text, EINVAL);
+        else if (mkdirat(rx.item_fd, text, 0755) != 0) result = rx_fail(text, errno);
+        else g_ptr_array_add(rx.dirs, g_build_filename(rx.name, text, NULL));
+    } else if (kind == 'F' || kind == 'G') {
+        guint64 size = be64(p);
+        gint64 mtime = (gint64)be64(p + 8);
+        guint32 mode = ((guint32)p[16] << 24) | ((guint32)p[17] << 16) | ((guint32)p[18] << 8) | p[19];
+        mode = (mode & 0777) | 0600;
+        if (!rx.name || (rx.is_dir ? !path_ok(text) : (*text || rx.file_fd < 0)) || (rx.is_dir && rx.file_fd >= 0)) {
+            result = rx_fail(*text ? text : rx.name ? rx.name : "a file", EPROTO);
+        } else {
+            if (rx.is_dir) {
+                int fd = openat(rx.item_fd, text, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, mode);
+                if (fd < 0) result = rx_fail(text, errno);
+                else {
+                    rx.file_fd = fd;
+                    g_ptr_array_add(rx.files, g_build_filename(rx.name, text, NULL));
+                }
+            } else {
+                fchmod(rx.file_fd, mode);
+            }
+            if (!result) {
+                g_free(rx.file_name);
+                rx.file_name = g_strdup(*text ? text : rx.name);
+                rx.size = rx.left = size;
+                rx.mtime = mtime;
+                if (!size) rx_file_done();
+                /* The file is there now: --part may open it. */
+                if (kind == 'G') rx_say("opened", NULL, NULL);
+            }
+        }
+    } else if (kind == 'E') {
+        if (!rx.name || rx.left || (!rx.is_dir && rx.file_fd >= 0)) {
+            result = rx_fail(rx.name ? rx.name : "an item", EPROTO);
+        } else {
+            if (rx.is_dir && n >= 8) rx_set_time(rx.item_fd, (gint64)be64(p));
+            char *path = g_build_filename(rx.dir, rx.name, NULL);
+            char *uri = g_filename_to_uri(path, NULL, NULL);
+            GString *s = g_string_new("{\"t\":\"landed\",\"name\":");
+            json_string(s, rx.name);
+            g_string_append(s, ",\"uri\":");
+            json_string(s, uri ? uri : "");
+            g_string_append_c(s, '}');
+            send_text(s->str);
+            say("receive: %s", path);
+            g_string_free(s, TRUE);
+            g_free(uri);
+            g_free(path);
+            rx_clear();
+        }
+    } else {
+        result = rx_fail(rx.name ? rx.name : "a file", EPROTO);
+    }
+    g_free(text);
+    return result;
+}
+
+/* Downloads, as the user's folders name it (GLib gives the home folder for one switched off), opened. */
+static gboolean rx_open_downloads(void) {
+    const char *dl = g_get_user_special_dir(G_USER_DIRECTORY_DOWNLOAD);
+    rx.dir = dl && *dl && g_strcmp0(dl, g_get_home_dir()) != 0 ? g_strdup(dl)
+                                                              : g_build_filename(g_get_home_dir(), "Downloads", NULL);
+    g_mkdir_with_parents(rx.dir, 0755);
+    rx.dir_fd = open(rx.dir, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (rx.dir_fd >= 0) return TRUE;
+    char *msg = g_strdup_printf("The phone's Downloads (%s) can't be opened: %s", rx.dir, g_strerror(errno));
+    rx_say("error", "message", msg);
+    say("receive: %s", msg);
+    g_free(msg);
+    return FALSE;
+}
+
+/* The frames on stdin, each handed to `frame` until it says to stop: its 0 goes on, 1 is done, -1 failed. */
+static int rx_read_frames(int (*frame)(guint8, const guint8 *, gsize), void (*cut_short)(void)) {
+    GByteArray *in = g_byte_array_new();
+    guint8 buf[65536];
+    int status = 0;
+    for (;;) {
+        gsize off = 0;
+        int r = 0;
+        while (r == 0 && in->len - off >= 5) {
+            const guint8 *h = in->data + off;
+            guint32 len = ((guint32)h[1] << 24) | ((guint32)h[2] << 16) | ((guint32)h[3] << 8) | h[4];
+            if (len > (1u << 22)) {
+                r = rx_fail("a file", EMSGSIZE);
+                break;
+            }
+            if (in->len - off - 5 < len) break;
+            r = frame(h[0], h + 5, len);
+            off += 5 + len;
+        }
+        if (off) g_byte_array_remove_range(in, 0, (guint)off);
+        if (r) {
+            status = r < 0 ? 1 : 0;
+            break;
+        }
+        ssize_t n = read(STDIN_FILENO, buf, sizeof buf);
+        if (n > 0) g_byte_array_append(in, buf, (guint)n);
+        else if (n < 0 && errno == EINTR) continue;
+        else {
+            /* The computer went part way. */
+            if (cut_short) cut_short();
+            break;
+        }
+    }
+    g_byte_array_free(in, TRUE);
+    return status;
+}
+
+static void rx_cut_short(void) {
+    if (rx.name) rx_undo(); /* what was in progress goes */
+}
+
+/*
+ * A file under Downloads that receive made, for --part: each folder on the way
+ * opened without following a link, the file too, and nothing created.
+ */
+static int rx_open_part(const char *path) {
+    if (!path_ok(path)) {
+        errno = EINVAL;
+        return -1;
+    }
+    char *copy = g_strdup(path);
+    int at = dup(rx.dir_fd);
+    char *p = copy;
+    for (char *slash; at >= 0 && (slash = strchr(p, '/')); p = slash + 1) {
+        *slash = 0;
+        int next = openat(at, p, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+        close(at);
+        at = next;
+    }
+    int fd = at >= 0 ? openat(at, p, O_WRONLY | O_NOFOLLOW | O_CLOEXEC) : -1;
+    if (at >= 0) close(at);
+    g_free(copy);
+    return fd;
+}
+
+static int part_fd = -1;
+
+static int part_frame(guint8 kind, const guint8 *p, gsize n) {
+    if (kind == 'O') {
+        char *path = g_strndup((const char *)p, n);
+        if (part_fd >= 0) close(part_fd);
+        errno = EINVAL;
+        part_fd = strlen(path) == n ? rx_open_part(path) : -1;
+        int result = part_fd < 0 ? rx_fail(path, errno) : 0;
+        g_free(path);
+        return result;
+    }
+    if (kind == 'P') {
+        if (part_fd < 0 || n < 8) return rx_fail("a part of a file", EPROTO);
+        off_t at = (off_t)be64(p);
+        for (gsize done = 8; done < n;) {
+            ssize_t w = pwrite(part_fd, p + done, n - done, at + (off_t)(done - 8));
+            if (w < 0 && errno == EINTR) continue;
+            if (w <= 0) return rx_fail("a part of a file", w < 0 ? errno : EIO);
+            done += (gsize)w;
+        }
+        return 0;
+    }
+    if (kind == 'C') {
+        if (part_fd >= 0) close(part_fd);
+        part_fd = -1;
+        rx_say("done", NULL, NULL);
+        return 0;
+    }
+    if (kind == 'Q') {
+        rx_say("bye", NULL, NULL);
+        return 1;
+    }
+    return rx_fail("a part of a file", EPROTO);
+}
+
+/* `receive --part`: a big file's share of bytes, beside the receive that made it (see above). */
+static int cmd_receive_part(void) {
+    signal(SIGPIPE, SIG_IGN);
+    rx.files = g_ptr_array_new_with_free_func(g_free);
+    rx.dirs = g_ptr_array_new_with_free_func(g_free);
+    if (!rx_open_downloads()) return 1;
+    rx_say("ready", NULL, NULL);
+    int status = rx_read_frames(part_frame, NULL);
+    if (part_fd >= 0) close(part_fd);
+    return status;
+}
+
+static int cmd_receive(void) {
+    signal(SIGPIPE, SIG_IGN);
+    rx.files = g_ptr_array_new_with_free_func(g_free);
+    rx.dirs = g_ptr_array_new_with_free_func(g_free);
+    if (!rx_open_downloads()) return 1;
+    struct statvfs fs;
+    guint64 room = fstatvfs(rx.dir_fd, &fs) == 0 ? (guint64)fs.f_bavail * fs.f_frsize : 0;
+    GString *s = g_string_new("{\"t\":\"ready\",\"dir\":");
+    json_string(s, rx.dir);
+    g_string_append_printf(s, ",\"free\":%" G_GUINT64_FORMAT "}", room);
+    send_text(s->str);
+    g_string_free(s, TRUE);
+    return rx_read_frames(rx_frame, rx_cut_short);
+}
+
+/* ── clip: the phone's clipboard, by hand ──────────────────────────────── */
+
+static gboolean clip_cli_wayland(gint fd, GIOCondition cond, gpointer d) {
+    if ((cond & (G_IO_ERR | G_IO_HUP | G_IO_NVAL)) || wl_display_dispatch(app.display) < 0) {
+        g_main_loop_quit(app.loop);
+        return G_SOURCE_REMOVE;
+    }
+    wl_display_flush(app.display);
+    return G_SOURCE_CONTINUE;
+}
+
+static gboolean clip_cli_enough(gpointer d) {
+    g_main_loop_quit(app.loop);
+    return G_SOURCE_REMOVE;
+}
+
+static const char *arg_value(int argc, char **argv, const char *name);
+
+static int cmd_clip(int argc, char **argv) {
+    const char *set = arg_value(argc, argv, "--set");
+    GString *why = g_string_new(NULL);
+    clipboard_only = TRUE;
+    if (!wayland_connect(why)) {
+        say("%s", why->str);
+        return 1;
+    }
+    clip_start();
+    if (!app.dc_device) return 1;
+    app.loop = g_main_loop_new(NULL, FALSE);
+    g_unix_fd_add(wl_display_get_fd(app.display), G_IO_IN | G_IO_HUP | G_IO_ERR, clip_cli_wayland, NULL);
+    if (set) {
+        clip_holding = TRUE;
+        clip_give(set, strlen(set));
+        g_timeout_add_seconds(600, clip_cli_enough, NULL);
+    } else {
+        app.clip_print = TRUE;
+        wl_display_roundtrip(app.display); /* the clipboard as it is, which starts the read */
+        if (!app.clip_reading) {
+            say("clip: there is no text on the phone's clipboard");
+            return 1;
+        }
+        g_timeout_add_seconds(6, clip_cli_enough, NULL);
+    }
+    g_main_loop_run(app.loop);
+    wl_display_disconnect(app.display);
+    return 0;
+}
+
 /* ── the computer's messages ───────────────────────────────────────────── */
 
 static void on_hello(const char *json) {
@@ -3505,6 +4812,8 @@ static void on_hello(const char *json) {
     g_atomic_int_set(&app.inflight, 0);
     app.last_ack = g_get_monotonic_time();
     g_atomic_int_set(&app.need_config, 1);
+    /* A window that comes says where its clipboard switch is once it shows the picture; not before. */
+    app.clip_share = FALSE;
     g_atomic_int_set(&app.attached, 1);
     send_state("running", NULL);
     force_keyframe();
@@ -3542,11 +4851,19 @@ static void on_text(const char *json) {
     } else if (strcmp(t, "bye") == 0) {
         /* The window went (pmos.rs says so); the screen stays for the next one. */
         g_atomic_int_set(&app.attached, 0);
+        app.clip_share = FALSE;
+        clip_read_stop();
         release_all();
     } else if (strcmp(t, "stop") == 0) {
         finish(0);
     } else if (strcmp(t, "resize") == 0) {
         on_resize(json);
+    } else if (strcmp(t, "clip") == 0) {
+        on_clip(json);
+    } else if (strcmp(t, "clipshare") == 0) {
+        on_clipshare(json);
+    } else if (strcmp(t, "drop") == 0) {
+        on_drop(json);
     }
     /* "hb" only feeds the watchdog. */
 }
@@ -3749,6 +5066,10 @@ static int cmd_probe(void) {
                                hd->current ? hd->current->h : 0, hd->scale, hd->x, hd->y);
     }
     g_string_append(s, "]}");
+    /* The clipboard (data-control) and handing dropped files to apps (layer shell, drag and drop). */
+    g_string_append_printf(s, ",\"dataControl\":\"%s\",\"layerShell\":%s,\"dataDevice\":%u",
+                           app.dc_ext ? "ext" : app.dc_wlr ? "wlr" : "", app.layer_shell ? "true" : "false",
+                           app.ddm ? app.ddm_version : 0);
     g_string_append(s, ",\"globals\":");
     json_string(s, app.globals ? app.globals->str : "");
     if (!wl) {
@@ -3832,6 +5153,7 @@ static int cmd_serve(void) {
     app.in = g_byte_array_new();
     app.keys_down = g_hash_table_new(NULL, NULL);
     app.last_rx = g_get_monotonic_time();
+    app.last_x = app.last_y = -1; /* the computer's pointer: not said yet */
     GString *why = g_string_new(NULL);
     if (!wayland_connect(why) || !make_screen(why)) {
         say("%s", why->str);
@@ -3858,13 +5180,17 @@ static int cmd_serve(void) {
     if (!app.wlr) dock();
     inhibit();
     here_start();
+    clip_start();
     {
+        /* What the window can count on: typing, the clipboard, files dropped handed to the app under them. */
         struct output *o = our_output();
         GString *s = g_string_new("{\"t\":\"ready\",\"output\":");
         json_string(s, o && o->name ? o->name : "");
-        g_string_append_printf(s, ",\"w\":%d,\"h\":%d,\"scale\":%.4f,\"encoder\":\"%s\",\"hw\":%s,\"keys\":%s}",
+        g_string_append_printf(s, ",\"w\":%d,\"h\":%d,\"scale\":%.4f,\"encoder\":\"%s\",\"hw\":%s,\"keys\":%s",
                                app.width, app.height, app.scale, app.encoder, app.hw ? "true" : "false",
                                (app.wlr ? app.vkeyboard != NULL : app.fake && app.fake_version >= 4) ? "true" : "false");
+        g_string_append_printf(s, ",\"clipboard\":%s,\"carry\":%s}", app.dc_device ? "true" : "false",
+                               can_carry() ? "true" : "false");
         send_text(s->str);
         g_string_free(s, TRUE);
     }
@@ -3987,8 +5313,16 @@ int main(int argc, char **argv) {
         adopt_session();
         return strcmp(cmd, "rest") == 0 ? cmd_rest() : cmd_guard();
     }
+    /* Files into Downloads: no desktop needed. */
+    if (strcmp(cmd, "receive") == 0)
+        return argc > 2 && strcmp(argv[2], "--part") == 0 ? cmd_receive_part() : cmd_receive();
+    if (strcmp(cmd, "clip") == 0) {
+        adopt_session();
+        return cmd_clip(argc, argv);
+    }
     if (strcmp(cmd, "probe") != 0 && strcmp(cmd, "serve") != 0 && strcmp(cmd, "snapshot") != 0) {
-        fprintf(stderr, "usage: openandroiddex-pmos version|probe|serve|snapshot|rest [--width W --height H --scale S]\n");
+        fprintf(stderr, "usage: openandroiddex-pmos version|probe|serve|snapshot|rest|receive|clip [--width W --height H "
+                        "--scale S]\n");
         return 2;
     }
     if (!parse_args(argc, argv)) return 2;

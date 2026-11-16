@@ -18,13 +18,13 @@ edge, Plasma 6.8, KWin 6.8.2) on 2026-11-13.
 
 | Piece | File | What it owns |
 | --- | --- | --- |
-| The phone's helper | `openandroiddex-pmos/src/main.c` | the virtual output (KWin) or headless output (Phosh), the encoder, fake or virtual input, the phone's keymap, keeping the phone awake, putting a Phosh phone back |
+| The phone's helper | `openandroiddex-pmos/src/main.c` | the virtual output (KWin) or headless output (Phosh), the encoder, fake or virtual input, the phone's keymap, keeping the phone awake, putting a Phosh phone back, the phone's end of the clipboard, dropped files into Downloads and onto the app under them |
 | KWin's script | `openandroiddex-pmos/src/here.js` | apps opened from a screen showing on that screen (KWin), see [Apps open where they are opened](#apps-open-where-they-are-opened) |
 | Building it | `openandroiddex-pmos/build.sh`, `cstring.sh`, `Dockerfile` | an x86_64 Alpine with clang and an aarch64 Alpine sysroot; here.js embedded as a C string; the binary goes to `prebuilt/` |
-| The computer's end | `src-tauri/src/pmos.rs` | which phone is on the cable, signing in, putting the helper there, the session, the window's WebSocket |
+| The computer's end | `src-tauri/src/pmos.rs` | which phone is on the cable, signing in, putting the helper there, the session, the window's WebSocket, a drop's copy (`pmos_put`) |
 | The Desktop tab | `src/features/pmos/usePmos.ts`, `DesktopPage.tsx` (`pmosContent`, `PmosAlso`), `PmosSignIn.tsx` | the phone's own flow beside the Android one, and its card on the Android screens |
 | The Linux tab | `src/features/pmos/PmosLinuxCard.tsx` | the same phone: sign in, Open desktop |
-| The window | `src/features/pmos/PmosDesktop.tsx` | `UsbDesktop` (usb-desktop.md) pointed at pmos.rs |
+| The window | `src/features/pmos/PmosDesktop.tsx` | `UsbDesktop` (usb-desktop.md) pointed at pmos.rs, with the clipboard (`clipboardShare.ts`) and drops (`DesktopCards.tsx`'s cards) as the phone's Linux window has them |
 
 ## The pipe
 
@@ -220,9 +220,11 @@ after the window says hello: 45–115 ms.
   it was locked, so it can't tell whether the phone is locked; the session's
   `org.freedesktop.ScreenSaver.GetActive` answered correctly when tried the
   same day.
-- Not here yet: the clipboard, files dropped on the window, sound, the Android
-  flow's Wi-Fi. A hardware encoder (Venus) would lift the frame rate; on this
-  phone its driver needs work first.
+- Not here yet: sound, the Android flow's Wi-Fi, files from the phone to this
+  computer. A hardware encoder (Venus) would lift the frame rate; on this
+  phone its driver needs work first. The clipboard and files dropped on the
+  window came with helper 5: see
+  [The clipboard and dropped files](#the-clipboard-and-dropped-files).
 
 ## Following the window
 
@@ -569,6 +571,211 @@ both times. Not done during a session: the keyboard moving between the two
 screens mid-session was not reproduced, and the real session's keyboard has
 not yet been restarted this way.
 
+## The clipboard and dropped files
+
+Since helper 5 the window shares the clipboard with the phone, and files
+dropped on it go to the phone, as the phone's Linux window does both
+(usb-desktop.md, "The window"): the same rules and the same switch on the pill
+(`clipboardShare.ts`, the phone being the guest), and the same cards in the
+corner (`DesktopCards.tsx`).
+
+### The clipboard
+
+The window's `clip` messages carry text both ways, as for the phone's Linux;
+the helper is the phone's end. A Wayland program sees the clipboard only while
+it has the keyboard, which the helper never has, so it uses data-control, the
+protocol clipboard managers use: the seat's clipboard at any time, and a way
+to set it. KWin 6.8 offers the standard one (`ext_data_control_manager_v1`),
+wlroots its older `zwlr_data_control_manager_v1` as well; the helper takes
+whichever there is, and says so in its `ready` (`"clipboard":true`). A phone
+without either shows no switch on the pill.
+
+- **Text only**, in the types toolkits ask for (`text/plain;charset=utf-8`,
+  `UTF8_STRING`, `text/plain`, `TEXT`, `STRING`). A picture or files on the
+  phone's clipboard stay there.
+- **No echo.** The computer's text carries a type of the helper's own beside
+  those (`application/x-openandroiddex-pmos`), so when the phone says its
+  clipboard is now that, it isn't sent back.
+- **Only what changes, only to a window.** The phone's text goes once a
+  window is open and when it changes: a window that opens hands the
+  computer's clipboard over (when it is in front), and the phone's older one
+  mustn't overwrite it.
+- **Off means nothing leaves the phone.** The window tells the helper where
+  its switch is (`{"t":"clipshare","on":…}`) once it shows the picture and
+  whenever the switch moves, and until it says on, the helper neither reads
+  nor sends what is copied on the phone. Off also takes the computer's text
+  off the phone's clipboard, if it is still there; something copied on the
+  phone since is left alone. (Until a review on 2026-11-16 found it, the
+  phone's text still crossed to this computer with the switch off, and only
+  the window threw it away. The phone's Linux, LinuxStream, ignores the word
+  and still sends its clipboard; the window drops it there as before.)
+- **Only into a window in front.** What the phone copies goes onto this
+  computer's clipboard 150 ms later (a selection being dragged out announces
+  itself many times), and only if the window is still in front then;
+  otherwise it waits for the window to come back, as anything copied while
+  it is elsewhere does (`clipboardShare.ts`). Before the same review, a window
+  sent to the back within those 150 ms still wrote it, over whatever was
+  copied in the app now in front; the fix serves the Linux window too.
+- **Sizes.** The window gives the phone up to 1 MiB at once (the helper takes
+  a message of up to 4 MiB, and JSON's escapes can double a text); the helper
+  sends up to 4 MiB, the window's limit for what comes in.
+- The computer's text goes with the helper: the phone's clipboard empties if
+  it still held it when the session ended, as Xvnc lets go of a client's.
+
+**KWin's serial rule.** KWin 6.8 gives a data-control selection the next
+serial (`display->nextSerial()`) and cancels an app's later copy whose serial
+is older (`SeatInterfacePrivate::updateSelection`, `serial <
+currentSelectionSerial`). An app copies with the serial of the input that
+asked for it (GTK: its latest key, button or touch), so Ctrl+C or a menu click
+after the computer's text arrived is newer, and takes the clipboard. In the
+nested test, where no input had reached the test app, its copies after the
+computer's text carried serial 0 and were all cancelled; with a key sent to it
+through the helper first, every one took.
+
+### Files dropped on the window
+
+A drop goes into the phone's Downloads (XDG_DOWNLOAD_DIR), whatever it lands
+on, through the helper's `receive`: pmos.rs starts it on a second channel of
+the session's own SSH connection, so there is no second login, nothing
+listening on the phone, and no SFTP server needed (the S24's dropbear has
+none). pmos.rs walks the drop as for the phone's Linux (dexremote's
+`sftp::plan`: folders whole, links and unreadable files counted and left) and
+sends it in frames (main.c, "Files from the computer"). On the phone:
+
+- **Nothing is replaced.** An item whose name is taken is called
+  "name (1).ext", as a browser names a second download ("backup (1).tar.gz",
+  "trip (1)"); every file and folder is made with `O_EXCL` or `mkdir`, nothing
+  is followed through a link, and paths are checked a part at a time (a `..`
+  is refused).
+- Times and permission bits come along (owner read and write always).
+- **All of an item or none.** One that doesn't finish (Cancel on the card,
+  the window or the session closing, a write failing) is taken back whole;
+  items that had landed stay.
+- Not enough room on the phone is refused before anything is sent.
+
+### Into the app under the drop
+
+Then the helper drops the landed files on the app where they were let go of,
+as a file manager would: into a browser's upload, a chat, a terminal (which
+types the path). Wayland lets a program start a drag only from a button
+pressed on a surface of its own. So the helper puts eight pixels of its own
+over everything at that point (a layer-shell surface, overlay layer), moves
+its pointer onto them (KWin's fake input; on wlroots, the virtual pointer),
+presses the button there, starts a drag carrying the files' `text/uri-list`,
+makes its pixels let the pointer through (an empty input region), moves the
+pointer a pixel and back so the compositor looks for what is under it, waits
+for the app there to accept (up to about a second: a browser asks its page
+first), and lets go. Then the pointer goes back where the computer had it.
+The card says which happened: "Dropped into the app on …" with "A copy is in
+Downloads there", or "Copied to Downloads on …" when nothing there takes
+files (the home screen, a window that doesn't). The helper says whether it can
+(`"carry":true` in its `ready`); without it a drop only lands in Downloads.
+
+The drop's place is Tauri's: the position of the webview's drop (physical
+pixels of the page; `ScreenToClient` on Windows) over the device pixel ratio,
+mapped onto the desktop the way the pointer is (`DesktopHost.point`, which the
+view hands over while it shows the desktop).
+
+### Speed
+
+The S24's SSH server is dropbear, which gives each channel a receive window of
+24 KB (its default `-W`). Over the cable one channel carried about 10 MB/s
+whatever this computer did: a file of 100,000,000 bytes took 10.1 s through the
+app (the app's log: copying at 16:46:08.646, landed at 16:46:18.747). More
+channels of the same connection at once carry more (from this computer with
+paramiko, `cat > /dev/null` on the phone, 2026-11-16):
+
+| Channels at once | MiB/s |
+| --- | --- |
+| 1 | 8.7 |
+| 2 | 22.6 |
+| 4 | 30.8 |
+| 8 | 38.5 |
+
+So a file of 4 MiB (4,194,304 bytes) or more goes in four shares at once,
+over four more channels of the session's one SSH connection, each running
+`receive --part`, opened at the first such file of a drop and kept for the
+rest of it. The main channel makes the file first and says so (`G`, which
+answers "opened"), and only then do the shares start: the channels are
+separate and nothing orders them, so a share could otherwise reach the phone
+before the file it writes into exists. (A review found that gap on
+2026-11-16; forced in a test, the share failed with "No such file or
+directory". A single file is made when it is named, so only big files inside
+a dropped folder were exposed.) Each share writes where it goes (`pwrite`),
+then the main channel says the bytes are all there and the helper checks the
+size. Through the app, the same 100,000,000 bytes took 5.0 s (copying at
+17:01:37.510, landed at 17:01:42.477, before the two small items of the same
+drop). Four rather than eight: OpenSSH, which other pmOS phones run, allows
+ten sessions on a connection by default (`MaxSessions`), and its 2 MB window
+makes one channel fast there anyway.
+
+### Checked
+
+On the S24 on 2026-11-16, in a private nested session as for here.js (its own
+KWin, bus and settings, Plasma Mobile's shell, a GTK 4 test app that copies,
+pastes and takes dropped files). First with a harness speaking for the
+computer:
+
+| Case | Result |
+| --- | --- |
+| The app copies (em dash, CJK, emoji, a newline) | the same 42 bytes to the computer |
+| The computer's text (quotes, backslashes, a tab, ü, an emoji) | the app pasted the same 61 bytes; nothing sent back |
+| The switch off (empty text) | the phone's clipboard empty; with the app's newer copy there, left alone |
+| No window, then a window again | nothing sent while none, nothing unasked when it came |
+| The window's switch: not said yet, on, off, on; a new window not saying yet, then on | sent while on only: 3 of the 6 copies |
+| 752,810 bytes both ways | byte for byte |
+| Two files, one with a Unicode name, dropped on the app | both URIs taken, 53 ms |
+| A folder dropped on the app | taken, 73 ms |
+| Dropped on the home screen | "nothing there takes files", after 1.3 s |
+| Dropped with a button held on the computer | not done |
+| After a drop | the pointer back where the computer had it |
+| `receive`: names taken, `.tar.gz`, a folder, Unicode, an empty file | "hello (1).txt", "backup (1).tar.gz", "trip (1)"; contents, times and modes kept |
+| `receive`: cancelled, cut off, a `..` | taken back whole, nothing left; refused |
+| `receive --part`: 24,129,593 bytes in four shares | byte for byte; a share outside Downloads refused; cancelled mid-way, taken back |
+| A share opening its file before the main `receive` made it (forced) | the share fails, the item is taken back; with `G` and "opened" first, 9,437,961 bytes in a folder in four shares, byte for byte |
+
+The window's clipboard rules run off the phone in `test/usb-desktop-test.mjs`
+(`clipboardShare.ts`): what the guest copies lands with the window in front;
+sent to the back within the 150 ms, it waits, and lands when the window comes
+back; a newer copy on this computer wins over it; and the phone's words and
+1 MiB limit beside Linux's 256 KiB.
+
+Then through the app: a separate development copy with a test identity, its
+helper pointed at the nested session (`OADX_PMOS_ENV`), the drops emitted into
+the window as Tauri's own drop events (paths and place). Two files dropped on
+the test app went into Downloads byte for byte and reached the app at the very
+point (desktop 500, 350, which was 300, 172 in its window, below its title
+bar); a folder, a Unicode name and a taken name dropped on the home screen
+landed as "Copied to Downloads", "notes (1).txt" among them; Cancel on the card
+during 100,000,000 bytes on one channel said "Copy stopped" and left nothing;
+with the four shares the same file arrived in 5.0 s with the bar moving. Cancel
+during the four shares first left their four `receive --part` waiting on the
+phone until the session ended (the channels were dropped, not closed); fixed,
+the same cancel at 40 % left none. Disconnect ended the helper, the script and
+the nested keyboard, leaving the real session's alone. The person at this
+computer used that window too: a PNG they dropped on its home screen arrived
+(1,082,942 bytes, a PNG of 1179 × 2556, its date kept; its size and header
+were checked, no checksum against the original), and bringing the window to
+the front put their clipboard on the phone (the helper logged 2,497 bytes).
+These runs were before the two fixes above (the switch, the share order); the
+fixes were checked with the harness and the test file, not through the app.
+
+### Not tested
+
+- Phosh: data-control and the layer shell are wlroots' too, but the S24 runs
+  Plasma.
+- The phone's own session, and its real apps (a browser's upload, a chat):
+  only the GTK 4 test app took drops.
+- The phone's text landing on this computer's clipboard: the helper sent it,
+  but this computer's foreground was a Windows prompt that kept the window
+  from coming to the front for the test, and the window holds the phone's
+  text until it is in front.
+- A drag from Explorer with this computer's mouse, apart from the person's
+  one drop.
+- The window sending its switch (`clipshare`) through the app: the helper's
+  side ran with the harness sending the word; the window's side was
+  type-checked only.
+
 ## Phosh
 
 Phosh's compositor, phoc, is wlroots, and has no virtual outputs to ask for.
@@ -688,6 +895,11 @@ this change (its code path is the same, but was not re-run on the Redmi), and
 a cable pulled.
 
 ## Testing over Wi-Fi
+
+`OADX_PMOS_ENV=<file on the phone>` makes each of the helper's commands
+source that shell file first: a test pointing the helper at another desktop on
+the phone than its own session, such as a nested KWin (its `WAYLAND_DISPLAY`,
+bus and folders). The checks of the clipboard and drops above ran that way.
 
 `OADX_PMOS_ADDRESS=<address>` (an IP or a name such as `redmi-note-7.local`)
 in the app's environment looks for the phone there instead of on the cable,

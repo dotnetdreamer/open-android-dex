@@ -24,6 +24,12 @@
 //!
 //! One phone at a time: every postmarketOS phone is 172.16.42.1 on its cable.
 //! Which one is plugged in is told by its SSH host key, which pairing pins.
+//!
+//! The clipboard rides the window's socket as `clip` messages, which the
+//! helper puts on the phone's clipboard and takes from it. Files dropped on the
+//! window go over a second channel of the same SSH connection, to the helper's
+//! `receive`, into the phone's Downloads; then the helper drops them on the app
+//! where they were let go of (`pmos_put`).
 
 use std::net::{Ipv4Addr, SocketAddr, UdpSocket};
 use std::path::PathBuf;
@@ -31,17 +37,19 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
+use dexremote::sftp::{self, CancellationToken};
 use russh::client::{self, Handle};
 use russh::keys::ssh_key::private::Ed25519Keypair;
 use russh::keys::{HashAlg, PrivateKey, PrivateKeyWithHashAlg, PublicKeyOrCertificate};
 use russh::ChannelMsg;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use tauri::ipc::Channel;
 use tauri::webview::NewWindowResponse;
 use tauri::{AppHandle, Emitter, Manager, Url, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{mpsc, oneshot, watch};
 
 /// The phone's end of postmarketOS's USB network. Every phone is this address
 /// on its own cable; the computer's end is given an address beside it.
@@ -62,6 +70,24 @@ fn wifi_address() -> Option<&'static str> {
         a
     })
     .as_deref()
+}
+
+/// A test of a desktop other than the phone's own session (a nested KWin on
+/// the phone, say): `OADX_PMOS_ENV` names a shell file on the phone that the
+/// helper's commands source first, setting its Wayland socket, session bus
+/// and folders. What it returns goes in front of each command run there.
+fn test_env() -> &'static str {
+    static ENV: OnceLock<String> = OnceLock::new();
+    ENV.get_or_init(|| {
+        let file = std::env::var("OADX_PMOS_ENV").ok().map(|f| f.trim().to_string()).filter(|f| !f.is_empty());
+        match file {
+            Some(f) if !f.contains('\'') => {
+                log::info!("pmos: the helper's commands source {f} on the phone first (OADX_PMOS_ENV)");
+                format!(". '{f}'; ")
+            }
+            _ => String::new(),
+        }
+    })
 }
 
 /// Which network the phone is looked for on, for the log.
@@ -505,6 +531,12 @@ struct Session {
     label: String,
     port: u16,
     token: String,
+    /// The phone's SSH: the helper's channel, and a channel for each drop's files beside it.
+    ssh: Arc<Handle<Pin>>,
+    /// What the phone's desktop lets the helper do, as it said when the screen was up:
+    /// the clipboard (Wayland's data-control), and dropping files on the app under them.
+    clipboard: bool,
+    carry: bool,
     /// Framed messages for the helper's stdin.
     to_helper: mpsc::UnboundedSender<Vec<u8>>,
     /// The window's socket while one is open, by its number: a new one takes over.
@@ -513,6 +545,10 @@ struct Session {
     end: watch::Sender<Option<String>>,
     /// The helper's output has ended: it has exited, or the link has gone.
     gone: watch::Sender<bool>,
+    /// The copy of a drop under way, to stop.
+    copy: Mutex<Option<CancellationToken>>,
+    /// Waiting for the helper to say whether the app under a drop took it.
+    dropped: Mutex<Option<oneshot::Sender<serde_json::Value>>>,
 }
 
 impl Session {
@@ -743,8 +779,11 @@ async fn launch(app: &AppHandle, phone: &Paired) -> Result<(), String> {
 
     let fit = fit(app);
     let command = format!(
-        "exec \"{HELPER_PATH}\" serve --width {} --height {} --scale {:.4} --cap {CAP}",
-        fit.width, fit.height, fit.scale
+        "{}exec \"{HELPER_PATH}\" serve --width {} --height {} --scale {:.4} --cap {CAP}",
+        test_env(),
+        fit.width,
+        fit.height,
+        fit.scale
     );
     log::info!("pmos: asking for a {}x{} screen at scale {:.3}", fit.width, fit.height, fit.scale);
     let channel = ssh.channel_open_session().await.map_err(|e| e.to_string())?;
@@ -813,10 +852,15 @@ async fn launch(app: &AppHandle, phone: &Paired) -> Result<(), String> {
         label: label_for(&phone.id),
         port,
         token: token.iter().map(|b| format!("{b:02x}")).collect(),
+        ssh: Arc::new(ssh),
+        clipboard: ready["clipboard"].as_bool().unwrap_or(false),
+        carry: ready["carry"].as_bool().unwrap_or(false),
         to_helper,
         window: Mutex::new(None),
         end,
         gone,
+        copy: Mutex::new(None),
+        dropped: Mutex::new(None),
     });
     *session().lock().unwrap() = Some(s.clone());
 
@@ -832,10 +876,10 @@ async fn launch(app: &AppHandle, phone: &Paired) -> Result<(), String> {
         s.finish("");
         *session().lock().unwrap() = None;
         tokio::time::sleep(Duration::from_millis(300)).await;
-        hang_up(&ssh).await;
+        hang_up(&s.ssh).await;
         return Err(format!("Couldn't open the desktop's window: {e}"));
     }
-    tauri::async_runtime::spawn(wind_down(app.clone(), s.clone(), ssh));
+    tauri::async_runtime::spawn(wind_down(app.clone(), s.clone()));
     tell(app, &s.id, &s.name, "running", Some(3), None);
     Ok(())
 }
@@ -883,6 +927,13 @@ async fn read_helper(mut read: russh::ChannelReadHalf, mut buf: Vec<u8>, s: Arc<
                     *why = msg["message"].as_str().unwrap_or_default().to_string();
                 }
             }
+            // The answer to a drop is pmos_put's, not the window's.
+            if kind == 0 && payload.starts_with(br#"{"t":"dropped""#) {
+                if let Some(waiting) = s.dropped.lock().unwrap().take() {
+                    let _ = waiting.send(serde_json::from_slice(&payload).unwrap_or_default());
+                }
+                continue;
+            }
             s.to_window(kind, payload);
         }
     };
@@ -920,7 +971,7 @@ async fn heartbeat(s: Arc<Session>) {
 
 /// Once the session ends, however it does: the phone let go of, the window
 /// closed, and the Desktop tab told why.
-async fn wind_down(app: AppHandle, s: Arc<Session>, ssh: Handle<Pin>) {
+async fn wind_down(app: AppHandle, s: Arc<Session>) {
     let mut end = s.end.subscribe();
     while end.borrow().is_none() {
         if end.changed().await.is_err() {
@@ -928,13 +979,17 @@ async fn wind_down(app: AppHandle, s: Arc<Session>, ssh: Handle<Pin>) {
         }
     }
     let why = end.borrow().clone().unwrap_or_default();
+    // A copy under way stops: what it was in the middle of is taken back on the phone.
+    if let Some(copy) = s.copy.lock().unwrap().as_ref() {
+        copy.cancel();
+    }
     // The helper's stop, written by write_helper, and then its end: before it
     // closes the screen it puts the screen's first mode back and takes its
     // custom modes away (kscreen-doctor, a second or so), and says so. A
     // hang-up before that loses its word; with the link gone it is at once.
     let mut gone = s.gone.subscribe();
     let _ = tokio::time::timeout(Duration::from_secs(4), gone.wait_for(|g| *g)).await;
-    hang_up(&ssh).await;
+    hang_up(&s.ssh).await;
     {
         let mut slot = session().lock().unwrap();
         if slot.as_ref().is_some_and(|c| Arc::ptr_eq(c, &s)) {
@@ -1007,6 +1062,10 @@ fn may_navigate(dev: Option<&Url>, url: &Url) -> bool {
 pub struct PmosLink {
     url: String,
     name: String,
+    /// The phone can share its clipboard: the window shows the switch for it.
+    clipboard: bool,
+    /// Files dropped on the window can be dropped on the app under them, not only saved in Downloads.
+    carry: bool,
 }
 
 /// From the phone's desktop window: the WebSocket to open. A window gets its
@@ -1017,7 +1076,468 @@ pub fn pmos_window_link(window: WebviewWindow, id: String) -> Result<PmosLink, S
     if window.label() != s.label || s.id != id {
         return Err("this window belongs to another phone".into());
     }
-    Ok(PmosLink { url: format!("ws://127.0.0.1:{}/stream/{}", s.port, s.token), name: s.name.clone() })
+    Ok(PmosLink {
+        url: format!("ws://127.0.0.1:{}/stream/{}", s.port, s.token),
+        name: s.name.clone(),
+        clipboard: s.clipboard,
+        carry: s.carry,
+    })
+}
+
+// ── files dropped on the window ──────────────────────────────────────────
+
+/// How a drop went: the copy into the phone's Downloads, in the report the
+/// Linux desktop's window reads (dexremote::sftp::Report), and whether the app
+/// it was dropped on took it.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PmosPut {
+    #[serde(flatten)]
+    report: sftp::Report,
+    /// Taken by the app under the drop; false when nothing there takes files;
+    /// null when it wasn't tried (nothing landed, or no place to drop it).
+    taken: Option<bool>,
+}
+
+/// One frame's worth of a file's bytes: about what SSH's window lets through at once.
+const CHUNK: usize = 256 * 1024;
+
+/// Files dropped on the phone's desktop window: into its Downloads, through
+/// the helper's `receive` on a channel of the session's own SSH connection
+/// (no second login, nothing listening, no SFTP server needed on the phone),
+/// then, given `at` (the drop's place in the picture's pixels), dropped on the
+/// app under it by the helper (main.c, "Files dropped on the window").
+/// `events` hears the copy's progress ten times a second. One copy per window
+/// at a time: the window queues the drops that come during one.
+#[tauri::command]
+pub async fn pmos_put(
+    window: WebviewWindow,
+    id: String,
+    paths: Vec<String>,
+    at: Option<[u32; 2]>,
+    events: Channel<sftp::Progress>,
+) -> Result<PmosPut, String> {
+    let s = current().ok_or("The phone's desktop has closed.")?;
+    if window.label() != s.label || s.id != id {
+        return Err("this window belongs to another phone".into());
+    }
+    let cancel = CancellationToken::new();
+    {
+        let mut copy = s.copy.lock().unwrap();
+        if copy.is_some() {
+            return Err("a copy is already running in this window".into());
+        }
+        *copy = Some(cancel.clone());
+    }
+    let paths: Vec<PathBuf> = paths.into_iter().map(PathBuf::from).collect();
+    log::info!("pmos: copying {} dropped item(s) to {}", paths.len(), s.name);
+    let result = put(&s, &paths, &events, &cancel).await;
+    s.copy.lock().unwrap().take();
+    let (report, uris) = result.inspect_err(|e| log::warn!("pmos: the copy failed: {e}"))?;
+    log::info!(
+        "pmos: {} {} file(s), {} bytes, to {}{}",
+        if report.cancelled { "stopped after" } else { "copied" },
+        report.files,
+        report.bytes,
+        report.dir,
+        if report.links + report.unreadable > 0 {
+            format!(" ({} links, {} unreadable, left out)", report.links, report.unreadable)
+        } else {
+            String::new()
+        }
+    );
+    let taken = match at {
+        Some([x, y]) if s.carry && !uris.is_empty() && !report.cancelled && !s.ended() => drop_on_app(&s, x, y, &uris).await,
+        _ => None,
+    };
+    Ok(PmosPut { report, taken })
+}
+
+/// Stop the copy a window has under way. What it was in the middle of is
+/// taken back on the phone; what had landed stays.
+#[tauri::command]
+pub fn pmos_put_cancel(window: WebviewWindow) {
+    if let Some(s) = current().filter(|s| s.label == window.label()) {
+        if let Some(copy) = s.copy.lock().unwrap().as_ref() {
+            copy.cancel();
+        }
+    }
+}
+
+/// A file's 'F' frame for `receive` (main.c): its size, its time, its permissions, its path in the item.
+fn file_head(f: &sftp::LocalFile) -> Vec<u8> {
+    let mut head = Vec::with_capacity(20 + f.rel.len());
+    head.extend_from_slice(&f.size.to_be_bytes());
+    head.extend_from_slice(&i64::from(f.mtime.unwrap_or(0)).to_be_bytes());
+    head.extend_from_slice(&f.mode.to_be_bytes());
+    head.extend_from_slice(f.rel.as_bytes());
+    head
+}
+
+/// Files of this size (4 MiB, 4,194,304 bytes) or more go over several channels
+/// of the session's one SSH connection at once. The phone's SSH server
+/// (dropbear) gives each channel a window of 24 KB: on the Galaxy S24's cable
+/// one channel carried about 8.7 MiB/s, two 22.6, four 30.8, eight 38.5
+/// (2026-11-16). Four, opened at the first big file of a drop and kept for the
+/// rest of it.
+const PART_MIN: u64 = 4 << 20;
+const PARTS: u64 = 4;
+
+/// A channel to the helper's `receive` (or `receive --part`): frames out, its JSON words back.
+struct Receiver {
+    write: russh::ChannelWriteHalf<client::Msg>,
+    answers: mpsc::UnboundedReceiver<serde_json::Value>,
+}
+
+impl Receiver {
+    async fn open(s: &Session, part: bool) -> Result<Self, String> {
+        let channel = s.ssh.channel_open_session().await.map_err(|e| format!("The phone didn't take the files: {e}"))?;
+        let command = format!("{}exec \"{HELPER_PATH}\" receive{}", test_env(), if part { " --part" } else { "" });
+        channel.exec(true, command).await.map_err(|e| format!("The phone didn't take the files: {e}"))?;
+        let (mut read, write) = channel.split();
+        let (tx, answers) = mpsc::unbounded_channel();
+        tauri::async_runtime::spawn(async move {
+            let mut buf = Vec::new();
+            while let Some(msg) = read.wait().await {
+                match msg {
+                    ChannelMsg::Data { data } => {
+                        buf.extend_from_slice(&data);
+                        while let Some((kind, payload)) = take_frame(&mut buf) {
+                            if kind == 0 {
+                                let _ = tx.send(serde_json::from_slice(&payload).unwrap_or_default());
+                            }
+                        }
+                    }
+                    ChannelMsg::ExtendedData { data, .. } => {
+                        for line in phone_lines(&String::from_utf8_lossy(&data)) {
+                            log::info!("pmos: phone: {line}");
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        });
+        Ok(Receiver { write, answers })
+    }
+
+    /// One whole frame. Never cut short: the phone would read the rest as another.
+    async fn send(&self, kind: u8, payload: &[u8]) -> Result<(), String> {
+        self.write.data(&frame(kind, payload)[..]).await.map_err(|_| "The phone stopped taking the files.".to_string())
+    }
+
+    async fn next(&mut self, limit: Duration) -> Result<serde_json::Value, String> {
+        match tokio::time::timeout(limit, self.answers.recv()).await {
+            Ok(Some(m)) if m["t"] == "error" => {
+                Err(m["message"].as_str().unwrap_or("The phone couldn't save the files.").to_string())
+            }
+            Ok(Some(m)) => Ok(m),
+            Ok(None) => Err("The phone stopped taking the files.".into()),
+            Err(_) => Err("The phone took too long to answer.".into()),
+        }
+    }
+
+    /// The next word that is `t`, past any others.
+    async fn wait_for(&mut self, t: &str, limit: Duration) -> Result<serde_json::Value, String> {
+        loop {
+            let m = self.next(limit).await?;
+            if m["t"] == t {
+                return Ok(m);
+            }
+        }
+    }
+
+    /// An error the phone has already said, without waiting for one.
+    fn failed(&mut self) -> Option<String> {
+        while let Ok(m) = self.answers.try_recv() {
+            if m["t"] == "error" {
+                return Some(m["message"].as_str().unwrap_or("The phone couldn't save the files.").to_string());
+            }
+        }
+        None
+    }
+
+    /// Done with it: "that was all", then the channel's end.
+    async fn close(mut self) {
+        if self.send(b'Q', &[]).await.is_ok() {
+            let _ = self.wait_for("bye", Duration::from_secs(5)).await;
+        }
+        let _ = self.write.eof().await;
+    }
+}
+
+fn read_error(name: &str, e: impl std::fmt::Display) -> String {
+    sftp::PutError::Read { name: name.to_string(), why: e.to_string() }.to_string()
+}
+
+/// One share of a big file, `len` bytes from `start`, over a `receive --part`
+/// channel into `remote` (its path under the phone's Downloads). Hands the
+/// channel back with how it went.
+#[allow(clippy::too_many_arguments)]
+async fn send_share(
+    mut chan: Receiver,
+    local: PathBuf,
+    name: String,
+    remote: String,
+    start: u64,
+    len: u64,
+    done: Arc<AtomicU64>,
+    stop: CancellationToken,
+) -> (Receiver, Result<(), String>) {
+    let result = async {
+        let mut file = tokio::fs::File::open(&local).await.map_err(|e| read_error(&name, e))?;
+        tokio::io::AsyncSeekExt::seek(&mut file, std::io::SeekFrom::Start(start)).await.map_err(|e| read_error(&name, e))?;
+        chan.send(b'O', remote.as_bytes()).await?;
+        let mut reader = file.take(len);
+        let mut payload = vec![0u8; 8 + CHUNK];
+        let mut at = start;
+        while at < start + len {
+            let n = reader.read(&mut payload[8..]).await.map_err(|e| read_error(&name, e))?;
+            if n == 0 {
+                return Err(read_error(&name, "it got shorter while it was being copied"));
+            }
+            payload[..8].copy_from_slice(&at.to_be_bytes());
+            chan.send(b'P', &payload[..8 + n]).await?;
+            at += n as u64;
+            done.fetch_add(n as u64, Ordering::Relaxed);
+            if stop.is_cancelled() {
+                return Err(String::new());
+            }
+            if let Some(why) = chan.failed() {
+                return Err(why);
+            }
+        }
+        chan.send(b'C', &[]).await?;
+        chan.wait_for("done", Duration::from_secs(60)).await.map(|_| ())
+    }
+    .await;
+    (chan, result)
+}
+
+/// The copy itself: what landed, and each landed item's file:// URI on the phone.
+async fn put(
+    s: &Session,
+    paths: &[PathBuf],
+    events: &Channel<sftp::Progress>,
+    cancel: &CancellationToken,
+) -> Result<(sftp::Report, Vec<String>), String> {
+    let owned = paths.to_vec();
+    let plan = tokio::task::spawn_blocking(move || sftp::plan(&owned))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())?;
+    let mut main = Receiver::open(s, false).await?;
+    let ready = main.next(Duration::from_secs(15)).await?;
+    let dir = ready["dir"].as_str().unwrap_or("Downloads").to_string();
+    let free = ready["free"].as_u64().unwrap_or(0);
+    if free > 0 && plan.bytes > free {
+        main.close().await;
+        return Err(sftp::PutError::NoRoom { needed: plan.bytes, free }.to_string());
+    }
+    let mut report = sftp::Report { dir, links: plan.links, unreadable: plan.unreadable, ..Default::default() };
+    let mut uris = Vec::new();
+    let mut progress = sftp::Progress { files_total: plan.files, bytes_total: plan.bytes, ..Default::default() };
+    let mut told = Instant::now();
+    let _ = events.send(progress.clone());
+    // The channels for big files' shares, once there is one.
+    let mut pool: Vec<Receiver> = Vec::new();
+
+    let outcome: Result<(), String> = async {
+        for item in &plan.items {
+            // A single file this computer won't open is counted and left, as before it was ever claimed there.
+            let mut first = None;
+            if !item.is_dir {
+                match tokio::fs::File::open(&item.files[0].path).await {
+                    Ok(f) => first = Some(f),
+                    Err(_) => {
+                        report.unreadable += 1;
+                        progress.files_done += 1;
+                        progress.bytes_done += item.files[0].size;
+                        continue;
+                    }
+                }
+            }
+            let mut head = vec![u8::from(item.is_dir)];
+            head.extend_from_slice(item.name.as_bytes());
+            main.send(b'I', &head).await?;
+            // Its name there, for the shares of a big file in it.
+            let claimed = if item.files.iter().any(|f| f.size >= PART_MIN) {
+                let m = main.wait_for("claimed", Duration::from_secs(30)).await?;
+                m["name"].as_str().unwrap_or_default().to_string()
+            } else {
+                String::new()
+            };
+            for d in &item.dirs {
+                main.send(b'D', d.rel.as_bytes()).await?;
+            }
+            let (mut files, mut bytes) = (0u64, 0u64);
+            for f in &item.files {
+                let local = match first.take() {
+                    Some(opened) => opened,
+                    None => match tokio::fs::File::open(&f.path).await {
+                        Ok(opened) => opened,
+                        Err(_) => {
+                            report.unreadable += 1;
+                            progress.files_done += 1;
+                            progress.bytes_done += f.size;
+                            continue;
+                        }
+                    },
+                };
+                progress.current = f.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                let in_shares = f.size >= PART_MIN && !claimed.is_empty();
+                // A file that goes in shares is made first ('G' answers "opened"): the shares'
+                // channels are separate from this one, and nothing orders them, so a share could
+                // otherwise reach the phone before the file it writes into exists.
+                main.send(if in_shares { b'G' } else { b'F' }, &file_head(f)).await?;
+                if in_shares {
+                    main.wait_for("opened", Duration::from_secs(30)).await?;
+                    // Its bytes in shares, over the pool's channels at once; then "they are there".
+                    drop(local);
+                    while (pool.len() as u64) < PARTS {
+                        let mut part = Receiver::open(s, true).await?;
+                        part.wait_for("ready", Duration::from_secs(15)).await?;
+                        pool.push(part);
+                    }
+                    let remote = if item.is_dir { format!("{claimed}/{}", f.rel) } else { claimed.clone() };
+                    let done = Arc::new(AtomicU64::new(0));
+                    let stop = cancel.child_token();
+                    let share = f.size.div_ceil(PARTS);
+                    let mut shares = tokio::task::JoinSet::new();
+                    for (i, chan) in pool.drain(..).enumerate() {
+                        let start = i as u64 * share;
+                        let len = share.min(f.size.saturating_sub(start));
+                        let name = progress.current.clone();
+                        shares.spawn(send_share(chan, f.path.clone(), name, remote.clone(), start, len, done.clone(), stop.clone()));
+                    }
+                    let before = progress.bytes_done;
+                    let mut failure: Option<String> = None;
+                    let mut tick = tokio::time::interval(Duration::from_millis(100));
+                    loop {
+                        tokio::select! {
+                            joined = shares.join_next() => match joined {
+                                None => break,
+                                Some(Ok((chan, result))) => {
+                                    pool.push(chan);
+                                    if let Err(why) = result {
+                                        stop.cancel();
+                                        failure.get_or_insert(why);
+                                    }
+                                }
+                                Some(Err(e)) => {
+                                    stop.cancel();
+                                    failure.get_or_insert(e.to_string());
+                                }
+                            },
+                            _ = tick.tick() => {
+                                progress.bytes_done = before + done.load(Ordering::Relaxed);
+                                let _ = events.send(progress.clone());
+                            }
+                        }
+                    }
+                    progress.bytes_done = before + done.load(Ordering::Relaxed);
+                    // Stopped or failed: the pool's channels are still closed below (only whole frames
+                    // ever went on them), so no `receive --part` is left waiting on the phone.
+                    if let Some(why) = failure {
+                        return Err(why);
+                    }
+                    if cancel.is_cancelled() {
+                        return Err(String::new());
+                    }
+                    main.send(b'S', &[]).await?;
+                    files += 1;
+                    bytes += f.size;
+                    progress.files_done += 1;
+                    continue;
+                }
+                // Exactly the size announced: a file that changes under the copy is caught, not half sent.
+                let mut reader = local.take(f.size);
+                let mut sent = 0u64;
+                let mut chunk = vec![0u8; CHUNK];
+                while sent < f.size {
+                    let n = tokio::select! {
+                        n = reader.read(&mut chunk) => n.map_err(|e| read_error(&progress.current, e))?,
+                        _ = cancel.cancelled() => return Err(String::new()),
+                    };
+                    if n == 0 {
+                        return Err(read_error(&progress.current, "it got shorter while it was being copied"));
+                    }
+                    // Whole frames only: a write cut short would leave the phone reading half of one.
+                    main.send(b'B', &chunk[..n]).await?;
+                    if cancel.is_cancelled() {
+                        return Err(String::new());
+                    }
+                    sent += n as u64;
+                    progress.bytes_done += n as u64;
+                    if told.elapsed() >= Duration::from_millis(100) {
+                        told = Instant::now();
+                        let _ = events.send(progress.clone());
+                        if let Some(why) = main.failed() {
+                            return Err(why);
+                        }
+                    }
+                }
+                files += 1;
+                bytes += sent;
+                progress.files_done += 1;
+            }
+            main.send(b'E', &i64::from(item.mtime.unwrap_or(0)).to_be_bytes()).await?;
+            let landed = main.wait_for("landed", Duration::from_secs(30)).await?;
+            report.landed.push(landed["name"].as_str().unwrap_or(&item.name).to_string());
+            if let Some(uri) = landed["uri"].as_str().filter(|u| !u.is_empty()) {
+                uris.push(uri.to_string());
+            }
+            report.files += files;
+            report.bytes += bytes;
+            let _ = events.send(progress.clone());
+            if cancel.is_cancelled() {
+                return Err(String::new());
+            }
+        }
+        Ok(())
+    }
+    .await;
+
+    for part in pool {
+        part.close().await;
+    }
+    if let Err(why) = outcome {
+        // Cancelled (no words), or failed: the item under way is taken back on the phone.
+        if main.send(b'X', &[]).await.is_ok() {
+            let _ = main.wait_for("undone", Duration::from_secs(5)).await;
+        }
+        main.close().await;
+        if !why.is_empty() {
+            return Err(why);
+        }
+        report.cancelled = true;
+        return Ok((report, uris));
+    }
+    main.close().await;
+    Ok((report, uris))
+}
+
+/// The landed files, dropped by the helper where the window had them dropped.
+async fn drop_on_app(s: &Session, x: u32, y: u32, uris: &[String]) -> Option<bool> {
+    let (tx, rx) = oneshot::channel();
+    *s.dropped.lock().unwrap() = Some(tx);
+    let list: String = uris.iter().map(|u| format!("{u}\r\n")).collect();
+    let ask = serde_json::json!({ "t": "drop", "x": x, "y": y, "uris": list });
+    s.to_helper(0, ask.to_string().as_bytes());
+    match tokio::time::timeout(Duration::from_secs(8), rx).await {
+        Ok(Ok(answer)) => {
+            let taken = answer["taken"].as_bool();
+            match answer["why"].as_str() {
+                Some(why) if taken != Some(true) => log::info!("pmos: the drop stayed in Downloads: {why}"),
+                _ => log::info!("pmos: the app under the drop took it"),
+            }
+            taken
+        }
+        _ => {
+            s.dropped.lock().unwrap().take();
+            log::info!("pmos: the phone didn't say whether the app under the drop took it");
+            None
+        }
+    }
 }
 
 /// The window's WebSocket: one at a time, a new one taking over from the old.
@@ -1261,6 +1781,25 @@ mod tests {
     fn noise_is_left_out_of_the_log() {
         let text = "\n(openandroiddex-pmos:1): GStreamer-CRITICAL **: x\nopenandroiddex-pmos: video: x264enc\n";
         assert_eq!(phone_lines(text).collect::<Vec<_>>(), vec!["video: x264enc"]);
+    }
+
+    #[test]
+    fn a_files_header_is_what_receive_reads() {
+        // main.c's rx_frame: [u64 size][i64 mtime][u32 mode][path], big-endian.
+        let f = sftp::LocalFile {
+            rel: "photos/ünï.jpg".into(),
+            path: PathBuf::from("x"),
+            size: 0x0102_0304_0506,
+            mtime: Some(1_700_000_000),
+            mode: 0o644,
+        };
+        let h = file_head(&f);
+        assert_eq!(&h[..8], &[0, 0, 1, 2, 3, 4, 5, 6]);
+        assert_eq!(&h[8..16], &1_700_000_000i64.to_be_bytes());
+        assert_eq!(&h[16..20], &[0, 0, 1, 0xa4]);
+        assert_eq!(&h[20..], "photos/ünï.jpg".as_bytes());
+        // A file with no time: 0, which the phone leaves as the time it was written.
+        assert_eq!(&file_head(&sftp::LocalFile { mtime: None, ..f })[8..16], &[0; 8]);
     }
 
     #[test]

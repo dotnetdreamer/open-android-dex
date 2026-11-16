@@ -12,7 +12,7 @@ out, is [`doc/pmos-desktop.md`](../doc/pmos-desktop.md).
 
 | file | |
 | --- | --- |
-| `src/main.c` | the whole program: KWin's virtual output and fake input; Phosh's headless output, screencopy and virtual pointer and keyboard; the phone's keymap, the GStreamer pipeline, the framed messages on stdin and stdout, the inhibitions that keep the phone awake; on KWin, the session bus service for `here.js` |
+| `src/main.c` | the whole program: KWin's virtual output and fake input; Phosh's headless output, screencopy and virtual pointer and keyboard; the phone's keymap, the GStreamer pipeline, the framed messages on stdin and stdout, the inhibitions that keep the phone awake; the clipboard (data-control); files from the computer into Downloads, and dropped on the app under them; on KWin, the session bus service for `here.js` |
 | `src/here.js` | a KWin script, loaded while the computer has the screen, that makes an app opened from a screen show on that screen |
 | `protocols/virtual-keyboard-unstable-v1.xml` | the virtual keyboard protocol, which no Alpine package ships, copied from wlroots 0.19.0 (MIT) |
 | `Dockerfile` | the build environment: x86_64 Alpine with clang and the Wayland scanner, and an aarch64 Alpine sysroot with the phone's libraries |
@@ -44,6 +44,8 @@ openandroiddex-pmos probe
 openandroiddex-pmos snapshot --width 1920 --height 1080 --scale 1 --out /tmp/screen.png --wait 3
 openandroiddex-pmos serve --width 1920 --height 1080 --scale 1
 openandroiddex-pmos rest
+openandroiddex-pmos clip
+openandroiddex-pmos clip --set "some text"
 ```
 
 `probe` prints one line of JSON: whether KWin offers the virtual output and
@@ -54,7 +56,11 @@ it (KWin only; on Phosh, `grim -o HEADLESS-1` does it). `serve` speaks the
 framed messages on stdin and stdout that pmos.rs expects, and ends when stdin
 closes or after fifteen seconds without a message. `rest` puts Plasma
 Mobile's docked mode back as the phone had it, and turns Phosh's headless
-output off and gives the phone's panel the shell back.
+output off and gives the phone's panel the shell back. `clip` prints the
+text on the phone's clipboard, and `clip --set` puts some there until
+something else is copied, for looking at the clipboard by hand (the phone
+may have no `wl-paste`). `receive` is for the app: it takes the files dropped
+on the window on its stdin (below).
 
 On Phosh, `serve` also writes two files in the user's home, once: a marked
 block in `~/.phoshdebug` that adds wlroots' headless output to the session
@@ -92,6 +98,17 @@ keyboard after a session".
 clock) and encodes with one x264 thread there; it logs the frames it sent
 every ten seconds while the screen moves. Why: doc/pmos-desktop.md, "The
 Galaxy S24's cores".
+
+While a window is open, `serve` shares the clipboard both ways: it puts the
+computer's text on the phone's clipboard and sends what is copied on the
+phone, through Wayland's data-control (the standard `ext-data-control-v1`,
+else wlroots' own), text only. Files dropped on the window come over a second
+channel of the same SSH connection to `receive`, which saves them in the
+user's Downloads without replacing anything ("report (1).pdf"), and those of
+4 MiB or more over four more channels of that connection at once (`receive
+--part`); then `serve` drops them on the
+app where they were let go of, with a drag of its own. Why and how:
+doc/pmos-desktop.md, "The clipboard and dropped files".
 
 The phone needs `gst-plugins-base` and `gst-plugins-ugly` (x264), and on
 Plasma `gst-plugin-pipewire`. The Plasma Mobile install on the phone this was
