@@ -38,8 +38,41 @@ final class PhoneContext extends ContextWrapper {
         if (instance == null) {
             instance = new PhoneContext(systemContext());
             giveTheThreadAnApplication(instance);
+            giveMediaTeksCacheAContext(instance);
         }
         return instance;
+    }
+
+    /**
+     * MediaTek's drawable cache (com.mediatek.res.AsyncDrawableCache) asks the
+     * context in the static ResourcesImpl.mAppContext which process it is in,
+     * for every drawable it would cache. An app's process is handed that
+     * context as it starts; app_process never is, and the null pointer took
+     * the icons drawn through the cache with it: on a Redmi 9A (MIUI 12,
+     * Android 11), Google Calendar's and choisy's, and the platform's default
+     * icon. The context given names the system's process, which the cache
+     * leaves alone, as it does system_server; only the cache sees it. The
+     * field is MediaTek's: elsewhere there is nothing to do.
+     */
+    private static void giveMediaTeksCacheAContext(Context base) {
+        try {
+            Field f = Class.forName("android.content.res.ResourcesImpl").getDeclaredField("mAppContext");
+            if (!java.lang.reflect.Modifier.isStatic(f.getModifiers())) return;
+            f.setAccessible(true);
+            if (f.get(null) != null) return;
+            f.set(null, new ContextWrapper(base) {
+                @Override
+                public android.content.pm.ApplicationInfo getApplicationInfo() {
+                    android.content.pm.ApplicationInfo info = new android.content.pm.ApplicationInfo(super.getApplicationInfo());
+                    info.processName = "system";
+                    return info;
+                }
+            });
+        } catch (NoSuchFieldException notMediaTek) {
+            // nothing to do
+        } catch (Throwable t) {
+            System.out.println("apps: MediaTek's drawable cache has no context (" + t + ") — some icons may be missing");
+        }
     }
 
     /**
