@@ -35,8 +35,9 @@ MSYS_NO_PATHCONV=1 docker run --rm -v "$HOST_DIR:/src" -w /src "$IMAGE" sh -euc 
     wayland-scanner client-header "$xml" "$gen/$base-client-protocol.h"
     wayland-scanner private-code "$xml" "$gen/$base-protocol.c"
   done
-  # The KWin script the program hands KWin (see src/here.js), as a C string.
+  # The KWin scripts the program hands KWin (see src/here.js, src/app.js), as C strings.
   sh cstring.sh HERE_JS src/here.js >"$gen/here-js.h"
+  sh cstring.sh APP_JS src/app.js >"$gen/app-js.h"
   export PKG_CONFIG_SYSROOT_DIR=/sysroot
   export PKG_CONFIG_LIBDIR=/sysroot/usr/lib/pkgconfig:/sysroot/usr/share/pkgconfig
   pkgs="wayland-client xkbcommon gio-unix-2.0 gstreamer-1.0 gstreamer-app-1.0 gstreamer-video-1.0"

@@ -20,11 +20,13 @@ edge, Plasma 6.8, KWin 6.8.2) on 2026-11-13.
 | --- | --- | --- |
 | The phone's helper | `openandroiddex-pmos/src/main.c` | the virtual output (KWin) or headless output (Phosh), the encoder, fake or virtual input, the phone's keymap, keeping the phone awake, putting a Phosh phone back, the phone's end of the clipboard, dropped files into Downloads and onto the app under them |
 | KWin's script | `openandroiddex-pmos/src/here.js` | apps opened from a screen showing on that screen (KWin), see [Apps open where they are opened](#apps-open-where-they-are-opened) |
-| Building it | `openandroiddex-pmos/build.sh`, `cstring.sh`, `Dockerfile` | an x86_64 Alpine with clang and an aarch64 Alpine sysroot; here.js embedded as a C string; the binary goes to `prebuilt/` |
+| One app's script | `openandroiddex-pmos/src/app.js` | one app's windows on a screen of its own, full screen, and back to the phone's screen, see [One app in a window of its own](#one-app-in-a-window-of-its-own) |
+| Building it | `openandroiddex-pmos/build.sh`, `cstring.sh`, `Dockerfile` | an x86_64 Alpine with clang and an aarch64 Alpine sysroot; here.js and app.js embedded as C strings; the binary goes to `prebuilt/` |
 | The computer's end | `src-tauri/src/pmos.rs` | which phone is on the cable, signing in, putting the helper there, the session, the window's WebSocket, a drop's copy (`pmos_put`) |
 | The Desktop tab | `src/features/pmos/usePmos.ts`, `DesktopPage.tsx` (`pmosContent`, `PmosAlso`), `PmosSignIn.tsx` | the phone's own flow beside the Android one, and its card on the Android screens |
 | The Linux tab | `src/features/pmos/PmosLinuxCard.tsx` | the same phone: sign in, Open desktop |
-| The window | `src/features/pmos/PmosDesktop.tsx` | `UsbDesktop` (usb-desktop.md) pointed at pmos.rs, with the clipboard (`clipboardShare.ts`) and drops (`DesktopCards.tsx`'s cards) as the phone's Linux window has them |
+| The window | `src/features/pmos/PmosDesktop.tsx` | `UsbDesktop` (usb-desktop.md) pointed at pmos.rs, with the clipboard (`clipboardShare.ts`) and drops (`DesktopCards.tsx`'s cards) as the phone's Linux window has them; an app's window too |
+| The Apps tab | `src/features/pmos/PmosApps.tsx`, `src/features/desktop/PhoneSwitcher.tsx` | the phone's apps, each opened in a window of its own; which phone the tabs are about |
 
 ## The pipe
 
@@ -781,6 +783,97 @@ fixes were checked with the harness and the test file, not through the app.
 - The window sending its switch (`clipshare`) through the app: the helper's
   side ran with the harness sending the word; the window's side was
   type-checked only.
+
+## One app in a window of its own
+
+The Apps tab lists the phone's apps once the postmarketOS phone is chosen at
+the top of the window (`PhoneSwitcher.tsx`), and opens each in a window of its
+own, as it does an Android phone's apps (apps-on-pc.md). Closing the window
+puts the app back on the phone's own screen; closing the app on the phone
+closes the window.
+
+- **The list** is the helper's `apps` command: the desktop files that should
+  show (`g_app_info_should_show`), without Terminal apps and our own, each
+  with its icon from the icon theme (kdeglobals' theme, then GSettings', then
+  their `Inherits`, then hicolor; SVG or the PNG nearest 256 px) as base64.
+- **A window** is `serve --app <desktop id> --name OADX-App-<slot>` over a new
+  SSH channel (`pmos_open_app`): a virtual output of its own, sized for the
+  window (1024 × 720 at this computer's scale) and streamed as the desktop's
+  is, into a window built like the desktop's (`PmosDesktop.tsx`), titled by
+  the app's window and given the app's icon. Up to eight at once, beside the
+  desktop's. Not "OpenAndroidDeX…": the helper finds its output by that
+  substring. Docked mode, `here.js`, the bus name and the keyboard restart
+  stay the desktop's. KWin only: Phosh has no way to put a window on a
+  screen.
+- **app.js**, a second KWin script (the helper prepends a `CONFIG`: its bus
+  name, the screen, the app, the window classes it may go by), brings the
+  app's window over if it has one, else the helper starts it as the drawer
+  does (`DBusActivatable` over D-Bus, else its `Exec`) and the script brings
+  its first window. The main window goes full screen, so the computer's
+  window shows the app alone; dialogs follow their window. When none of the
+  app's windows has been on the screen for 1.5 s, the helper says "stopped"
+  and the window closes.
+- **Handing back.** Before the screen goes, the helper unloads app.js and runs
+  it again as `back`: the windows on the screen go to the phone's screen (the
+  one KWin doesn't name `Virtual-…`), the app's out of full screen, and the
+  script calls `Back`, which the helper waits up to 4 s for. Left to KWin,
+  the windows went full screen to a screen of its choosing as the screen
+  went: with the desktop open, Calculator covered the desktop's screen
+  (1920 × 1020 at x = 393).
+
+What cost time to learn (KWin 6.8, Plasma Mobile, the S24, 2026-11-16):
+
+- **Plasma Mobile's `convergentwindows` undid the moves.** Outside docked
+  mode, this KWin script of Plasma Mobile's sizes a window to its screen of
+  the moment and maximizes it: when the window is added or activated, when
+  the window last activated goes in or out of full screen or maximized, and
+  for every window when screens come or go; a full-screen window keeps its
+  geometry. KWin applies a move to another screen when the app answers the
+  configure that asks for it, and until then the window is still on the
+  phone's screen, which is what the script sizes it to. That is the
+  explanation that fits what polling showed (the move undone, full screen
+  landing on the phone at 393 × 851); KWin's side wasn't traced. With the
+  desktop open, docked mode is on and the script leaves geometry alone,
+  which is why the first test, with the desktop open, passed. Before the fix,
+  of five opens through the app with the desktop closed, three never showed
+  the app (the window showed the phone's home screen: two captured, one seen
+  by polling), and none of the five hand-backs worked: the window wasn't on
+  the app's screen to hand back, or didn't get off it before the screen
+  went. Where it was checked afterwards, the app was full screen on the
+  phone.
+- So app.js places a window and then looks again every 200 ms until it has
+  stayed on the right screen, in the right state, for 400 ms (at most 8 s;
+  3 s when handing back). It activates the window before moving it, so what
+  activation does comes first, and takes it out of full screen before moving
+  it back: polling showed a window sent back while still full screen come
+  out of full screen at its size on the app's screen and stay there, with no
+  change of geometry to say it hadn't moved. Once a window is full screen,
+  `convergentwindows` leaves its geometry alone.
+- **KWin's stdout and stderr are `/dev/null`** on the S24, so a script's
+  `print` shows nothing. What showed the race was polling KWin:
+  `org.kde.krunner1.Match` on `/WindowsRunner` lists windows by caption with
+  their ids, and `org.kde.KWin.getWindowInfo(id)` gives each one's place, size
+  and full-screen state.
+
+Checked on 2026-11-16 through the app on this computer (the Apps tab, the
+S24 on the cable, its real session):
+
+| Case | Result |
+| --- | --- |
+| Desktop open; Calculator running on the phone; opened, then closed | its window brought over, full screen in the window; back on the phone's screen, maximized, 841 ms after the close |
+| No desktop; the same | back in 1016 ms |
+| No desktop; Calculator not running (`DBusActivatable`) | started; its window on the app's screen within about 0.3 s; back in 846 ms |
+| No desktop; VLC (`Exec`, Qt) | the same; back in 845 ms |
+| Calculator closed on the phone with its window open | the window closed by itself about 2 s later |
+| A click on "7" in the window (the build before the placing fix) | 7 in Calculator's display |
+| The window resized to 1278 × 1367 during a run (not by the test) | Calculator was laid out for the new size |
+
+Before the placing fix the same runs without the desktop failed as described
+above, and with it each hand-back said "1 of 1 on DSI-1". Not tested: several
+app windows at once, an app's dialogs (a file chooser), a single-instance app
+with several windows, Firefox (whose window class isn't its desktop file's),
+typing, drops onto an app's window, and input after the placing fix. VLC's
+menus came out small at the window's scale of 1 (not looked into).
 
 ## Phosh
 

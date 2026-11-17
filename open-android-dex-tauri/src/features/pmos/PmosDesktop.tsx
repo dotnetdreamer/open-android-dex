@@ -34,6 +34,8 @@ interface PmosLink {
   clipboard: boolean;
   /** …and drop files on its apps; otherwise a drop only lands in Downloads. */
   carry: boolean;
+  /** The app's name, for one of the phone's apps in a window of its own (PmosApps); none for the desktop. */
+  app?: string | null;
 }
 
 /**
@@ -280,6 +282,7 @@ export function PmosDesktop({ id }: { id: string }) {
         route="USB"
         tier="cable"
         name={link.name}
+        what={link.app ?? undefined}
         start
         smooth
         host={host}

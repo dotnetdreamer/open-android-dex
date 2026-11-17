@@ -549,9 +549,34 @@ struct Session {
     copy: Mutex<Option<CancellationToken>>,
     /// Waiting for the helper to say whether the app under a drop took it.
     dropped: Mutex<Option<oneshot::Sender<serde_json::Value>>>,
+    /// One of the phone's apps in a window of its own (`serve --app`); None, the phone's desktop.
+    app: Option<AppOf>,
+    /// The helper ended it as it should end ("stopped": an app closed on the phone), not for a failure.
+    stopped: AtomicBool,
+    /// For what the helper says of an app's window: its title.
+    handle: AppHandle,
+}
+
+/// What an app's window is (the Apps page's "Open").
+#[derive(Clone, Debug)]
+struct AppOf {
+    /// Its desktop file, without .desktop: what the helper starts.
+    id: String,
+    /// Its name, which the window is called until the app's own window says.
+    name: String,
+    /// Which of the screens kept for apps it has: OADX-App-<slot> on the phone, pmos-app-<slot> here.
+    slot: u8,
 }
 
 impl Session {
+    /// Which window this is, for the log: the desktop's, or an app's.
+    fn window_name(&self) -> String {
+        match &self.app {
+            Some(a) => format!("{}'s window", a.name),
+            None => "the desktop's window".into(),
+        }
+    }
+
     fn finish(&self, why: &str) {
         self.end.send_if_modified(|v| {
             if v.is_none() {
@@ -585,6 +610,31 @@ fn session() -> &'static Mutex<Option<Arc<Session>>> {
 
 fn current() -> Option<Arc<Session>> {
     session().lock().unwrap().clone().filter(|s| !s.ended())
+}
+
+/// The phone's apps in windows of their own, beside the desktop: one session each.
+fn app_sessions() -> &'static Mutex<Vec<Arc<Session>>> {
+    static APPS: OnceLock<Mutex<Vec<Arc<Session>>>> = OnceLock::new();
+    APPS.get_or_init(Default::default)
+}
+
+/// The session a window here belongs to: the desktop's, or an app's.
+fn by_label(label: &str) -> Option<Arc<Session>> {
+    if let Some(s) = current().filter(|s| s.label == label) {
+        return Some(s);
+    }
+    app_sessions().lock().unwrap().iter().find(|s| s.label == label && !s.ended()).cloned()
+}
+
+/// A session that has ended is no one's any more.
+fn unregister(s: &Arc<Session>) {
+    {
+        let mut slot = session().lock().unwrap();
+        if slot.as_ref().is_some_and(|c| Arc::ptr_eq(c, s)) {
+            *slot = None;
+        }
+    }
+    app_sessions().lock().unwrap().retain(|c| !Arc::ptr_eq(c, s));
 }
 
 /// A launch under way: one at a time, and the auto-open and a click do not both start one.
@@ -786,11 +836,39 @@ async fn launch(app: &AppHandle, phone: &Paired) -> Result<(), String> {
         fit.scale
     );
     log::info!("pmos: asking for a {}x{} screen at scale {:.3}", fit.width, fit.height, fit.scale);
+    let (read, write, buf, ready) = start_helper(&ssh, command, "the desktop").await?;
+    log::info!("pmos: the phone's screen is up: {ready}");
+    tell(app, &phone.id, &phone.name, "launching", Some(2), None);
+
+    let s = begin(app, phone, ssh, read, write, buf, &ready, None).await?;
+    if let Err(e) = open_window(app, &s, &fit) {
+        // Undone here rather than by wind_down, which would call it closed
+        // over the failure the Desktop tab is about to be told.
+        s.finish("");
+        unregister(&s);
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        hang_up(&s.ssh).await;
+        return Err(format!("Couldn't open the desktop's window: {e}"));
+    }
+    tauri::async_runtime::spawn(wind_down(app.clone(), s.clone()));
+    tell(app, &s.id, &s.name, "running", Some(3), None);
+    Ok(())
+}
+
+type HelperRead = russh::ChannelReadHalf;
+type HelperWrite = russh::ChannelWriteHalf<client::Msg>;
+
+/// The helper started with `command`, up to its first word: ready, with what
+/// it says of the screen (and what came after it, still to read), or why not.
+/// `what` is what it was starting, for those words: "the desktop", an app's name.
+async fn start_helper(
+    ssh: &Handle<Pin>,
+    command: String,
+    what: &str,
+) -> Result<(HelperRead, HelperWrite, Vec<u8>, serde_json::Value), String> {
     let channel = ssh.channel_open_session().await.map_err(|e| e.to_string())?;
     channel.exec(true, command).await.map_err(|e| e.to_string())?;
     let (mut read, write) = channel.split();
-
-    // Up to its first word: ready, or why not.
     let mut buf = Vec::new();
     let ready = tokio::time::timeout(Duration::from_secs(30), async {
         let mut why = String::new();
@@ -806,7 +884,10 @@ async fn launch(app: &AppHandle, phone: &Paired) -> Result<(), String> {
                         match msg["t"].as_str() {
                             Some("ready") => return Ok(msg),
                             Some("state") if msg["state"] != "running" && msg["state"] != "starting" => {
-                                return Err(msg["message"].as_str().unwrap_or("The phone couldn't start the desktop.").to_string())
+                                return Err(msg["message"]
+                                    .as_str()
+                                    .map(str::to_string)
+                                    .unwrap_or_else(|| format!("The phone couldn't start {what}.")))
                             }
                             _ => {}
                         }
@@ -822,22 +903,35 @@ async fn launch(app: &AppHandle, phone: &Paired) -> Result<(), String> {
                 Some(_) => {}
                 None => {
                     return Err(if why.is_empty() {
-                        "The phone's helper stopped before the desktop was up.".to_string()
+                        format!("The phone's helper stopped before {what} was up.")
                     } else {
-                        format!("The phone couldn't start the desktop: {why}")
+                        format!("The phone couldn't start {what}: {why}")
                     })
                 }
             }
         }
     })
     .await
-    .map_err(|_| "The phone took too long to make the desktop's screen.".to_string())??;
-    log::info!("pmos: the phone's screen is up: {ready}");
-    tell(app, &phone.id, &phone.name, "launching", Some(2), None);
+    .map_err(|_| format!("The phone took too long to make {what}'s screen."))??;
+    Ok((read, write, buf, ready))
+}
 
+/// A session, its helper up: the window's port and its token, the helper's
+/// two directions, the heartbeat. The desktop's, or an app's (`app`).
+#[allow(clippy::too_many_arguments)]
+async fn begin(
+    app: &AppHandle,
+    phone: &Paired,
+    ssh: Handle<Pin>,
+    read: HelperRead,
+    write: HelperWrite,
+    buf: Vec<u8>,
+    ready: &serde_json::Value,
+    app_of: Option<AppOf>,
+) -> Result<Arc<Session>, String> {
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
         .await
-        .map_err(|e| format!("cannot open a local port for the desktop: {e}"))?;
+        .map_err(|e| format!("cannot open a local port for the window: {e}"))?;
     let port = listener.local_addr().map_err(|e| e.to_string())?.port();
     let mut token = [0u8; 16];
     if !crate::wireless::fill_random(&mut token) {
@@ -846,10 +940,14 @@ async fn launch(app: &AppHandle, phone: &Paired) -> Result<(), String> {
     let (to_helper, helper_rx) = mpsc::unbounded_channel();
     let (end, _) = watch::channel(None);
     let (gone, _) = watch::channel(false);
+    let label = match &app_of {
+        Some(a) => app_label_for(a.slot),
+        None => label_for(&phone.id),
+    };
     let s = Arc::new(Session {
         id: phone.id.clone(),
         name: phone.name.clone(),
-        label: label_for(&phone.id),
+        label,
         port,
         token: token.iter().map(|b| format!("{b:02x}")).collect(),
         ssh: Arc::new(ssh),
@@ -861,27 +959,22 @@ async fn launch(app: &AppHandle, phone: &Paired) -> Result<(), String> {
         gone,
         copy: Mutex::new(None),
         dropped: Mutex::new(None),
+        app: app_of,
+        stopped: AtomicBool::new(false),
+        handle: app.clone(),
     });
-    *session().lock().unwrap() = Some(s.clone());
+    if s.app.is_some() {
+        app_sessions().lock().unwrap().push(s.clone());
+    } else {
+        *session().lock().unwrap() = Some(s.clone());
+    }
 
     tauri::async_runtime::spawn(write_helper(write, helper_rx, s.clone()));
     tauri::async_runtime::spawn(read_helper(read, buf, s.clone()));
     tauri::async_runtime::spawn(heartbeat(s.clone()));
     let dev = if tauri::is_dev() { app.config().build.dev_url.clone().map(|u| u.origin().ascii_serialization()) } else { None };
     tauri::async_runtime::spawn(serve(listener, s.clone(), dev));
-
-    if let Err(e) = open_window(app, &s, &fit) {
-        // Undone here rather than by wind_down, which would call it closed
-        // over the failure the Desktop tab is about to be told.
-        s.finish("");
-        *session().lock().unwrap() = None;
-        tokio::time::sleep(Duration::from_millis(300)).await;
-        hang_up(&s.ssh).await;
-        return Err(format!("Couldn't open the desktop's window: {e}"));
-    }
-    tauri::async_runtime::spawn(wind_down(app.clone(), s.clone()));
-    tell(app, &s.id, &s.name, "running", Some(3), None);
-    Ok(())
+    Ok(s)
 }
 
 /// The helper's stderr, line by line, without GStreamer's noise about a
@@ -926,12 +1019,21 @@ async fn read_helper(mut read: russh::ChannelReadHalf, mut buf: Vec<u8>, s: Arc<
                 if msg["state"] == "stopped" || msg["state"] == "failed" {
                     *why = msg["message"].as_str().unwrap_or_default().to_string();
                 }
+                if msg["state"] == "stopped" {
+                    s.stopped.store(true, Ordering::SeqCst);
+                }
             }
             // The answer to a drop is pmos_put's, not the window's.
             if kind == 0 && payload.starts_with(br#"{"t":"dropped""#) {
                 if let Some(waiting) = s.dropped.lock().unwrap().take() {
                     let _ = waiting.send(serde_json::from_slice(&payload).unwrap_or_default());
                 }
+                continue;
+            }
+            // An app's window is called what the app's own window in front is.
+            if kind == 0 && payload.starts_with(br#"{"t":"title""#) {
+                let msg: serde_json::Value = serde_json::from_slice(&payload).unwrap_or_default();
+                retitle(&s, msg["title"].as_str().unwrap_or_default());
                 continue;
             }
             s.to_window(kind, payload);
@@ -990,15 +1092,18 @@ async fn wind_down(app: AppHandle, s: Arc<Session>) {
     let mut gone = s.gone.subscribe();
     let _ = tokio::time::timeout(Duration::from_secs(4), gone.wait_for(|g| *g)).await;
     hang_up(&s.ssh).await;
-    {
-        let mut slot = session().lock().unwrap();
-        if slot.as_ref().is_some_and(|c| Arc::ptr_eq(c, &s)) {
-            *slot = None;
-        }
-    }
+    unregister(&s);
     s.window.lock().unwrap().take();
     if let Some(w) = app.get_webview_window(&s.label) {
         let _ = w.close();
+    }
+    if let Some(a) = &s.app {
+        // An app's window: the Apps page hears it went, and why when it wasn't asked to.
+        log::info!("pmos: {} on {} ended{}", a.name, s.name, if why.is_empty() { String::new() } else { format!(": {why}") });
+        // Closed on the phone, or here: nothing to say. Anything else is why it went.
+        let message = if s.stopped.load(Ordering::SeqCst) { String::new() } else { why };
+        apps_changed(&app, Some(AppEnded { phone: s.id.clone(), app: a.id.clone(), name: a.name.clone(), message }));
+        return;
     }
     log::info!("pmos: the desktop of {} ended{}", s.name, if why.is_empty() { String::new() } else { format!(": {why}") });
     tell(&app, &s.id, &s.name, "ended", None, (!why.is_empty()).then_some(why));
@@ -1012,9 +1117,9 @@ pub fn pmos_close() {
     }
 }
 
-/// The phone's desktop window has gone: so has its session.
+/// A window of a phone's (its desktop's, one of its apps') has gone: so has its session.
 pub fn window_closed(label: &str) {
-    if let Some(s) = current().filter(|s| s.label == label) {
+    if let Some(s) = by_label(label) {
         s.finish("");
     }
 }
@@ -1022,6 +1127,9 @@ pub fn window_closed(label: &str) {
 /// The app is quitting.
 pub fn close_all() {
     if let Some(s) = current() {
+        s.finish("");
+    }
+    for s in app_sessions().lock().unwrap().iter() {
         s.finish("");
     }
 }
@@ -1066,14 +1174,16 @@ pub struct PmosLink {
     clipboard: bool,
     /// Files dropped on the window can be dropped on the app under them, not only saved in Downloads.
     carry: bool,
+    /// The app's name, for an app's window; none for the desktop's.
+    app: Option<String>,
 }
 
 /// From the phone's desktop window: the WebSocket to open. A window gets its
 /// own phone's and no other.
 #[tauri::command]
 pub fn pmos_window_link(window: WebviewWindow, id: String) -> Result<PmosLink, String> {
-    let s = current().ok_or("The phone's desktop has closed.")?;
-    if window.label() != s.label || s.id != id {
+    let s = by_label(window.label()).ok_or("This window's connection to the phone has closed.")?;
+    if s.id != id {
         return Err("this window belongs to another phone".into());
     }
     Ok(PmosLink {
@@ -1081,8 +1191,288 @@ pub fn pmos_window_link(window: WebviewWindow, id: String) -> Result<PmosLink, S
         name: s.name.clone(),
         clipboard: s.clipboard,
         carry: s.carry,
+        app: s.app.as_ref().map(|a| a.name.clone()),
     })
 }
+
+// ── the phone's apps, each in a window of its own ───────────────────────
+
+// The Apps page lists a postmarketOS phone's apps beside an Android phone's,
+// and opens each in a window of its own, as it does an Android app or a Linux
+// app of an Android phone's (apps-on-pc.md). On the phone that is the
+// helper's `serve --app` (main.c, "One app's window"): a screen of its own,
+// made and streamed as the desktop's is, the size of the window here, with the
+// app's windows on it full screen; closing the window here puts the app back
+// on the phone's own screen. The window is the desktop's (PmosDesktop.tsx,
+// UsbDesktop.tsx), and so are its clipboard and its drops; it is called what
+// the app's window in front is called.
+
+/// The apps' screens: OADX-App-<n> on the phone. Not "OpenAndroidDeX…": the
+/// desktop's helper finds its own screen by that name.
+const APP_SLOTS: u8 = 8;
+
+fn app_label_for(slot: u8) -> String {
+    format!("pmos-app-{slot}")
+}
+
+/// One login at a time for the Apps page, listing or opening: each costs the
+/// phone's sshd a PAM run, and a pile of them once soft-locked a phone (see
+/// pmos-desktop.md).
+fn apps_lock() -> &'static tokio::sync::Mutex<()> {
+    static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(Default::default)
+}
+
+fn paired(app: &AppHandle, id: &str) -> Result<Paired, String> {
+    paired_all(app)
+        .into_iter()
+        .find(|p| p.id == id)
+        .ok_or_else(|| "This computer hasn't signed in to that phone. Plug it in and sign in again.".to_string())
+}
+
+/// Signed in to the phone with this computer's key, and the helper there.
+async fn reach(app: &AppHandle, phone: &Paired) -> Result<Handle<Pin>, String> {
+    let (mut ssh, _) = connect(Some(&phone.host_key)).await?;
+    let seed = client_seed(app)?;
+    login(&mut ssh, &phone.user, &seed).await?;
+    deploy(&ssh).await?;
+    Ok(ssh)
+}
+
+/// One of the phone's apps, as its launcher lists it.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PmosApp {
+    /// Its desktop file, without .desktop.
+    id: String,
+    name: String,
+    /// Its icon as a data URL, SVG or PNG; none when the phone has none for it.
+    icon: Option<String>,
+}
+
+/// The apps of a phone this computer has signed in to, for the Apps page: what
+/// its own launcher lists, with their icons (the helper's `apps`).
+#[tauri::command]
+pub async fn pmos_apps(app: AppHandle, id: String) -> Result<Vec<PmosApp>, String> {
+    let phone = paired(&app, &id)?;
+    let _one = apps_lock().lock().await;
+    let ssh = reach(&app, &phone).await?;
+    let ran = run(&ssh, &format!("{}exec \"{HELPER_PATH}\" apps", test_env()), None, Duration::from_secs(30)).await;
+    hang_up(&ssh).await;
+    let ran = ran?;
+    for line in phone_lines(&ran.err) {
+        log::info!("pmos: phone: {line}");
+    }
+    let v: serde_json::Value =
+        serde_json::from_str(&ran.out).map_err(|e| format!("The phone's list of apps didn't come through: {e}"))?;
+    let mut apps: Vec<PmosApp> = v["apps"]
+        .as_array()
+        .map(|all| {
+            all.iter()
+                .filter_map(|a| {
+                    let id = a["id"].as_str()?.to_string();
+                    let kind = if a["type"] == "svg" { "svg+xml" } else { "png" };
+                    Some(PmosApp {
+                        name: a["name"].as_str().unwrap_or(&id).to_string(),
+                        icon: a["icon"].as_str().map(|b64| format!("data:image/{kind};base64,{b64}")),
+                        id,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    apps.sort_by_key(|a| a.name.to_lowercase());
+    log::info!("pmos: {} apps on {}", apps.len(), phone.name);
+    Ok(apps)
+}
+
+/// An app's window on the Apps page: which phone's, which app.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenApp {
+    phone: String,
+    app: String,
+}
+
+/// An app's window that went, and why when it wasn't asked to (the app closed
+/// on the phone, or never opened).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AppEnded {
+    phone: String,
+    app: String,
+    name: String,
+    message: String,
+}
+
+fn open_apps() -> Vec<OpenApp> {
+    app_sessions()
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|s| !s.ended())
+        .filter_map(|s| s.app.as_ref().map(|a| OpenApp { phone: s.id.clone(), app: a.id.clone() }))
+        .collect()
+}
+
+fn apps_changed(app: &AppHandle, ended: Option<AppEnded>) {
+    let _ = app.emit("pmos:apps", serde_json::json!({ "open": open_apps(), "ended": ended }));
+}
+
+/// The phone's apps in windows of their own now, for an Apps page just opened.
+#[tauri::command]
+pub fn pmos_app_windows() -> Vec<OpenApp> {
+    open_apps()
+}
+
+/// Apps being opened, by phone and app: a second click waits for the first.
+fn opening() -> &'static Mutex<std::collections::HashSet<(String, String)>> {
+    static OPENING: OnceLock<Mutex<std::collections::HashSet<(String, String)>>> = OnceLock::new();
+    OPENING.get_or_init(Default::default)
+}
+
+/// Open one of the phone's apps in a window of its own, or bring its window to
+/// the front if it has one. `icon` is the app's icon as a PNG, for the
+/// window's own (the Apps page draws it, SVG or not). Returns once the window is.
+#[tauri::command]
+pub async fn pmos_open_app(
+    app: AppHandle,
+    id: String,
+    app_id: String,
+    name: String,
+    icon: Option<Vec<u8>>,
+) -> Result<(), String> {
+    // As the helper takes it: a desktop file's name, nothing that could be a path or a word for the shell.
+    if app_id.is_empty()
+        || app_id.starts_with('.')
+        || app_id.len() > 200
+        || !app_id.chars().all(|c| c.is_ascii_alphanumeric() || ".-_".contains(c))
+    {
+        return Err("That isn't one of the phone's apps.".into());
+    }
+    let open = app_sessions()
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|s| s.id == id && !s.ended() && s.app.as_ref().is_some_and(|a| a.id == app_id))
+        .cloned();
+    if let Some(s) = open {
+        if let Some(w) = app.get_webview_window(&s.label) {
+            let _ = w.unminimize();
+            let _ = w.set_focus();
+        }
+        return Ok(());
+    }
+    let phone = paired(&app, &id)?;
+    if !opening().lock().unwrap().insert((id.clone(), app_id.clone())) {
+        return Ok(());
+    }
+    let result = open_app(&app, &phone, &app_id, &name, icon.as_deref()).await;
+    opening().lock().unwrap().remove(&(id.clone(), app_id.clone()));
+    match &result {
+        Ok(()) => apps_changed(&app, None),
+        Err(e) => log::warn!("pmos: {name} didn't open: {e}"),
+    }
+    result
+}
+
+async fn open_app(app: &AppHandle, phone: &Paired, app_id: &str, name: &str, icon: Option<&[u8]>) -> Result<(), String> {
+    // One opening at a time: so two don't take the same screen, and the phone's sshd one login at a time.
+    let _one = apps_lock().lock().await;
+    let slot = (1..=APP_SLOTS)
+        .find(|n| !app_sessions().lock().unwrap().iter().any(|s| s.app.as_ref().is_some_and(|a| a.slot == *n)))
+        .ok_or("Eight of the phone's apps are open on this computer already. Close one first.")?;
+    log::info!("pmos: opening {name} ({app_id}) from {} in a window of its own", phone.name);
+    let ssh = reach(app, phone).await?;
+    let fit = app_fit(app);
+    let command = format!(
+        "{}exec \"{HELPER_PATH}\" serve --app {app_id} --name OADX-App-{slot} --width {} --height {} --scale {:.4} --cap {CAP}",
+        test_env(),
+        fit.width,
+        fit.height,
+        fit.scale
+    );
+    let (read, write, buf, ready) = start_helper(&ssh, command, name).await?;
+    log::info!("pmos: {name}'s screen is up: {ready}");
+    let of = AppOf { id: app_id.to_string(), name: name.to_string(), slot };
+    let s = begin(app, phone, ssh, read, write, buf, &ready, Some(of)).await?;
+    if let Err(e) = open_app_window(app, &s, &fit, icon) {
+        s.finish("");
+        unregister(&s);
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        hang_up(&s.ssh).await;
+        return Err(format!("Couldn't open {name}'s window: {e}"));
+    }
+    tauri::async_runtime::spawn(wind_down(app.clone(), s));
+    Ok(())
+}
+
+/// An app's screen: 1024 × 720 of this screen's points, as a Linux app's
+/// window opens (apps/mod.rs's open_linux), in pixels at this screen's scale.
+/// It follows the window from there, as the desktop's does.
+fn app_fit(app: &AppHandle) -> Fit {
+    let scale = crate::display::screen_for_desktop(app).map(|s| s.scale).unwrap_or(1.0).clamp(1.0, 4.0);
+    let window = (1024.0, 720.0);
+    let (width, height) = screen_for(window, scale);
+    Fit { width, height, scale, window }
+}
+
+fn open_app_window(app: &AppHandle, s: &Session, fit: &Fit, icon: Option<&[u8]>) -> Result<(), String> {
+    let a = s.app.as_ref().ok_or("not an app's window")?;
+    if let Some(w) = app.get_webview_window(&s.label) {
+        let _ = w.close();
+    }
+    let dev = if tauri::is_dev() { app.config().build.dev_url.clone() } else { None };
+    let w = WebviewWindowBuilder::new(app, &s.label, WebviewUrl::App(format!("index.html#pmos={}", s.id).into()))
+        .title(app_title(&a.name, &s.name))
+        .inner_size(fit.window.0, fit.window.1)
+        .min_inner_size(640.0, 400.0)
+        .center()
+        .background_color(tauri::window::Color(9, 11, 16, 255))
+        .incognito(true)
+        .on_navigation(move |url| may_navigate(dev.as_ref(), url))
+        .on_new_window(|_, _| NewWindowResponse::Deny)
+        .build()
+        .map_err(|e| e.to_string())?;
+    if let Some(png) = icon {
+        set_window_icon(&w, png);
+    }
+    Ok(())
+}
+
+/// "Calculator — Galaxy S24": the app's, then the phone's, as an Android app's window is called.
+fn app_title(title: &str, phone: &str) -> String {
+    format!("{title} — {phone}")
+}
+
+/// What the app's window in front is called now, for its window here; its name when it says nothing.
+fn retitle(s: &Session, title: &str) {
+    let Some(a) = &s.app else { return };
+    if let Some(w) = s.handle.get_webview_window(&s.label) {
+        let _ = w.set_title(&app_title(if title.trim().is_empty() { &a.name } else { title.trim() }, &s.name));
+    }
+}
+
+/// The window's icon, big and small, from the app's own (a PNG), as an Android app's window has (apps/win's set_icons).
+#[cfg(windows)]
+fn set_window_icon(w: &WebviewWindow, png: &[u8]) {
+    use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        CreateIconFromResourceEx, SendMessageW, ICON_BIG, ICON_SMALL, LR_DEFAULTCOLOR, WM_SETICON,
+    };
+    let Ok(raw) = w.hwnd() else { return };
+    let hwnd = HWND(raw.0 as _);
+    unsafe {
+        for which in [ICON_BIG, ICON_SMALL] {
+            if let Ok(icon) = CreateIconFromResourceEx(png, true, 0x0003_0000, 0, 0, LR_DEFAULTCOLOR) {
+                SendMessageW(hwnd, WM_SETICON, Some(WPARAM(which as usize)), Some(LPARAM(icon.0 as isize)));
+            }
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn set_window_icon(_w: &WebviewWindow, _png: &[u8]) {}
 
 // ── files dropped on the window ──────────────────────────────────────────
 
@@ -1117,8 +1507,8 @@ pub async fn pmos_put(
     at: Option<[u32; 2]>,
     events: Channel<sftp::Progress>,
 ) -> Result<PmosPut, String> {
-    let s = current().ok_or("The phone's desktop has closed.")?;
-    if window.label() != s.label || s.id != id {
+    let s = by_label(window.label()).ok_or("This window's connection to the phone has closed.")?;
+    if s.id != id {
         return Err("this window belongs to another phone".into());
     }
     let cancel = CancellationToken::new();
@@ -1157,7 +1547,7 @@ pub async fn pmos_put(
 /// taken back on the phone; what had landed stays.
 #[tauri::command]
 pub fn pmos_put_cancel(window: WebviewWindow) {
-    if let Some(s) = current().filter(|s| s.label == window.label()) {
+    if let Some(s) = by_label(window.label()) {
         if let Some(copy) = s.copy.lock().unwrap().as_ref() {
             copy.cancel();
         }
@@ -1584,7 +1974,7 @@ async fn socket(mut tcp: TcpStream, s: Arc<Session>, dev: Option<String>) {
     let (tx, mut rx) = mpsc::unbounded_channel::<Out>();
     let number = SOCKETS.fetch_add(1, Ordering::Relaxed);
     *s.window.lock().unwrap() = Some((number, tx.clone()));
-    log::info!("pmos: the desktop's window connected");
+    log::info!("pmos: {} connected", s.window_name());
 
     let writer = tauri::async_runtime::spawn(async move {
         while let Some((opcode, payload)) = rx.recv().await {
@@ -1639,7 +2029,7 @@ async fn socket(mut tcp: TcpStream, s: Arc<Session>, dev: Option<String>) {
     };
     if mine {
         s.to_helper(0, br#"{"t":"bye"}"#);
-        log::info!("pmos: the desktop's window disconnected");
+        log::info!("pmos: {} disconnected", s.window_name());
     }
     drop(tx);
     let _ = writer.await;

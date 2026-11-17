@@ -91,6 +91,7 @@
 #include "ext-data-control-v1-client-protocol.h"
 #include "fake-input-client-protocol.h"
 #include "here-js.h" /* src/here.js as HERE_JS, made by build.sh */
+#include "app-js.h"  /* src/app.js as APP_JS, made by build.sh */
 #include "virtual-keyboard-unstable-v1-client-protocol.h"
 #include "wlr-data-control-unstable-v1-client-protocol.h"
 #include "wlr-layer-shell-unstable-v1-client-protocol.h"
@@ -101,7 +102,7 @@
 #include "zkde-screencast-unstable-v1-client-protocol.h"
 
 /* What `version` prints; pmos.rs compares the whole file's hash, not this. */
-#define VERSION "5"
+#define VERSION "6"
 
 /*
  * Frames sent and not yet acknowledged before new ones stop going into the
@@ -298,6 +299,18 @@ static struct {
     char *kwin_name;                  /* KWin's unique name on the bus: only its script is answered */
     guint here_object, here_owner;
     gboolean here_loaded;
+
+    /* One app in a window of its own on the computer (`serve --app`; see "One app's window"). */
+    char *launch_id;                  /* the app's desktop file, without .desktop; NULL for the desktop */
+    char *app_bus;                    /* this program's name on the session bus, for the app's script */
+    char *app_script;                 /* the script's name in KWin */
+    guint app_object, app_owner;
+    gboolean app_loaded;
+    gboolean app_shown;               /* one of the app's windows has come to the screen */
+    guint app_wait;                   /* no window yet: the app didn't open */
+    guint app_empty;                  /* none of its windows left: the window here closes */
+    char *app_config;                 /* what the script is told first (its CONFIG), kept for its run as `back` */
+    gboolean app_back;                /* that run has called Back: the windows are on the phone's screen */
 
     /* The clipboard (see "The clipboard"): Wayland's data-control, the standard one or wlroots' older one. */
     struct ext_data_control_manager_v1 *dc_ext;
@@ -1906,8 +1919,12 @@ static gboolean rest_autostart(void) {
     return ok;
 }
 
-/* A process of its own that waits for this one to end, however it ends, and then runs `rest`. */
-static void start_guard(void) {
+/*
+ * A process of its own that waits for this one to end, however it ends, and
+ * then runs `rest`; for one app's window (`script`), unloads that app's KWin
+ * script and does nothing else: the desktop's is someone else's.
+ */
+static void start_guard_for(const char *script) {
     int p[2];
     char exe[4096];
     ssize_t n = readlink("/proc/self/exe", exe, sizeof exe - 1);
@@ -1925,7 +1942,8 @@ static void start_guard(void) {
         if (p[0] == 3) fcntl(3, F_SETFD, 0); /* dup2 onto itself would keep close-on-exec */
         else dup2(p[0], 3);
         setsid();
-        execl(exe, "openandroiddex-pmos", "guard", (char *)NULL);
+        if (script) execl(exe, "openandroiddex-pmos", "guard", "--script", script, (char *)NULL);
+        else execl(exe, "openandroiddex-pmos", "guard", (char *)NULL);
         _exit(127);
     }
     close(p[0]);
@@ -1934,8 +1952,11 @@ static void start_guard(void) {
         return;
     }
     app.guard_fd = p[1];
-    say("guard: %d puts the phone's screen back if this ends without doing so", (int)pid);
+    if (script) say("guard: %d stops %s if this ends without doing so", (int)pid, script);
+    else say("guard: %d puts the phone's screen back if this ends without doing so", (int)pid);
 }
+
+static void start_guard(void) { start_guard_for(NULL); }
 
 /* The virtual pointer on our screen and the virtual keyboard with the seat's keymap. */
 static void wlr_input(void) {
@@ -3314,11 +3335,12 @@ static void opened_ended(GPid pid, gint status, gpointer d) {
  * environment, in its own process session (nothing of this program's SSH
  * login reaches it), with nothing on this program's stdout, which is the
  * computer's stream. GLib's own launcher would leave that stdout to it.
+ * No action is the app's own Exec: the app started as the drawer starts it.
  */
 static gboolean spawn_action(GDesktopAppInfo *info, const char *action, GString *why) {
     const char *file = g_desktop_app_info_get_filename(info);
     GKeyFile *kf = g_key_file_new();
-    char *group = g_strdup_printf("Desktop Action %s", action);
+    char *group = action ? g_strdup_printf("Desktop Action %s", action) : g_strdup(G_KEY_FILE_DESKTOP_GROUP);
     char *exec = NULL, *dir = NULL, *icon = NULL;
     gchar **words = NULL;
     GError *err = NULL;
@@ -3441,10 +3463,10 @@ static GVariant *kwin_scripting(GDBusConnection *bus, const char *method, GVaria
                                        reply ? G_VARIANT_TYPE(reply) : NULL, G_DBUS_CALL_FLAGS_NONE, 3000, NULL, err);
 }
 
-/* KWin unloads ours by its name; TRUE if it had it. */
-static gboolean unload_here(GDBusConnection *bus) {
+/* KWin unloads a script of ours by its name; TRUE if it had it. */
+static gboolean kwin_unload(GDBusConnection *bus, const char *name) {
     gboolean had = FALSE;
-    GVariant *r = kwin_scripting(bus, "unloadScript", g_variant_new("(s)", HERE_SCRIPT), "(b)", NULL);
+    GVariant *r = kwin_scripting(bus, "unloadScript", g_variant_new("(s)", name), "(b)", NULL);
     if (r) {
         g_variant_get(r, "(b)", &had);
         g_variant_unref(r);
@@ -3452,23 +3474,71 @@ static gboolean unload_here(GDBusConnection *bus) {
     return had;
 }
 
+static gboolean unload_here(GDBusConnection *bus) { return kwin_unload(bus, HERE_SCRIPT); }
+
+/* The session bus, and KWin's unique name on it: only KWin's scripts are answered. */
+static gboolean kwin_owner(GError **err) {
+    if (!app.bus) app.bus = g_bus_get_sync(G_BUS_TYPE_SESSION, NULL, err);
+    if (!app.bus) return FALSE;
+    if (app.kwin_name) return TRUE;
+    GVariant *r = g_dbus_connection_call_sync(app.bus, "org.freedesktop.DBus", "/org/freedesktop/DBus",
+                                              "org.freedesktop.DBus", "GetNameOwner", g_variant_new("(s)", "org.kde.KWin"),
+                                              G_VARIANT_TYPE("(s)"), G_DBUS_CALL_FLAGS_NONE, 3000, NULL, err);
+    if (!r) return FALSE;
+    g_variant_get(r, "(s)", &app.kwin_name);
+    g_variant_unref(r);
+    return TRUE;
+}
+
+/*
+ * KWin runs the script in `file` as `name`. One of that name a session that
+ * died left behind goes first: KWin loads a name once.
+ */
+static gboolean kwin_run_script(const char *file, const char *name, GError **err) {
+    kwin_unload(app.bus, name);
+    /* KWin numbers a script by how many it has (Scripting::loadScript), so after another was
+     * unloaded the number can be one in use, whose /Scripting/ScriptN is that one's. */
+    char *before = NULL;
+    GVariant *r = g_dbus_connection_call_sync(app.bus, "org.kde.KWin", "/Scripting",
+                                              "org.freedesktop.DBus.Introspectable", "Introspect", NULL,
+                                              G_VARIANT_TYPE("(s)"), G_DBUS_CALL_FLAGS_NONE, 3000, NULL, NULL);
+    if (r) {
+        g_variant_get(r, "(s)", &before);
+        g_variant_unref(r);
+    }
+    gint id = -1;
+    r = kwin_scripting(app.bus, "loadScript", g_variant_new("(ss)", file, name), "(i)", err);
+    if (r) {
+        g_variant_get(r, "(i)", &id);
+        g_variant_unref(r);
+    }
+    char node[48], path[48];
+    g_snprintf(node, sizeof node, "name=\"Script%d\"", id);
+    g_snprintf(path, sizeof path, "/Scripting/Script%d", id);
+    if (id >= 0 && before && !strstr(before, node)) {
+        /* Ours alone; KWin answers once it has read the file. */
+        r = g_dbus_connection_call_sync(app.bus, "org.kde.KWin", path, "org.kde.kwin.Script", "run", NULL, NULL,
+                                        G_DBUS_CALL_FLAGS_NONE, 5000, NULL, err);
+        if (r) g_variant_unref(r);
+    } else if (id >= 0) {
+        /* start() also applies KWin's script settings (what is on or off), as its settings page does. */
+        say("KWin's number %d for %s is another's; starting it with KWin's own", id, name);
+        r = kwin_scripting(app.bus, "start", NULL, NULL, err);
+        if (r) g_variant_unref(r);
+    }
+    g_free(before);
+    return id >= 0 && !*err;
+}
+
 /* The service, then the script: KWin reads it from a file, in the cache, written anew each time. */
 static void here_start(void) {
     if (app.wlr) return;
     GError *err = NULL;
-    if (!app.bus) app.bus = g_bus_get_sync(G_BUS_TYPE_SESSION, NULL, &err);
-    GVariant *r = app.bus ? g_dbus_connection_call_sync(app.bus, "org.freedesktop.DBus", "/org/freedesktop/DBus",
-                                                        "org.freedesktop.DBus", "GetNameOwner",
-                                                        g_variant_new("(s)", "org.kde.KWin"), G_VARIANT_TYPE("(s)"),
-                                                        G_DBUS_CALL_FLAGS_NONE, 3000, NULL, &err)
-                          : NULL;
-    if (!r) {
+    if (!kwin_owner(&err)) {
         say("here: apps open where KWin puts them (%s)", err ? err->message : "no session bus");
         g_clear_error(&err);
         return;
     }
-    g_variant_get(r, "(s)", &app.kwin_name);
-    g_variant_unref(r);
     static const GDBusInterfaceVTable vtable = {here_call, NULL, NULL, {0}};
     GDBusNodeInfo *node = g_dbus_node_info_new_for_xml(here_xml, NULL);
     app.here_object = g_dbus_connection_register_object(app.bus, HERE_PATH, node->interfaces[0], &vtable, NULL, NULL, &err);
@@ -3484,42 +3554,7 @@ static void here_start(void) {
     char *dir = g_build_filename(g_get_user_cache_dir(), "openandroiddex", NULL);
     char *file = g_build_filename(dir, "kwin-here.js", NULL);
     g_mkdir_with_parents(dir, 0700);
-    gint id = -1;
-    if (g_file_set_contents(file, HERE_JS, -1, &err)) {
-        /* One a session that died left behind goes first: KWin loads a name once. */
-        unload_here(app.bus);
-        /* KWin numbers a script by how many it has (Scripting::loadScript), so after another was
-         * unloaded the number can be one in use, whose /Scripting/ScriptN is that one's. */
-        char *before = NULL;
-        r = g_dbus_connection_call_sync(app.bus, "org.kde.KWin", "/Scripting", "org.freedesktop.DBus.Introspectable",
-                                        "Introspect", NULL, G_VARIANT_TYPE("(s)"), G_DBUS_CALL_FLAGS_NONE, 3000,
-                                        NULL, NULL);
-        if (r) {
-            g_variant_get(r, "(s)", &before);
-            g_variant_unref(r);
-        }
-        r = kwin_scripting(app.bus, "loadScript", g_variant_new("(ss)", file, HERE_SCRIPT), "(i)", &err);
-        if (r) {
-            g_variant_get(r, "(i)", &id);
-            g_variant_unref(r);
-        }
-        char node[48], path[48];
-        g_snprintf(node, sizeof node, "name=\"Script%d\"", id);
-        g_snprintf(path, sizeof path, "/Scripting/Script%d", id);
-        if (id >= 0 && before && !strstr(before, node)) {
-            /* Ours alone; KWin answers once it has read the file. */
-            r = g_dbus_connection_call_sync(app.bus, "org.kde.KWin", path, "org.kde.kwin.Script", "run", NULL, NULL,
-                                            G_DBUS_CALL_FLAGS_NONE, 5000, NULL, &err);
-            if (r) g_variant_unref(r);
-        } else if (id >= 0) {
-            /* start() also applies KWin's script settings (what is on or off), as its settings page does. */
-            say("here: KWin's number %d for the script is another's; starting it with KWin's own", id);
-            r = kwin_scripting(app.bus, "start", NULL, NULL, &err);
-            if (r) g_variant_unref(r);
-        }
-        g_free(before);
-    }
-    if (id >= 0 && !err) {
+    if (g_file_set_contents(file, HERE_JS, -1, &err) && kwin_run_script(file, HERE_SCRIPT, &err)) {
         app.here_loaded = TRUE;
         say("here: KWin runs %s: what is opened from a screen shows there", file);
         /* If this program dies, the guard's `rest` unloads it. */
@@ -3610,6 +3645,325 @@ static void here_stop(void) {
     if (app.here_owner) g_bus_unown_name(app.here_owner);
     if (app.here_object) g_dbus_connection_unregister_object(app.bus, app.here_object);
     app.here_owner = app.here_object = 0;
+}
+
+/* ── One app's window (serve --app) ───────────────────────────────────── */
+
+/*
+ * One of the phone's apps in a window of its own on the computer, as an
+ * Android app's is (apps-on-pc.md): a screen of its own, made and streamed as
+ * the desktop's is and sized for the window, with the app's windows on it full
+ * screen (app.js, KWin's), and the app started first if it wasn't running.
+ * What is the desktop's is left out: Plasma Mobile's docked mode, here.js and
+ * its name on the bus, the on-screen keyboard. So several of these can run at
+ * once, each with a screen, a script and a name on the bus of its own, beside
+ * the desktop's. KWin only: Phosh has no way to put a window on a screen.
+ *
+ * What the app's script calls (KWin alone is answered):
+ *   Started(found)  it has looked; found: the app's window was brought over, else the app is started
+ *   Shown(title)    a window of the app's is on the screen, full screen
+ *   Title(title)    the app's window in front has this title
+ *   Empty()         none of the app's windows is left on the screen
+ *   Note(text)      a line for this program's log
+ *   Back(text)      run as `back`: the windows have gone to the phone's screen (text: how many, for the log)
+ */
+#define APP_IFACE "com.ccrstech.openandroiddex.PmosApp"
+#define APP_PATH "/com/ccrstech/openandroiddex/PmosApp"
+/* The app's first window comes within this, or it isn't coming. */
+#define APP_OPEN_S 25
+/* None of its windows left this long, and the window on the computer closes: a dialog closing may have the main window next. */
+#define APP_EMPTY_MS 1500
+/* The script's run as `back` takes about 2 s (app.js's RESEND_MS); the screen goes after this at the latest. */
+#define APP_BACK_MS 4000
+
+static const char app_xml[] =
+    "<node><interface name='" APP_IFACE "'>"
+    "<method name='Started'><arg type='s' name='found' direction='in'/></method>"
+    "<method name='Shown'><arg type='s' name='title' direction='in'/></method>"
+    "<method name='Title'><arg type='s' name='title' direction='in'/></method>"
+    "<method name='Empty'/>"
+    "<method name='Note'><arg type='s' name='text' direction='in'/></method>"
+    "<method name='Back'><arg type='s' name='text' direction='in'/></method>"
+    "</interface></node>";
+
+/* The app's name, for what the computer's window says. */
+static char *app_label(void) {
+    GDesktopAppInfo *info = app_info(app.launch_id);
+    char *name = g_strdup(info ? g_app_info_get_name(G_APP_INFO(info)) : app.launch_id);
+    if (info) g_object_unref(info);
+    return name;
+}
+
+static void send_title(const char *title) {
+    GString *s = g_string_new("{\"t\":\"title\",\"title\":");
+    json_string(s, title ? title : "");
+    g_string_append_c(s, '}');
+    send_text(s->str);
+    g_string_free(s, TRUE);
+}
+
+static void app_fail(const char *message) {
+    say("app: %s", message);
+    send_state("failed", message);
+    finish(1);
+}
+
+static gboolean app_never_came(gpointer d) {
+    app.app_wait = 0;
+    if (!app.app_shown) {
+        char *name = app_label();
+        char *msg = g_strdup_printf("%s didn't open a window on the phone.", name);
+        app_fail(msg);
+        g_free(msg);
+        g_free(name);
+    }
+    return G_SOURCE_REMOVE;
+}
+
+static gboolean app_closed(gpointer d) {
+    app.app_empty = 0;
+    say("app: %s has no window on the screen any more", app.launch_id);
+    send_state("stopped", "The app was closed on the phone.");
+    finish(0);
+    return G_SOURCE_REMOVE;
+}
+
+/* The app, started as the drawer starts it: over the bus for an app started that way, else its Exec here. */
+static gboolean launch_app(GString *why) {
+    GDesktopAppInfo *info = app_info(app.launch_id);
+    if (!info) {
+        g_string_assign(why, "it isn't installed");
+        return FALSE;
+    }
+    gboolean ok;
+    if (g_desktop_app_info_get_boolean(info, "DBusActivatable")) {
+        /* org.freedesktop.Application.Activate: GLib runs nothing here for such an app. */
+        GError *err = NULL;
+        ok = g_app_info_launch(G_APP_INFO(info), NULL, NULL, &err);
+        if (!ok) g_string_assign(why, err ? err->message : "it didn't answer");
+        g_clear_error(&err);
+    } else {
+        ok = spawn_action(info, NULL, why);
+    }
+    g_object_unref(info);
+    return ok;
+}
+
+static void app_call(GDBusConnection *c, const char *sender, const char *path, const char *iface,
+                     const char *method, GVariant *params, GDBusMethodInvocation *inv, gpointer d) {
+    if (!app.kwin_name || g_strcmp0(sender, app.kwin_name) != 0) {
+        g_dbus_method_invocation_return_dbus_error(inv, "org.freedesktop.DBus.Error.AccessDenied",
+                                                   "Only KWin's script for the app's screen asks this.");
+        return;
+    }
+    if (strcmp(method, "Started") == 0) {
+        /* A string: KWin's scripts hand the bus numbers as doubles. */
+        const char *found = NULL;
+        g_variant_get(params, "(&s)", &found);
+        gboolean brought = g_strcmp0(found, "1") == 0;
+        g_dbus_method_invocation_return_value(inv, NULL);
+        if (brought) return;
+        GString *why = g_string_new(NULL);
+        if (launch_app(why)) {
+            say("app: %s: started", app.launch_id);
+        } else {
+            char *name = app_label();
+            char *msg = g_strdup_printf("The phone couldn't start %s: %s", name, why->str);
+            app_fail(msg);
+            g_free(msg);
+            g_free(name);
+        }
+        g_string_free(why, TRUE);
+        return;
+    }
+    const char *text = NULL;
+    if (g_variant_is_of_type(params, G_VARIANT_TYPE("(s)"))) g_variant_get(params, "(&s)", &text);
+    if (strcmp(method, "Shown") == 0) {
+        if (!app.app_shown) say("app: %s: its window is on the screen", app.launch_id);
+        app.app_shown = TRUE;
+        if (app.app_wait) g_source_remove(app.app_wait);
+        if (app.app_empty) g_source_remove(app.app_empty);
+        app.app_wait = app.app_empty = 0;
+        send_title(text);
+    } else if (strcmp(method, "Title") == 0) {
+        send_title(text);
+    } else if (strcmp(method, "Empty") == 0) {
+        if (!app.app_empty) app.app_empty = g_timeout_add(APP_EMPTY_MS, app_closed, NULL);
+    } else if (strcmp(method, "Back") == 0) {
+        say("app: back on the phone's screen: %s", text ? text : "");
+        app.app_back = TRUE;
+    } else {
+        say("app: %s", text ? text : "");
+    }
+    g_dbus_method_invocation_return_value(inv, NULL);
+}
+
+/* A program that starts the app, not the app: its windows don't go by that name. */
+static gboolean launcher_name(const char *exe) {
+    static const char *const launchers[] = {"flatpak", "env", "sh", "bash", "dash", "python", "python3", "java",
+                                            "sudo", "pkexec", "gtk-launch", "kstart", "kstart5", "kstart6",
+                                            "dbus-launch", "snap", NULL};
+    for (int i = 0; launchers[i]; i++)
+        if (strcmp(exe, launchers[i]) == 0) return TRUE;
+    return FALSE;
+}
+
+/*
+ * The app's script, with what it needs to know first (app_config) in front,
+ * written to a file in the cache that KWin reads, and run; `back`: once more,
+ * to hand the windows back (app_hand_back), under a name of its own.
+ */
+static gboolean app_run_js(gboolean back, GError **err) {
+    const char *suffix = back ? "-back" : "";
+    GString *js = g_string_new("const CONFIG = ");
+    g_string_append(js, app.app_config);
+    g_string_append(js, ";\n");
+    if (back) g_string_append(js, "CONFIG.back = true;\n");
+    g_string_append(js, APP_JS);
+    char *dir = g_build_filename(g_get_user_cache_dir(), "openandroiddex", NULL);
+    char *base = g_strdup_printf("kwin-%s%s.js", app.name, suffix);
+    char *file = g_build_filename(dir, base, NULL);
+    char *name = g_strconcat(app.app_script, suffix, NULL);
+    g_mkdir_with_parents(dir, 0700);
+    gboolean ok = g_file_set_contents(file, js->str, -1, err) && kwin_run_script(file, name, err);
+    if (ok) say("app: KWin runs %s %s %s", file, back ? "to hand back the windows of" : "for", app.launch_id);
+    g_free(name);
+    g_free(file);
+    g_free(base);
+    g_free(dir);
+    g_string_free(js, TRUE);
+    return ok;
+}
+
+/*
+ * The app's screen is up: the name on the bus its script calls, then the
+ * script, with what it needs to know first (the screen, the app, the names
+ * its windows may go by).
+ */
+static gboolean app_start(GString *why) {
+    GError *err = NULL;
+    GDesktopAppInfo *info = app_info(app.launch_id);
+    if (!info) {
+        g_string_assign(why, "The phone doesn't have that app any more.");
+        return FALSE;
+    }
+    if (!kwin_owner(&err)) {
+        g_string_printf(why, "KWin isn't answering on the phone (%s).", err ? err->message : "no session bus");
+        g_clear_error(&err);
+        g_object_unref(info);
+        return FALSE;
+    }
+    static const GDBusInterfaceVTable vtable = {app_call, NULL, NULL, {0}};
+    GDBusNodeInfo *node = g_dbus_node_info_new_for_xml(app_xml, NULL);
+    app.app_object = g_dbus_connection_register_object(app.bus, APP_PATH, node->interfaces[0], &vtable, NULL, NULL, &err);
+    g_dbus_node_info_unref(node);
+    /* Taken before the script runs: it calls at once. */
+    app.app_bus = g_strdup_printf(APP_IFACE ".p%d", (int)getpid());
+    guint32 got = 0;
+    GVariant *r = app.app_object ? g_dbus_connection_call_sync(app.bus, "org.freedesktop.DBus", "/org/freedesktop/DBus",
+                                                               "org.freedesktop.DBus", "RequestName",
+                                                               g_variant_new("(su)", app.app_bus, 4 /* DO_NOT_QUEUE */),
+                                                               G_VARIANT_TYPE("(u)"), G_DBUS_CALL_FLAGS_NONE, 3000, NULL, &err)
+                                 : NULL;
+    if (r) {
+        g_variant_get(r, "(u)", &got);
+        g_variant_unref(r);
+    }
+    if (got != 1 /* PRIMARY_OWNER */) {
+        g_string_printf(why, "The phone's session bus wouldn't take the app's name (%s).", err ? err->message : "taken");
+        g_clear_error(&err);
+        g_object_unref(info);
+        return FALSE;
+    }
+
+    struct output *o = our_output();
+    GString *cfg = g_string_new("{\"bus\":");
+    json_string(cfg, app.app_bus);
+    g_string_append(cfg, ",\"path\":");
+    json_string(cfg, APP_PATH);
+    g_string_append(cfg, ",\"iface\":");
+    json_string(cfg, APP_IFACE);
+    g_string_append(cfg, ",\"output\":");
+    json_string(cfg, o && o->name ? o->name : "");
+    g_string_append(cfg, ",\"app\":");
+    json_string(cfg, app.launch_id);
+    /* The names its windows may go by when they don't go by the app's: its window class, its program. */
+    g_string_append(cfg, ",\"classes\":[");
+    const char *wm = g_desktop_app_info_get_startup_wm_class(info);
+    const char *exe_path = g_app_info_get_executable(G_APP_INFO(info));
+    char *exe = exe_path ? g_path_get_basename(exe_path) : NULL;
+    gboolean any = FALSE;
+    if (wm && *wm) {
+        json_string(cfg, wm);
+        any = TRUE;
+    }
+    if (exe && *exe && !launcher_name(exe)) {
+        if (any) g_string_append_c(cfg, ',');
+        json_string(cfg, exe);
+    }
+    g_string_append(cfg, "]}");
+    app.app_config = g_string_free(cfg, FALSE);
+    g_free(exe);
+    g_object_unref(info);
+
+    app.app_script = g_strdup_printf("openandroiddex-pmos-%s", app.name);
+    gboolean ok = app_run_js(FALSE, &err);
+    if (ok) {
+        app.app_loaded = TRUE;
+        /* If this program dies, the guard unloads it: KWin keeps a script until it is told. */
+        if (app.guard_fd == 0) start_guard_for(app.app_script);
+        if (!app.app_shown) app.app_wait = g_timeout_add_seconds(APP_OPEN_S, app_never_came, NULL);
+    } else {
+        g_string_printf(why, "KWin wouldn't run the app's script (%s).", err ? err->message : "no script id");
+    }
+    g_clear_error(&err);
+    return ok;
+}
+
+static gboolean app_back_late(gpointer d) {
+    *(gboolean *)d = TRUE;
+    return G_SOURCE_REMOVE;
+}
+
+/*
+ * Before the app's screen goes: the windows on it go to the phone's screen,
+ * the app's out of full screen, by the app's script run once more as `back`
+ * (app.js), which calls Back once they are there and have stayed. KWin would
+ * otherwise put them on a screen of its choosing as the screen goes, full
+ * screen still: the phone's desktop on the computer, when that is open too.
+ * The script that brought them over goes first: what it would make of them
+ * leaving (Empty) is no one's now.
+ */
+static void app_hand_back(void) {
+    if (!app.app_object || !app.app_config) return;
+    GError *err = NULL;
+    app.app_back = FALSE;
+    if (!app_run_js(TRUE, &err)) {
+        say("app: KWin wouldn't hand the windows back (%s): KWin puts them where it puts them",
+            err ? err->message : "no script id");
+        g_clear_error(&err);
+        return;
+    }
+    /* Back comes over the bus, which the main loop answers; it has ended, so it runs here a little. */
+    gboolean late = FALSE;
+    guint timer = g_timeout_add(APP_BACK_MS, app_back_late, &late);
+    while (!app.app_back && !late) g_main_context_iteration(NULL, TRUE);
+    if (late) say("app: the windows weren't handed back within %d ms", APP_BACK_MS);
+    else g_source_remove(timer);
+    char *back = g_strconcat(app.app_script, "-back", NULL);
+    kwin_unload(app.bus, back);
+    g_free(back);
+}
+
+static void app_stop(void) {
+    if (app.app_wait) g_source_remove(app.app_wait);
+    if (app.app_empty) g_source_remove(app.app_empty);
+    app.app_wait = app.app_empty = 0;
+    if (app.app_loaded && kwin_unload(app.bus, app.app_script)) say("app: KWin's script stopped");
+    app.app_loaded = FALSE;
+    app_hand_back();
+    if (app.app_object) g_dbus_connection_unregister_object(app.bus, app.app_object);
+    app.app_object = 0;
 }
 
 /* ── The clipboard ─────────────────────────────────────────────────────── */
@@ -5000,7 +5354,10 @@ static gboolean parse_args(int argc, char **argv) {
         } else if (strcmp(a, "--encoder") == 0) app.forced_encoder = g_strdup(v);
         else if (strcmp(a, "--convert") == 0) app.convert = g_strdup(v);
         else if (strcmp(a, "--bitrate") == 0) app.bitrate = atoi(v);
-        else if (strcmp(a, "--out") == 0 || strcmp(a, "--wait") == 0) continue; /* snapshot's, read there */
+        else if (strcmp(a, "--app") == 0) {
+            g_free(app.launch_id);
+            app.launch_id = g_strdup(v);
+        } else if (strcmp(a, "--out") == 0 || strcmp(a, "--wait") == 0) continue; /* snapshot's, read there */
         else {
             say("unknown option %s", a);
             return FALSE;
@@ -5148,6 +5505,216 @@ static int cmd_snapshot(int argc, char **argv) {
     return status;
 }
 
+/* ── The phone's apps, for the computer's Apps page (`apps`) ─────────────── */
+
+/*
+ * What the phone's own launcher lists (GLib's should_show: not NoDisplay, and
+ * meant for this desktop), each with its icon as a file of the icon theme the
+ * session uses, for the computer to draw: an SVG as it is, else the biggest
+ * PNG up to 256. An app that runs in a terminal is left out: it has no window
+ * of its own to show. Printed once, as JSON:
+ *   {"apps":[{"id":"org.kde.kalk","name":"Calculator","icon":"<base64>","type":"svg"}]}
+ */
+struct icon_pick {
+    char *path;
+    int score;
+};
+
+static void icon_pick_free(gpointer p) {
+    struct icon_pick *k = p;
+    g_free(k->path);
+    g_free(k);
+}
+
+/* An icon's size from its folder: 48 in hicolor's ".../48x48/apps/" and Breeze's ".../apps/48/"; scalable is any. */
+static int icon_size(const char *path) {
+    if (strstr(path, "/scalable/")) return 512;
+    int best = 0;
+    for (const char *p = path; *p; p++) {
+        if (*p == '/' && g_ascii_isdigit(p[1])) {
+            int n = atoi(p + 1);
+            if (n > best && n <= 1024) best = n;
+        }
+    }
+    return best ? best : 48;
+}
+
+/* Every icon under `dir`, the best of each name kept: the theme first (`rank`), apps' icons, then an SVG or a big PNG. */
+static void index_icons(GHashTable *index, const char *dir, int rank, int depth) {
+    GDir *d = g_dir_open(dir, 0, NULL);
+    if (!d) return;
+    const char *e;
+    while ((e = g_dir_read_name(d))) {
+        char *path = g_build_filename(dir, e, NULL);
+        const char *ext = strrchr(e, '.');
+        gboolean svg = ext && strcmp(ext, ".svg") == 0, png = ext && strcmp(ext, ".png") == 0;
+        if (!svg && !png) {
+            if (depth < 4 && g_file_test(path, G_FILE_TEST_IS_DIR)) index_icons(index, path, rank, depth + 1);
+        } else {
+            /* A PNG of 256 is plenty for the computer's tiles; one bigger is only more to send. */
+            int size = icon_size(path);
+            int drawing = svg ? 2600 : size <= 256 ? size * 10 : 2560 - MIN(size - 256, 2000);
+            int score = (100 - rank) * 100000 + (strstr(path, "/apps") ? 50000 : 0) -
+                        (strstr(path, "symbolic") ? 40000 : 0) + drawing;
+            char *name = g_strndup(e, ext - e);
+            struct icon_pick *had = g_hash_table_lookup(index, name);
+            if (!had || score > had->score) {
+                struct icon_pick *k = g_new0(struct icon_pick, 1);
+                k->path = path;
+                k->score = score;
+                path = NULL;
+                g_hash_table_replace(index, name, k);
+            } else {
+                g_free(name);
+            }
+        }
+        g_free(path);
+    }
+    g_dir_close(d);
+}
+
+/* The session's icon theme, what it inherits, then hicolor: KDE's from kdeglobals, GNOME's (Phosh) from its settings. */
+static GPtrArray *icon_themes(void) {
+    GPtrArray *themes = g_ptr_array_new_with_free_func(g_free);
+    char *theme = NULL;
+    GKeyFile *kf = g_key_file_new();
+    char *globals = g_build_filename(g_get_user_config_dir(), "kdeglobals", NULL);
+    if (g_key_file_load_from_file(kf, globals, G_KEY_FILE_NONE, NULL)) theme = g_key_file_get_string(kf, "Icons", "Theme", NULL);
+    g_free(globals);
+    g_key_file_unref(kf);
+    const char *desktop = getenv("XDG_CURRENT_DESKTOP");
+    gboolean kde = desktop && strstr(desktop, "KDE");
+    if (!theme && !kde) {
+        GSettingsSchemaSource *src = g_settings_schema_source_get_default();
+        GSettingsSchema *schema = src ? g_settings_schema_source_lookup(src, "org.gnome.desktop.interface", TRUE) : NULL;
+        if (schema) {
+            GSettings *s = g_settings_new("org.gnome.desktop.interface");
+            theme = g_settings_get_string(s, "icon-theme");
+            g_object_unref(s);
+            g_settings_schema_unref(schema);
+        }
+    }
+    if (!theme || !*theme) {
+        g_free(theme);
+        theme = g_strdup(kde ? "breeze" : "Adwaita");
+    }
+    g_ptr_array_add(themes, theme);
+    /* What each inherits (its index.theme's Inherits), in order, as far as they go. */
+    GPtrArray *bases = g_ptr_array_new();
+    g_ptr_array_add(bases, (gpointer)g_get_user_data_dir());
+    for (const char *const *d = g_get_system_data_dirs(); *d; d++) g_ptr_array_add(bases, (gpointer)*d);
+    for (guint i = 0; i < themes->len && themes->len < 12; i++) {
+        for (guint b = 0; b < bases->len; b++) {
+            char *index = g_build_filename(bases->pdata[b], "icons", (char *)themes->pdata[i], "index.theme", NULL);
+            GKeyFile *ik = g_key_file_new();
+            gchar **inherits = NULL;
+            if (g_key_file_load_from_file(ik, index, G_KEY_FILE_NONE, NULL))
+                inherits = g_key_file_get_string_list(ik, "Icon Theme", "Inherits", NULL, NULL);
+            for (int k = 0; inherits && inherits[k]; k++) {
+                gboolean have = FALSE;
+                for (guint m = 0; m < themes->len; m++)
+                    if (strcmp(themes->pdata[m], inherits[k]) == 0) have = TRUE;
+                if (!have && *inherits[k]) g_ptr_array_add(themes, g_strdup(inherits[k]));
+            }
+            g_strfreev(inherits);
+            g_key_file_unref(ik);
+            g_free(index);
+        }
+    }
+    g_ptr_array_free(bases, TRUE);
+    gboolean hicolor = FALSE;
+    for (guint m = 0; m < themes->len; m++)
+        if (strcmp(themes->pdata[m], "hicolor") == 0) hicolor = TRUE;
+    if (!hicolor) g_ptr_array_add(themes, g_strdup("hicolor"));
+    return themes;
+}
+
+/* The file for an app's icon: a file named outright, else the best of its names in the themes. */
+static char *icon_path(GIcon *icon, GHashTable *index) {
+    if (!icon) return NULL;
+    if (G_IS_FILE_ICON(icon)) return g_file_get_path(g_file_icon_get_file(G_FILE_ICON(icon)));
+    if (!G_IS_THEMED_ICON(icon)) return NULL;
+    const char *const *names = g_themed_icon_get_names(G_THEMED_ICON(icon));
+    for (int i = 0; names && names[i]; i++) {
+        if (g_path_is_absolute(names[i])) {
+            if (g_file_test(names[i], G_FILE_TEST_IS_REGULAR)) return g_strdup(names[i]);
+            continue;
+        }
+        struct icon_pick *k = g_hash_table_lookup(index, names[i]);
+        if (k) return g_strdup(k->path);
+    }
+    return NULL;
+}
+
+static int cmd_apps(void) {
+    /* Names in the phone's own language: the session's, not this login's. */
+    static const char *const lang[] = {"LANGUAGE", "LC_ALL", "LC_MESSAGES", "LANG", NULL};
+    for (int i = 0; lang[i] && app.session_env; i++) {
+        const char *v = g_environ_getenv(app.session_env, lang[i]);
+        if (v && !getenv(lang[i])) setenv(lang[i], v, 1);
+    }
+    GHashTable *index = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, icon_pick_free);
+    GPtrArray *themes = icon_themes();
+    const char *const *dirs = g_get_system_data_dirs();
+    for (guint i = 0; i < themes->len; i++) {
+        char *mine = g_build_filename(g_get_user_data_dir(), "icons", (char *)themes->pdata[i], NULL);
+        index_icons(index, mine, (int)i, 0);
+        g_free(mine);
+        for (int j = 0; dirs[j]; j++) {
+            char *dir = g_build_filename(dirs[j], "icons", (char *)themes->pdata[i], NULL);
+            index_icons(index, dir, (int)i, 0);
+            g_free(dir);
+        }
+    }
+    index_icons(index, "/usr/share/pixmaps", (int)themes->len, 3);
+
+    GString *out = g_string_new("{\"apps\":[");
+    GList *all = g_app_info_get_all();
+    gboolean first = TRUE;
+    int n = 0;
+    for (GList *l = all; l; l = l->next) {
+        GAppInfo *info = l->data;
+        if (!G_IS_DESKTOP_APP_INFO(info) || !g_app_info_should_show(info)) continue;
+        if (g_desktop_app_info_get_boolean(G_DESKTOP_APP_INFO(info), "Terminal")) continue;
+        const char *file_id = g_app_info_get_id(info);
+        if (!file_id || !g_str_has_suffix(file_id, ".desktop")) continue;
+        char *id = g_strndup(file_id, strlen(file_id) - strlen(".desktop"));
+        if (strcmp(id, "com.ccrstech.openandroiddex.pmos") == 0) {
+            g_free(id);
+            continue;
+        }
+        g_string_append(out, first ? "{\"id\":" : ",{\"id\":");
+        first = FALSE;
+        json_string(out, id);
+        g_string_append(out, ",\"name\":");
+        json_string(out, g_app_info_get_name(info));
+        char *path = icon_path(g_app_info_get_icon(info), index);
+        gchar *data = NULL;
+        gsize len = 0;
+        if (path && g_file_get_contents(path, &data, &len, NULL) && len > 0 && len <= 512 * 1024) {
+            gchar *b64 = g_base64_encode((const guchar *)data, len);
+            g_string_append(out, ",\"icon\":\"");
+            g_string_append(out, b64);
+            g_string_append_printf(out, "\",\"type\":\"%s\"", g_str_has_suffix(path, ".svg") ? "svg" : "png");
+            g_free(b64);
+        }
+        g_free(data);
+        g_free(path);
+        g_string_append_c(out, '}');
+        g_free(id);
+        n++;
+    }
+    g_list_free_full(all, g_object_unref);
+    g_string_append(out, "]}\n");
+    fwrite(out->str, 1, out->len, stdout);
+    fflush(stdout);
+    say("apps: %d, icons from %s", n, (char *)themes->pdata[0]);
+    g_string_free(out, TRUE);
+    g_ptr_array_free(themes, TRUE);
+    g_hash_table_destroy(index);
+    return 0;
+}
+
 static int cmd_serve(void) {
     signal(SIGPIPE, SIG_IGN);
     app.in = g_byte_array_new();
@@ -5155,7 +5722,13 @@ static int cmd_serve(void) {
     app.last_rx = g_get_monotonic_time();
     app.last_x = app.last_y = -1; /* the computer's pointer: not said yet */
     GString *why = g_string_new(NULL);
-    if (!wayland_connect(why) || !make_screen(why)) {
+    gboolean up = wayland_connect(why);
+    if (up && app.launch_id && !app.screencast) {
+        g_string_assign(why, "Opening one of the phone's apps in a window of its own needs KDE Plasma on the phone. "
+                             "Open the phone's desktop to use its apps.");
+        up = FALSE;
+    }
+    if (!up || !make_screen(why)) {
         say("%s", why->str);
         send_state("failed", why->str);
         return 1;
@@ -5177,9 +5750,22 @@ static int cmd_serve(void) {
         close_screen();
         return 1;
     }
-    if (!app.wlr) dock();
+    if (app.launch_id) {
+        /* One app's window: its script, and the app; none of the desktop's below. */
+        if (!app_start(why)) {
+            say("%s", why->str);
+            send_state("failed", why->str);
+            app_stop();
+            stop_video();
+            stop_sizer();
+            close_screen();
+            return 1;
+        }
+    } else if (!app.wlr) {
+        dock();
+    }
     inhibit();
-    here_start();
+    if (!app.launch_id) here_start();
     clip_start();
     {
         /* What the window can count on: typing, the clipboard, files dropped handed to the app under them. */
@@ -5208,17 +5794,21 @@ static int cmd_serve(void) {
     g_main_loop_run(app.loop);
 
     /* Before the screen goes: its windows come to the phone's, and that is no one's asking. */
-    here_stop();
+    if (app.launch_id) app_stop();
+    else here_stop();
     release_all();
     g_atomic_int_set(&app.attached, 0);
     stop_video();
     stop_sizer();
     close_screen();
-    /* After the screen has gone, so its windows come to the phone's screen as phone apps. */
-    undock();
-    /* And a keyboard laid out for the phone alone (see restart_keyboard); the guard needn't, then. */
-    if (!app.wlr) restart_keyboard(app.bus, "the computer's screen has gone");
-    if (app.guard_fd > 0 && write(app.guard_fd, "k", 1) != 1) say("guard: couldn't tell it the keyboard is done");
+    /* An app's window ends here: its windows are on the phone's screen now, and the app goes on there. */
+    if (!app.launch_id) {
+        /* After the screen has gone, so its windows come to the phone's screen as phone apps. */
+        undock();
+        /* And a keyboard laid out for the phone alone (see restart_keyboard); the guard needn't, then. */
+        if (!app.wlr) restart_keyboard(app.bus, "the computer's screen has gone");
+        if (app.guard_fd > 0 && write(app.guard_fd, "k", 1) != 1) say("guard: couldn't tell it the keyboard is done");
+    }
     wl_display_disconnect(app.display);
     say("done");
     return app.status;
@@ -5264,8 +5854,13 @@ static int cmd_rest(void) {
     return 0;
 }
 
-/* start_guard's process: waits on fd 3 for serve to end, then rests. It logs to a file: it has no stderr. */
-static int cmd_guard(void) {
+/*
+ * start_guard's process: waits on fd 3 for serve to end, then rests; for one
+ * app's window (--script), unloads that app's script only. It logs to a
+ * file: it has no stderr.
+ */
+static int cmd_guard(int argc, char **argv) {
+    const char *script = arg_value(argc, argv, "--script");
     char *dir = g_build_filename(g_get_user_cache_dir(), "openandroiddex", NULL);
     char *log = g_build_filename(dir, "guard.log", NULL);
     struct stat st;
@@ -5292,6 +5887,18 @@ static int cmd_guard(void) {
     say("guard: serve ended at %s", when);
     g_free(when);
     g_date_time_unref(now);
+    if (script) {
+        /* An app's window: its scripts (the one that hands the windows back too), which a serve that ended well has unloaded already. */
+        GDBusConnection *bus = g_bus_get_sync(G_BUS_TYPE_SESSION, NULL, NULL);
+        if (bus) {
+            char *back = g_strconcat(script, "-back", NULL);
+            if (kwin_unload(bus, script)) say("guard: KWin's %s stopped", script);
+            if (kwin_unload(bus, back)) say("guard: KWin's %s stopped", back);
+            g_free(back);
+            g_object_unref(bus);
+        }
+        return 0;
+    }
     int status = cmd_rest();
     /* serve died with the computer's screen up: the keyboard as serve would have left it (restart_keyboard). */
     GDBusConnection *bus = keyboard_done ? NULL : g_bus_get_sync(G_BUS_TYPE_SESSION, NULL, NULL);
@@ -5311,7 +5918,12 @@ int main(int argc, char **argv) {
     }
     if (strcmp(cmd, "rest") == 0 || strcmp(cmd, "guard") == 0) {
         adopt_session();
-        return strcmp(cmd, "rest") == 0 ? cmd_rest() : cmd_guard();
+        return strcmp(cmd, "rest") == 0 ? cmd_rest() : cmd_guard(argc, argv);
+    }
+    /* The phone's apps for the computer's Apps page: the session's desktop files and icons, no screen. */
+    if (strcmp(cmd, "apps") == 0) {
+        adopt_session();
+        return cmd_apps();
     }
     /* Files into Downloads: no desktop needed. */
     if (strcmp(cmd, "receive") == 0)
@@ -5321,8 +5933,8 @@ int main(int argc, char **argv) {
         return cmd_clip(argc, argv);
     }
     if (strcmp(cmd, "probe") != 0 && strcmp(cmd, "serve") != 0 && strcmp(cmd, "snapshot") != 0) {
-        fprintf(stderr, "usage: openandroiddex-pmos version|probe|serve|snapshot|rest|receive|clip [--width W --height H "
-                        "--scale S]\n");
+        fprintf(stderr, "usage: openandroiddex-pmos version|probe|serve|snapshot|rest|receive|clip|apps [--width W "
+                        "--height H --scale S] [--app ID]\n");
         return 2;
     }
     if (!parse_args(argc, argv)) return 2;

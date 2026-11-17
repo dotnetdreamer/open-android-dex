@@ -6,13 +6,23 @@ import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { error as logError, info as logInfo, warn as logWarn } from "@tauri-apps/plugin-log";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { AppsPanel, opensAppsOnConnect } from "./features/apps/AppsPanel";
+import { AppsPanel, Centered, opensAppsOnConnect } from "./features/apps/AppsPanel";
 import { ClosePrompt } from "./features/close/ClosePrompt";
 import { DesktopPage, type Method } from "./features/desktop/DesktopPage";
-import { deviceName, type AdbState, type LaunchMode, type Phase, type Progress } from "./features/desktop/model";
+import { PhoneSwitcher } from "./features/desktop/PhoneSwitcher";
+import {
+  deviceName,
+  otherPhones,
+  samePhone,
+  type AdbState,
+  type LaunchMode,
+  type Phase,
+  type Progress,
+} from "./features/desktop/model";
 import { useSessions } from "./features/mirror/useSessions";
 import { NotificationsBell } from "./features/notifications/NotificationsBell";
 import { PhotosPanel } from "./features/photos/PhotosPanel";
+import { PmosApps } from "./features/pmos/PmosApps";
 import { usePmos } from "./features/pmos/usePmos";
 import { RemotePanel } from "./features/remote/RemotePanel";
 import { WirelessPanel } from "./features/wireless/WirelessPanel";
@@ -48,6 +58,30 @@ const DESKTOP_RES = "1920x1080";
 const LAUNCH_TIMEOUT_MS = 45_000;
 /** How long a launch waits once the phone has asked its owner about the install — adb.rs's INSTALL_TIMEOUT. */
 const PHONE_ANSWER_TIMEOUT_MS = 240_000;
+
+/**
+ * The undo of the last desktop to close (adb_end_desktop), while it runs: a
+ * few seconds of adb calls. A launch waits for it. On the same phone the undo
+ * would take apart the desktop being set up; on another, the parts of it that
+ * go through the window daemon's port would reach that phone instead, for the
+ * port is one for the whole computer (wm.rs), forwarded to whichever phone set
+ * it up last. One for the whole app, then, not this component's.
+ */
+let puttingBack: Promise<unknown> = Promise.resolve();
+/** The longest a launch waits for it: a phone that stopped answering must not hold another up. */
+const PUT_BACK_WAIT_MS = 10_000;
+
+/** `work` finished, or `ms` gone by, whichever is first. */
+function within(work: Promise<unknown>, ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    const done = () => {
+      clearTimeout(timer);
+      resolve();
+    };
+    work.then(done, done);
+  });
+}
 
 const ISSUES_URL = "https://github.com/dotnetdreamer/open-android-dex/issues";
 
@@ -144,11 +178,21 @@ export default function App() {
   const armedRef = useRef(true);
   const scannedOnce = useRef(false);
   /**
-   * The serial to launch on when more than one is ready. A phone that has just
-   * been put on Wi-Fi is still on the cable too, and launching on the USB
-   * serial would tie the session to the cable the user is about to pull out.
+   * The phone in use when more than one is ready: the one last opened or
+   * chosen (the titlebar's PhoneSwitcher). The Desktop page offers it, the Apps
+   * and Photos pages show it, and a launch with no phone named goes to it. A
+   * phone that has just been put on Wi-Fi is still on the cable too, and
+   * launching on the USB serial would tie the session to the cable the user is
+   * about to pull out.
    */
-  const preferredSerial = useRef<string | null>(null);
+  const [preferred, setPreferred] = useState<string | null>(null);
+  /** The same, for the callbacks and effects that read it after it changed. */
+  const preferredSerial = useRef(preferred);
+  preferredSerial.current = preferred;
+  const prefer = useCallback((serial: string | null) => {
+    preferredSerial.current = serial;
+    setPreferred(serial);
+  }, []);
   /**
    * Set when a live session was stopped in order to move it onto Wi-Fi.
    * `adb tcpip` restarts adbd, which drops every transport including the one
@@ -223,7 +267,7 @@ export default function App() {
         );
         if (live && back.length > 0) {
           logInfo(`boot: ${back.join(", ")} answered`);
-          preferredSerial.current = back[0];
+          prefer(back[0]);
         }
       })
       .catch(() => {})
@@ -235,7 +279,7 @@ export default function App() {
     return () => {
       live = false;
     };
-  }, []);
+  }, [prefer]);
 
   useEffect(() => {
     invoke<{ serial: string; pkg: string } | null>("apps_startup")
@@ -292,10 +336,16 @@ export default function App() {
     setSwitching(false);
     setProgress({ step: 0, mode });
     setPhase({ kind: "launching", device });
+    // The phone opened is the one in use from here on.
+    prefer(device.serial);
     logInfo(
       `launch: ${deviceName(device)} (${device.serial}, ${device.connection}, ` +
         `Android ${device.androidVersion ?? "?"})`,
     );
+    const since = Date.now();
+    await within(puttingBack, PUT_BACK_WAIT_MS);
+    const waited = Date.now() - since;
+    if (waited > 100) logInfo(`launch: waited ${waited} ms for the last desktop's phone to be put back`);
     try {
       // FIRED, NOT AWAITED. The profile is a chain of `settings` round trips —
       // measured at ~1.2s on a Redmi Note 7 over USB, because each `settings`
@@ -321,7 +371,7 @@ export default function App() {
       logError(`launch: start_mirror failed — ${String(e)}`);
       setPhase({ kind: "connect", error: String(e) });
     }
-  }, []);
+  }, [prefer]);
 
   /** A launch that cannot continue: show why, and where the trace is. */
   const failLaunch = useCallback((message: string) => {
@@ -549,7 +599,7 @@ export default function App() {
         invoke<WirelessResult>("wireless_go_wireless", { serial: phase.device.serial })
           .then(async (result) => {
             logInfo(`wireless: ${phase.device.serial} is now reachable at ${result.address}`);
-            preferredSerial.current = result.serial;
+            prefer(result.serial);
             const list = await invoke<DeviceInfo[]>("adb_list_devices").catch(() => []);
             say("Wi‑Fi is set up — you can unplug the cable.", "ok");
             launch(
@@ -577,13 +627,13 @@ export default function App() {
       // However the session ended, the phone is left with a desktop profile on
       // it — freeform windowing, a relaxed hidden-API policy, our accessibility
       // service and the window daemon. Take all of it back off.
-      invoke("adb_end_desktop", { serial: phase.device.serial })
+      puttingBack = invoke("adb_end_desktop", { serial: phase.device.serial })
         .then(() => logInfo("exit: the phone is back to normal"))
         .catch((e) => logWarn(`exit: the phone could not be fully restored — ${String(e)}`));
       appWindow.unminimize().catch(() => {});
       appWindow.setFocus().catch(() => {});
     }
-  }, [phase, sessions, launch, failLaunch, say]);
+  }, [phase, sessions, launch, failLaunch, say, prefer]);
 
   // ── Help ──
   const [diagBusy, setDiagBusy] = useState(false);
@@ -643,12 +693,12 @@ export default function App() {
   /** A phone became reachable over Wi-Fi — take the desktop there. */
   const onWirelessConnected = useCallback(
     (result: WirelessResult) => {
-      preferredSerial.current = result.serial;
+      prefer(result.serial);
       armedRef.current = true;
       setPhase((p) => (p.kind === "connect" ? { kind: "connect" } : p));
       refresh();
     },
-    [refresh],
+    [refresh, prefer],
   );
 
   /** "Lose the cable", from a desktop that is already running on one. */
@@ -711,15 +761,42 @@ export default function App() {
       .catch((e) => say("Couldn't reach the desktop", "bad", String(e)));
   }, [say]);
 
-  /** The phone "Open desktop" means: the one asked for, as auto-launch and retry choose it. */
-  const readyDevice =
-    devices.find((d) => d.state === "device" && d.serial === preferredSerial.current) ??
-    devices.find((d) => d.state === "device");
+  /** A postmarketOS phone on the cable: its own flow, which waits while an Android desktop opens or is open. */
+  const pmos = usePmos(phase.kind === "launching" || phase.kind === "ready");
+  /** The postmarketOS phone, when it can be the one in use: signed in to, its SSH answering. */
+  const pmosPhone = pmos.phone?.ssh && pmos.phone.paired && pmos.phone.id ? pmos.phone : undefined;
+  /** It is the one in use (the titlebar's switcher): its apps on the Apps page, its desktop on the Desktop page. */
+  const pmosChosen = !!pmosPhone && preferred === `pmos:${pmosPhone.id}`;
+
+  /** The Android phone in use: the one asked for, as auto-launch and retry choose it; none while the postmarketOS phone is. */
+  const readyDevice = pmosChosen
+    ? undefined
+    : (devices.find((d) => d.state === "device" && d.serial === preferred) ?? devices.find((d) => d.state === "device"));
+
+  /**
+   * A phone chosen in the titlebar becomes the one in use. A screen about
+   * another phone — its desktop just closed, or failed to open — gives way to
+   * this one's; a desktop that is opening or open stays as it is.
+   */
+  const choosePhone = (d: DeviceInfo) => {
+    const failedOn = phase.kind === "connect" && phase.error ? readyDevice : undefined;
+    prefer(d.serial);
+    setPhase((p) =>
+      (p.kind === "ended" && !samePhone(d, p.device)) ||
+      (p.kind === "connect" && p.error && !(failedOn && samePhone(d, failedOn)))
+        ? { kind: "connect" }
+        : p,
+    );
+  };
+  /** The postmarketOS phone chosen in the titlebar: as choosePhone, an Android phone's screens give way to it. */
+  const choosePmos = () => {
+    if (!pmosPhone) return;
+    prefer(`pmos:${pmosPhone.id}`);
+    setPhase((p) => (p.kind === "ended" || (p.kind === "connect" && p.error) ? { kind: "connect" } : p));
+  };
   /** The stream dropped and scrcpy is bringing it back by itself. */
   const stalled =
     phase.kind === "ready" && sessions[`${phase.device.serial}|desktop`]?.status === "reconnecting";
-  /** A postmarketOS phone on the cable: its own flow, which waits while an Android desktop opens or is open. */
-  const pmos = usePmos(phase.kind === "launching" || phase.kind === "ready");
 
   // ── Files dropped on this window, or pasted in it: into the phone's Downloads ──
   // The phone the page in front shows: the Desktop page's (its desktop's, else
@@ -870,6 +947,16 @@ export default function App() {
         tab={tab}
         onTab={setTab}
         menu={helpMenu}
+        phone={
+          <PhoneSwitcher
+            devices={devices}
+            current={readyDevice}
+            onChoose={choosePhone}
+            pmos={pmosPhone}
+            pmosChosen={pmosChosen}
+            onChoosePmos={choosePmos}
+          />
+        }
         notifications={<NotificationsBell />}
         desktopBusy={phase.kind === "launching" || switching || pmos.session.kind === "launching"}
       />
@@ -901,13 +988,31 @@ export default function App() {
                 home: backToLauncher,
                 closeTop: closeTopWindow,
                 disconnect: stopDesktop,
-                chooseAnother: () => setPhase({ kind: "connect" }),
+                // Another phone ready besides the one just used becomes the
+                // one offered, with this one beside it.
+                chooseAnother: () => {
+                  const other = "device" in phase ? otherPhones(devices, phase.device)[0] : undefined;
+                  if (other) prefer(other.serial);
+                  setPhase({ kind: "connect" });
+                },
               }}
             />
           ) : tab === "apps" ? (
-            <AppsPanel device={readyDevice} say={say} />
+            pmosChosen && pmosPhone ? (
+              <PmosApps key={pmosPhone.id} phone={pmosPhone} say={say} />
+            ) : (
+              <AppsPanel key={readyDevice?.serial ?? ""} device={readyDevice} say={say} />
+            )
           ) : tab === "photos" ? (
-            <PhotosPanel key={readyDevice?.serial ?? ""} device={readyDevice} say={say} />
+            pmosChosen ? (
+              <div className="flex min-h-full flex-col">
+                <Centered icon="phone" title="Photos come from an Android phone">
+                  Choose an Android phone at the top of this window to see its photos here.
+                </Centered>
+              </div>
+            ) : (
+              <PhotosPanel key={readyDevice?.serial ?? ""} device={readyDevice} say={say} />
+            )
           ) : (
             <RemotePanel devices={devices} />
           )}

@@ -98,6 +98,7 @@ export function UsbDesktop({
   route,
   tier,
   name,
+  what,
   start,
   host,
   onLost,
@@ -108,6 +109,8 @@ export function UsbDesktop({
   route: string;
   tier: Tier;
   name: string;
+  /** What the picture is, when it is one app of the phone's rather than its desktop: the app's name. */
+  what?: string;
   /** Start the desktop if it is not running: a window's first open, never its comebacks. */
   start: boolean;
   /** The window around this view: the clipboard, and where drops go. */
@@ -639,7 +642,7 @@ export function UsbDesktop({
         tabIndex={0}
         className="absolute inset-0 h-full w-full outline-none"
         style={{ objectFit: "contain", imageRendering: smooth ? "auto" : "pixelated", touchAction: "none" }}
-        aria-label={`The Linux desktop on ${name}`}
+        aria-label={what ? `${what} on ${name}` : `The Linux desktop on ${name}`}
       />
       {covered && (
         <DesktopCover
