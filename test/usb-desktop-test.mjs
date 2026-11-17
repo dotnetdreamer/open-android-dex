@@ -113,9 +113,13 @@ console.log("clipboardShare.ts");
   const file = path.join(tmp, "clipboardShare.mjs");
   fs.writeFileSync(file, js);
   const { ClipboardShare } = await import(pathToFileURL(file).href);
-  const window = { front: true, computer: "", writes: [], posts: [], said: [] };
+  const window = { front: true, computer: "", writes: [], posts: [], said: [], gate: null };
   const host = {
-    read: async () => window.computer,
+    // What the clipboard held when the read went out, back when `gate` opens: a slow read is an old one.
+    read: () => {
+      const then = window.computer;
+      return window.gate ? window.gate.then(() => then) : Promise.resolve(then);
+    },
     write: async (t) => {
       window.writes.push(t);
       window.computer = t;
@@ -152,6 +156,82 @@ console.log("clipboardShare.ts");
     window.writes.length === 2 && window.posts.at(-1)?.paste === "copied here meanwhile",
     JSON.stringify(window.posts.at(-1)),
   );
+  // The newer copy wins whichever end it was made on, and however the timing falls (found in review, 2026-11-16).
+  // Each sequence starts agreed: the window in front, this computer's text given to the guest.
+  const agreed = async () => {
+    window.front = true;
+    window.computer = "agreed";
+    window.gate = null;
+    const s = new ClipboardShare(host, true);
+    await s.focus();
+    window.writes.length = 0;
+    window.posts.length = 0;
+    return s;
+  };
+  let open = () => {};
+  {
+    const s = await agreed();
+    s.fromGuest("A, copied in front");
+    await sleep(20);
+    window.front = false;
+    s.fromGuest("B, copied with the window at the back");
+    await sleep(200);
+    window.front = true;
+    await s.focus();
+    check("a copy made with the window at the back replaces one still on its way: the newer lands", window.writes.join(" | ") === "B, copied with the window at the back", window.writes.join(" | "));
+    s.dispose();
+  }
+  {
+    const s = await agreed();
+    window.front = false;
+    s.fromGuest("waiting for the window");
+    window.gate = new Promise((r) => (open = r));
+    window.front = true;
+    const reading = s.focus();
+    await sleep(10);
+    window.front = false;
+    open();
+    await reading;
+    window.gate = null;
+    check("the window gone to the back again while the clipboard is read: nothing lands while it is there", window.writes.length === 0, window.writes.join(" | "));
+    window.front = true;
+    await s.focus();
+    check("…and what waited lands once it is back", window.writes.join(" | ") === "waiting for the window", window.writes.join(" | "));
+    s.dispose();
+  }
+  {
+    const s = await agreed();
+    window.computer = "older, on this computer";
+    window.gate = new Promise((r) => (open = r));
+    const reading = s.focus();
+    s.fromGuest("the guest's, newer");
+    await sleep(200);
+    open();
+    await reading;
+    window.gate = null;
+    check(
+      "a read that went out before the guest's copy landed here gives the guest nothing older",
+      !window.posts.some((p) => p.paste === "older, on this computer") && window.computer === "the guest's, newer",
+      JSON.stringify(window.posts),
+    );
+    s.dispose();
+  }
+  {
+    const s = await agreed();
+    s.fromGuest("the guest's, on its way");
+    await sleep(20);
+    window.front = false;
+    window.computer = "copied here meanwhile";
+    window.front = true;
+    await s.focus();
+    await sleep(200);
+    check(
+      "a copy here during the guest's 150 ms wins: it goes to the guest, and the guest's never lands here",
+      window.writes.length === 0 && window.posts.at(-1)?.paste === "copied here meanwhile" && window.computer === "copied here meanwhile",
+      `${window.writes.join(" | ")} / ${JSON.stringify(window.posts.at(-1))}`,
+    );
+    s.dispose();
+  }
   // A postmarketOS phone's window: its own words, and its own limit.
   const phone = new ClipboardShare(host, true, { name: "the phone", max: 1024 * 1024 });
   window.computer = "x".repeat(1024 * 1024 + 10);

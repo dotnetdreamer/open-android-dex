@@ -121,13 +121,19 @@ export class ClipboardShare {
   /** The window came to the front. */
   async focus() {
     if (!this.on) return;
+    const agreed = this.synced;
     const now = await this.host.read().catch(() => null);
-    if (!this.on) return;
+    // While the read was out, the switch went off, the window went to the
+    // back again (what waits keeps waiting, for the next time it comes), or
+    // a copy of the guest's landed here: then what was read is an older
+    // clipboard than the one there is now, and is not to be given anywhere.
+    if (!this.on || !this.host.focused() || this.synced !== agreed) return;
     const text = now === null ? null : lf(now);
     if (text !== null && text !== this.synced) {
       // Copied on this computer while the window was elsewhere: newer than
-      // anything the guest said in the meantime.
+      // anything the guest said in the meantime, waiting or still on its way.
       this.pending = null;
+      this.dropInFlight();
       if (guestSize(text) > this.guest.max) {
         if (this.refused !== text) {
           this.refused = text;
@@ -152,6 +158,9 @@ export class ClipboardShare {
     if (!this.on || raw.length > COMPUTER_MAX) return;
     const text = lf(raw);
     if (!this.host.focused()) {
+      // Newer than a copy still on its way from while the window was in
+      // front: that one must not come after it and take its place.
+      this.dropInFlight();
       this.pending = text;
       return;
     }
@@ -188,15 +197,19 @@ export class ClipboardShare {
     } else {
       this.host.say(`Clipboard not shared with ${this.guest.name}.`);
       this.pending = null;
-      this.latest = null;
-      if (this.timer !== null) clearTimeout(this.timer);
-      this.timer = null;
+      this.dropInFlight();
     }
   }
 
   dispose() {
+    this.dropInFlight();
+  }
+
+  /** The guest's copy waiting out its 150 ms, if there is one: let go of, a newer one being there. */
+  private dropInFlight() {
     if (this.timer !== null) clearTimeout(this.timer);
     this.timer = null;
+    this.latest = null;
   }
 
   private async commit(text: string) {

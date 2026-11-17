@@ -615,7 +615,13 @@ without either shows no switch on the pill.
   otherwise it waits for the window to come back, as anything copied while
   it is elsewhere does (`clipboardShare.ts`). Before the same review, a window
   sent to the back within those 150 ms still wrote it, over whatever was
-  copied in the app now in front; the fix serves the Linux window too.
+  copied in the app now in front; the fix serves the Linux window too. A
+  second review that evening found the newer copy could still lose: a copy
+  made with the window at the back was replaced by an older one still waiting
+  out its 150 ms, and the window, gone to the back again while it read this
+  computer's clipboard, wrote what had waited. Now any newer copy, from either
+  end, cancels one still on its way, and after the read the window checks it
+  is still in front and that nothing landed meanwhile (usb-desktop.md's checks).
 - **Sizes.** The window gives the phone up to 1 MiB at once (the helper takes
   a message of up to 4 MiB, and JSON's escapes can double a text); the helper
   sends up to 4 MiB, the window's limit for what comes in.

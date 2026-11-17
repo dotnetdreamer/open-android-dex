@@ -340,11 +340,14 @@ app's page through to LinuxStream's socket, handed `/stream` with the page's
 `Origin`, 1 MB both ways intact; and a phone without it refusing the op in a
 sentence, and a computer asking first told the app is too old.
 
-Off the phone (`node test/usb-desktop-test.mjs`, 70 checks): the window's H.264
+Off the phone (`node test/usb-desktop-test.mjs`, 75 checks): the window's H.264
 handling and key mapping; the window's clipboard rules (`clipboardShare.ts`:
 the guest's text lands only with the window still in front 150 ms later, and
-otherwise waits for it, unless something newer was copied here); the
-launcher's own `LinuxStreamRfb` against a stand-in
+otherwise waits for it; the newer copy wins whichever end it was made on,
+including a guest copy made while an earlier one waited out its 150 ms, a
+copy here during them, and a read of this computer's clipboard that comes back
+after the guest's copy landed or after the window went to the back again);
+the launcher's own `LinuxStreamRfb` against a stand-in
 Xvnc — VncAuth against OpenSSL's DES, a wrong password refused, shared, raw and
 the four pseudo-encodings asked for and nothing else, Xvnc's format kept, every
 sampled pixel right, the cursor's shape and mask, a resize and the pictures
