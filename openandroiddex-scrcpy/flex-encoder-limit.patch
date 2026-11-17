@@ -1,0 +1,70 @@
+diff --git a/server/src/main/java/com/genymobile/scrcpy/video/NewDisplayCapture.java b/server/src/main/java/com/genymobile/scrcpy/video/NewDisplayCapture.java
+index 37ba5ab..765cc01 100644
+--- a/server/src/main/java/com/genymobile/scrcpy/video/NewDisplayCapture.java
++++ b/server/src/main/java/com/genymobile/scrcpy/video/NewDisplayCapture.java
+@@ -153,7 +153,8 @@ public class NewDisplayCapture extends SurfaceCapture {
+         if (virtualDisplay == null) {
+             if (flexDisplay) {
+                 assert displaySize != null;
+-                displaySize = displaySize.constrain(videoConstraints, false);
++                // Open Android DeX: a size the encoder cannot take keeps its shape as it shrinks (see below)
++                displaySize = displaySize.constrain(videoConstraints, true);
+             } else {
+                 if (displaySize == null) {
+                     assert !flexDisplay;
+@@ -178,7 +179,18 @@ public class NewDisplayCapture extends SurfaceCapture {
+             displayRotation = displayInfo.getRotation();
+             displaySize = displayInfo.getSize();
+             if (flexDisplay) {
+-                displaySize = displaySize.constrain(videoConstraints, false);
++                // Open Android DeX: the display itself, not only its capture, at a size the encoder
++                // takes. An encoder that fails at the display's size has the capture constrained
++                // ("Applying video encoder constraints") while the display kept its size, and
++                // Android 11's SurfaceFlinger then scaled the display into the smaller video but left
++                // out every layer lying wholly outside it in the display's own coordinates: a desktop's
++                // taskbar, along its bottom edge, was never drawn (Redmi 9A: a 1920x1080 encoder under a
++                // 2464x1296 display). Its shape is kept, as the computer's window has it.
++                Size constrained = displaySize.constrain(videoConstraints, true);
++                if (!constrained.equals(displaySize)) {
++                    resizeToConstraints(constrained, dpi, displayRotation);
++                }
++                displaySize = constrained;
+             } else {
+                 // Align the physical display size to avoid unnecessary mismatches with the output size
+                 displaySize = displaySize.align(videoConstraints.getAlignment());
+@@ -421,7 +433,8 @@ public class NewDisplayCapture extends SurfaceCapture {
+         int height = DisplayScale.toPixels(window.getHeight(), s);
+ 
+         VideoConstraints constraints = getVideoConstraints(); // synchronized
+-        Size newSize = new Size(width, height).constrain(constraints, false);
++        // Open Android DeX: the window's shape kept, should the encoder not take its size (see prepare)
++        Size newSize = new Size(width, height).constrain(constraints, true);
+         if (Ln.isEnabled(Ln.Level.VERBOSE)) {
+             Ln.v(getClass().getSimpleName() + ": requestResize(" + window.getWidth() + ", " + window.getHeight() + ") at " + s + "x");
+             Ln.v(getClass().getSimpleName() + ": constrained size = " + newSize);
+@@ -471,9 +484,24 @@ public class NewDisplayCapture extends SurfaceCapture {
+         this.videoConstraints = videoConstraints;
+     }
+ 
++    /**
++     * Open Android DeX: the display resized to the size its capture was constrained to, as a client
++     * resize is: the tracker expects the change, and the computer follows the display from the log line.
++     */
++    private synchronized void resizeToConstraints(Size size, int dpi, int displayRotation) {
++        int displayId = virtualDisplay.getDisplay().getDisplayId();
++        tracker.pushClientRequest(new DisplayProperties(size, displayRotation));
++        // Although the display size (as detected by the DisplayMonitor) is rotated, the virtual display itself is not
++        Size vdSize = (displayRotation % 2) == 0 ? size : size.rotate();
++        virtualDisplay.resize(vdSize.getWidth(), vdSize.getHeight(), dpi);
++        Ln.i("Display resized: " + size.getWidth() + "x" + size.getHeight() + "/" + dpi + " (id=" + displayId
++                + "), to the encoder's limits");
++    }
++
+     private synchronized void triggerResize(Size size) {
+         if (virtualDisplay != null) {
+-            size = size.constrain(videoConstraints, false); // in case the constraints have changed
++            // in case the constraints have changed; Open Android DeX: the shape kept (see prepare)
++            size = size.constrain(videoConstraints, true);
+             int displayId = virtualDisplay.getDisplay().getDisplayId();
+             DisplayInfo displayInfo = ServiceManager.getDisplayManager().getDisplayInfo(displayId);
+             @SuppressWarnings("checkstyle:HiddenField") // hides this.dpi on purpose

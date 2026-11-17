@@ -1744,11 +1744,28 @@ fn apply_stored_config(app: &AppHandle, opts: &mut MirrorOptions) {
     // The display that follows its window where the host can (macOS, Windows),
     // else one fitted to the screen once.
     let picked = map.get("res").filter(|r| parse_display_size(r).is_some());
+    // The most this phone's encoder was seen to take: a display that follows its
+    // window starts within it, and is held to it (display::cap_flex).
+    let cap = display::video_cap(app, &opts.serial, opts.video_codec.as_deref());
     let fit = match picked {
         Some(_) => None,
-        None => display::desktop_flex_geometry(app).or_else(|| {
-            display::desktop_geometry(app, &opts.serial, opts.video_codec.as_deref())
-        }),
+        None => display::desktop_flex_geometry(app)
+            .map(|g| match cap {
+                Some(c) => {
+                    let capped = display::cap_flex(g, c);
+                    if capped != g {
+                        log::info!(
+                            "display: {} encodes at most {c} px on the long side — the desktop starts at {}x{} and stays within it",
+                            opts.serial,
+                            capped.width,
+                            capped.height
+                        );
+                    }
+                    capped
+                }
+                None => g,
+            })
+            .or_else(|| display::desktop_geometry(app, &opts.serial, opts.video_codec.as_deref())),
     };
     match (picked, fit) {
         (Some(res), _) => {
@@ -1764,6 +1781,12 @@ fn apply_stored_config(app: &AppHandle, opts: &mut MirrorOptions) {
             opts.base_dpi = Some(g.base_dpi);
             opts.fitted = true;
             opts.flex = g.flex;
+            // Every size the window asks for later is held to the encoder's too.
+            if g.flex.is_some() {
+                if let Some(c) = cap.filter(|c| *c < display::MAX_LONG_SIDE) {
+                    opts.max_size = c;
+                }
+            }
         }
         // No screen to fit (none reported, or too small): the size the
         // frontend asked for, as before this existed.

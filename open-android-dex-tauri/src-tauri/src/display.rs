@@ -241,6 +241,37 @@ pub fn flex_geometry(screen: &Screen) -> Option<Geometry> {
     })
 }
 
+/// A desktop that follows its window ([`flex_geometry`]) on a phone whose
+/// encoder was seen to stop at `cap` pixels on its long side
+/// ([`remember_video_cap`]): started that small, in the window's shape, so the
+/// encoder is not first asked for a size it fails at. The window then opens at
+/// the display's size, one pixel for one, and every size it is given later is
+/// held to the cap too: the caller passes it as `--max-size`, and the patched
+/// server keeps the shape as it shrinks (openandroiddex-scrcpy/
+/// flex-encoder-limit.patch). The density is left alone: a phone that cannot
+/// encode the window's size has a smaller desktop, not smaller type.
+///
+/// Before this the cap was learned but only fitted-once desktops used it, and a
+/// Redmi 9A (a 1920x1080 encoder) was asked for 2464x1296 at every start.
+pub fn cap_flex(g: Geometry, cap: u32) -> Geometry {
+    let long = g.width.max(g.height);
+    if cap < MIN_WIDTH || long <= cap {
+        return g;
+    }
+    let k = f64::from(cap) / f64::from(long);
+    let largest_long = g.largest.0.max(g.largest.1);
+    let kl = (f64::from(cap) / f64::from(largest_long.max(1))).min(1.0);
+    Geometry {
+        width: align_down((f64::from(g.width) * k) as u32),
+        height: align_down((f64::from(g.height) * k) as u32),
+        largest: (
+            (f64::from(g.largest.0) * kl) as u32,
+            (f64::from(g.largest.1) * kl) as u32,
+        ),
+        ..g
+    }
+}
+
 /// The bit rate a desktop of `width` x `height` is streamed at when the user
 /// has not picked one: scrcpy's own 8 Mbps for 1080p, scaled by the pixel
 /// count, so a sharper desktop keeps the same quality per pixel when it moves.
@@ -768,6 +799,34 @@ mod tests {
         assert_eq!((w.width, w.height), (3808, 2032));
         assert_eq!(w.y, 45);
         assert_eq!(w.x, 11 + (3818 - 3808) / 2);
+    }
+
+    #[test]
+    fn a_learned_encoder_limit_starts_a_following_desktop_within_it() {
+        // This PC's screen, and the Redmi 9A's 1920x1080 encoder
+        let s = Screen {
+            units: Units::Pixels,
+            ..mac((0, 0, 2560, 1392), 1.0)
+        };
+        let g = flex_geometry(&s).unwrap();
+        assert_eq!((g.width, g.height), (2464, 1296));
+        let c = cap_flex(g, 1920);
+        assert_eq!((c.width, c.height), (1920, 1008));
+        assert_eq!(c.width % ALIGN, 0);
+        assert_eq!(c.height % ALIGN, 0);
+        // the window's shape, within an alignment step
+        let shape = |w: u32, h: u32| f64::from(w) / f64::from(h);
+        assert!((shape(c.width, c.height) - shape(g.width, g.height)).abs() < 0.02);
+        // the same type size, and still a desktop that follows its window
+        assert_eq!(c.base_dpi, g.base_dpi);
+        assert_eq!(c.flex, g.flex);
+        // the bit rate is chosen for the most it will be, which the cap bounds
+        assert!(c.largest.0.max(c.largest.1) <= 1920);
+        // no cap, or one the desktop is within: as it was
+        assert_eq!(cap_flex(g, 3840), g);
+        assert_eq!(cap_flex(g, 2464), g);
+        // a cap nobody could build a desktop on is not one
+        assert_eq!(cap_flex(g, 640), g);
     }
 
     #[test]
