@@ -12,6 +12,12 @@
 //! through the window daemon. Where the shell may not route audio (Android 11
 //! and 12 refuse it), the third answer is the phone as a whole — "Phone only",
 //! as the desktop's Settings says it — and the phone plays where it would.
+//!
+//! Above them, Mute: the sound nowhere, and nothing spent on it — no
+//! companion, so the phone captures and encodes nothing, the link carries
+//! nothing and this computer decodes and plays nothing, while the phone's own
+//! media is held silent so the sound does not fall back to its speaker. It is
+//! the windows': the phone lifts it when the last of them closes.
 
 use std::sync::Arc;
 
@@ -60,6 +66,9 @@ pub struct PhoneSound {
     pub can_pin: bool,
     pub pinned: Option<(i32, String)>,
     pub playing: Option<(i32, String)>,
+    /// This computer's Mute is on, as the phone holds it: lifted by the phone
+    /// itself when the last window closes.
+    pub muted: bool,
 }
 
 impl PhoneSound {
@@ -88,6 +97,7 @@ impl PhoneSound {
             can_pin: v["canPin"].as_bool().unwrap_or(false),
             pinned: device(&v["pinned"]),
             playing: device(&v["playing"]),
+            muted: v["muted"].as_bool().unwrap_or(false),
         }
     }
 }
@@ -127,6 +137,19 @@ impl Mode {
             Mode::Phone => "phone",
         }
     }
+
+    /// What actually happens on a phone on Android `sdk` (0 if it has not
+    /// said), by scrcpy's floors: below 13 "both" is the computer alone, below
+    /// 11 the phone alone.
+    pub fn on_android(self, sdk: u32) -> Mode {
+        let can_forward = sdk == 0 || sdk >= 30;
+        let can_both = sdk == 0 || sdk >= 33;
+        match self {
+            Mode::Both | Mode::Computer if !can_forward => Mode::Phone,
+            Mode::Both if !can_both => Mode::Computer,
+            m => m,
+        }
+    }
 }
 
 /// Where the sound can be sent: what a menu item does.
@@ -136,6 +159,8 @@ pub enum Choice {
     Both,
     /// The phone: pinned to one of its outputs, or (None) where it plays by itself.
     Phone(Option<Output>),
+    /// Mute on (true) or off: the sound nowhere, and nothing spent carrying it.
+    Mute(bool),
 }
 
 /// A line of the menu.
@@ -151,9 +176,14 @@ pub enum Item {
 pub const COMPUTER_ONLY: &str = "Computer only";
 pub const COMPUTER_AND_PHONE: &str = "Computer and phone";
 pub const PHONE_ONLY: &str = "Phone only";
+pub const MUTE: &str = "Mute";
 
 /// The menu, for a phone on Android `sdk` (0 if it has not said) that told
-/// `phone` of its outputs, with the sound where `mode` puts it.
+/// `phone` of its outputs, with the sound where `mode` puts it, or `muted`.
+///
+/// Mute first, checked while it is on; picking it again turns it off. Then
+/// where the sound plays, which stays checked through a mute: where it goes
+/// when the mute ends — and picking a place ends it.
 ///
 /// The computer's answers have scrcpy's floors: any sound here needs Android
 /// 11, the phone playing it as well 13 — below them the item is there, greyed,
@@ -162,16 +192,13 @@ pub const PHONE_ONLY: &str = "Phone only";
 /// answer, "Phone only". Which output is checked, while the sound stays on the
 /// phone: the pinned one, else where the phone plays now, else the speaker —
 /// the one output with no name of its own.
-pub fn menu(mode: Mode, sdk: u32, phone: Option<&PhoneSound>) -> Vec<Item> {
+pub fn menu(mode: Mode, sdk: u32, phone: Option<&PhoneSound>, muted: bool) -> Vec<Item> {
     let can_forward = sdk == 0 || sdk >= 30;
     let can_both = sdk == 0 || sdk >= 33;
-    // What actually happens: below 13 "both" is the computer alone, below 11 the phone alone.
-    let mode = match mode {
-        Mode::Both | Mode::Computer if !can_forward => Mode::Phone,
-        Mode::Both if !can_both => Mode::Computer,
-        m => m,
-    };
+    let mode = mode.on_android(sdk);
     let mut items = vec![
+        Item::Choice { label: MUTE.into(), checked: muted, enabled: true, choice: Choice::Mute(!muted) },
+        Item::Separator,
         Item::Choice {
             label: if can_forward { COMPUTER_ONLY.into() } else { format!("{COMPUTER_ONLY} (needs Android 11)") },
             checked: mode == Mode::Computer,
@@ -236,7 +263,46 @@ pub fn menu_for(app: &tauri::AppHandle, serial: &str) -> Vec<Item> {
         s.sound()
     });
     let sdk = server.as_ref().map_or(0, |s| s.hello.sdk);
-    menu(Mode::of(forward, duplicate), sdk, phone.as_ref())
+    let muted = server.as_ref().is_some_and(|s| s.muted());
+    menu(Mode::of(forward, duplicate), sdk, phone.as_ref(), muted)
+}
+
+/// Where the menu says the sound plays now, for a note: the place checked under Mute.
+fn playing_at(items: &[Item]) -> Option<String> {
+    items.iter().find_map(|i| match i {
+        Item::Choice { label, checked: true, choice, .. } if !matches!(choice, Choice::Mute(_)) => Some(label.clone()),
+        _ => None,
+    })
+}
+
+/// The Mute on or off for the phone `serial` reaches (doc/apps-on-pc.md, "Mute").
+///
+/// The phone first, either way, and the companion after it. On: the phone's
+/// media silenced, and only then the companion stopped — gone first, it would
+/// hand the sound back to the phone's speaker. Off: the phone told first, so
+/// that where the companion takes the sound away from its speaker ("computer
+/// only") the phone holds its media silent until the capture is running, and
+/// nothing plays there in between; then the companion started. The phone's
+/// answer carries the Mute as it then is, which the control connection's
+/// reader takes in before this returns: the companion and the windows'
+/// speakers follow from there ([`muted_changed`]).
+fn set_muted(app: &tauri::AppHandle, serial: &str, on: bool) -> Result<(), String> {
+    let server = super::host::running(serial).ok_or("the phone is not connected")?;
+    let after_capture = !on && {
+        let (forward, duplicate) = crate::scrcpy::audio_forwarding(app);
+        Mode::of(forward, duplicate).on_android(server.hello.sdk) == Mode::Computer
+    };
+    server.mute(on, after_capture)
+}
+
+/// The Mute is not what it was for the phone `serial` reaches, as the phone
+/// says it (host.rs, the control connection's reader) — asked for here, or
+/// lifted by the phone itself when its last window closed: its companion
+/// stops or starts, and the windows' speakers show it.
+pub fn muted_changed(app: &tauri::AppHandle, serial: &str) {
+    crate::scrcpy::sound_muted_changed(app, serial);
+    #[cfg(any(windows, target_os = "macos"))]
+    super::show_muted();
 }
 
 /// Send `serial`'s sound where `choice` says, off the window's thread; the
@@ -247,16 +313,18 @@ pub fn menu_for(app: &tauri::AppHandle, serial: &str) -> Vec<Item> {
 /// silenced the computer and moved the sound somewhere nobody chose (the
 /// desktop's routeToPhoneOutput, in the same order). Back to this computer,
 /// any pin is let go of, so the phone's half of "computer and phone" plays
-/// where the phone would play on its own.
+/// where the phone would play on its own. A place picked while muted is the
+/// sound back on, there.
 pub fn pick(app: &tauri::AppHandle, serial: &str, choice: Choice, window: Arc<dyn Surface>) {
     let (app, serial) = (app.clone(), serial.to_string());
     std::thread::spawn(move || {
-        let server = super::host::running(&serial);
         let (mode, pick) = match &choice {
+            Choice::Mute(on) => return pick_mute(&app, &serial, *on, &*window),
             Choice::Computer => (Mode::Computer, None),
             Choice::Both => (Mode::Both, None),
             Choice::Phone(out) => (Mode::Phone, out.clone()),
         };
+        let server = super::host::running(&serial);
         if let Some(out) = &pick {
             let routed = match &server {
                 Some(s) => s.route_audio(Some(out)),
@@ -287,8 +355,34 @@ pub fn pick(app: &tauri::AppHandle, serial: &str, choice: Choice, window: Arc<dy
             (None, Mode::Phone) => PHONE_ONLY.into(),
         };
         log::info!("apps [{serial}] sound: {said}");
+        // Muted on a phone not reached just now, too: it holds the Mute until it is told.
+        if super::host::sound_muted(&serial) {
+            if let Err(e) = set_muted(&app, &serial, false) {
+                log::warn!("apps [{serial}] sound: unmuting for {said}: {e}");
+                window.note(Some(format!("Sound: {said} (still muted)")), false);
+                return;
+            }
+            log::info!("apps [{serial}] sound: unmuted");
+        }
         window.note(Some(format!("Sound: {said}")), false);
     });
+}
+
+/// The menu's Mute, picked: on, or off again — the sound back where the menu
+/// says it plays. The window hears how it went.
+fn pick_mute(app: &tauri::AppHandle, serial: &str, on: bool, window: &dyn Surface) {
+    if let Err(e) = set_muted(app, serial, on) {
+        log::warn!("apps [{serial}] sound: {}: {e}", if on { "muting" } else { "unmuting" });
+        window.note(Some(if on { "Couldn't mute the sound" } else { "Couldn't unmute the sound" }.into()), false);
+        return;
+    }
+    log::info!("apps [{serial}] sound: {}", if on { "muted" } else { "unmuted" });
+    let said = if on {
+        "Sound muted".to_string()
+    } else {
+        playing_at(&menu_for(app, serial)).map_or_else(|| "Sound on".into(), |at| format!("Sound: {at}"))
+    };
+    window.note(Some(said), false);
 }
 
 /// What the launcher is told, for its own record of the choice (AppsProvider's `media.mode`).
@@ -309,7 +403,7 @@ mod tests {
     }
 
     fn phone() -> PhoneSound {
-        PhoneSound { outputs: vec![Output::speaker(), buds()], can_pin: true, pinned: None, playing: None }
+        PhoneSound { outputs: vec![Output::speaker(), buds()], can_pin: true, pinned: None, playing: None, muted: false }
     }
 
     fn checked(items: &[Item]) -> Vec<String> {
@@ -333,19 +427,23 @@ mod tests {
             "canPin": true,
             "pinned": {"type": 8, "address": "AA:BB"},
             "playing": null,
+            "muted": true,
         });
         let s = PhoneSound::parse(&v);
         assert_eq!(s.outputs, vec![Output::speaker(), buds()]);
         assert!(s.can_pin);
         assert_eq!(s.pinned, Some((8, "AA:BB".into())));
         assert_eq!(s.playing, None);
-        // A phone that says nothing of pins cannot be assumed to take one.
-        assert!(!PhoneSound::parse(&serde_json::json!({"t": "audio", "outputs": []})).can_pin);
+        assert!(s.muted);
+        // A phone that says nothing of pins cannot be assumed to take one, nor
+        // one that says nothing of the Mute to have it on.
+        let quiet = PhoneSound::parse(&serde_json::json!({"t": "audio", "outputs": []}));
+        assert!(!quiet.can_pin && !quiet.muted);
     }
 
     #[test]
-    fn the_menu_is_the_desktops() {
-        let items = menu(Mode::Computer, 34, Some(&phone()));
+    fn the_menu_is_mute_then_the_desktops() {
+        let items = menu(Mode::Computer, 34, Some(&phone()), false);
         let labels: Vec<String> = items
             .iter()
             .map(|i| match i {
@@ -353,26 +451,57 @@ mod tests {
                 Item::Separator => "—".into(),
             })
             .collect();
-        assert_eq!(labels, ["Computer only", "Computer and phone", "—", "Phone speaker", "Galaxy Buds2"]);
+        assert_eq!(labels, ["Mute", "—", "Computer only", "Computer and phone", "—", "Phone speaker", "Galaxy Buds2"]);
         assert_eq!(checked(&items), ["Computer only"]);
+    }
+
+    #[test]
+    fn mute_is_checked_while_on_and_picking_it_again_turns_it_off() {
+        let off = menu(Mode::Computer, 34, Some(&phone()), false);
+        assert_eq!(off[0], Item::Choice { label: "Mute".into(), checked: false, enabled: true, choice: Choice::Mute(true) });
+        let on = menu(Mode::Computer, 34, Some(&phone()), true);
+        assert_eq!(on[0], Item::Choice { label: "Mute".into(), checked: true, enabled: true, choice: Choice::Mute(false) });
+        // Where it goes once the mute ends stays checked, and is what a note says it plays on.
+        assert_eq!(checked(&on), ["Mute", "Computer only"]);
+        assert_eq!(playing_at(&on).as_deref(), Some("Computer only"));
+        let mut p = phone();
+        p.pinned = Some((8, "AA:BB".into()));
+        assert_eq!(playing_at(&menu(Mode::Phone, 34, Some(&p), true)).as_deref(), Some("Galaxy Buds2"));
+        // A phone too old for any sound here can still be muted: its own media is.
+        assert_eq!(menu(Mode::Computer, 29, None, false)[0], off[0]);
+    }
+
+    #[test]
+    fn what_happens_has_scrcpys_floors() {
+        assert_eq!(Mode::Both.on_android(34), Mode::Both);
+        assert_eq!(Mode::Both.on_android(33), Mode::Both);
+        // Below 13 "both" is the computer alone: the companion takes the sound away from the phone.
+        assert_eq!(Mode::Both.on_android(32), Mode::Computer);
+        assert_eq!(Mode::Computer.on_android(30), Mode::Computer);
+        // Below 11 nothing comes here: the phone plays it.
+        assert_eq!(Mode::Computer.on_android(29), Mode::Phone);
+        assert_eq!(Mode::Both.on_android(29), Mode::Phone);
+        assert_eq!(Mode::Phone.on_android(34), Mode::Phone);
+        // A phone that has not said is taken to be able.
+        assert_eq!(Mode::Both.on_android(0), Mode::Both);
     }
 
     #[test]
     fn on_the_phone_the_pin_is_checked_then_where_it_plays_then_the_speaker() {
         let mut p = phone();
-        assert_eq!(checked(&menu(Mode::Phone, 34, Some(&p))), ["Phone speaker"]);
+        assert_eq!(checked(&menu(Mode::Phone, 34, Some(&p), false)), ["Phone speaker"]);
         p.playing = Some((8, "AA:BB".into()));
-        assert_eq!(checked(&menu(Mode::Phone, 34, Some(&p))), ["Galaxy Buds2"]);
+        assert_eq!(checked(&menu(Mode::Phone, 34, Some(&p), false)), ["Galaxy Buds2"]);
         p.pinned = Some((2, String::new()));
-        assert_eq!(checked(&menu(Mode::Phone, 34, Some(&p))), ["Phone speaker"]);
+        assert_eq!(checked(&menu(Mode::Phone, 34, Some(&p), false)), ["Phone speaker"]);
         // The same earbuds under their other profile are the same earbuds.
         p.pinned = Some((26, "AA:BB".into()));
-        assert_eq!(checked(&menu(Mode::Phone, 34, Some(&p))), ["Galaxy Buds2"]);
+        assert_eq!(checked(&menu(Mode::Phone, 34, Some(&p), false)), ["Galaxy Buds2"]);
     }
 
     #[test]
     fn an_older_phone_says_what_it_cannot_do() {
-        let items = menu(Mode::Both, 31, Some(&phone()));
+        let items = menu(Mode::Both, 31, Some(&phone()), false);
         // Android 12 cannot play it in both places: it comes here alone, and says so.
         assert_eq!(checked(&items), ["Computer only"]);
         assert!(items.contains(&Item::Choice {
@@ -382,7 +511,7 @@ mod tests {
             choice: Choice::Both,
         }));
         // Android 10 sends no sound here at all: it plays on the phone.
-        assert_eq!(checked(&menu(Mode::Computer, 29, Some(&phone()))), ["Phone speaker"]);
+        assert_eq!(checked(&menu(Mode::Computer, 29, Some(&phone()), false)), ["Phone speaker"]);
     }
 
     #[test]
@@ -390,22 +519,22 @@ mod tests {
         // Android 11 and 12 refuse the shell the pin: the phone plays where it would.
         let mut p = phone();
         p.can_pin = false;
-        let items = menu(Mode::Phone, 31, Some(&p));
-        assert_eq!(items.len(), 4);
+        let items = menu(Mode::Phone, 31, Some(&p), false);
+        assert_eq!(items.len(), 6);
         assert_eq!(checked(&items), ["Phone only"]);
         assert_eq!(
-            items[3],
+            items[5],
             Item::Choice { label: "Phone only".into(), checked: true, enabled: true, choice: Choice::Phone(None) }
         );
         // …and so is one that has said nothing yet.
-        assert_eq!(checked(&menu(Mode::Phone, 0, None)), ["Phone only"]);
-        assert_eq!(checked(&menu(Mode::Computer, 0, None)), ["Computer only"]);
+        assert_eq!(checked(&menu(Mode::Phone, 0, None, false)), ["Phone only"]);
+        assert_eq!(checked(&menu(Mode::Computer, 0, None, false)), ["Computer only"]);
     }
 
     #[test]
     fn a_phone_that_lists_nothing_still_has_a_speaker() {
-        let p = PhoneSound { outputs: Vec::new(), can_pin: true, pinned: None, playing: None };
-        assert_eq!(checked(&menu(Mode::Phone, 34, Some(&p))), ["Phone speaker"]);
+        let p = PhoneSound { outputs: Vec::new(), can_pin: true, pinned: None, playing: None, muted: false };
+        assert_eq!(checked(&menu(Mode::Phone, 34, Some(&p), false)), ["Phone speaker"]);
     }
 
     #[test]

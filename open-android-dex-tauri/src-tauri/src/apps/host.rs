@@ -50,6 +50,8 @@ const ANSWER_TIMEOUT: Duration = Duration::from_secs(20);
 const LINUX_RUN_TIMEOUT: Duration = Duration::from_secs(8);
 /// Pinning the phone's sound is one call to its audio service.
 const ROUTE_TIMEOUT: Duration = Duration::from_secs(5);
+/// So is muting it; an unmute that waits for the capture answers before it waits.
+const MUTE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// What the phone said about itself.
 #[derive(Debug, Clone, Default, serde::Serialize)]
@@ -72,6 +74,7 @@ enum Answer {
     Icon(String, Vec<u8>),
     IconsDone,
     Routed(Value),
+    Muted(Value),
 }
 
 pub struct Server {
@@ -100,6 +103,10 @@ pub struct Server {
     pub clip_last: Arc<Mutex<String>>,
     /// What the phone last said of its sound outputs: it says so as they come and go.
     sound: Arc<Mutex<Option<PhoneSound>>>,
+    /// The windows' Mute is on for the phone (sound.rs), as the phone last
+    /// said it — in an answer, or in a word of its sound, for it lifts the
+    /// Mute by itself. Written by the control connection's reader alone.
+    muted: Arc<AtomicBool>,
     /// The Apps page or a window has used it, not only the phone's
     /// notifications: what the phone copies comes to this computer only then,
     /// as it did before notifications started a server of their own.
@@ -143,6 +150,11 @@ impl Server {
         self.ways.lock().unwrap().contains(serial)
     }
 
+    /// The windows' Mute is on for the phone.
+    pub fn muted(&self) -> bool {
+        self.muted.load(Ordering::SeqCst)
+    }
+
     /// The control connection made again, over `serial`: the server outlived
     /// the way its last one took (the cable pulled) and waits for this computer.
     fn reconnect_control(&self, app: &tauri::AppHandle, serial: &str) -> Result<(), String> {
@@ -175,6 +187,7 @@ impl Server {
             generation,
             self.clip_last.clone(),
             self.sound.clone(),
+            self.muted.clone(),
             self.for_apps.clone(),
         );
         Ok(())
@@ -318,6 +331,29 @@ impl Server {
         }
     }
 
+    /// The windows' Mute on the phone, or off (sound.rs): its media silenced,
+    /// or playing again — with `after_capture`, only once this computer's
+    /// capture of it is running. The phone answers at once, saying the Mute as
+    /// it then is; the control connection's reader takes that in, in the
+    /// order the phone said it, before this hears the answer — never this
+    /// thread after it, which could set back a lift the phone said since.
+    pub fn mute(&self, on: bool, after_capture: bool) -> Result<(), String> {
+        let _one = self.asking.lock().unwrap();
+        self.send(&json!({"t": "mute", "on": on, "afterCapture": after_capture}))?;
+        let answers = self.answers.lock().unwrap();
+        let until = Instant::now() + MUTE_TIMEOUT;
+        loop {
+            match answers.recv_timeout(until.saturating_duration_since(Instant::now())) {
+                Ok(Answer::Muted(v)) if v["ok"].as_bool() == Some(true) => return Ok(()),
+                Ok(Answer::Muted(v)) => {
+                    return Err(v["message"].as_str().filter(|m| !m.is_empty()).unwrap_or("the phone refused").to_string())
+                }
+                Ok(_) => continue,
+                Err(_) => return Err("the phone did not answer".into()),
+            }
+        }
+    }
+
     /// Tell the phone's launcher where this computer sent the sound, for its
     /// own record of the choice: the desktop's flyout then shows the same.
     pub fn tell_launcher_sound(&self, mode: sound::Mode, pick: Option<&Output>) {
@@ -397,7 +433,9 @@ impl Server {
             match answers.recv_timeout(until.saturating_duration_since(Instant::now())) {
                 Ok(Answer::Icon(pkg, png)) => got(pkg, png),
                 Ok(Answer::IconsDone) => return Ok(()),
-                Ok(Answer::Apps(_)) | Ok(Answer::Linux(_)) | Ok(Answer::LinuxRan(_)) | Ok(Answer::Routed(_)) => continue,
+                Ok(Answer::Apps(_)) | Ok(Answer::Linux(_)) | Ok(Answer::LinuxRan(_)) | Ok(Answer::Routed(_)) | Ok(Answer::Muted(_)) => {
+                    continue
+                }
                 Err(_) => return Err("the phone did not send its icons".into()),
             }
         }
@@ -552,6 +590,13 @@ pub fn adopt(app: &tauri::AppHandle, serial: &str, phone: &str) -> Option<Arc<Se
 /// The server that `serial` reaches, if it is up.
 pub fn running(serial: &str) -> Option<Arc<Server>> {
     servers().lock().unwrap().values().find(|s| s.alive() && s.reaches(serial)).cloned()
+}
+
+/// The windows' Mute is on for the phone `serial` reaches — up, or only
+/// waiting for this computer to come back another way (the cable pulled):
+/// the phone holds the Mute meanwhile, and its sound is not to come here.
+pub fn sound_muted(serial: &str) -> bool {
+    servers().lock().unwrap().values().any(|s| s.reaches(serial) && s.muted())
 }
 
 /// Every phone's server that is up (a game controller's going is told to each).
@@ -738,6 +783,7 @@ fn start(app: &tauri::AppHandle, serial: &str, phone: &str, warm: bool) -> Resul
     let (answer_tx, answer_rx) = mpsc::channel::<Answer>();
     let clip_last = Arc::new(Mutex::new(String::new()));
     let sound = Arc::new(Mutex::new(None));
+    let muted = Arc::new(AtomicBool::new(false));
     let control_gen = Arc::new(AtomicU64::new(0));
     let for_apps = Arc::new(AtomicBool::new(false));
     let reader = control.try_clone().map_err(|e| e.to_string())?;
@@ -752,6 +798,7 @@ fn start(app: &tauri::AppHandle, serial: &str, phone: &str, warm: bool) -> Resul
         0,
         clip_last.clone(),
         sound.clone(),
+        muted.clone(),
         for_apps.clone(),
     );
     log::info!(
@@ -778,15 +825,33 @@ fn start(app: &tauri::AppHandle, serial: &str, phone: &str, warm: bool) -> Resul
         control_gen,
         clip_last,
         sound,
+        muted,
         for_apps,
         for_send: Arc::new(AtomicBool::new(false)),
     })
 }
 
+/// The Mute as the phone last said it, kept by the control connection's
+/// reader alone, in the order the phone said it: when it changes, the
+/// companion and the windows' speakers follow (sound.rs).
+fn follow_mute(app: &tauri::AppHandle, serial: &str, muted: &AtomicBool, now: bool) {
+    if take_mute(muted, now) {
+        log::info!("apps [{serial}] the windows' mute is {} on the phone", if now { "on" } else { "off" });
+        super::sound::muted_changed(app, serial);
+    }
+}
+
+/// The reader's part of [`follow_mute`]: the Mute as the phone said it now,
+/// and whether that changed it.
+fn take_mute(muted: &AtomicBool, now: bool) -> bool {
+    muted.swap(now, Ordering::SeqCst) != now
+}
+
 /// What the phone sends on its own: answers go to whoever asked, the
 /// clipboard straight to this computer's (once the server is the Apps
-/// page's, `for_apps`), word of its sound to the menus, its notifications to
-/// this computer's own (notifications/mod.rs).
+/// page's, `for_apps`), word of its sound to the menus — and of the Mute,
+/// which the phone lifts by itself, to the companion and the windows — its
+/// notifications to this computer's own (notifications/mod.rs).
 /// The server is no longer reached once this ends, unless a control
 /// connection made again (generation after `generation`) has it.
 #[allow(clippy::too_many_arguments)]
@@ -801,6 +866,7 @@ fn spawn_control_reader(
     generation: u64,
     clip_last: Arc<Mutex<String>>,
     sound: Arc<Mutex<Option<PhoneSound>>>,
+    muted: Arc<AtomicBool>,
     for_apps: Arc<AtomicBool>,
 ) {
     let _ = thread::Builder::new().name("apps-control".into()).spawn(move || {
@@ -827,10 +893,20 @@ fn spawn_control_reader(
                             let _ = answers.send(Answer::LinuxRan(v));
                         }
                         Some("audio") => {
-                            *sound.lock().unwrap() = Some(PhoneSound::parse(&v));
+                            let said = PhoneSound::parse(&v);
+                            let now = said.muted;
+                            *sound.lock().unwrap() = Some(said);
+                            follow_mute(&app, &serial, &muted, now);
                         }
                         Some("audioRouted") => {
                             let _ = answers.send(Answer::Routed(v));
+                        }
+                        // The Mute as the phone has it after what was asked, taken in before whoever asked hears.
+                        Some("muted") => {
+                            if let Some(now) = v["muted"].as_bool() {
+                                follow_mute(&app, &serial, &muted, now);
+                            }
+                            let _ = answers.send(Answer::Muted(v));
                         }
                         Some("linux") => super::linux_event(&app, &serial, &v),
                         Some("notifs") | Some("notif") | Some("notifDone") => {
@@ -888,4 +964,83 @@ fn spawn_control_reader(
             log::info!("apps [{serial}] the control connection closed");
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::TcpListener;
+
+    /// A server whose control connection ends in the test, which plays the
+    /// phone and the control connection's reader.
+    fn server() -> (Server, TcpStream, Sender<Answer>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let ours = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (phone, _) = listener.accept().unwrap();
+        let (answer_tx, answer_rx) = mpsc::channel::<Answer>();
+        let server = Server {
+            socket: "test".into(),
+            hello: Hello::default(),
+            phone: "phone".into(),
+            ways: Mutex::new(HashSet::from(["serial".to_string()])),
+            child: Mutex::new(None),
+            stdin: Mutex::new(None),
+            control: Mutex::new(ours),
+            answers: Mutex::new(answer_rx),
+            answer_tx: Mutex::new(answer_tx.clone()),
+            asking: Mutex::new(()),
+            alive: Arc::new(AtomicBool::new(true)),
+            control_gen: Arc::new(AtomicU64::new(0)),
+            clip_last: Arc::new(Mutex::new(String::new())),
+            sound: Arc::new(Mutex::new(None)),
+            muted: Arc::new(AtomicBool::new(false)),
+            for_apps: Arc::new(AtomicBool::new(false)),
+            for_send: Arc::new(AtomicBool::new(false)),
+        };
+        (server, phone, answer_tx)
+    }
+
+    /// The phone answers a mute, and its last window closing lifts it a moment
+    /// later; the reader takes in both, in that order, before the thread that
+    /// asked hears its answer. That answer must not then set the Mute back on:
+    /// only the reader writes it.
+    #[test]
+    fn an_answer_heard_late_does_not_undo_a_lift_said_since() {
+        let (s, mut phone, answers) = server();
+        let muted = s.muted.clone();
+        let reader = thread::spawn(move || {
+            let asked = wire::read(&mut phone).unwrap().unwrap();
+            let v: Value = serde_json::from_slice(&asked.data).unwrap();
+            assert_eq!((v["t"].as_str(), v["on"].as_bool()), (Some("mute"), Some(true)));
+            // The answer's Mute (on), then the phone's word after the lift (off), in order…
+            assert!(take_mute(&muted, true));
+            assert!(take_mute(&muted, false));
+            // …and only then does the asker hear its answer.
+            answers.send(Answer::Muted(json!({"t": "muted", "on": true, "muted": true, "ok": true}))).unwrap();
+        });
+        assert_eq!(s.mute(true, false), Ok(()));
+        reader.join().unwrap();
+        assert!(!s.muted(), "the late answer set the Mute back on over the lift the phone said since");
+    }
+
+    #[test]
+    fn a_refusal_comes_back_in_the_phones_words() {
+        let (s, mut phone, answers) = server();
+        let reader = thread::spawn(move || {
+            wire::read(&mut phone).unwrap().unwrap();
+            let refused = json!({"t": "muted", "on": false, "muted": true, "ok": false, "message": "the phone kept its media muted"});
+            answers.send(Answer::Muted(refused)).unwrap();
+        });
+        assert_eq!(s.mute(false, true), Err("the phone kept its media muted".to_string()));
+        reader.join().unwrap();
+    }
+
+    #[test]
+    fn the_mute_changes_only_when_the_phone_says_otherwise() {
+        let m = AtomicBool::new(false);
+        assert!(!take_mute(&m, false));
+        assert!(take_mute(&m, true));
+        assert!(!take_mute(&m, true));
+        assert!(take_mute(&m, false));
+    }
 }

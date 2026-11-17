@@ -1906,6 +1906,19 @@ pub fn audio_forwarding(app: &AppHandle) -> (bool, bool) {
 pub fn set_audio_forwarding(app: &AppHandle, serial: &str, forward: bool, duplicate: bool) {
     remember_config(app, "audio", if forward { "on" } else { "off" });
     remember_config(app, "audiodup", if duplicate { "on" } else { "off" });
+    reconcile_with_app_windows(app, serial);
+}
+
+/// The app windows' Mute went on or off for the phone `serial` reaches
+/// (apps/sound.rs): its companion stops, or starts again — for `serial` and
+/// every other way to a phone with windows here, each asking whether it is
+/// muted itself.
+pub fn sound_muted_changed(app: &AppHandle, serial: &str) {
+    reconcile_with_app_windows(app, serial);
+}
+
+/// `serial`'s audio companion and every one of the phones with app windows here, made to match.
+fn reconcile_with_app_windows(app: &AppHandle, serial: &str) {
     let mut serials = APP_WINDOWS.lock().unwrap().clone();
     if !serials.iter().any(|s| s == serial) {
         serials.push(serial.to_string());
@@ -2004,9 +2017,15 @@ fn reconcile_audio_session(app: &AppHandle, serial: &str) {
     // The companion accompanies a desktop, or the phone's apps in windows of
     // their own; without either there is nothing to keep silent-but-streaming,
     // and a leftover companion would divert the phone's sound to a computer
-    // showing nothing.
+    // showing nothing. Nor while those windows' Mute is on: the phone mutes
+    // its media then, which a running capture follows — on a Galaxy S25
+    // Ultra, a tone played into one went silent within 200 ms of the mute,
+    // once what was already on its way had come — so all a companion would
+    // still do is capture, encode, send and play silence: the cost the Mute
+    // is there to save.
     let desktop_live = sound_shown_here(app, serial);
-    let mut want = desktop_live && forward;
+    let muted = crate::apps::host::sound_muted(serial);
+    let mut want = desktop_live && forward && !muted;
 
     if want {
         // Both of scrcpy's audio paths have an Android floor, and asking past
@@ -2080,7 +2099,11 @@ fn reconcile_audio_session(app: &AppHandle, serial: &str) {
         (None, true) => {}
     }
     if !want {
-        log::info!("audio [{serial}] sound stays on the phone — no companion");
+        if muted {
+            log::info!("audio [{serial}] muted — no companion");
+        } else {
+            log::info!("audio [{serial}] sound stays on the phone — no companion");
+        }
         return;
     }
 
@@ -2096,6 +2119,11 @@ fn reconcile_audio_session(app: &AppHandle, serial: &str) {
     let desktop_still_live = sound_shown_here(app, serial);
     if !desktop_still_live {
         log::info!("audio [{serial}] the desktop ended mid-reconcile — no companion");
+        return;
+    }
+    // Muted meanwhile: the reconcile that muting queued behind this one would only stop it again.
+    if crate::apps::host::sound_muted(serial) {
+        log::info!("audio [{serial}] muted mid-reconcile — no companion");
         return;
     }
 

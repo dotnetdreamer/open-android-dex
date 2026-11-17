@@ -1245,6 +1245,8 @@ fn open_window(
     };
     // The window says when it is no longer opening: its first event.
     opening.armed = false;
+    // Opened while its phone is muted: it shows so, and its sound does not come.
+    window.show_muted(host::sound_muted(serial));
     windows().lock().unwrap().insert(id, window);
     emit_windows(app);
     static KEEPER: std::sync::Once = std::sync::Once::new();
@@ -1260,6 +1262,15 @@ fn open_window(
         HOOK.call_once(game::hook::start);
     }
     Ok(())
+}
+
+/// Every window's speaker as its phone's Mute stands (sound.rs): crossed out while it is on.
+#[cfg(any(windows, target_os = "macos"))]
+pub(crate) fn show_muted() {
+    let all: Vec<Arc<native::Window>> = windows().lock().unwrap().values().cloned().collect();
+    for w in all {
+        w.show_muted(host::sound_muted(&w.serial()));
+    }
 }
 
 /// Whether an Android app's window is open (game controllers are read only then).
@@ -1451,6 +1462,8 @@ impl link::Host for WindowHost {
                 log::info!("apps [{serial}] {pkg}: its picture is back over {to}, {}ms after the last connection went", after.as_millis());
                 if let Some(w) = self.window() {
                     w.say(None);
+                    // On a server started anew, its Mute is gone with the one before.
+                    w.show_muted(host::sound_muted(&serial));
                 }
                 // The sound follows the window to the way it takes now.
                 crate::scrcpy::apps_audio(app, &serial, true);
