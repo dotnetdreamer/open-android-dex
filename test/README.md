@@ -230,13 +230,31 @@ server as the app does, two of them at once, with the window daemon's dex
 (build it first), speaks the wire to them, and opens Settings in windows of
 its own to have one open, beside a helper (`test/apps-mute/MuteHelper.java`)
 that reads the music stream and captures the phone's output as the audio
-companion does. It mutes the phone's media for seconds at a time. It will not
+companion does (on Android 11 as scrcpy does there too: the shell's own
+HeapDumpActivity is put in front of the phone's screen while the recording
+starts, or Android refuses it). It mutes the phone's media for seconds at a time. It will not
 start while a Mute is on (that server's mark would be undone by its own);
 media muted before it is unmuted for the run and muted again after; by the
 end the phone is as it was, and nothing it pushed is left. It removes a mark
 only if one of its own servers, by name, left it, and leaves the servers'
 lock file be: the app's servers make it, and share it. Give it the running
 app's adb (`ADB=…`), so its adb server is not restarted under the app.
+
+The desktop's taskbar under a window that hides overlays (a permission prompt,
+an app lock's PIN screen; issue #11) is checked by hand, on a phone with a
+desktop session running, with a probe taken at each step:
+
+```powershell
+.\test\overlay-probe.ps1 -Serial <serial> -Label <step> -Adb <the running app's adb.exe>
+```
+
+Each probe saves the raw window dump, the launcher's log and a screenshot of
+each virtual display the phone lists for capture (none on Android 12 and
+older, where the desktop's window is captured on the computer instead), then
+lists the windows that ask
+Android to hide overlays and the launcher's overlay windows, with a HIDDEN line
+for any that Android keeps off the screen. It reads the hide flag whether a
+build prints it by name or as hex, as One UI does.
 
 The phone's notifications on the computer (`doc/phone-notifications.md`) have
 their phone's half checked the same way:

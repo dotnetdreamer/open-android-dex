@@ -163,6 +163,11 @@ const ADB = process.env.ADB || (fs.existsSync(bundled) ? bundled : path.join(sdk
 const PHONE_DEX = "/data/local/tmp/oadx-mute-test.dex";
 const HELPER_DEX = "/data/local/tmp/oadx-mute-helper.dex";
 const MARK = "/data/local/tmp/oadx-apps-muted";
+// How a hold for the computer's capture ends, in the phone's words (AppMute's release reasons).
+const PLAYS_AGAIN = /the phone's media plays again/;
+const CAPTURE_BEGAN = /the computer's capture began \d+ ms after the unmute/;
+/** Held the whole time: no capture came, or the phone could not say whether one did. */
+const HELD_THROUGH = /no capture began in \d+ ms|could not say when the capture begins; held \d+ ms/;
 
 const adbArgs = (...a) => ["-s", serialArg, ...a];
 const adb = (...a) => spawnSync(ADB, adbArgs(...a), { encoding: "utf8" }).stdout || "";
@@ -283,16 +288,25 @@ class Server {
     this.hello = await this.control.first();
     this.sound = (await this.control.until("audio")).v;
   }
-  said(text) {
-    return this.lines.some((l) => l.includes(text));
+  /** Where its next line will be: said, line and waitFor given it look only at what it says from there on. */
+  mark() {
+    return this.lines.length;
   }
-  async waitFor(text, ms) {
+  /** The first line since `from` that says `text` (words, or a RegExp), or "". */
+  line(text, from = 0) {
+    const says = typeof text === "string" ? (l) => l.includes(text) : (l) => text.test(l);
+    return this.lines.slice(from).find(says) ?? "";
+  }
+  said(text, from = 0) {
+    return this.line(text, from) !== "";
+  }
+  async waitFor(text, ms, from = 0) {
     const until = Date.now() + ms;
     while (Date.now() < until) {
-      if (this.said(text)) return true;
+      if (this.said(text, from)) return true;
       await sleep(100);
     }
-    return this.said(text);
+    return this.said(text, from);
   }
   /** Ask for the Mute: the phone's answer, and its word of the sound after it. */
   async mute(on, afterCapture = false) {
@@ -428,26 +442,33 @@ try {
   check("on: the answer and the word after it say muted", r.answer?.ok === true && r.answer?.muted === true && r.sound?.muted === true, JSON.stringify(r.answer));
   check("the phone's media is muted, and the mark names the server", stream().muted && mark() === a.name, `mark ${mark()}`);
 
-  // Off, held for a capture that starts a second later, as the companion's does.
+  // Off, held for a capture that starts a second later, as the companion's does. What the
+  // phone says of each hold is read from that hold's own start: "no capture began" holds the
+  // words "capture began" too, and a hold's line from a step before would answer for this one.
+  const sinceCapture = a.mark();
   r = await a.mute(false, true);
   check("off for a capture: the Mute is off at once", r.answer?.ok === true && r.answer?.muted === false && r.sound?.muted === false, JSON.stringify(r.answer));
   check("the media still silent while no capture runs", stream().muted);
   await sleep(500);
   const capture = captureFor(2500);
-  const began = await a.waitFor("capture began", 8000);
-  const heard = a.lines.find((l) => l.includes("capture began")) || "";
-  check("it plays once the capture runs", began, heard);
+  const began = await a.waitFor(CAPTURE_BEGAN, 8000, sinceCapture);
+  check("it plays once the capture runs", began, a.line(PLAYS_AGAIN, sinceCapture) || "the phone said nothing of its media playing");
   const ran = await capture;
   check("…and while the capture still runs: unmuted, the mark gone", ran.states["capturing-end"]?.muted === false && mark() === null, ran.text.replace(/\s+/g, " "));
 
   // Off for a capture that never comes: held the whole time, then played.
   await a.mute(true);
+  const sinceHold = a.mark();
   const t0 = Date.now();
   await a.mute(false, true);
   await sleep(2000);
   const held = stream().muted;
-  const gave = await a.waitFor("no capture began", 9000);
-  check("no capture: held, then played after the hold", held && gave && !stream().muted && Date.now() - t0 >= 5500, `${((Date.now() - t0) / 1000).toFixed(1)} s`);
+  const gave = await a.waitFor(HELD_THROUGH, 9000, sinceHold);
+  check(
+    "no capture: held, then played after the hold",
+    held && gave && !stream().muted && Date.now() - t0 >= 5500,
+    `${((Date.now() - t0) / 1000).toFixed(1)} s; ${a.line(PLAYS_AGAIN, sinceHold) || "the phone said nothing of its media playing"}`,
+  );
 
   // A second server, as a computer starting again makes one while the first still waits.
   r = await a.mute(true);
@@ -458,8 +479,9 @@ try {
   const wb = await b.window();
   r = await b.mute(true);
   check("and mutes it as its own", r.answer?.ok === true && stream().muted && mark() === b.name, `mark ${mark()}`);
+  const sinceClose = a.mark();
   wa.json({ t: "close", app: "phone" });
-  const lifted = await a.waitFor("another server's to unmute now", 10000);
+  const lifted = await a.waitFor("another server's to unmute now", 10000, sinceClose);
   check("the earlier server's last window closing leaves the later one's mute alone", lifted && stream().muted && mark() === b.name, `mark ${mark()}`);
   r = await b.mute(false);
   check("the later one unmutes it", r.answer?.ok === true && !stream().muted && mark() === null);

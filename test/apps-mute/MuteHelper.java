@@ -87,7 +87,7 @@ public final class MuteHelper {
      * {@code mute}, the music stream muted while it runs (and unmuted before
      * it stops), and the captured sound's loudest sample said before and after.
      */
-    private static void capture(AudioManager am, long ms, boolean mute) {
+    private static void capture(AudioManager am, long ms, boolean mute) throws Exception {
         AudioFormat format = new AudioFormat.Builder()
                 .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
                 .setSampleRate(48000)
@@ -99,10 +99,9 @@ public final class MuteHelper {
         b.setAudioFormat(format);
         int min = AudioRecord.getMinBufferSize(48000, AudioFormat.CHANNEL_IN_STEREO, AudioFormat.ENCODING_PCM_16BIT);
         if (min > 0) b.setBufferSizeInBytes(8 * min);
-        AudioRecord record = b.build();
         state(am, "before-capture");
         long t0 = SystemClock.uptimeMillis();
-        record.startRecording();
+        AudioRecord record = startRecording(b);
         System.out.println("CAPTURE started " + (SystemClock.uptimeMillis() - t0) + " ms");
         state(am, "capturing");
         byte[] buf = new byte[Math.max(min, 4096)];
@@ -134,6 +133,54 @@ public final class MuteHelper {
         System.out.println("CAPTURE stopped");
         SystemClock.sleep(150);
         state(am, "after-capture");
+    }
+
+    /**
+     * The recording, started as scrcpy's AudioDirectCapture starts it. Android 11 lets a uid
+     * record only while it is in the foreground, and this process's uid is the shell's: so,
+     * as scrcpy does there, the shell's own HeapDumpActivity is put in front, the recording
+     * tried every 100 ms, five times, and the shell's package stopped again after. Without
+     * it Android 11 refuses ("Cannot create AudioRecord", on a Redmi 9A), while the
+     * companion's own capture runs.
+     */
+    private static AudioRecord startRecording(AudioRecord.Builder b) throws Exception {
+        if (Build.VERSION.SDK_INT != 30) {
+            AudioRecord record = b.build();
+            record.startRecording();
+            return record;
+        }
+        run("am", "start", "-a", "android.intent.action.MAIN", "-c", "android.intent.category.LAUNCHER",
+                "-f", "0x10000000", "-n", "com.android.shell/.HeapDumpActivity");
+        try {
+            RuntimeException last = null;
+            for (int attempt = 0; attempt < 5; attempt++) {
+                SystemClock.sleep(100);
+                AudioRecord record = null;
+                try {
+                    record = b.build();
+                    record.startRecording();
+                    return record;
+                } catch (UnsupportedOperationException | IllegalStateException e) {
+                    if (record != null) record.release();
+                    last = e;
+                }
+            }
+            throw last;
+        } finally {
+            run("am", "force-stop", "com.android.shell");
+        }
+    }
+
+    /** A command of the shell's, waited for; what it prints is read and dropped. */
+    private static void run(String... command) throws Exception {
+        Process p = new ProcessBuilder(command).redirectErrorStream(true).start();
+        try (java.io.InputStream in = p.getInputStream()) {
+            byte[] buf = new byte[4096];
+            while (in.read(buf) != -1) {
+                // drain
+            }
+        }
+        p.waitFor();
     }
 
     /** A 1 kHz tone at an eighth of full scale, through media, until stopped. */

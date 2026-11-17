@@ -1761,6 +1761,40 @@ after, and 4096 again once unmuted. The computer's half: its tests (the menu,
 scrcpy's floors, the answer's race), clippy on Windows, type-checked (not
 built) for a Mac and for Linux before the second round's changes.
 
+The Mute in the app (2026-11-17, Windows 11, built from bf2ffcd): picked from a
+window's menu, which showed Mute, then "Computer only", "Computer and phone" and
+"Phone speaker" (on Android 11, "Computer and phone (needs Android 13)" greyed
+and "Phone only"). The menu was opened and picked from with messages posted to
+the window (a click on its Sound button, then keys), not with the mouse. The
+sound was a quiet 1 kHz tone the shell played into media, and nobody listened:
+this computer's side was read from the peak meter of scrcpy's audio session,
+the phone's from its music stream, read every 25 ms. On a Galaxy S25 Ultra
+(Android 17, over Wi‑Fi), with a desktop of the same phone open:
+
+- Mute: the companion gone within 0.25 s (the desktop's sound with it), the
+  media muted and marked, the three lines logged, the window's speaker crossed
+  out (one window was open);
+- off in "Computer only": the media held silent until the companion's capture
+  began, 783 and 840 ms after the unmute, and the sound back here 1.36 and
+  1.41 s after the pick;
+- Mute, then "Phone speaker": the phone played again at once, and nothing here;
+  under the phone's output, Mute silenced only the phone;
+- "Computer and phone": no hold, the sound back here after 1.42 s;
+- Mute, then the last window closed (its "Close Calculator?" answered): the
+  phone played again ("the last window has closed"), and the desktop's
+  companion started again;
+- the app killed while muted: the phone played again 29.4 to 30.4 s later (its
+  stream read once a second), its mark gone.
+
+On a Redmi 9A (Android 11, MIUI 12, USB), off in "Computer only": the capture
+began 1747 ms after the unmute, and the sound came back here after 2.2 s. The
+device test then gave 86 of 86 on a Galaxy A13 (Android 12) and on the Redmi.
+On the Redmi that needed two changes to the test: its helper now records as
+scrcpy does on Android 11 (with the shell's HeapDumpActivity in front while
+the recording starts; before, Android refused it), and each hold's line is
+read from that hold's own start (before, "no capture began" passed for
+"capture began", and the next step took the line of the one before).
+
 Not yet:
 
 - **A window that gave up, clicked**: the phone never went for the 30 s that
@@ -1869,11 +1903,9 @@ Not yet:
   there.
 - Windows of this app's own on a Linux computer (it gets scrcpy's).
 - The compositor's refresh of latency: presenting to a hardware overlay.
-- **The Mute in the app**: picked from a window's menu, the companion stopping
-  and starting with it — and so the hold against the companion's own capture,
-  not the test's helper — the speakers crossed out, the reader following a
-  lift: none of it run yet, on Windows or on a Mac. Nor the Mute with a desktop
-  of the same phone open, nor on a phone older than Android 17, nor on one
-  where the audio policy will not say. Nor measured: what the rest gains while
-  the sound is not carried, over the cable or over Wi‑Fi. The device test's
-  putting back a phone whose media was muted before it ran is written, not run.
+- **The Mute in the app** on a Mac, and on a phone whose audio policy will not
+  say when a capture runs (both phones tried said so). Nor seen: two windows of
+  one phone crossed out at once, or a Mute lifted by the app starting again
+  rather than after 30 s. Nor measured: what the rest gains while the sound is
+  not carried, over the cable or over Wi‑Fi. The device test's putting back a
+  phone whose media was muted before it ran is written, not run.
