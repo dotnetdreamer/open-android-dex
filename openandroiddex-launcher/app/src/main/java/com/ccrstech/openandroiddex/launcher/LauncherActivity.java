@@ -353,6 +353,10 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
     private float drawerRawX, drawerRawY;
     private View taskbarView;
     private boolean taskbarOverlay = false;
+    /** What added the taskbar's window, and so what moves and removes it. */
+    private WindowManager taskbarWm;
+    /** The caption service whose accessibility overlay the taskbar is, or null. */
+    private CaptionService taskbarService;
     /** The phone dock's Mouse button, so it can show the touchpad's state. */
     private TextView padButton;
     /** The phone's touchpad and pointer; null until asked for. See {@link DexPointer}. */
@@ -977,7 +981,7 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
                 (android.hardware.display.DisplayManager) getSystemService(DISPLAY_SERVICE);
         dm.registerDisplayListener(displayListener, handler);
         DexLog.step("launcher", "desktop ready — " + allApps.size() + " apps, taskbar "
-                + (taskbarOverlay ? "as an overlay window" : "inside the activity"));
+                + taskbarWhere());
         maybeOfferTouchpad();
     }
 
@@ -1209,12 +1213,7 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
             TouchpadNotice.hide(this);
             Touchpad.closeAll();
         }
-        if (taskbarOverlay && taskbarView != null) {
-            try {
-                getWindowManager().removeViewImmediate(taskbarView);
-            } catch (Exception ignored) {
-            }
-        }
+        if (taskbarOverlay) detachTaskbar();
     }
 
     @Override
@@ -1419,17 +1418,7 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
             shotHud.detach();
             shotHud = null;
         }
-        if (taskbarView != null) {
-            if (taskbarOverlay) {
-                try {
-                    getWindowManager().removeViewImmediate(taskbarView);
-                } catch (Exception ignored) {
-                }
-                taskbarOverlay = false;
-            } else if (rootFrame != null) {
-                rootFrame.removeView(taskbarView);
-            }
-        }
+        detachTaskbar();
         buildUi();
         setupTaskbar();
         // The pad and the pointer are windows of their own — buildUi cannot
@@ -1681,10 +1670,11 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
     }
 
     /**
-     * Taskbar as a TYPE_APPLICATION_OVERLAY window: floats above the app
-     * windows, so it is usable while apps are maximized. Falls back to an
-     * in-activity bar without the overlay permission (granted by the PC
-     * via appops).
+     * Taskbar as a window of its own: floats above the app windows, so it is
+     * usable while apps are maximized — an accessibility overlay of the
+     * caption service where it can be, a TYPE_APPLICATION_OVERLAY otherwise
+     * (see attachTaskbarOverlay). Falls back to an in-activity bar with
+     * neither (the overlay permission is granted by the PC via appops).
      */
     private void setupTaskbar() {
         // Survives a density rebuild: the CPU figure is a delta between two
@@ -1692,7 +1682,7 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
         if (sysStats == null) sysStats = new SysStats(this);
         setupPerfGauge();
         taskbarView = buildTaskbar();
-        // Its own TYPE_APPLICATION_OVERLAY window, so the activity's pointers
+        // Its own window, an overlay of either kind, so the activity's pointers
         // do not reach it — a PointerIcon resolves inside one ViewRootImpl and
         // no further. Done here rather than after attachTaskbarOverlay so the
         // in-activity fallback is covered by the same line.
@@ -1763,22 +1753,104 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
                 && (display.getFlags() & DISPLAY_FLAG_TRUSTED) == 0;
     }
 
-    /** Add the taskbar as an always-on-top overlay window; false if not permitted. */
+    /**
+     * Add the taskbar as an always-on-top window of its own; false if no such
+     * window can be had.
+     *
+     * On a desktop display that is an accessibility overlay of the caption
+     * service, and an application overlay only while the service is down.
+     * Android hides every application overlay, on every display, for as long
+     * as any window that asks it to is showing — a permission prompt, an app
+     * lock's PIN screen (HIDE_NON_SYSTEM_OVERLAY_WINDOWS). Those open on the
+     * phone's own screen, out of sight of the computer, and the bar was gone
+     * from the desktop until the phone was answered (issue #11: an app lock
+     * asking for its PIN each time the gallery opened). Accessibility overlays
+     * are not hidden — the touchpad's arrow stands on the same exemption — and
+     * need no overlay permission either. The service is restarted on every
+     * connect and its overlays go with it, so {@link #retakeTaskbarWindow}
+     * moves the bar each time.
+     *
+     * That puts the bar above the input method too, where it would cover the
+     * keyboard's bottom row — if one ever opened on this display. It does not:
+     * with our shell the PC leaves force_desktop_mode_on_external_displays off
+     * (adb_prepare_desktop), and the keyboard goes to the phone.
+     *
+     * The phone's own dock stays an application overlay on purpose: there the
+     * prompt is on the same screen, and hiding what could cover it is the
+     * point of the rule.
+     */
     private boolean attachTaskbarOverlay() {
         if (overlaysBuried()) {
             DexLog.step("taskbar", "overlays draw under apps on this display (Samsung, "
                     + "untrusted) — the taskbar goes inside the desktop instead");
             return false;
         }
+        if (!onPhone() && addTaskbarToCaptionService()) return true;
         if (!android.provider.Settings.canDrawOverlays(this)) {
             DexLog.warn("taskbar", "no overlay permission yet — app windows will cover the bar");
             return false;
         }
+        try {
+            getWindowManager().addView(taskbarView,
+                    taskbarParams(WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY));
+        } catch (Exception e) {
+            DexLog.warn("taskbar", "overlay window rejected", e);
+            return false;
+        }
+        taskbarWm = getWindowManager();
+        taskbarService = null;
+        taskbarOverlay = true;
+        return true;
+    }
+
+    /**
+     * The taskbar as an accessibility overlay of {@link CaptionService}, on this
+     * desktop's display; false while the service is down or will not host it.
+     *
+     * The touchpad arrow's two hosts, in its order (DesktopPointer#addArrow):
+     * the service's window context, which Android 14 and later take, then its
+     * display context, which carries the service's overlay token for the
+     * display below that. Android 11 and later only, as Activity#getDisplay
+     * and window contexts are.
+     */
+    private boolean addTaskbarToCaptionService() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return false;
+        CaptionService service = CaptionService.live();
+        Display display = getDisplay();
+        if (service == null || display == null) return false;
+        return addTaskbarTo(CaptionService.overlayContext(display.getDisplayId()), service)
+                || addTaskbarTo(service.createDisplayContext(display), service);
+    }
+
+    private boolean addTaskbarTo(Context host, CaptionService service) {
+        if (host == null) return false;
+        WindowManager wm = host.getSystemService(WindowManager.class);
+        try {
+            // Fresh params for each try: a refused addView has already stamped
+            // the host's token on the ones it was handed.
+            wm.addView(taskbarView,
+                    taskbarParams(WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY));
+        } catch (RuntimeException e) {
+            DexLog.step("taskbar", "refused as an accessibility overlay ("
+                    + e.getMessage() + ") — trying the next way");
+            return false;
+        }
+        taskbarWm = wm;
+        taskbarService = service;
+        taskbarOverlay = true;
+        // Of two accessibility overlays the later is on top, and the arrow
+        // has to stay above the bar it is pointing at.
+        DesktopPointer.raise();
+        return true;
+    }
+
+    /** The taskbar's window: the full-width strip on a desktop, the floating dock on the phone. */
+    private WindowManager.LayoutParams taskbarParams(int type) {
         boolean dock = onPhone();
-        WindowManager.LayoutParams barLp = new WindowManager.LayoutParams(
+        WindowManager.LayoutParams lp = new WindowManager.LayoutParams(
                 dock ? ViewGroup.LayoutParams.WRAP_CONTENT : ViewGroup.LayoutParams.MATCH_PARENT,
                 dp(dock ? DOCK_DP : TASKBAR_DP),
-                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                type,
                 WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
                 PixelFormat.TRANSLUCENT);
         // No y offset for the gesture pill here, unlike addTaskbarToActivity:
@@ -1786,16 +1858,57 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
         // bottomSystemInset), and offsetting it again lifts the bar off the
         // bottom edge by the height of the pill. The dock's own offset is a
         // different thing — it is the touchpad underneath it, not an inset.
-        barLp.gravity = dock ? (Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL) : Gravity.BOTTOM;
-        barLp.y = dockLift();
-        try {
-            getWindowManager().addView(taskbarView, barLp);
-        } catch (Exception e) {
-            DexLog.warn("taskbar", "overlay window rejected", e);
-            return false;
+        lp.gravity = dock ? (Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL) : Gravity.BOTTOM;
+        lp.y = dockLift();
+        return lp;
+    }
+
+    /** Take the taskbar off whichever window holds it: one of its own, or the activity's. */
+    private void detachTaskbar() {
+        if (taskbarView == null) return;
+        if (taskbarOverlay) {
+            try {
+                taskbarWm.removeViewImmediate(taskbarView);
+            } catch (Exception ignored) {
+            }
+        } else if (taskbarView.getParent() instanceof ViewGroup) {
+            ((ViewGroup) taskbarView.getParent()).removeView(taskbarView);
         }
-        taskbarOverlay = true;
-        return true;
+        taskbarOverlay = false;
+        taskbarWm = null;
+        taskbarService = null;
+    }
+
+    /**
+     * The caption service came up or went away; it says so from both ends, and
+     * the PC restarts it on every connect. An accessibility overlay goes with
+     * the service that holds it, so the taskbar moves now rather than vanish.
+     */
+    static void captionServiceChanged() {
+        LauncherActivity desktop = liveDesktop();
+        if (desktop != null) desktop.handler.post(desktop::retakeTaskbarWindow);
+    }
+
+    private void retakeTaskbarWindow() {
+        if (isFinishing() || isDestroyed() || taskbarView == null || onPhone()) return;
+        CaptionService service = CaptionService.live();
+        // Settled on the service that is up now — by instance: a restart can
+        // land both of its ends before this runs — or, with none up, on no
+        // service at all.
+        boolean settled = taskbarOverlay
+                ? taskbarService == service
+                : service == null || overlaysBuried();
+        if (settled) return;
+        detachTaskbar();
+        if (!attachTaskbarOverlay()) addTaskbarToActivity();
+        DexLog.step("taskbar", "caption service " + (service != null ? "up" : "gone")
+                + " — taskbar re-seated " + taskbarWhere());
+    }
+
+    /** Where the taskbar is, for the log. */
+    private String taskbarWhere() {
+        if (!taskbarOverlay) return "inside the activity";
+        return taskbarService != null ? "as an accessibility overlay" : "as an overlay window";
     }
 
     /**
@@ -1872,7 +1985,7 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
                 WindowManager.LayoutParams lp =
                         (WindowManager.LayoutParams) taskbarView.getLayoutParams();
                 lp.y = dockLift();
-                getWindowManager().updateViewLayout(taskbarView, lp);
+                taskbarWm.updateViewLayout(taskbarView, lp);
             } else if (taskbarView.getLayoutParams() instanceof FrameLayout.LayoutParams) {
                 FrameLayout.LayoutParams lp =
                         (FrameLayout.LayoutParams) taskbarView.getLayoutParams();

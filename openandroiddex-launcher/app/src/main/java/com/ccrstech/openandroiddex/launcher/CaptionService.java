@@ -220,8 +220,9 @@ public final class CaptionService extends AccessibilityService {
 
     /**
      * A context for {@code TYPE_ACCESSIBILITY_OVERLAY} windows on a display:
-     * above every app window and the taskbar, needing no permission — where a
-     * Linux app's menus are shown. Null while the service is not running.
+     * above every app window and application overlay, needing no permission, and not hidden
+     * when a window hides overlays — where a Linux app's menus are shown, and the desktop's
+     * taskbar. Null while the service is not running.
      */
     static android.content.Context overlayContext(int displayId) {
         CaptionService s = live;
@@ -457,6 +458,9 @@ public final class CaptionService extends AccessibilityService {
         // gesture dispatch has no such floor, so the Web viewer's control
         // still works on a phone this service can draw nothing on.
         live = this;
+        // The desktop's taskbar is an accessibility overlay of this service where it can be,
+        // and the one it was on went with the last instance (LauncherActivity#attachTaskbarOverlay).
+        LauncherActivity.captionServiceChanged();
         // Ahead of the API floor below, which the cable-pulled undo does not share.
         if (unplug == null) {
             unplug = new UnplugWatch(this, () -> main.post(this::disableSelf));
@@ -514,6 +518,8 @@ public final class CaptionService extends AccessibilityService {
     public void onDestroy() {
         running = false;
         live = null;
+        // Our overlays go with us, the desktop's taskbar among them: it moves to one that stays.
+        LauncherActivity.captionServiceChanged();
         if (unplug != null) unplug.stop();
         try {
             unregisterReceiver(restoreReceiver);
