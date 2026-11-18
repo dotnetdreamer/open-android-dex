@@ -1,5 +1,6 @@
 mod adb;
 mod apps;
+mod deskbar;
 mod diag;
 mod display;
 mod embed;

@@ -41,6 +41,8 @@ final class AppInput {
 
     /** InputManager.INJECT_INPUT_EVENT_MODE_ASYNC: queue it and return. */
     private static final int INJECT_ASYNC = 0;
+    /** INJECT_INPUT_EVENT_MODE_WAIT_FOR_RESULT: return once the input side has chosen the window it goes to. */
+    private static final int INJECT_WAIT_FOR_RESULT = 1;
     /** INJECT_INPUT_EVENT_MODE_WAIT_FOR_FINISH: return once the app has handled it. */
     private static final int INJECT_WAIT_FOR_FINISH = 2;
     /** The only device id an injected mouse needs: a consistent one. */
@@ -193,6 +195,39 @@ final class AppInput {
     synchronized void carried() {
         carrying = false;
         cancel();
+    }
+
+    /**
+     * A finger down on ({@code x}, {@code y}) and the gesture cancelled at once: what it
+     * lands on sees the press taken back and is not clicked. What the press does do is
+     * what any press on a display does: that display becomes the one the keyboard goes
+     * to (WindowState#handleTapOutsideFocusInsideSelf). Before Android 14 only the
+     * topmost display has a focused window at all, and nothing a shell can call raises
+     * a display: setFocusedTask raises the task within its display, nothing more
+     * (measured on a Galaxy A13, Android 12, with the phone's own screen holding the
+     * keyboard). False, and nothing sent, while a mouse press or the fingers of game
+     * controls are under way (they are this display's one stream), or if Android would
+     * not take the press.
+     */
+    synchronized boolean pressTakenBack(int x, int y) {
+        if (buttons != 0 || !fingers.isEmpty()) return false;
+        long down = SystemClock.uptimeMillis();
+        MotionEvent.PointerProperties p = new MotionEvent.PointerProperties();
+        p.id = 0;
+        p.toolType = MotionEvent.TOOL_TYPE_FINGER;
+        MotionEvent.PointerProperties[] props = {p};
+        MotionEvent.PointerCoords[] at = {coords(x, y, 1f)};
+        MotionEvent e = MotionEvent.obtain(down, down, MotionEvent.ACTION_DOWN, 1, props, at,
+                0, 0, 1f, 1f, TOUCH_DEVICE, 0, InputDevice.SOURCE_TOUCHSCREEN, 0);
+        // Waits for the input side to pick the window: the focus change it starts is on its way.
+        boolean ok = injected(e, INJECT_WAIT_FOR_RESULT);
+        e.recycle();
+        if (!ok) return false;
+        e = MotionEvent.obtain(down, SystemClock.uptimeMillis(), MotionEvent.ACTION_CANCEL, 1, props, at,
+                0, 0, 1f, 1f, TOUCH_DEVICE, 0, InputDevice.SOURCE_TOUCHSCREEN, 0);
+        injected(e, INJECT_ASYNC);
+        e.recycle();
+        return true;
     }
 
     /** The pointer left the window: whatever was under it stops showing it hovered. */

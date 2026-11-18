@@ -61,6 +61,7 @@ import java.util.List;
  *   CURSOR <display> <x> <y> <hx> <hy> <png>  -> OK          …drawn here (base64 PNG, hot spot)
  *   CURSOR <display> -                        -> OK          …and no longer
  *   KEY <display> <keycode>                   -> OK          one key, to what has the keyboard
+ *   TASKKEY <display> <task> <keycode> [meta] -> OK <ms>     one key, to that window, once it has the keyboard
  *   FOCUS <display>                           -> OK [<task>] the keyboard back to <display>
  *   TOP <display>                             -> OK <task> <pkg> | OK -1 -   what is in front
  *   SHAPE <display> <name>                    -> OK <seq>    the pointer's shape there (CSS name)
@@ -971,6 +972,41 @@ public final class WmDaemon {
                 return;
             }
 
+            case "TASKKEY": {
+                // "TASKKEY <display> <task> <keycode> [meta]" — one key for ONE window: its
+                // title bar's Back, and its menu's Copy and Paste (meta: Ctrl). The window
+                // whose bar was pressed is given the keyboard first, as a click on it would
+                // give it, and the key waits until it has it. Sent at once, it would land in
+                // whichever window had the keyboard before — and Back there closes something
+                // nobody asked to close. So a window that never gets the keyboard gets no key
+                // either: ERR, and nothing sent. Answers how long it waited, in ms.
+                int d = padDisplay(a, caller, out);
+                if (d < 0) return;
+                int task = i(a, 2);
+                int code = i(a, 3);
+                int meta = a.length > 4 ? i(a, 4) & TASK_KEY_META : 0;
+                if (code <= 0 || code > android.view.KeyEvent.getMaxKeyCode()) {
+                    out.println("ERR no such key " + code);
+                    return;
+                }
+                long waited = giveKeyboardTo(d, task);
+                if (waited == NOT_ON_DISPLAY) {
+                    out.println("ERR no such window " + task);
+                    return;
+                }
+                if (waited < 0) {
+                    log("taskkey: task " + task + " on " + d + " never got the keyboard; key "
+                            + code + " not sent");
+                    out.println("ERR not focused");
+                    return;
+                }
+                AppInput in = padInput(d);
+                in.key(true, code, 0, meta);
+                in.key(false, code, 0, meta);
+                out.println("OK " + waited);
+                return;
+            }
+
             case "FOCUS": {
                 // "FOCUS <display>" — the keyboard back to <display>, when the phone's own
                 // screen has taken it. The touchpad asks as each touch begins, so that the
@@ -1090,6 +1126,103 @@ public final class WmDaemon {
             return t.id;
         }
         return -1;
+    }
+
+    /** The modifiers a TASKKEY may hold: Ctrl, Alt and Shift, as AppInput makes them. */
+    private static final int TASK_KEY_META = android.view.KeyEvent.META_CTRL_MASK
+            | android.view.KeyEvent.META_ALT_MASK | android.view.KeyEvent.META_SHIFT_MASK;
+
+    /** Longest TASKKEY waits for its window to have the keyboard. */
+    private static final long TASK_FOCUS_WAIT_MS = 400L;
+
+    /**
+     * After the window manager has moved the focus: the frame or two the input side takes to
+     * follow it. The focus request rides the next SurfaceFlinger transaction to the input
+     * dispatcher, and a key injected before it lands goes to the window that had it.
+     */
+    private static final long TASK_FOCUS_SETTLE_MS = 50L;
+
+    /**
+     * How long setFocusedTask is given to bring the keyboard over from another display
+     * before a press does it (giveKeyboardTo). Where it can, it has by then: it answers in
+     * a frame or two.
+     */
+    private static final long TASK_FOCUS_PRESS_AFTER_MS = 100L;
+
+    /** giveKeyboardTo: the task is not a visible window on that display. */
+    private static final long NOT_ON_DISPLAY = -2L;
+    /** giveKeyboardTo: the task did not get the keyboard in TASK_FOCUS_WAIT_MS. */
+    private static final long NEVER_FOCUSED = -1L;
+
+    /**
+     * Give {@code taskId}, a window on {@code displayId}, the keyboard: raised and focused,
+     * as a click on it does (ActivityTaskManager#setFocusedTask, the call a tap on a window
+     * ends in). Returns the ms it waited, 0 when the window already had it, or
+     * NOT_ON_DISPLAY / NEVER_FOCUSED.
+     *
+     * When the keyboard is still on another display after that, the phone's own screen
+     * most often (used last, or a call came in), the window is pressed and the press taken
+     * back: before Android 14 nothing else moves the keyboard to another display
+     * (AppInput#pressTakenBack). The press is in the middle of the window, so if anything
+     * covers that spot it is what gets the keyboard, and setFocusedTask then moves it
+     * over within the display, as it can.
+     *
+     * Held to the display: a task id from anywhere else — the phone's own screen — is not
+     * focused at all, so a connection that may only reach the desktop cannot bring another
+     * app to the front of the phone with it.
+     */
+    private static long giveKeyboardTo(int displayId, int taskId) {
+        boolean there = false;
+        for (AppTasks.Task t : AppTasks.onDisplay(displayId)) {
+            if (t.id == taskId) {
+                there = t.visible;
+                break;
+            }
+        }
+        if (!there) return NOT_ON_DISPLAY;
+        if (AppTasks.focusOn(displayId, taskId) == AppTasks.FOCUS_HERE) return 0;
+        long start = android.os.SystemClock.uptimeMillis();
+        long deadline = TASK_FOCUS_WAIT_MS;
+        boolean pressed = false;
+        AppTasks.focus(taskId);
+        while (true) {
+            long waited = android.os.SystemClock.uptimeMillis() - start;
+            int focus = AppTasks.focusOn(displayId, taskId);
+            if (focus == AppTasks.FOCUS_HERE || focus == AppTasks.FOCUS_UNKNOWN) {
+                // Where the platform will not say, the settle alone is all there is to go on.
+                sleep(focus == AppTasks.FOCUS_HERE ? TASK_FOCUS_SETTLE_MS : TASK_FOCUS_SETTLE_MS * 2);
+                return android.os.SystemClock.uptimeMillis() - start;
+            }
+            if (!pressed && waited >= TASK_FOCUS_PRESS_AFTER_MS) {
+                int on = AppTasks.focusedDisplay();
+                if (on != displayId) {
+                    pressed = true;
+                    if (pressToFocus(displayId, taskId, on)) {
+                        AppTasks.focus(taskId);
+                        deadline = waited + TASK_FOCUS_WAIT_MS;
+                    }
+                }
+            }
+            if (waited >= deadline) return NEVER_FOCUSED;
+            sleep(10);
+        }
+    }
+
+    /** giveKeyboardTo's press, taken back, in the middle of the window: true if it was sent. */
+    private static boolean pressToFocus(int displayId, int taskId, int keyboardOn) {
+        Rect b;
+        try {
+            b = Wm.taskById(displayId, taskId).bounds;
+        } catch (Refl.WmError e) {
+            return false;
+        }
+        if (b.isEmpty()) return false;
+        boolean sent = padInput(displayId).pressTakenBack(b.centerX(), b.centerY());
+        log("taskkey: the keyboard was on display " + keyboardOn + "; "
+                + (sent ? "a press taken back on task " + taskId + " at " + b.centerX() + "," + b.centerY()
+                        + " to bring it to display " + displayId
+                        : "no press to bring it to display " + displayId + " (one is under way there)"));
+        return sent;
     }
 
     private static float f(String[] a, int ix) {

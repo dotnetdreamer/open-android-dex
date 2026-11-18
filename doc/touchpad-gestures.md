@@ -196,7 +196,7 @@ Three channels, chosen per action by what actually owns the state:
 | Next / previous window | `wm.rs` → daemon `LIST` + `FRONT` | ~2.5 ms; no shell involvement at all |
 | Maximise / restore | the enforcer's `window_reqs` mailbox | the enforcer owns per-window maximized state and windowed bounds, and would undo a bare resize on its next tick |
 | Open apps, apps screen, quick settings, show desktop | `am broadcast …GESTURE` | shell UI, which the daemon holds none of by design |
-| Home, Back | `input -d <display> keyevent` | no daemon verb exists; this is the same path the taskbar's own Back button uses |
+| Home, Back | `input -d <display> keyevent` | the display's Back, to whichever window has its keyboard; the taskbar's ◁ and the desktop window's own Back aim theirs at the window in front instead (daemon `TASKKEY`, `doc/desktop-window-buttons.md`) |
 
 **Nothing slow happens on a reader thread.** A recognised gesture is posted on a
 channel to a worker that owns the `WmClient` and the `ShellSession`; the
@@ -230,7 +230,9 @@ for the desktop means "clear the other two".
 toggle are there — the live window list and the record of what has already been
 hidden — and, critically, a window hidden without being recorded in that map
 vanishes from the taskbar with nothing able to restore it. "Show desktop" would
-then mean "close everything".
+then mean "close everything". Since 2026-11-17 it clears an app that is full
+screen as well as the windows, and the taskbar's ○ is Show desktop too
+(`doc/desktop-window-buttons.md`).
 
 ## 6. Standing down the host's own gestures
 

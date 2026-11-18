@@ -23,8 +23,61 @@ use std::time::Duration;
 
 /// Device-side port the daemon binds (loopback only — it speaks with shell authority).
 pub const DEVICE_PORT: u16 = 7191;
-/// Host-side port `adb forward` publishes it on.
+/// Host-side port `adb forward` publishes the first phone's daemon on: one phone at a
+/// time works exactly as it always did.
 pub const HOST_PORT: u16 = 7191;
+/// The ports further phones get, at the same time: one each, never shared. Below
+/// `HOST_PORT`, clear of the file service's 7192–7199.
+const MORE_HOST_PORTS: std::ops::RangeInclusive<u16> = 7180..=7190;
+
+/// Which computer port leads to which phone's daemon, for as long as this app runs, and
+/// the phone forwarded last. One port for every phone had the last phone connected take
+/// it from the others: with two desktops open each session's request pump read that
+/// phone's queue, and one taskbar Close was run on both phones (2026-11-17).
+struct Ports {
+    by_serial: Vec<(String, u16)>,
+    last: Option<String>,
+}
+
+static PORTS: Mutex<Ports> = Mutex::new(Ports { by_serial: Vec::new(), last: None });
+
+/// The computer port for `serial`'s daemon: the same one every time, and one no other
+/// phone has. The first phone gets `HOST_PORT`.
+pub fn host_port(serial: &str) -> u16 {
+    let mut ports = PORTS.lock().unwrap_or_else(|e| e.into_inner());
+    pick_port(&mut ports.by_serial, serial)
+}
+
+fn pick_port(by_serial: &mut Vec<(String, u16)>, serial: &str) -> u16 {
+    if let Some((_, port)) = by_serial.iter().find(|(s, _)| s == serial) {
+        return *port;
+    }
+    let taken = |p: u16| by_serial.iter().any(|(_, q)| *q == p);
+    // Twelve phones at once is past anything real; a thirteenth shares the first's.
+    let port = std::iter::once(HOST_PORT)
+        .chain(MORE_HOST_PORTS.rev())
+        .find(|p| !taken(*p))
+        .unwrap_or(HOST_PORT);
+    by_serial.push((serial.to_string(), port));
+    port
+}
+
+/// `serial`'s daemon was forwarded just now: the desktop commands that name no phone
+/// (`desktop_home`, `desktop_close_top`) act on it, as they acted on whichever phone the
+/// one forward led to.
+pub fn note_forwarded(serial: &str) {
+    let mut ports = PORTS.lock().unwrap_or_else(|e| e.into_inner());
+    ports.last = Some(serial.to_string());
+}
+
+/// The port of the phone forwarded last, `HOST_PORT` before any.
+fn last_port() -> u16 {
+    let mut ports = PORTS.lock().unwrap_or_else(|e| e.into_inner());
+    match ports.last.clone() {
+        Some(serial) => pick_port(&mut ports.by_serial, &serial),
+        None => HOST_PORT,
+    }
+}
 
 const CONNECT_TIMEOUT: Duration = Duration::from_millis(500);
 const IO_TIMEOUT: Duration = Duration::from_millis(1500);
@@ -61,9 +114,10 @@ impl Task {
 }
 
 /// A pooled connection. Reconnects on demand; a dead daemon is not an error state.
-#[derive(Default)]
 pub struct WmClient {
     conn: Mutex<Option<Conn>>,
+    /// The computer port this client's phone is forwarded on (`host_port`).
+    port: u16,
 }
 
 struct Conn {
@@ -72,8 +126,14 @@ struct Conn {
 }
 
 impl WmClient {
+    /// The daemon of the phone forwarded last: for what names no phone.
     pub fn new() -> Self {
-        Self::default()
+        Self { conn: Mutex::new(None), port: last_port() }
+    }
+
+    /// `serial`'s daemon, and no other phone's whatever else is connected.
+    pub fn for_serial(serial: &str) -> Self {
+        Self { conn: Mutex::new(None), port: host_port(serial) }
     }
 
     /// Display id of the live desktop, or `None`.
@@ -107,7 +167,7 @@ impl WmClient {
             Ok(g) => g,
             Err(_) => return out,
         };
-        if !Self::ensure(&mut guard) {
+        if !self.ensure(&mut guard) {
             return out;
         }
         let conn = guard.as_mut().expect("ensured");
@@ -181,7 +241,7 @@ impl WmClient {
     /// can tell "not there" from "there, nothing to say".
     fn lines_command(&self, command: &str) -> Option<Vec<String>> {
         let mut guard = self.conn.lock().ok()?;
-        if !Self::ensure(&mut guard) {
+        if !self.ensure(&mut guard) {
             return None;
         }
         let conn = guard.as_mut().expect("ensured");
@@ -337,7 +397,7 @@ impl WmClient {
 
     fn attempt(&self, command: &str) -> Option<String> {
         let mut guard = self.conn.lock().ok()?;
-        if !Self::ensure(&mut guard) {
+        if !self.ensure(&mut guard) {
             return None;
         }
         let conn = guard.as_mut().expect("ensured");
@@ -355,11 +415,11 @@ impl WmClient {
         }
     }
 
-    fn ensure(guard: &mut Option<Conn>) -> bool {
+    fn ensure(&self, guard: &mut Option<Conn>) -> bool {
         if guard.is_some() {
             return true;
         }
-        let addr = format!("127.0.0.1:{HOST_PORT}");
+        let addr = format!("127.0.0.1:{}", self.port);
         let socket = match addr.parse() {
             Ok(a) => a,
             Err(_) => return false,
@@ -530,18 +590,18 @@ fn ask_launcher_to_close(app: &tauri::AppHandle, task: &Task) -> bool {
     }
 }
 
-/// The phone the daemon client is talking to: the one `adb forward` points
-/// [`HOST_PORT`] at. The desktop commands take no serial — they act on the
+/// The phone a `WmClient::new` is talking to: the one `adb forward` points the
+/// last phone's port at. The desktop commands take no serial — they act on the
 /// desktop the forward leads to — and what goes by adb has to name it.
 fn forwarded_serial(app: &tauri::AppHandle) -> Option<String> {
-    serial_forwarding(&crate::adb::run_adb_quiet(app, &["forward", "--list"]).ok()?)
+    serial_forwarding(&crate::adb::run_adb_quiet(app, &["forward", "--list"]).ok()?, last_port())
 }
 
 /// `adb forward --list`'s "<serial> tcp:7191 tcp:7191", cut at the port rather
 /// than at the first space: a phone on wireless debugging can have a space in
 /// its serial.
-fn serial_forwarding(list: &str) -> Option<String> {
-    let host = format!(" tcp:{HOST_PORT} ");
+fn serial_forwarding(list: &str, port: u16) -> Option<String> {
+    let host = format!(" tcp:{port} ");
     list.lines()
         .find_map(|l| l.find(&host).map(|at| l[..at].trim().to_string()))
         .filter(|s| !s.is_empty())
@@ -620,12 +680,36 @@ mod tests {
                     YPKRA6VS754L6XTO tcp:17191 tcp:7191\n\
                     adb-R5CT30-vWgJpq (2)._adb-tls-connect._tcp tcp:7191 tcp:7191\n";
         assert_eq!(
-            serial_forwarding(list).as_deref(),
+            serial_forwarding(list, HOST_PORT).as_deref(),
             Some("adb-R5CT30-vWgJpq (2)._adb-tls-connect._tcp")
         );
-        assert_eq!(serial_forwarding("R58T51N3G2X tcp:7191 tcp:7191\n").as_deref(), Some("R58T51N3G2X"));
-        assert_eq!(serial_forwarding("R58T51N3G2X tcp:17191 tcp:7191\n"), None);
-        assert_eq!(serial_forwarding(""), None);
+        assert_eq!(serial_forwarding("R58T51N3G2X tcp:7191 tcp:7191\n", 7191).as_deref(), Some("R58T51N3G2X"));
+        assert_eq!(serial_forwarding("R58T51N3G2X tcp:17191 tcp:7191\n", 7191), None);
+        assert_eq!(serial_forwarding("", 7191), None);
+        // A second phone's own port.
+        assert_eq!(
+            serial_forwarding("R58T51N3G2X tcp:7191 tcp:7191\nYPKRA6VS754L6XTO tcp:7190 tcp:7191\n", 7190).as_deref(),
+            Some("YPKRA6VS754L6XTO")
+        );
+    }
+
+    #[test]
+    fn every_phone_gets_a_port_of_its_own_and_keeps_it() {
+        let mut ports = Vec::new();
+        assert_eq!(pick_port(&mut ports, "A13"), HOST_PORT, "the first phone is where one phone always was");
+        assert_eq!(pick_port(&mut ports, "S25"), 7190);
+        assert_eq!(pick_port(&mut ports, "Redmi"), 7189);
+        assert_eq!(pick_port(&mut ports, "S25"), 7190, "asked again, the same port");
+        assert_eq!(pick_port(&mut ports, "A13"), HOST_PORT);
+        // Past every port there is: the first phone's, not a panic.
+        for n in 0..20 {
+            pick_port(&mut ports, &format!("phone{n}"));
+        }
+        assert!(ports.iter().all(|(_, p)| *p == HOST_PORT || MORE_HOST_PORTS.contains(p)));
+        let mut seen: Vec<u16> = ports.iter().take(12).map(|(_, p)| *p).collect();
+        seen.sort_unstable();
+        seen.dedup();
+        assert_eq!(seen.len(), 12, "the first twelve phones never share");
     }
 
     #[test]

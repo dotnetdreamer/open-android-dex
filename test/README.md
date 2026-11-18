@@ -425,6 +425,26 @@ screen; never the launcher's Settings on another display; and in the gap an APK
 install makes, the display the desktop was last seen on while that display holds a
 task, then none at all — not the other display's app.
 
+A desktop window's title bar has a Back, a ☰ and a sound button since 2026-11-17
+(`doc/custom-titlebar-v2.md`, "Back, More and Sound"). Its arithmetic is checked on
+a computer's JVM, with a JDK:
+
+```sh
+node test/caption-bar-test.mjs
+```
+
+It compiles the launcher's own `CaptionMath`: where ☰'s Phone size and Tablet size
+put a window (a phone's 412 × 915 dp and a tablet's 1280 × 800 dp, fitted under the
+taskbar, kept where its top-left is, centred from maximised, the same size in dp on
+a 2x desktop; a tablet's size that comes out under 600 dp maximised where the whole
+room is a tablet's, the most there is where it is not), which of the two a window
+is now, where a bar's menu opens (under its button, inside the display, upwards
+where the taskbar is in the way), that the press closing a menu does not open it
+again from its own button, and which buttons make way on a narrow window (the icon,
+then the snaps, the speaker, minimise, ☰ and maximise, keeping 48 px to drag by)
+so that ✕ is never pushed off the bar at any width from 72 to 1000 px. Back reaching the window it was pressed on, the menus as
+windows and the buttons themselves need a phone on Android 14 or newer.
+
 Everything else needs a device. `doc/web-viewer.md`, `doc/remote-access.md`,
 `doc/usb-desktop.md`, `doc/apps-on-pc.md`, `doc/phone-notifications.md` and
 `doc/game-mode.md` list what is still unverified there.

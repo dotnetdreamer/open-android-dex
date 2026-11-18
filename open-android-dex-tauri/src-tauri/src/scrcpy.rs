@@ -856,6 +856,11 @@ fn register_session(
             );
         }
     }
+    // The desktop window's own Back, Home and Recent apps, over its title bar (deskbar.rs):
+    // the way out when an app on the phone covers the taskbar.
+    if key.ends_with("|desktop") {
+        crate::deskbar::watch(app.clone(), key.clone(), opts.serial.clone(), pid, stop.clone(), child.clone());
+    }
     let handle = SessionHandle {
         child: child.clone(),
         stop_requested: stop.clone(),
@@ -1389,6 +1394,10 @@ struct TaskRec {
     /// Bolt's sign-in screen becomes one full-width field above a full-width
     /// button. These get a phone-shaped window instead.
     portrait: bool,
+    /// The task was started with something to show — its intent has data (`dat=`):
+    /// a video, a document, a picture another app handed it. Such a screen cannot be
+    /// re-launched by component (`apply`), which would hand it an empty intent.
+    opened_with_data: bool,
 }
 
 impl TaskRec {
@@ -1517,11 +1526,17 @@ fn parse_section(section: &str, root: Option<usize>) -> Vec<TaskRec> {
                         root_comp: String::new(),
                         bounds: None,
                         portrait: false,
+                        opened_with_data: false,
                     })
             } else {
                 None
             };
         } else if let Some(rec) = cur.as_mut() {
+            // The task's own intent, printed under its header before any activity: the
+            // one it was started with.
+            if t.starts_with("intent={") && rec.comp.is_empty() && t.contains(" dat=") {
+                rec.opened_with_data = true;
+            }
             if rec.comp.is_empty() {
                 if let Some(comp) = record_comp(t) {
                     rec.comp = comp;
@@ -2777,6 +2792,25 @@ impl Enforcer {
     /// Drive one task to `maxed` (or back to its windowed bounds) and mark
     /// the transition in flight.
     fn apply(&mut self, rec: &TaskRec, maxed: bool, display: i32, density: i32) {
+        // A full-screen task can only be brought back into a window by re-launching it,
+        // and `am start -n` names the component and nothing else: a screen opened WITH
+        // something — a video, a document, a picture another app handed it — gets an empty
+        // intent in place of the one it was showing. The video player, maximised from One
+        // UI's own window controls on a Galaxy A13, answered "Failed to play video". It is
+        // left full screen: the app's own Back, the keys and the desktop window's buttons
+        // still reach it.
+        if rec.fullscreen && rec.opened_with_data {
+            if self.unshapeable.insert(rec.id) {
+                log::info!(
+                    "freeform-enforcer [{}] task {} ({}) is full screen showing what it was opened with — left as it is: a re-launch would empty it",
+                    self.key,
+                    rec.id,
+                    rec.comp
+                );
+            }
+            self.wins.remove(&rec.id);
+            return;
+        }
         let Some(max_rect) = self.grown_rect(rec, density) else {
             return;
         };
@@ -3770,6 +3804,14 @@ impl Enforcer {
             // with no fullscreen flash. Where the wm command is missing,
             // convert_pass still fixes it after the fact.
             self.run(&format!("wm set-display-windowing-mode -d {display} 5"));
+            // Android 10 and 11: a portrait app that stays full screen would turn the
+            // whole desktop (rotation_lock_command).
+            if self.run(&rotation_lock_command(display)).is_some_and(|o| o.trim() == "locked") {
+                log::info!(
+                    "freeform-enforcer [{}] display {display}: rotation held at the desktop's own (Android 10/11)",
+                    self.key
+                );
+            }
             // "Physical size: 1080x2340" for the phone panel itself
             if let Some((pw, ph)) = self
                 .run("wm size")
@@ -3878,7 +3920,7 @@ impl Enforcer {
         // drained on its own thread precisely because it costs ~1s and used
         // to stretch this poll (and with it the taskbar) to over a second.
         let Some(dump) = self.run(
-            "dumpsys activity activities | grep -E 'Display #|\\* Task|mBounds=Rect| u0 |requestedOrientation='",
+            "dumpsys activity activities | grep -E 'Display #|\\* Task|mBounds=Rect| u0 |requestedOrientation=|intent=\\{'",
         ) else {
             return;
         };
@@ -3998,6 +4040,8 @@ fn spawn_freeform_enforcer(
         // snapshot it is read from.
         let undo_globals = crate::adb::undo_globals_script(&app, &serial);
         thread::spawn(move || {
+            // This phone's daemon, whatever other phone has a desktop open too.
+            let wm = crate::wm::WmClient::for_serial(&serial);
             let mut enforcer = Enforcer {
                 shell: ShellSession::new(serial),
                 app,
@@ -4011,7 +4055,7 @@ fn spawn_freeform_enforcer(
                 reclaims: Default::default(),
                 unshapeable: Default::default(),
                 seen_on: Default::default(),
-                wm: crate::wm::WmClient::new(),
+                wm,
                 last_display: -1,
                 phone_aspect: 1080.0 / 2340.0,
                 default_freeform: false,
@@ -4080,7 +4124,10 @@ fn spawn_freeform_enforcer(
     // launcher's queue costs ~1s on the device.
     thread::spawn(move || {
         let mut pump = RequestPump {
-            wm: crate::wm::WmClient::new(),
+            // This phone's queue: with one port for every phone, a pump read the queue
+            // of the phone connected last, ran its requests on this phone, and never saw
+            // this phone's own (a Redmi's taskbar Close did nothing, 2026-11-17).
+            wm: crate::wm::WmClient::for_serial(&serial),
             fast: false,
             shell: ShellSession::new(serial),
             app,
@@ -4974,27 +5021,76 @@ fn density_reset_command(display: i32) -> String {
     )
 }
 
-/// Leave the phone's density as the desktop found it: called as a desktop
-/// ends on purpose (Exit DeX, from the phone or here; the app closing; a
-/// restart), before scrcpy takes the display away — a display already gone
-/// cannot be reset. A cable pulled first leaves it to the phone's scrcpy
-/// server, which clears whatever an earlier display left on each display it
-/// makes (`clearForcedDensity`, display-scale.patch).
+/// Leave the phone's density, and an Android 10 or 11 desktop's rotation hold,
+/// as the desktop found them: called as a desktop ends on purpose (Exit DeX,
+/// from the phone or here; the app closing; a restart), before scrcpy takes the
+/// display away — a display already gone cannot be reset. Any other ending (the
+/// desktop's own ×, a cable pulled) leaves both to the phone's scrcpy server,
+/// which clears them before it releases its display and, for a server killed
+/// first, whatever an earlier display left on each display it makes
+/// (`clearForcedDensity`, display-scale.patch; `releaseRotationHold`,
+/// desktop-rotation.patch).
 fn release_display_density(app: &AppHandle, key: &str, serial: &str, display: i32) {
     // 0 is the phone's own screen, whose density is its owner's: a reset there
     // would undo one they set themselves. A desktop is never on it.
     if display <= 0 {
         return;
     }
-    let cmd = density_reset_command(display);
+    // One shell for both, so an ending desktop pays one round trip for them.
+    let cmd = format!("{}; {}", density_reset_command(display), rotation_reset_command(display));
     match adb::run_adb_timeout(app, &["-s", serial, "shell", &cmd], DENSITY_RESET_TIMEOUT) {
-        Ok(out) => match out.trim() {
-            "reset" => log::info!("mirror [{key}] display {display}: density back to its own before it goes"),
-            "forgotten" => log::info!("mirror [{key}] display {display}: density left to Android, which forgets it with the display"),
-            _ => log::info!("mirror [{key}] display {display}: no density forced on it"),
-        },
+        Ok(out) => {
+            let mut lines = out.lines().map(str::trim);
+            match lines.next().unwrap_or("") {
+                "reset" => log::info!("mirror [{key}] display {display}: density back to its own before it goes"),
+                "forgotten" => log::info!("mirror [{key}] display {display}: density left to Android, which forgets it with the display"),
+                _ => log::info!("mirror [{key}] display {display}: no density forced on it"),
+            }
+            if lines.any(|l| l == "freed") {
+                log::info!("mirror [{key}] display {display}: rotation free again before it goes");
+            }
+        }
         Err(e) => log::warn!("mirror [{key}] display {display}: could not take its density off: {e}"),
     }
+}
+
+/// The shell line that holds an Android 10 or 11 desktop at its own rotation, and says
+/// whether it did ("locked", "none").
+///
+/// There an app that asks to be portrait turns the whole display while it is full screen
+/// — one that never becomes a window, as MIUI 12.5's Clock on a Redmi 9A never did — and
+/// the desktop's window on the computer turned with it, portrait and back at every
+/// re-launch the enforcer tried (2026-11-17). Later Android has the desktop display
+/// ignore the app's request; 10 and 11 can only be told to keep to the user's rotation
+/// (`set-fix-to-user-rotation`), with the user's rotation locked at 0, the desktop's own.
+/// The app is then laid out on the desktop as it is.
+fn rotation_lock_command(display: i32) -> String {
+    format!(
+        "s=$(getprop ro.build.version.sdk); if [ \"$s\" -ge 29 ] && [ \"$s\" -le 30 ]; then \
+         wm set-user-rotation lock -d {display} 0; wm set-fix-to-user-rotation -d {display} enabled; \
+         echo locked; else echo none; fi"
+    )
+}
+
+/// `rotation_lock_command` taken back as the desktop ends ("freed", "none"). A display's
+/// rotation settings are kept where its forced density is (`density_reset_command`),
+/// under the display's identity, which the next scrcpy display gets too: anyone's own
+/// scrcpy display (not the app's phone windows, whose displays have a name of their own).
+/// Back to `default`, which Android 11 keeps nothing for, not `disabled`, which it keeps
+/// as it keeps `enabled`. Android 10's shell takes `default` as `disabled`, the nearest
+/// to nothing kept it allows there: the next display then follows its apps' orientation,
+/// as a phone's display does by default.
+///
+/// Only an ending the computer starts runs this (Exit, the app closing, a restart). The
+/// desktop's window closed with its own ×, a cable pulled or Wi-Fi lost never come here;
+/// the phone's scrcpy server takes the hold off itself before it lets the display go, and
+/// off every display it makes, for a server killed first (desktop-rotation.patch).
+fn rotation_reset_command(display: i32) -> String {
+    format!(
+        "s=$(getprop ro.build.version.sdk); if [ \"$s\" -ge 29 ] && [ \"$s\" -le 30 ]; then \
+         wm set-fix-to-user-rotation -d {display} default; wm set-user-rotation free -d {display}; \
+         echo freed; else echo none; fi"
+    )
 }
 
 #[tauri::command(async)]
@@ -5176,6 +5272,25 @@ mod tests {
         assert_eq!(cmd.matches("-d ").count(), 2, "{cmd}");
     }
 
+    /// Android 10 and 11 only, on the desktop's display only, and put back as it ends.
+    #[test]
+    fn an_android_11_desktop_keeps_its_rotation_and_gives_it_back() {
+        let lock = super::rotation_lock_command(20);
+        assert!(lock.contains("[ \"$s\" -ge 29 ] && [ \"$s\" -le 30 ]"), "{lock}");
+        assert!(lock.contains("wm set-user-rotation lock -d 20 0;"), "{lock}");
+        assert!(lock.contains("wm set-fix-to-user-rotation -d 20 enabled;"), "{lock}");
+        assert!(lock.ends_with("echo locked; else echo none; fi"), "{lock}");
+        let reset = super::rotation_reset_command(20);
+        // "default", not "disabled": Android keeps "disabled" for the next display too.
+        assert!(reset.contains("wm set-fix-to-user-rotation -d 20 default;"), "{reset}");
+        assert!(!reset.contains("disabled"), "{reset}");
+        assert!(reset.contains("wm set-user-rotation free -d 20;"), "{reset}");
+        assert!(reset.ends_with("echo freed; else echo none; fi"), "{reset}");
+        for cmd in [&lock, &reset] {
+            assert!(!cmd.contains("-d 0"), "never the phone's own screen: {cmd}");
+        }
+    }
+
     /// The launcher queues every request twice — once in the ContentProvider, once in the
     /// window daemon — and the PC reads whichever answered. If the two shapes ever
     /// disagreed, presses would be silently dropped on one path or run twice on the
@@ -5278,6 +5393,29 @@ mod tests {
         assert_eq!(phone.comp, "com.foo/.MainActivity");
         assert_eq!(phone.root_comp, "com.foo/.MainActivity");
         assert!(!phone.is_ours());
+    }
+
+    /// Verbatim in shape from a Galaxy A13 (Android 12): the task's own intent is printed
+    /// under its header, before any activity. The video player was started with the video
+    /// (`dat=`); My Files with nothing. Only the first may never be re-launched (`apply`).
+    #[test]
+    fn a_task_started_with_something_to_show_says_so() {
+        const A13: &str = concat!(
+            "Display #15 (activities from top to bottom):\n",
+            "    * Task{d1fa78 #3896 type=standard A=10086:com.samsung.android.video.movieplayer U=0 visible=true mode=fullscreen translucent=false sz=1}\n",
+            "      intent={act=android.intent.action.VIEW dat=content://media/external/video/media/81 typ=video/mp4 flg=0x10000001 cmp=com.samsung.android.video/.player.activity.MoviePlayer}\n",
+            "      * Hist #0: ActivityRecord{f39fdb u0 com.samsung.android.video/.player.activity.MoviePlayer t3896}\n",
+            "    * Task{a86d616 #3892 type=standard I=com.sec.android.app.myfiles/.external.ui.MainActivity U=0 visible=true mode=freeform translucent=false sz=1}\n",
+            "      mBounds=Rect(0, 0 - 1412, 752)\n",
+            "      intent={flg=0x10000000 cmp=com.sec.android.app.myfiles/.external.ui.MainActivity}\n",
+            "      * Hist #0: ActivityRecord{4164f31 u0 com.sec.android.app.myfiles/.external.ui.MainActivity t3892}\n",
+        );
+        let all = parse_all_display_tasks(A13);
+        let tasks = &all[0].1;
+        assert_eq!(tasks[0].comp, "com.samsung.android.video/.player.activity.MoviePlayer");
+        assert!(tasks[0].fullscreen && tasks[0].opened_with_data);
+        assert_eq!(tasks[1].comp, "com.sec.android.app.myfiles/.external.ui.MainActivity");
+        assert!(!tasks[1].opened_with_data);
     }
 
     #[test]

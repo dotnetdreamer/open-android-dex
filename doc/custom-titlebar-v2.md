@@ -300,6 +300,70 @@ half-covered one, which is a real limitation, not a bug to fix from inside the s
     single-streamed-display equivalent is either a platform launch transition via
     `ActivityOptions.makeCustomAnimation` at launch, or a fade-out veil overlay — both want
     on-device iteration).
+  - **Back, More and Sound (2026-11-17).** The bar now opens with ← Back and ☰ More and the
+    app's icon, and has the sound button before ◧, as the computer's own window for an app
+    does (`apps/win/frame.rs`): a tester put the two windows side by side and asked for the
+    same controls in both. The three are drawn marks (`CaptionGlyph`), not text: ☰ and a
+    speaker are not in every phone's fonts.
+    - **Back is aimed, not broadcast.** There each app has a display of its own, so a key
+      tap can only reach it. Here every window shares one display and a key goes to whichever
+      window has the keyboard, and a click on our bar never moves it: the bar is a
+      `FLAG_NOT_FOCUSABLE` embedded window whose host token is our own 1×1 overlay, so the
+      press is not a tap on the app. A display-wide Back (the taskbar's ◁, `input -d`) would
+      go to the window that was in front, and close something nobody asked to close. The
+      daemon's **`TASKKEY <d> <task> <code> [meta]`** gives the window the keyboard first —
+      `setFocusedTask`, the call a tap on a window ends in, which also raises it — waits for
+      `getFocusedRootTaskInfo` to name it (up to 400 ms), then 50 ms for the input side to
+      follow (the focus rides the next SurfaceFlinger transaction to InputDispatcher), and only
+      then injects. A window that never gets the keyboard gets no key: `ERR not focused`.
+      Nothing falls back to an unaimed key. Where `setFocusedTask` cannot bring the keyboard
+      over from another display (Android 12 does not raise the display), a press on the
+      window taken back at once does (`doc/desktop-window-buttons.md`). The task must be a visible window on that
+      display, so the launcher's uid (shared with the Linux guest) cannot use it to bring an
+      app forward on the phone's own screen. It runs on the bar's own daemon connection,
+      because its wait must not hold up the reconcile's and the drag's.
+    - **More** has Copy and Paste (Ctrl+C, Ctrl+V through `TASKKEY`; a Linux window gets
+      KEYCODE_COPY/PASTE, which `LinuxWinView` turns into Ctrl+Shift+C in a terminal), Phone
+      size and Tablet size (`apps/shape.rs`'s 412×915 and 1280×800 dp, fitted the same way,
+      the window kept where its top-left is; a tablet's size under 600 dp maximises instead),
+      and the phone as this desktop's touchpad where quick settings offers it. Not the
+      computer window's Full screen or game controls: here the desktop is one picture, and
+      game controls are the computer's keys on an app's own window.
+    - **Sound** offers the taskbar's Media output flyout rows (`mediaOutputItems`), so the
+      two can never offer different choices.
+    - **A narrow window keeps ✕.** Eight buttons and the icon are ~320 px at 1x, and
+      Android lets a freeform window be narrower than that; fixed-width views past the bar's
+      end are cut off, and ✕ is the last. `fitBar` (rule in `CaptionMath.shown`) lets the
+      least needed go first — the icon, ◨, ◧, the speaker, —, ☰, ▢ — until the rest fits
+      with 48 px left to drag the window by, and brings them back as it widens. Back and ✕
+      never go. The sizing, the menu placement and this rule are checked on a JVM by
+      `test/caption-bar-test.mjs`.
+    - **The menus are windows of their own** (`CaptionMenu`): `TYPE_ACCESSIBILITY_OVERLAY`
+      on the desktop display, as the Linux apps' menus are, positioned under the button, not
+      popups from the bar (it has no window of ours to hang one from, and anything drawn in
+      it is cropped to the app's window). They close on a pick, on a press outside them
+      (`FLAG_WATCH_OUTSIDE_TOUCH`), and when their window moves, resizes or closes. A press on
+      the button whose menu is open closes it: that press reaches the menu as an outside press
+      before the button hears it, so a menu closed that way within 400 ms is not reopened.
+    - **The bar follows a screen the app opens over itself** (`followAppWindow`). My Files
+      opens Samsung's Storage Share settings in its own task, over its main screen, and Android
+      throws away the main screen's surface, our bar with it; when it came back it had a new
+      surface under the same window id, so the bar was never put back. Now, while the window
+      under the bar is out of view, the bar moves to another window the task shows (only one
+      whose content belongs to the app the task is showing now). A window that comes back
+      after two passes or more away gets the bar put on afresh: its surface is new, though its
+      id is not. One pass away could be a blink.
+    - **Run on a Galaxy S25 Ultra (Android 17, over Wi-Fi), 2026-11-17:** ← on Play Store
+      behind My Files went to Play Store (`key 4 for task 1567: OK 56`), My Files untouched;
+      ☰ opened under its button with the current size ticked; Phone size made the window
+      412 × 915 dp under a 40 px bar, Tablet size 1280 × 800 dp, top-left kept; 🔊 offered
+      Computer only, Computer and phone, Phone speaker and All outputs on phone, and a second
+      press on it closed it; at 230 px wide the bar kept ←, ☰, the title, —, ▢ and ✕; Storage
+      Share from My Files took the bar with it (`its window 1858 has gone from view — the bar
+      moves to window 1882`) and ← brought it back (`key 4 for task 1488: OK 0`, then back on
+      window 1858). Not run: Copy and Paste (one try, on My Files with nothing selected so as
+      not to replace the phone owner's clipboard, was cut short when another desktop's close
+      request force-stopped My Files), and the touchpad item.
 - Apps using activity embedding (two-pane Settings) get a bar clipped to the pane that hosts
   it, because a surface parented under a window is cropped to that window. Inherent to
   per-window hosting; the display overlay avoided it but cost far more elsewhere.

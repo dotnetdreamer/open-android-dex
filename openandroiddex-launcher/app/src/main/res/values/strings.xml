@@ -519,6 +519,15 @@
     <string name="lx_call_answer">Answer</string>
     <string name="lx_call_decline">Decline</string>
     <string name="lx_call_gone">The call has already ended</string>
+    <!-- A window's title bar on the desktop: its More menu and its sound button, the
+         two the computer's own window for an app has too -->
+    <string name="cap_more">More</string>
+    <string name="cap_sound">Sound output</string>
+    <string name="cap_copy">Copy</string>
+    <string name="cap_paste">Paste</string>
+    <string name="cap_phone_size">Phone size</string>
+    <string name="cap_tablet_size">Tablet size</string>
+    <string name="cap_touchpad">Use phone as touchpad</string>
     <string name="lx_maximize_restore">Maximize / restore</string>
     <string name="lx_close_app">Close app</string>
     <string name="lx_app_info">App info</string>

@@ -550,11 +550,12 @@ pub fn start(
     if !backend::supported() {
         return;
     }
+    let wm = WmClient::for_serial(&serial);
     let mut sink = Sink {
         app: app.clone(),
         key: key.clone(),
         shell: ShellSession::new(serial),
-        wm: WmClient::new(),
+        wm,
         shared,
         ring: Vec::new(),
         ring_at: 0,

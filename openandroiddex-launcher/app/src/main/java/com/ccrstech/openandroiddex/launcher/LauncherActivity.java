@@ -609,6 +609,14 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
                     // pad's watch takes as the phone in use, and close it.
                     if (!onPhone()) goHome();
                     break;
+                // The desktop window's own ◁ and ▢ on the computer (deskbar.rs): the
+                // taskbar's buttons, from up there, for when an app covers the taskbar.
+                case "back":
+                    if (!onPhone()) taskbarBack();
+                    break;
+                case "recents":
+                    if (!onPhone()) recentApps();
+                    break;
                 case "close":
                     // Not a gesture: the computer's "Close the front app", when
                     // the window in front is one of ours.
@@ -4037,13 +4045,13 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
         LinearLayout.LayoutParams navLp = new LinearLayout.LayoutParams(
                 dp(compact ? 33 : 40), dp(compact ? 34 : 38));
         navLp.setMargins(dp(compact ? 1 : 2), 0, dp(compact ? 1 : 2), 0);
-        // back is executed by the PC (adb key inject) via the request queue
+        // Back goes to the window in front, through the window daemon (taskbarBack)
         left.addView(navButton("◁", getString(R.string.lx_back),
-                v -> RequestProvider.enqueue("key", "back")), navLp);
+                v -> taskbarBack()), navLp);
         left.addView(navButton("○", getString(R.string.lx_home), v -> goHome()),
                 new LinearLayout.LayoutParams(navLp));
         left.addView(navButton("▢", getString(R.string.lx_recent_apps),
-                v -> toggleRecentsPopup()), new LinearLayout.LayoutParams(navLp));
+                v -> recentApps()), new LinearLayout.LayoutParams(navLp));
         return left;
     }
 
@@ -4108,9 +4116,9 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
         left.setOrientation(LinearLayout.HORIZONTAL);
         left.setGravity(Gravity.CENTER_VERTICAL);
         left.setPadding(dp(compact ? 4 : 8), 0, 0, 0);
-        // executed by the PC (adb key inject) via the request queue
+        // Back goes to the window in front, through the window daemon (taskbarBack)
         left.addView(win11BarButton(barGlyph("◁"), getString(R.string.lx_back),
-                v -> RequestProvider.enqueue("key", "back")));
+                v -> taskbarBack()));
         return left;
     }
 
@@ -4136,7 +4144,7 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
         center.addView(win11BarButton(barGlyph("🔍"), getString(R.string.w11_search),
                 v -> showStartSearching()));
         center.addView(win11BarButton(barGlyph("▢"), getString(R.string.w11_task_view),
-                v -> toggleRecentsPopup()));
+                v -> recentApps()));
         center.addView(win11BarButton(barGlyph("▭"), getString(R.string.w11_desktop),
                 v -> goHome()));
 
@@ -4437,7 +4445,107 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
     private void goHome() {
         dismissPopups();
         hideDrawer();
+        // The desktop cannot be raised over a window: the windows stay above the desktop's
+        // own task whatever reorder it is given (Galaxy A13, Android 12, and Galaxy S25
+        // Ultra, Android 17, 2026-11-17), so Home did nothing at all with an app open.
+        // Home clears the windows off the desktop instead, as DeX's Home does —
+        // CaptionService's Show desktop, which below Android 14 runs without its bars:
+        // every window and full-screen app minimised, Home again putting them back, a
+        // taskbar icon bringing back its own.
+        sendBroadcast(new Intent(ACTION_SHOW_DESKTOP).setPackage(getPackageName()));
         bringDesktopForward();
+    }
+
+    /**
+     * The taskbar's Back: for the window in front, whatever has the keyboard.
+     *
+     * A click on the taskbar is a click on the desktop where the taskbar is part of it
+     * (inside this activity, on a display that buries overlays: the Galaxy A13), and the
+     * click hands the desktop the keyboard. A Back sent to the display — the computer's
+     * key, which this button used to ask for — then went to the desktop and not to the
+     * app in front, so the button did nothing there, and plainly so with an app filling
+     * the desktop. So the key is aimed, as a title bar's Back is: the window in front is
+     * given the keyboard and then the key (the daemon's TASKKEY). An open drawer or flyout
+     * is what Back closes first, as on a phone. With no daemon to aim through, the
+     * computer's Back to the display, as before.
+     */
+    private void taskbarBack() {
+        if (drawerShown || popupShowing()) {
+            dismissPopups();
+            hideDrawer();
+            return;
+        }
+        final int display = displayId();
+        if (qsWm == null) qsWm = new WmClient();
+        final WmClient client = qsWm;
+        client.post(() -> {
+            List<WmClient.Task> list = display >= 0 ? client.list(display) : null;
+            if (list == null) {
+                RequestProvider.enqueue("key", "back");
+                return;
+            }
+            WmClient.Task front = null;
+            for (WmClient.Task t : list) {
+                if (t.visible && !isDesktopShell(t)) {
+                    front = t;
+                    break;
+                }
+            }
+            if (front == null) return;      // nothing open: nothing to go back in
+            String reply = client.taskKey(display, front.taskId, KeyEvent.KEYCODE_BACK, 0);
+            DexLog.step("taskbar", "back for " + front.pkg + " (task " + front.taskId + "): "
+                    + (reply == null ? "no answer" : reply));
+        });
+    }
+
+    /**
+     * The taskbar's ▢: the open apps, in the flyout above it. Where that flyout is drawn
+     * under the windows (overlaysBuried: the taskbar is inside the desktop, and the
+     * windows are above the desktop) it cannot be seen with an app open, so there ▢ brings
+     * the window at the back to the front instead — each press the next one, as switching
+     * apps does on a phone. With nothing open, the flyout, which nothing then covers.
+     */
+    private void recentApps() {
+        if (!overlaysBuried()) {
+            toggleRecentsPopup();
+            return;
+        }
+        dismissPopups();
+        hideDrawer();
+        final int display = displayId();
+        if (qsWm == null) qsWm = new WmClient();
+        final WmClient client = qsWm;
+        client.post(() -> {
+            List<WmClient.Task> list = display >= 0 ? client.list(display) : null;
+            WmClient.Task last = null;
+            if (list != null) {
+                for (WmClient.Task t : list) {
+                    if (t.visible && !isDesktopShell(t)) last = t;   // topmost first: the last is at the back
+                }
+            }
+            if (last == null) {
+                runOnUiThread(this::toggleRecentsPopup);
+                return;
+            }
+            boolean raised = client.front(display, last.taskId);
+            DexLog.step("taskbar", "recent apps: " + last.pkg + " (task " + last.taskId + ") to the front"
+                    + (raised ? "" : " — refused"));
+        });
+    }
+
+    /** This desktop's own task: not a window, and never what Back or ▢ is for. */
+    private boolean isDesktopShell(WmClient.Task t) {
+        return getPackageName().equals(t.pkg) && LauncherActivity.class.getName().equals(t.activity);
+    }
+
+    /** Whether any of the taskbar's flyouts is open. */
+    private boolean popupShowing() {
+        PopupWindow[] all = {recentsPopup, calendarPopup, batteryPopup, qsPopup, notifPopup,
+                exitPopup, widgetPicker, mediaPopup, padPopup, homePopup};
+        for (PopupWindow p : all) {
+            if (p != null && p.isShowing()) return true;
+        }
+        return false;
     }
 
     private void toggleDrawer() {
@@ -5421,15 +5529,30 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
         header.setPadding(dp(10), dp(4), dp(10), dp(6));
         panel.addView(header);
 
+        for (CaptionMenu.Item it : mediaOutputItems()) {
+            panel.addView(it.separator() ? mediaDivider() : mediaRow(it.label, it.checked, it.action));
+        }
+
+        mediaPopup = makePopup(panel);
+        showTrayPopup(mediaPopup, Gravity.END);
+    }
+
+    /**
+     * The flyout's choices: the computer, the computer and the phone, each of
+     * the phone's own outputs, and the phone's own picker. Kept as items so a
+     * window's sound button (CaptionService#onSound) offers exactly these, and
+     * picking one there does exactly what it does here.
+     */
+    private List<CaptionMenu.Item> mediaOutputItems() {
+        List<CaptionMenu.Item> items = new ArrayList<>();
         String mode = DexMedia.audioMode(this);
-        panel.addView(mediaRow(getString(R.string.lx_audio_computer),
+        items.add(CaptionMenu.item(getString(R.string.lx_audio_computer), null,
                 DexMedia.AUDIO_COMPUTER.equals(mode),
                 () -> pickForwarding(DexMedia.AUDIO_COMPUTER)));
-        panel.addView(mediaRow(getString(R.string.lx_audio_both),
+        items.add(CaptionMenu.item(getString(R.string.lx_audio_both), null,
                 DexMedia.AUDIO_BOTH.equals(mode),
                 () -> pickForwarding(DexMedia.AUDIO_BOTH)));
-
-        panel.addView(mediaDivider());
+        items.add(CaptionMenu.separator());
 
         // The phone's own outputs. Which row is lit: only meaningful while
         // sound stays on the phone, and then it is the remembered pick when
@@ -5452,15 +5575,31 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
         }
         for (int ix = 0; ix < outputs.size(); ix++) {
             final DexMedia.Output out = outputs.get(ix);
-            panel.addView(mediaRow(out.name, ix == lit, () -> routeToPhoneOutput(out)));
+            items.add(CaptionMenu.item(out.name, null, ix == lit, () -> routeToPhoneOutput(out)));
         }
 
-        panel.addView(mediaDivider());
-        panel.addView(mediaRow(getString(R.string.lx_output_more), false,
+        items.add(CaptionMenu.separator());
+        items.add(CaptionMenu.item(getString(R.string.lx_output_more), null, false,
                 this::openPhoneOutputPicker));
+        return items;
+    }
 
-        mediaPopup = makePopup(panel);
-        showTrayPopup(mediaPopup, Gravity.END);
+    /** The flyout's choices for a window's sound button (CaptionService); null with no desktop. */
+    static List<CaptionMenu.Item> soundMenuItems() {
+        LauncherActivity desktop = liveDesktop();
+        return desktop == null ? null : desktop.mediaOutputItems();
+    }
+
+    /** Whether quick settings offers the phone as this desktop's touchpad now. */
+    static boolean touchpadOffered() {
+        LauncherActivity desktop = liveDesktop();
+        return desktop != null && desktop.touchpadUsable();
+    }
+
+    /** A window's More menu: the phone as this desktop's touchpad, as quick settings opens it. */
+    static void openTouchpadFromCaption() {
+        LauncherActivity desktop = liveDesktop();
+        if (desktop != null && desktop.touchpadUsable()) desktop.openTouchpad();
     }
 
     /** One flyout row: a check column and a name. The check is the state. */

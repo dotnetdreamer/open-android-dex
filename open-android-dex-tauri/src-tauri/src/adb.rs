@@ -1717,7 +1717,7 @@ pub fn restore_phone(app: &tauri::AppHandle, serial: &str) {
     //    ART does not run shutdown hooks on SIGTERM — once that process is gone nothing on
     //    the device can undo it, and the user is left pressing power twice at a phone that
     //    looks broken.
-    let wm = crate::wm::WmClient::new();
+    let wm = crate::wm::WmClient::for_serial(serial);
     if wm.restore_screen() {
         log::info!("{serial}: the phone's own screen was off — turned back on");
     }
@@ -1930,7 +1930,7 @@ pub fn restore_phone(app: &tauri::AppHandle, serial: &str) {
         }
     }
 
-    let forward = format!("tcp:{}", crate::wm::HOST_PORT);
+    let forward = format!("tcp:{}", crate::wm::host_port(serial));
     let _ = run_adb_timeout(
         app,
         &["-s", serial, "forward", "--remove", &forward],
@@ -3222,12 +3222,17 @@ fn power_exemption_is_ours(app: &tauri::AppHandle, serial: &str) -> bool {
 /// armed over, which would otherwise stay silent and have the daemon conclude
 /// the PC had gone for good.
 ///
-/// Idempotent: adb replaces an existing forward for the same local port.
+/// Idempotent: adb replaces an existing forward for the same local port. Each phone
+/// has a computer port of its own (`wm::host_port`): with one for all, the phone
+/// forwarded last took it from the others.
 pub fn forward_wm_port(app: &tauri::AppHandle, serial: &str) -> bool {
-    let host = format!("tcp:{}", crate::wm::HOST_PORT);
+    let host = format!("tcp:{}", crate::wm::host_port(serial));
     let device = format!("tcp:{}", crate::wm::DEVICE_PORT);
     match run_adb_quiet(app, &["-s", serial, "forward", &host, &device]) {
-        Ok(_) => true,
+        Ok(_) => {
+            crate::wm::note_forwarded(serial);
+            true
+        }
         Err(e) => {
             log::warn!("adb forward for wmd failed: {e} — host-side window control unavailable");
             false
@@ -3351,7 +3356,7 @@ fn fresh_wmd_answers(app: &tauri::AppHandle, serial: &str, at: Instant) -> bool 
     if !forward_wm_port(app, serial) {
         return false;
     }
-    let wm = crate::wm::WmClient::new();
+    let wm = crate::wm::WmClient::for_serial(serial);
     loop {
         if wm.ping() {
             return true;

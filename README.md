@@ -134,10 +134,18 @@ at your monitor's size, sitting next to your other windows.
   desktop, step through your windows. It is under Touchpad in quick settings
   too
 - **Proper windows.** Every app gets a title bar with close, minimise, maximise
-  and snap left or right. Drag them where you want. On Android 14 and newer,
-  resize them from any edge or corner: the grab area reaches past the window's
-  border, and your pointer turns into a resize arrow over it. Put two apps side by side and get
-  something done
+  and snap left or right, plus the same Back, ☰ and speaker buttons as the app
+  windows on your computer. Back goes to that window's app, even if another
+  window was in front. ☰ has Copy, Paste, Phone size, Tablet size and Use phone
+  as touchpad, and the speaker picks where the sound plays. Drag them where you
+  want. On Android 14 and newer, resize them from any edge or corner: the grab
+  area reaches past the window's border, and your pointer turns into a resize
+  arrow over it. Put two apps side by side and get something done
+- **A way out of full screen apps.** On Windows, the desktop's own window has
+  Back, Home and Recent apps buttons at the left end of its title bar. They work
+  even when an app covers the whole desktop and its taskbar, like a video made
+  full screen. With the desktop itself full screen, move the mouse to the top
+  middle of the screen to find them
 - **Windows stay where you put them.** Move an app or resize it, and that is
   where it opens next time. Every app remembers its own spot
 - **An app drawer** you can search, and a desktop you can drop shortcuts onto
