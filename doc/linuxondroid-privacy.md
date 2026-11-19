@@ -44,7 +44,8 @@ Remote access lets computers you pair log in to your phone's Linux, for example 
 
 - **Internet and network state.** To download Linux and your apps, and for remote access
 - **Foreground service and notifications.** To keep Linux running while you use other apps, with a notification so you always know it's running and can get back to it
-- **Run at startup and stay awake.** Only for remote access: to turn it back on after your phone restarts if you had it on, and to keep a connected computer's session alive
+- **Run at startup.** Only for things you switch on: to start Linux when your phone starts, if you turn on Start Linux with the phone in Settings, and to turn remote access back on after a restart if you had it on
+- **Stay awake.** While Linux is being installed, so the download and setup can finish with the screen off, and while a computer is connected, to keep its session alive
 - **Battery optimization.** The Remote access screen can ask Android not to pause the app, so your computers can still reach the phone when its screen is off. You decide
 
 ## Children
