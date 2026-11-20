@@ -401,6 +401,31 @@ the same job, the desktop included (`dexremote desktop`, in a browser tab). How
 it works, and what was ruled out on the way:
 [doc/remote-access.md](doc/remote-access.md).
 
+#### Open it in a browser on your computer
+
+Use your laptop as Linux's big screen, with its own keyboard and mouse, and
+install nothing on it. The phone and the computer just need the same Wi-Fi.
+Joining the phone's hotspot from the computer should work too, but nobody has
+tried it yet.
+
+1. On the phone, in LinuxOnDroid: ⋮ → **Settings** → **Open in a browser**. It
+   shows an address and a six digit code. The code works while that page is
+   open, and for 10 minutes after
+2. On the computer, type the address into Chrome, Edge or Firefox (Safari
+   should work too, but nobody has tried it yet). The first time, the browser
+   warns that the connection is not private, because the phone made its own
+   certificate. Choose Advanced, then Continue (Firefox calls it Proceed)
+3. Type the code. Linux fills the window, and follows it when you resize it
+
+At the top of the page you pick the picture: **Low** when the Wi-Fi is slow,
+**High** for the sharpest text, **Medium** for everything in between. The
+phone's own video chip makes the picture and the computer's graphics chip shows
+it, so scrolling and videos stay smooth. Copy and paste work both ways. In
+Chrome and Edge, full screen hands every key to Linux, Alt+Tab included. The
+browser remembers that you let it in, so next time it is just the address. To
+shut every browser out again, use **Sign them out** on the same page. How it
+works: [doc/linux-browser.md](doc/linux-browser.md).
+
 A control strip sits along the top wherever Linux is running, on the phone or in
 a window. It holds the pointer, the keyboard, the screen and zoom. Tap the
 pointer and you pick how touch should behave: point where you look, use the

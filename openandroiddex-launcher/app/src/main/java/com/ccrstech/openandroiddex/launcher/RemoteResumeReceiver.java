@@ -76,6 +76,17 @@ public class RemoteResumeReceiver extends BroadcastReceiver {
         // meant to end; LinuxBoot also tells a real boot from the
         // BOOT_COMPLETED Android 15 sends to an app opened after a force-stop.
         if (Intent.ACTION_BOOT_COMPLETED.equals(action)) LinuxBoot.onBoot(ctx);
+        // "Open in a browser" left on: listening again, on all three, as remote
+        // access is below. A refused start is not lost: LinuxOnDroid opening
+        // starts the service, and every start brings the listener back.
+        if (LinuxService.browser(ctx).isOn() && !Linux.isRemoving(ctx)) {
+            if (LinuxService.browserResume(ctx)) {
+                DexLog.step("browser", "listening for browsers again after " + action);
+            } else {
+                DexLog.step("browser", "Android refused to listen for browsers after " + action
+                        + " — it does when LinuxOnDroid opens next");
+            }
+        }
         // Samsung's background slowdown as remote access wants it, whichever way
         // that is. This is what finishes switching it back on when remote access
         // went off without the permission to: the desktop app keeps it in place

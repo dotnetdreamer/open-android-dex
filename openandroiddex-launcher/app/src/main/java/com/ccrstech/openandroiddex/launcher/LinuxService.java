@@ -65,6 +65,8 @@ public class LinuxService extends Service {
     static final String ACTION_REMOTE_PAIR_CANCEL = "com.ccrstech.openandroiddex.launcher.linux.REMOTE_PAIR_CANCEL";
     /** A computer on the cable is about to open the desktop as video: be up to answer. See {@link LinuxStream}. */
     static final String ACTION_STREAM = "com.ccrstech.openandroiddex.launcher.linux.STREAM";
+    /** The page a browser is served, in the APK's assets: never the guest's, which root in Linux can rewrite. */
+    static final String BROWSER_ASSETS = "linux/browser/";
     /**
      * Start a Linux app as a window of its own (doc/linux-windows.md): the
      * window session first, if it is not running, then the app in it.
@@ -77,6 +79,15 @@ public class LinuxService extends Service {
      * {@link LinuxBoot}), at the size it last had and with its sound off.
      */
     static final String ACTION_BOOT_START = "com.ccrstech.openandroiddex.launcher.linux.BOOT_START";
+    /**
+     * "Open in a browser" (LinuxOnDroid's Settings): listen for a browser on the
+     * phone's network, and keep listening while the switch is on. Also what
+     * brings it back after a boot or an update. See {@link LinuxBrowserServer}.
+     */
+    static final String ACTION_BROWSER_ON = "com.ccrstech.openandroiddex.launcher.linux.BROWSER_ON";
+    static final String ACTION_BROWSER_OFF = "com.ccrstech.openandroiddex.launcher.linux.BROWSER_OFF";
+    /** Every browser was signed out on the phone: one watching now is ended, and told. */
+    static final String ACTION_BROWSER_SIGNOUT = "com.ccrstech.openandroiddex.launcher.linux.BROWSER_SIGNOUT";
     static final String EXTRA_W = "w";
     static final String EXTRA_H = "h";
     static final String EXTRA_CODE = "code";
@@ -84,6 +95,8 @@ public class LinuxService extends Service {
     static final String EXTRA_DPI = "dpi";
     /** On REMOTE_OFF: it came from the notification's Turn off. */
     private static final String EXTRA_FROM_NOTIFICATION = "from_notification";
+    /** On BROWSER_ON: the switch was just turned on, on screen; start the desktop too. */
+    private static final String EXTRA_PRESTART = "prestart";
 
     private static final String CHANNEL = "linux";
     private static final int NOTIF_ID = 0x1D;
@@ -277,6 +290,56 @@ public class LinuxService extends Service {
     static void uninstall(Context ctx) {
         Linux.setRemoving(ctx, true);
         send(ctx, ACTION_UNINSTALL, 0, 0);
+    }
+
+    /** "Open in a browser"'s files: the switch, the code, the browsers let in, the certificate. */
+    static LinuxBrowser browser(Context ctx) {
+        return new LinuxBrowser(new File(ctx.getFilesDir(), "browser"));
+    }
+
+    /**
+     * Let browsers on the phone's network in, and remember that it is on.
+     *
+     * @return false when Android refused to start the service from where the
+     *         caller is; it is still on, and comes up at the next start
+     */
+    static boolean browserOn(Context ctx) {
+        browser(ctx).setOn(true);
+        // The desktop starts now too, if it can, while the page that turned
+        // this on is in front: see ACTION_BROWSER_ON's handler for why.
+        return start(ctx, new Intent(ctx, LinuxService.class).setAction(ACTION_BROWSER_ON)
+                .putExtra(EXTRA_PRESTART, true));
+    }
+
+    /** Stop listening, and stay so. A browser watching now loses its picture. */
+    static void browserOff(Context ctx) {
+        LinuxBrowser b = browser(ctx);
+        b.setOn(false);
+        // A code works only while the switch is on and the card shows it.
+        b.closePairing();
+        send(ctx, ACTION_BROWSER_OFF, 0, 0);
+    }
+
+    /**
+     * Every browser out, as the card's "Sign them out" says: the tokens and the
+     * code here, and in {@code :linux} the one watching now, which a token
+     * checked when it began would otherwise keep, and every connection that
+     * has not yet become a stream.
+     */
+    static void browserSignOut(Context ctx) {
+        browser(ctx).signOutAll();
+        send(ctx, ACTION_BROWSER_SIGNOUT, 0, 0);
+    }
+
+    /**
+     * Listening again after a boot or an update, if the switch was left on;
+     * nothing at all otherwise. Synchronous, from inside a broadcast.
+     *
+     * @return false when Android refused the start from where we are
+     */
+    static boolean browserResume(Context ctx) {
+        if (!browser(ctx).isOn() || Linux.isRemoving(ctx)) return true;
+        return send(ctx, ACTION_BROWSER_ON, 0, 0);
     }
 
     /**
@@ -475,6 +538,12 @@ public class LinuxService extends Service {
             @Override
             public void streaming(boolean on) {
                 streamAwake(on);
+                // The notification says when a browser has the picture ("Linux
+                // is open in a browser"), and this is the moment it does: the
+                // server's own word comes before LinuxStream has the stream,
+                // too soon for that line, which stayed "Open … in a browser"
+                // all through a session on the S25.
+                mainHandler.post(LinuxService.this::refreshForeground);
                 // A session that ended may have been the last reason to be up.
                 if (!on) idleStopQueued();
             }
@@ -567,6 +636,58 @@ public class LinuxService extends Service {
                 getSystemService(NotificationManager.class).cancel(0x1E);
             } catch (Exception ignored) {
             }
+        }
+        // "Open in a browser", the same way: listening after every start while
+        // the switch is on (a sticky restart, a boot, the window opening), and
+        // not while Linux is being removed. Only the notification's Turn off
+        // clears the switch here; Settings cleared it before it sent the Off.
+        if (ACTION_BROWSER_OFF.equals(action) && intent.getBooleanExtra(EXTRA_FROM_NOTIFICATION, false)) {
+            browser(this).setOn(false);
+        }
+        boolean browserWanted = browser(this).isOn() && !Linux.isRemoving(this)
+                && !ACTION_UNINSTALL.equals(action);
+        if (browserWanted) {
+            startBrowserServer();
+        } else {
+            stopBrowserServer();
+        }
+        if (ACTION_BROWSER_ON.equals(action) && browserWanted) {
+            if (!provisioning.get()) goForeground(getString(R.string.ln_label));
+            // Switched on just now, in Settings: the desktop starts at once,
+            // at the size it last had and with its sound off, as a computer's
+            // does. Then, rather than when a browser first asks: the browser
+            // finds it ready, and on Samsung's phones it is born on the big
+            // cores. One UI moves an app with no window on screen to the small
+            // ones about 12 s after its last one went, and a desktop started
+            // there stays there (see coreGroupForLinux); a browser's first
+            // connection comes minutes after the page that has the address.
+            // Not after a boot or an update (no extra): "Start Linux with the
+            // phone" decides that.
+            if (intent.getBooleanExtra(EXTRA_PRESTART, false)) {
+                io.execute(() -> {
+                    Linux.Status st = Linux.readStatus(this);
+                    if (!"ready".equals(st.phase) || st.running || Linux.needsProvision(this)) return;
+                    int[] size = lastGeometry();
+                    DexLog.step("browser", "starting the desktop for a browser, at " + size[0] + "x" + size[1]);
+                    startRuntimeForComputer(size[0], size[1]);
+                });
+            }
+            return stickiness();
+        }
+        if (ACTION_BROWSER_SIGNOUT.equals(action)) {
+            // The tokens are gone already (browserSignOut); what they let in goes now.
+            endBrowserSafely("unauthorized");
+            LinuxBrowserServer s;
+            synchronized (browserLock) {
+                s = browserServer;
+            }
+            if (s != null) s.dropOpen();
+            if (!browserWanted) idleStopQueued();
+            return stickiness();
+        }
+        if (ACTION_BROWSER_ON.equals(action) || ACTION_BROWSER_OFF.equals(action)) {
+            if (!browserWanted) idleStopQueued();
+            return stickiness();
         }
         if (ACTION_REMOTE_ON.equals(action) || ACTION_REMOTE_RESUME.equals(action)) {
             if (remoteWanted) {
@@ -729,12 +850,151 @@ public class LinuxService extends Service {
      * anywhere" would quietly stop being true the first time memory ran low.
      */
     private int stickiness() {
-        return LinuxRemote.isEnabled(this) ? START_STICKY : START_NOT_STICKY;
+        return LinuxRemote.isEnabled(this) || browser(this).isOn() ? START_STICKY : START_NOT_STICKY;
+    }
+
+    // ── "Open in a browser" ──
+
+    private final Object browserLock = new Object();
+    /** Listening, while the switch is on. Under {@link #browserLock}. */
+    private LinuxBrowserServer browserServer;
+    private boolean browserStarting;
+    private volatile boolean destroyed;
+    private final Map<String, byte[]> browserAssets = new java.util.concurrent.ConcurrentHashMap<>();
+
+    private final LinuxBrowserServer.Host browserHost = new LinuxBrowserServer.Host() {
+        @Override
+        public boolean stream(LinuxStreamSocket ws, String hello, java.io.Closeable sock, String who,
+                              LinuxBrowserServer.Gate gate, Runnable ended) {
+            try {
+                return LinuxStream.serve(ws, new org.json.JSONObject(hello), sock, who, gate, ended);
+            } catch (org.json.JSONException e) {
+                return false;
+            }
+        }
+
+        @Override
+        public String phoneName() {
+            return LinuxRemote.phoneName(LinuxService.this);
+        }
+
+        @Override
+        public byte[] asset(String name) {
+            byte[] b = browserAssets.get(name);
+            if (b != null) return b;
+            try (InputStream in = getAssets().open(BROWSER_ASSETS + name)) {
+                java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+                byte[] buf = new byte[16 * 1024];
+                for (int n; (n = in.read(buf)) > 0; ) out.write(buf, 0, n);
+                b = out.toByteArray();
+                browserAssets.put(name, b);
+                return b;
+            } catch (java.io.IOException e) {
+                return null;
+            }
+        }
+
+        @Override
+        public void changed() {
+            mainHandler.post(LinuxService.this::refreshForeground);
+        }
+    };
+
+    /**
+     * Listen, on a thread of its own: the first start makes a key and a
+     * certificate, which is no work for the main thread, and the io thread
+     * may be an hour into an install.
+     */
+    private void startBrowserServer() {
+        synchronized (browserLock) {
+            if (browserServer != null || browserStarting || destroyed) return;
+            browserStarting = true;
+        }
+        new Thread(() -> {
+            LinuxBrowser store = browser(this);
+            LinuxBrowserServer s = null;
+            try {
+                LinuxBrowserCert cert = LinuxBrowserCert.loadOrMake(store.dir(), LinuxBrowserServer.ips(),
+                        System.currentTimeMillis());
+                s = LinuxBrowserServer.start(store, cert, browserHost, new LinuxBrowserPeek(), LinuxBrowser.PORT);
+            } catch (LinuxBrowserServer.PortTaken e) {
+                // Said by the server ("failed port 7443"), for the card's own words.
+                DexLog.warn("browser", "cannot listen for browsers: " + e.getMessage());
+            } catch (Exception e) {
+                DexLog.warn("browser", "cannot listen for browsers", e);
+                store.setState("failed " + e.getMessage());
+            }
+            boolean keep;
+            synchronized (browserLock) {
+                browserStarting = false;
+                // The switch went off, or the service away, while this started.
+                keep = s != null && store.isOn() && !destroyed;
+                if (keep) browserServer = s;
+            }
+            if (s != null && !keep) s.stop();
+            mainHandler.post(this::refreshForeground);
+        }, "linux-browser-start").start();
+    }
+
+    /**
+     * A browser's picture ends, told why. Never at Linux's expense: this runs
+     * in :linux, beside the desktop, and an exception thrown out of
+     * onStartCommand takes the process and every Linux app with it (seen on
+     * the S25 when it wrote to the network from the main thread).
+     */
+    private static void endBrowserSafely(String why) {
+        try {
+            LinuxStream.endBrowser(why);
+        } catch (RuntimeException e) {
+            DexLog.warn("browser", "ending the browser's session (" + why + "): " + e);
+        }
+    }
+
+    /** Stop listening, and end a browser's picture if one is watching: the switch is off. */
+    private void stopBrowserServer() {
+        LinuxBrowserServer s;
+        synchronized (browserLock) {
+            s = browserServer;
+            browserServer = null;
+        }
+        if (s == null) {
+            // It never listened (the port was another app's): switched on
+            // again, the card starts from nothing, not from that failure.
+            LinuxBrowser store = browser(this);
+            if (store.state().startsWith("failed")) store.setState("off");
+            return;
+        }
+        // Closed first: every connection not yet a stream goes, none of them
+        // to finish a request now, and a browser being let in this moment is
+        // turned away as it takes the desktop (its Gate sees the server
+        // stopped). Then the browser watching, told the switch went off. The
+        // other way round, one let in between the two would watch on.
+        s.stop();
+        endBrowserSafely("off");
+        DexLog.step("browser", "stopped listening");
+        // Not from onDestroy: a notification posted there outlives the service.
+        if (!destroyed) refreshForeground();
+    }
+
+    /**
+     * Where a browser opens Linux now, as a person types it ("" with no
+     * network to offer), or null while nothing is listening.
+     */
+    private String browserUrl() {
+        LinuxBrowserServer s;
+        synchronized (browserLock) {
+            s = browserServer;
+        }
+        if (s == null) return null;
+        java.util.List<LinuxBrowser.Address> where = LinuxBrowser.addresses();
+        return where.isEmpty() ? "" : where.get(0).typed(s.port());
     }
 
     @Override
     public void onDestroy() {
         super.onDestroy();
+        destroyed = true;
+        stopBrowserServer();
         // Its stdin is this process's: closed, the session ends, and proot takes
         // the apps with it.
         closeWinInput();
@@ -917,6 +1177,11 @@ public class LinuxService extends Service {
         LinuxRemote.setEnabled(this, false);
         SamsungSlowdown.sync(this, false);
         remote.stop();
+        // "Open in a browser" likewise: a page answering "not installed" to
+        // the network for ever is no use to anyone. The browsers let in stay
+        // (files/browser is outside the container), as computers do above.
+        browser(this).setOn(false);
+        mainHandler.post(this::stopBrowserServer);
         TreeDelete.Result left = wipe(true);
         // Uninstalled whether or not every file went: what is left is not a
         // container any more, and nothing is ever built on it (wipe()).
@@ -1931,17 +2196,41 @@ public class LinuxService extends Service {
             // over the install/runtime text, and the way to close the door is
             // right there on it.
             String remoteLine = remote != null ? remote.summary() : null;
+            // "Open in a browser" is a door too, and says where it is: the
+            // address a person types on the computer. With remote access on as
+            // well, both doors are named, and each keeps a way to its switch.
+            String url = browserUrl();
+            String browserLine = null;
+            if (url != null) {
+                browserLine = LinuxStream.browserWatching() ? getString(R.string.bw_note_watching)
+                        : url.isEmpty() ? getString(R.string.bw_note_no_network)
+                        : getString(R.string.bw_note_listening, url);
+            }
+            String line = remoteLine != null ? remoteLine : browserLine != null ? browserLine : text;
             Notification.Builder b = new Notification.Builder(this, CHANNEL)
                     .setSmallIcon(android.R.drawable.ic_menu_manage)
                     .setContentTitle(getString(R.string.ln_label))
-                    .setContentText(remoteLine != null ? remoteLine : text)
+                    .setContentText(line)
                     .setContentIntent(openWindow())
                     .setOngoing(true);
+            if (remoteLine != null && browserLine != null) {
+                b.setStyle(new Notification.BigTextStyle().bigText(remoteLine + "\n" + browserLine));
+            }
             if (remoteLine != null) {
                 b.addAction(new Notification.Action.Builder(null,
                         getString(R.string.rm_note_settings), openRemote()).build());
                 b.addAction(new Notification.Action.Builder(null,
                         getString(R.string.rm_note_turn_off), remoteOffIntent()).build());
+                // The browser's switch is on the page this opens.
+                if (browserLine != null) {
+                    b.addAction(new Notification.Action.Builder(null,
+                            getString(R.string.bw_note_code), openBrowserSettings()).build());
+                }
+            } else if (browserLine != null) {
+                b.addAction(new Notification.Action.Builder(null,
+                        getString(R.string.bw_note_code), openBrowserSettings()).build());
+                b.addAction(new Notification.Action.Builder(null,
+                        getString(R.string.rm_note_turn_off), browserOffIntent()).build());
             }
             Notification n = b.build();
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
@@ -1995,6 +2284,21 @@ public class LinuxService extends Service {
                 PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
     }
 
+    /** "Open in a browser"'s Turn off, as remote access's: the handler clears the switch. */
+    private PendingIntent browserOffIntent() {
+        return PendingIntent.getForegroundService(this, 7,
+                new Intent(this, LinuxService.class).setAction(ACTION_BROWSER_OFF)
+                        .putExtra(EXTRA_FROM_NOTIFICATION, true),
+                PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
+    }
+
+    /** Settings, where the address and the code are. */
+    private PendingIntent openBrowserSettings() {
+        return PendingIntent.getActivity(this, 8,
+                new Intent(this, LinuxSettingsActivity.class).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
+    }
+
     /**
      * Drop foreground + stop when neither provisioning nor a runtime is up.
      *
@@ -2033,6 +2337,9 @@ public class LinuxService extends Service {
         if (LinuxRemote.isEnabled(this) && LinuxRemote.available(this)) return;
         // A computer on the cable is watching the desktop, or about to.
         if (LinuxStream.active()) return;
+        // "Open in a browser" is on: listening is the reason to be up, as with
+        // remote access. The marker, for the same reason as remote access's.
+        if (browser(this).isOn() && !Linux.isRemoving(this)) return;
         if (stopSelfResult(lastStartId)) {
             stopForeground(STOP_FOREGROUND_REMOVE);
         }

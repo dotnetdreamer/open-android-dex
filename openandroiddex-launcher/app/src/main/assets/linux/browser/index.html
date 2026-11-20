@@ -1,0 +1,121 @@
+<!doctype html>
+<!--
+  LinuxOnDroid, in a computer's browser: the phone's Linux desktop as video
+  from the phone's hardware encoder, decoded on this computer's GPU
+  (WebCodecs) and drawn one pixel for one. Served by the phone itself
+  (LinuxBrowserServer.java) over HTTPS, which is what gives a page on a home
+  network WebCodecs at all; over plain http, for a browser that refuses the
+  phone's certificate, the picture goes through the browser's own video
+  player instead (mse.js). Design record: doc/linux-browser.md.
+
+  No inline script or style anywhere: the phone serves this page with a policy
+  that allows only its own files.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<meta name="referrer" content="no-referrer">
+<meta name="theme-color" content="#0b1222">
+<title>Linux</title>
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="viewer.css">
+<script type="module" src="viewer.js"></script>
+</head>
+<body>
+
+<canvas id="screen" tabindex="0" aria-label="The Linux desktop"></canvas>
+<video id="video" muted playsinline disablepictureinpicture aria-hidden="true"></video>
+
+<div id="hint" class="hint" aria-hidden="true"></div>
+
+<div id="bar" class="bar" role="toolbar" aria-label="Linux">
+  <div class="who"><span id="bar-dot" class="dot"></span><span id="bar-name">Linux</span><span id="bar-plain" class="plain" hidden></span></div>
+  <div id="modes" class="seg" role="radiogroup" aria-label="Picture" data-mode="medium">
+    <span class="glide" aria-hidden="true"></span>
+    <button type="button" role="radio" data-mode="low" aria-checked="false">
+      <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M9.2 1.5 3.5 9h4l-1 5.5L12.5 7h-4l.7-5.5z" fill="currentColor"/></svg>
+      <span>Low</span>
+    </button>
+    <button type="button" role="radio" data-mode="medium" aria-checked="true">
+      <svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="5.5" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M8 2.5a5.5 5.5 0 0 1 0 11z" fill="currentColor"/></svg>
+      <span>Medium</span>
+    </button>
+    <button type="button" role="radio" data-mode="high" aria-checked="false">
+      <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 1.5l1.7 4.3 4.3 1.7-4.3 1.7L8 13.5 6.3 9.2 2 7.5l4.3-1.7z" fill="currentColor"/></svg>
+      <span>High</span>
+    </button>
+  </div>
+  <div id="stats" class="stats" aria-live="off">&#160;</div>
+  <span class="sep" aria-hidden="true"></span>
+  <button type="button" id="sound" class="icon" aria-pressed="true">
+    <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3.5 7.5h3l4-3.5v12l-4-3.5h-3z" fill="currentColor"/><path class="waves" d="M13.3 7.2a4 4 0 0 1 0 5.6M15.4 5.1a7 7 0 0 1 0 9.8" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><path class="strike" d="M13 7.5l4.5 5M17.5 7.5l-4.5 5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
+  </button>
+  <button type="button" id="clip" class="icon" aria-pressed="true">
+    <svg viewBox="0 0 20 20" aria-hidden="true"><rect x="5.5" y="4" width="9" height="13" rx="2" fill="none" stroke="currentColor" stroke-width="1.6"/><rect x="7.5" y="2.5" width="5" height="3" rx="1" fill="currentColor"/><path class="strike" d="M3.5 3.5l13 13" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+  </button>
+  <button type="button" id="full" class="icon">
+    <svg class="enter" viewBox="0 0 20 20" aria-hidden="true"><path d="M3.5 7.5v-4h4M12.5 3.5h4v4M16.5 12.5v4h-4M7.5 16.5h-4v-4" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    <svg class="leave" viewBox="0 0 20 20" aria-hidden="true"><path d="M7.5 3.5v4h-4M16.5 7.5h-4v-4M12.5 16.5v-4h4M3.5 12.5h4v4" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
+  </button>
+  <button type="button" id="more" class="icon" aria-haspopup="menu" aria-expanded="false">
+    <svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="4.5" cy="10" r="1.6" fill="currentColor"/><circle cx="10" cy="10" r="1.6" fill="currentColor"/><circle cx="15.5" cy="10" r="1.6" fill="currentColor"/></svg>
+  </button>
+  <div id="menu" class="menu" role="menu" hidden>
+    <button type="button" role="menuitem" id="m-secure" hidden></button>
+    <button type="button" role="menuitem" id="m-disconnect">Disconnect</button>
+    <button type="button" role="menuitem" id="m-forget">Forget this browser</button>
+  </div>
+</div>
+
+<div id="cover" class="cover">
+  <div class="aura" aria-hidden="true"></div>
+
+  <section id="choose" class="card" hidden>
+    <img class="mark" src="icon.svg" alt="" width="60" height="60">
+    <h1 id="choose-title"></h1>
+    <p class="lede" id="choose-text"></p>
+    <div class="actions">
+      <button type="button" id="choose-secure" class="primary"></button>
+      <button type="button" id="choose-plain" class="ghost"></button>
+    </div>
+    <p class="fine" id="choose-fine"></p>
+  </section>
+
+  <section id="pair" class="card" hidden>
+    <img class="mark" src="icon.svg" alt="" width="60" height="60">
+    <h1 data-t="pairTitle">Enter the code</h1>
+    <p class="lede" id="pair-lede"></p>
+    <form id="pair-form" autocomplete="off" novalidate>
+      <label class="code" id="code-box">
+        <input id="code" inputmode="numeric" pattern="[0-9]*" maxlength="6" autocomplete="one-time-code"
+               spellcheck="false" aria-describedby="pair-error">
+        <span class="cells" aria-hidden="true"><i></i><i></i><i></i><b></b><i></i><i></i><i></i></span>
+      </label>
+      <p id="pair-error" class="error" role="alert"></p>
+    </form>
+    <p class="fine" id="pair-fine"></p>
+  </section>
+
+  <section id="wait" class="card" hidden>
+    <div class="orbit" aria-hidden="true"><img src="icon.svg" alt="" width="60" height="60"></div>
+    <h1 id="wait-title"></h1>
+    <p class="lede" id="wait-text"></p>
+  </section>
+
+  <section id="ended" class="card" hidden>
+    <img class="mark" src="icon.svg" alt="" width="60" height="60">
+    <h1 id="ended-title"></h1>
+    <p class="lede" id="ended-text"></p>
+    <div class="actions">
+      <button type="button" id="ended-go" class="primary"></button>
+      <button type="button" id="ended-alt" class="ghost" hidden></button>
+    </div>
+  </section>
+</div>
+
+<div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+</body>
+</html>

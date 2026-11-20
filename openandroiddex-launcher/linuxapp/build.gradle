@@ -133,6 +133,24 @@ android {
             excludes += ['**/libqemu.so', '**/libjingle_peerconnection_so.so']
         }
     }
+
+    // Unit tests of this app's own screens, on the computer under Robolectric
+    // (./gradlew :linuxapp:testDebugUnitTest; linuxapp/src/test). Test-only:
+    // nothing here goes into the APK.
+    testOptions {
+        unitTests {
+            includeAndroidResources = true
+            all {
+                maxHeapSize = '3g'
+                // PixelCopy draws a window as the phone does, outline clips and all.
+                systemProperty 'robolectric.pixelCopyRenderMode', 'hardware'
+                // Pictures of the screens, only when asked: -PbrowserShots=<folder>.
+                if (project.hasProperty('browserShots')) {
+                    systemProperty 'browser.shots', project.property('browserShots')
+                }
+            }
+        }
+    }
 }
 
 dependencies {
@@ -140,6 +158,10 @@ dependencies {
     // all because the Web viewer's sources are part of the tree this module
     // reuses and they must still compile.
     implementation 'io.github.webrtc-sdk:android:144.7559.12'
+
+    // Tests only (linuxapp/src/test): not part of the APK.
+    testImplementation 'junit:junit:4.13.2'
+    testImplementation 'org.robolectric:robolectric:4.14.1'
 }
 
 // The Play build's package: com.dotnetdreamer.linuxondroid, which is what the

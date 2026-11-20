@@ -5,6 +5,7 @@ import android.net.Credentials;
 import android.net.LocalServerSocket;
 import android.net.LocalSocket;
 import android.net.LocalSocketAddress;
+import android.os.Looper;
 import android.os.Process;
 import android.os.SystemClock;
 
@@ -47,9 +48,11 @@ import java.nio.ByteBuffer;
  *
  * <p>The wire, after a WebSocket upgrade on {@code /stream} ({@link LinuxStreamSocket}):
  * <pre>
- * computer → phone   text   {"t":"hello","v":1,"start":bool,"w":..,"h":..,"bitrate":..,"fps":..}
+ * computer → phone   text   {"t":"hello","v":1,"start":bool,"w":..,"h":..,"bitrate":..,"fps":..,
+ *                            "audio"?:bool,"codecs"?:["opus","pcm"],"mode"?:"low"|"medium"|"high"}
  *                    text   {"t":"resize","w":..,"h":..} | {"t":"clip","text":..}
  *                           | {"t":"keyframe"} | {"t":"ping","n":..} | {"t":"bitrate","bitrate":..}
+ *                           | {"t":"audio","on":bool,"codecs"?:[..]}  — a browser's sound, on or off
  *                    binary 0x10 buttons u8, x u16, y u16       — the pointer, in desktop pixels
  *                    binary 0x11 down u8, keysym u32            — a key
  *                    binary 0x12                                — one video frame arrived
@@ -59,8 +62,19 @@ import java.nio.ByteBuffer;
  *                    text   {"t":"clip","text":..} | {"t":"stats",..} | {"t":"pong","n":..}
  *                    binary 0x01 flags u8, pts µs u64, H.264 Annex B  — 1 key frame, 2 codec config
  *                    binary 0x02 hotX u16, hotY u16, w u16, h u16, RGBA — the pointer's shape
+ *                    text   {"t":"sound","codec":"opus"|"pcm","rate":..,"channels":..,"kbps":..,"mode":..}
+ *                           — the sound that follows, before its first run and at every change
+ *                    binary 0x03 codec u8, read at µs u64, data — a browser's sound: codec 0 is
+ *                           PCM s16le at the said rate and channels, 1 is one Opus packet
  * </pre>
- * All numbers big-endian.
+ * All numbers big-endian but the sound's samples, which are as the guest makes them.
+ *
+ * <p><b>Sound, for a browser.</b> A computer on the cable hears the phone's own
+ * playback (the desktop app captures it), so only a browser asks for sound
+ * ({@code "audio":true}). While a browser watches, the phone's speaker gives
+ * the desktop's sound up ({@link LinuxAudio#hold}), whether that browser
+ * wants it or not: the person is at the computer. Sound off is nothing read
+ * and nothing sent ({@link LinuxStreamAudio}).
  *
  * <p><b>Over the tunnel too.</b> The remote-access daemon puts a computer's
  * stream through to this socket when the phone is not on adb ({@code desktop/1}'s
@@ -112,7 +126,13 @@ final class LinuxStream {
 
     static final byte MSG_VIDEO = 0x01;
     static final byte MSG_CURSOR = 0x02;
+    static final byte MSG_AUDIO = 0x03;
     static final byte IN_POINTER = 0x10;
+
+    static {
+        // A browser's Low and Medium sound is Opus where the phone can make it.
+        LinuxStreamAudio.opus = LinuxStreamOpus.MAKER;
+    }
     static final byte IN_KEY = 0x11;
     static final byte IN_ACK = 0x12;
 
@@ -141,6 +161,13 @@ final class LinuxStream {
      * stop: a link slower than the video, where only frames can give.
      */
     private static final int MIN_WINDOW = 2;
+    /**
+     * Browsers too. Tried at 24 for a browser on a Galaxy S25 Ultra whose
+     * screen was off (Wi-Fi in power save, which no app may stop from the
+     * background since Android 14), 2026-11-19, A/B on the same phone: more
+     * frames (52-55 fps against 38-46) for twice the round trip (240-473 ms
+     * against 124-265) and a stall at High. Latency first, so not kept.
+     */
     private static final int MAX_WINDOW = 12;
     /** Round trips the window is the median of. */
     private static final int RTT_SAMPLES = 32;
@@ -190,6 +217,113 @@ final class LinuxStream {
     /** A computer is watching. */
     static synchronized boolean active() {
         return instance != null && instance.current() != null;
+    }
+
+    /**
+     * A browser's session ({@link LinuxBrowserServer}): its WebSocket already
+     * upgraded, and its hello read there, since the token that let it in rides
+     * in the hello. From here it is a session like any computer's, with two
+     * differences: it may ask for a picture smaller than the desktop, and it is
+     * told when a newer one takes the desktop from it, so that two windows do
+     * not take it back and forth. {@code gate} is asked as it takes the
+     * desktop ({@link #claim}); {@code ended} runs once it is over.
+     *
+     * @return false when the stream is not up, which it is whenever the
+     *         service is
+     */
+    static boolean serve(LinuxStreamSocket ws, JSONObject hello, java.io.Closeable sock, String who,
+                         LinuxBrowserServer.Gate gate, Runnable ended) {
+        LinuxStream s;
+        synchronized (LinuxStream.class) {
+            s = instance;
+        }
+        if (s == null || s.stopped) return false;
+        s.new Session(ws, hello, sock, who, gate, ended).begin();
+        return true;
+    }
+
+    /** A browser is watching the desktop now. */
+    static boolean browserWatching() {
+        LinuxStream s;
+        synchronized (LinuxStream.class) {
+            s = instance;
+        }
+        if (s == null) return false;
+        Session cur = s.current();
+        return cur != null && cur.browser;
+    }
+
+    /**
+     * A browser watching now loses its picture, and is told why first so that
+     * its page says so rather than coming back: {@code "off"} (the switch went
+     * off) or {@code "unauthorized"} (every browser was signed out). A
+     * computer's session stays. A browser let in but not yet watching is not
+     * here to end: its gate, asked as it takes the desktop, already says no.
+     */
+    static void endBrowser(String why) {
+        LinuxStream s;
+        synchronized (LinuxStream.class) {
+            s = instance;
+        }
+        if (s == null) return;
+        Session cur;
+        synchronized (s) {
+            cur = s.current;
+        }
+        if (cur != null && cur.browser) s.tellThenClose(cur, why, "browsers were " + why + " on the phone");
+    }
+
+    /** The process's main thread, where Android allows no network (StrictMode's NetworkOnMainThreadException). */
+    static boolean onMainThread() {
+        Looper main = Looper.getMainLooper();
+        return main != null && main.isCurrentThread();
+    }
+
+    /**
+     * {@code work} on a thread of its own, which nothing can throw out of: on
+     * Android an exception left to any thread ends the process, and with it
+     * Linux, which runs in this one.
+     */
+    static void offMain(String name, Runnable work) {
+        Thread t = new Thread(() -> {
+            try {
+                work.run();
+            } catch (RuntimeException e) {
+                DexLog.warn("stream", name + ": " + e);
+            }
+        }, name);
+        t.setDaemon(true);
+        t.start();
+    }
+
+    /**
+     * Say {@code state} to a session, then end it. On a thread of its own and
+     * given a moment: a frame stuck on a dead link holds the socket's lock,
+     * and the close is what frees it.
+     */
+    private void tellThenClose(Session was, String state, String why) {
+        if (onMainThread()) {
+            // The service calls here from its main thread (the switch going
+            // off, a sign-out), which must neither wait on a link nor write to
+            // one: the whole notice goes to a thread of its own.
+            offMain("linux-stream-notice", () -> tellThenClose(was, state, why));
+            return;
+        }
+        Thread note = new Thread(() -> {
+            try {
+                was.state(state, null);
+            } catch (IOException | RuntimeException ignored) {
+                // gone, or going: the close below is what matters
+            }
+        }, "linux-stream-notice");
+        note.setDaemon(true);
+        note.start();
+        try {
+            note.join(300);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+        was.closeAll(why);
     }
 
     private final Host host;
@@ -242,14 +376,36 @@ final class LinuxStream {
         }
     }
 
-    /** {@code s} is the session now; the one before it, if any, ends. */
-    private void claim(Session s) {
+    /**
+     * {@code s} is the session now, and the one before it, if any, ends;
+     * unless {@code s} may no longer have the desktop. A browser's gate is
+     * asked here, under the lock {@link #endBrowser} reads the session by: a
+     * sign-out or the switch going off either came before this and is seen,
+     * or comes after and finds {@code s} to end. So is the service stopping.
+     *
+     * @return null when {@code s} is the session; else what its page is told
+     *         ("" for nothing)
+     */
+    private String claim(Session s) {
         Session old;
         synchronized (this) {
+            if (stopped) return "";
+            String no = s.gate != null ? s.gate.refusal() : null;
+            if (no != null) return no;
             old = current;
             current = s;
         }
-        if (old != null && old != s) old.closeAll("replaced by a new session");
+        if (old == null || old == s) return null;
+        if (old.browser) {
+            // A browser comes back by itself when its stream drops, and so does
+            // the desktop app's window: told nothing, the two would take the
+            // desktop from each other for ever. Told, the browser's page says
+            // the desktop opened somewhere else and waits to be asked.
+            tellThenClose(old, "replaced", "replaced by a new session");
+            return null;
+        }
+        old.closeAll("replaced by a new session");
+        return null;
     }
 
     private void shutdown() {
@@ -278,7 +434,7 @@ final class LinuxStream {
         if (current == s) current = null;
     }
 
-    private static void closeQuietly(LocalSocket s) {
+    private static void closeQuietly(java.io.Closeable s) {
         try {
             s.close();
         } catch (IOException ignored) {
@@ -294,11 +450,28 @@ final class LinuxStream {
         return v & ~1;
     }
 
+    /** A browser's picture scale, held to what the encoder steps through: half the desktop to all of it. */
+    static double scaleOf(double asked) {
+        if (Double.isNaN(asked)) return 1.0;
+        return Math.max(0.5, Math.min(1.0, asked));
+    }
+
     // ── one computer ──
 
     private final class Session implements LinuxStreamRfb.Handler, LinuxStreamEncoder.Output {
-        private final LocalSocket sock;
-        private final int peerUid;
+        /** A computer's, over adb or the tunnel; null for a browser's. */
+        private final LocalSocket local;
+        /** What closes the connection, whichever kind it is. */
+        private final java.io.Closeable sock;
+        /** "uid 2000", or the browser and its address. */
+        private final String who;
+        /** A browser's session (LinuxBrowserServer): upgraded and let in before it got here. */
+        final boolean browser;
+        /** A browser's hello, read where its token was checked. */
+        private final JSONObject givenHello;
+        /** A browser's: whether it may still have the desktop, asked as it takes it. Null for a computer's. */
+        final LinuxBrowserServer.Gate gate;
+        private final Runnable onEnded;
         private final Thread thread;
         private Thread pump;
         private volatile LinuxStreamSocket ws;
@@ -314,7 +487,33 @@ final class LinuxStream {
         private volatile int bitrate = 24_000_000;
         /** What the computer asked for, for its route: the most {@link #adapt} gives back. */
         private volatile int ceiling = 24_000_000;
-        private int fps = 60;
+        private volatile int fps = 60;
+        /**
+         * The most of the desktop's size the picture may be: 1 for every
+         * computer, less for a browser's Low quality. A smaller picture is less
+         * to encode, send and decode; the browser scales it back up.
+         */
+        private volatile double scale = 1.0;
+        /** A browser chose another quality: the pump makes the encoder again at its next update. */
+        private volatile boolean rebuild;
+
+        // a browser's sound
+        /** The browser wants Linux's sound now. */
+        private volatile boolean soundWanted;
+        /** The browser's quality, Low, Medium or High: the sound follows it. */
+        private volatile String mode = "medium";
+        /** The page can decode Opus (WebCodecs' AudioDecoder: an https page). */
+        private volatile boolean pageOpus;
+        /** The desktop is up, so its sound tap is there to read. */
+        private volatile boolean soundReady;
+        /** Reading the tap for this browser; null while sound is off. Under {@link #soundLock}. */
+        private LinuxStreamAudio sound;
+        private final Object soundLock = new Object();
+        /** The phone's speaker was given up for this browser and must be given back. */
+        private boolean speakerHeld;
+        /** Sound bytes sent, all told; and as the last stats saw it (drain thread). */
+        private final java.util.concurrent.atomic.AtomicLong soundSent = new java.util.concurrent.atomic.AtomicLong();
+        private long soundSeen;
 
         // pump-thread state
         private boolean needFull;
@@ -361,9 +560,28 @@ final class LinuxStream {
         private long statsSendUs;
 
         Session(LocalSocket sock, int peerUid) {
+            this.local = sock;
             this.sock = sock;
-            this.peerUid = peerUid;
+            this.who = "uid " + peerUid;
+            this.browser = false;
+            this.givenHello = null;
+            this.gate = null;
+            this.onEnded = null;
             this.thread = new Thread(this::run, "linux-stream-session");
+            thread.setDaemon(true);
+        }
+
+        Session(LinuxStreamSocket ws, JSONObject hello, java.io.Closeable sock, String who,
+                LinuxBrowserServer.Gate gate, Runnable ended) {
+            this.local = null;
+            this.sock = sock;
+            this.ws = ws;
+            this.who = who;
+            this.browser = true;
+            this.givenHello = hello;
+            this.gate = gate;
+            this.onEnded = ended;
+            this.thread = new Thread(this::run, "linux-stream-browser");
             thread.setDaemon(true);
         }
 
@@ -374,25 +592,30 @@ final class LinuxStream {
         private void run() {
             boolean counted = false;
             try {
-                sock.setSoTimeout(15_000);
-                LinuxStreamSocket conn = new LinuxStreamSocket(sock.getInputStream(), sock.getOutputStream(), sock);
-                LinuxStreamSocket.Request req = conn.readRequest();
-                if ("/probe".equals(req.path)) {
-                    JSONObject p = new JSONObject();
-                    p.put("v", 1).put("id", host.phoneId()).put("name", host.phoneName())
-                            .put("state", host.desktopState());
-                    conn.respond(200, "OK", "application/json", p.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8));
-                    return;
+                JSONObject hello;
+                if (local != null) {
+                    local.setSoTimeout(15_000);
+                    LinuxStreamSocket conn = new LinuxStreamSocket(local.getInputStream(), local.getOutputStream(), local);
+                    LinuxStreamSocket.Request req = conn.readRequest();
+                    if ("/probe".equals(req.path)) {
+                        JSONObject p = new JSONObject();
+                        p.put("v", 1).put("id", host.phoneId()).put("name", host.phoneName())
+                                .put("state", host.desktopState());
+                        conn.respond(200, "OK", "application/json", p.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                        return;
+                    }
+                    if (!"/stream".equals(req.path)) {
+                        conn.respond(404, "Not Found", "text/plain", new byte[0]);
+                        return;
+                    }
+                    conn.upgrade(req);
+                    ws = conn;
+                    LinuxStreamSocket.Message m = ws.read();
+                    if (m == null || m.opcode != LinuxStreamSocket.OP_TEXT) return;
+                    hello = new JSONObject(m.text());
+                } else {
+                    hello = givenHello;
                 }
-                if (!"/stream".equals(req.path)) {
-                    conn.respond(404, "Not Found", "text/plain", new byte[0]);
-                    return;
-                }
-                conn.upgrade(req);
-                ws = conn;
-                LinuxStreamSocket.Message m = ws.read();
-                if (m == null || m.opcode != LinuxStreamSocket.OP_TEXT) return;
-                JSONObject hello = new JSONObject(m.text());
                 if (!"hello".equals(hello.optString("t"))) return;
                 start = hello.optBoolean("start");
                 wantW = even(clamp(hello.optInt("w", 1280), MIN_W, MAX_W));
@@ -401,13 +624,42 @@ final class LinuxStream {
                 ceiling = bitrate;
                 fps = clamp(hello.optInt("fps", 60), 10, 60);
                 acks = hello.optBoolean("acks");
-                sock.setSoTimeout(0);
-                claim(this);
-                DexLog.step("stream", "a computer connected (uid " + peerUid + ", " + wantW + "x" + wantH
-                        + ", " + bitrate / 1_000_000 + " Mb/s" + (start ? ", start" : "") + ")");
+                // Only a browser asks for a smaller picture; a computer's window
+                // is shown one pixel for one.
+                if (browser) scale = scaleOf(hello.optDouble("scale", 1.0));
+                if (local != null) local.setSoTimeout(0);
+                String refused = claim(this);
+                if (refused != null) {
+                    // Signed out, or switched off, while it was being let in.
+                    DexLog.step("stream", "turned away " + who + (refused.isEmpty() ? "" : ": " + refused));
+                    if (!refused.isEmpty()) {
+                        state(refused, null);
+                        // Nothing reads it yet, and its page pings: the word
+                        // must not go down with a reset.
+                        LinuxStreamSocket w = ws;
+                        if (w != null) w.closeAfterWord(LinuxBrowserServer.LAST_WORD_MS);
+                    }
+                    return;
+                }
+                DexLog.step("stream", (browser ? "a browser connected (" : "a computer connected (") + who + ", "
+                        + wantW + "x" + wantH + ", " + bitrate / 1_000_000 + " Mb/s"
+                        + (scale < 1 ? ", " + Math.round(scale * 100) + "% size" : "")
+                        + (hello.has("mode") ? ", " + hello.optString("mode") : "")
+                        + (start ? ", start" : "") + ")");
                 host.streaming(true);
                 counted = true;
+                if (browser) {
+                    // The person is at the computer: the phone's speaker goes
+                    // quiet for as long as this browser watches.
+                    LinuxAudio.hold(LinuxAudio.DESKTOP, true);
+                    speakerHeld = true;
+                    soundWanted = hello.optBoolean("audio");
+                    mode = hello.optString("mode", "medium");
+                    pageOpus = opusIn(hello);
+                }
                 if (!awaitDesktop()) return;
+                soundReady = true;
+                if (soundWanted) sound(true);
                 rfb = connectXvnc();
                 if (rfb == null) return;
                 pump = new Thread(this::pumpLoop, "linux-stream-gl");
@@ -418,6 +670,11 @@ final class LinuxStream {
                 if (!closing) DexLog.warn("stream", "session: " + e);
             } finally {
                 closeAll(null);
+                sound(false);
+                if (speakerHeld) {
+                    speakerHeld = false;
+                    LinuxAudio.hold(LinuxAudio.DESKTOP, false);
+                }
                 Thread p = pump;
                 if (p != null) {
                     try {
@@ -429,7 +686,14 @@ final class LinuxStream {
                 ended(this);
                 if (counted) {
                     host.streaming(false);
-                    DexLog.step("stream", "the computer's session ended");
+                    DexLog.step("stream", browser ? "the browser's session ended" : "the computer's session ended");
+                }
+                if (onEnded != null) {
+                    try {
+                        onEnded.run();
+                    } catch (RuntimeException e) {
+                        DexLog.warn("stream", "after the browser's session: " + e);
+                    }
                 }
             }
         }
@@ -547,7 +811,7 @@ final class LinuxStream {
                 // A frame the old encoder had sent and the computer had not yet
                 // acknowledged is still on its way; acks for it still come.
             }
-            LinuxStreamEncoder e = LinuxStreamEncoder.create(w, h, bitrate, fps, rfb.swizzle(), this);
+            LinuxStreamEncoder e = LinuxStreamEncoder.create(w, h, bitrate, fps, scale, rfb.swizzle(), this);
             enc = e;
             DexLog.step("stream", "encoding " + w + "x" + h + " as " + e.encWidth + "x" + e.encHeight
                     + " on " + e.codecName + (e.hardware ? "" : " (software)") + " at " + e.bitrate / 1_000_000 + " Mb/s"
@@ -589,6 +853,17 @@ final class LinuxStream {
         public void onUpdateEnd() throws IOException {
             long t0 = System.nanoTime();
             LinuxStreamEncoder e = enc;
+            if (rebuild && e != null) {
+                // Another quality: a new encoder at the new size, here on the
+                // thread that owns the GL context. Its texture starts empty, so
+                // this update goes nowhere and the next is the whole desktop,
+                // the first frame of the new encoder and a key frame.
+                rebuild = false;
+                newEncoder(e.fbWidth, e.fbHeight);
+                e = enc;
+                needFull = true;
+                skipFrame = true;
+            }
             if (e != null && !skipFrame) {
                 synchronized (pace) {
                     inFlight++;
@@ -721,6 +996,7 @@ final class LinuxStream {
                             .put("window", win)
                             .put("targetKbps", bitrate / 1000)
                             .put("swapMs", enc == null ? 0 : enc.swapMs());
+                    if (browser) j.put("soundKbps", soundKbps(secs));
                     int u = sumUpdates;
                     if (u > 0) {
                         j.put("waitMs", Math.round(sumWaitNs / 1e5 / u) / 10.0)
@@ -852,6 +1128,37 @@ final class LinuxStream {
                         setBitrate(asked, "the computer's route changed");
                         break;
                     }
+                    case "quality": {
+                        // A browser's Low, Medium or High, while it watches. The
+                        // bitrate lands at the next frame; a new size or frame
+                        // rate needs a new encoder, which the pump makes at its
+                        // next update, and a whole picture is asked for now so
+                        // that there is one on a desktop where nothing moves.
+                        if (!browser) break;
+                        int asked = clamp(j.optInt("bitrate", ceiling), MIN_BITRATE, 150_000_000);
+                        double s = scaleOf(j.optDouble("scale", scale));
+                        int f = clamp(j.optInt("fps", fps), 10, 60);
+                        ceiling = asked;
+                        keptUp = 0;
+                        setBitrate(asked, "the browser chose " + j.optString("mode", "a quality"));
+                        if (s != scale || f != fps) {
+                            scale = s;
+                            fps = f;
+                            rebuild = true;
+                            r.requestUpdate(false);
+                        }
+                        // The sound follows the picture's quality, at its next read.
+                        String asMode = j.optString("mode", mode);
+                        if (!asMode.equals(mode)) {
+                            mode = asMode;
+                            LinuxStreamAudio a;
+                            synchronized (soundLock) {
+                                a = sound;
+                            }
+                            if (a != null) a.setFormat(soundFormat());
+                        }
+                        break;
+                    }
                     case "ping": {
                         JSONObject p = new JSONObject();
                         try {
@@ -861,9 +1168,77 @@ final class LinuxStream {
                         send(p);
                         break;
                     }
+                    case "audio":
+                        // A browser's sound switch: off is nothing read and nothing sent.
+                        if (!browser) break;
+                        soundWanted = j.optBoolean("on");
+                        if (j.has("codecs")) pageOpus = opusIn(j);
+                        DexLog.step("stream", "the browser turned its sound " + (soundWanted ? "on" : "off"));
+                        sound(soundWanted && soundReady);
+                        break;
                     default:
                 }
             }
+        }
+
+        /** The page said it can decode Opus ({@code "codecs":["opus","pcm"]}). */
+        private boolean opusIn(JSONObject j) {
+            org.json.JSONArray c = j.optJSONArray("codecs");
+            if (c == null) return false;
+            for (int i = 0; i < c.length(); i++) {
+                if ("opus".equals(c.optString(i))) return true;
+            }
+            return false;
+        }
+
+        /** The sound for the picture's quality now, as both ends can make and play it. */
+        private LinuxStreamAudio.Format soundFormat() {
+            return LinuxStreamAudio.Format.forMode(mode, pageOpus && LinuxStreamAudio.opus != null);
+        }
+
+        /** Read the desktop's sound for this browser, or stop. Any thread, any number of times. */
+        private void sound(boolean on) {
+            synchronized (soundLock) {
+                if (on && !closing) {
+                    if (sound == null || !sound.running()) sound = new LinuxStreamAudio(soundSink, who, soundFormat()).start();
+                } else if (sound != null) {
+                    sound.stop();
+                    sound = null;
+                }
+            }
+        }
+
+        /** Where the sound goes: its form said first, then each run. */
+        private final LinuxStreamAudio.Sink soundSink = new LinuxStreamAudio.Sink() {
+            @Override
+            public void format(LinuxStreamAudio.Format f) throws IOException {
+                LinuxStreamSocket s = ws;
+                if (s == null || closing) throw new IOException("closed");
+                s.sendText(f.json());
+            }
+
+            @Override
+            public void audio(int codec, byte[] data, int off, int len, long atUs) throws IOException {
+                sendSound(codec, off == 0 ? data : java.util.Arrays.copyOfRange(data, off, off + len), len, atUs);
+            }
+        };
+
+        /** One run of sound: 0x03, its codec (0 PCM, 1 Opus), when it was read, its bytes. */
+        private void sendSound(int codec, byte[] data, int len, long atUs) throws IOException {
+            ByteBuffer head = ByteBuffer.allocate(10);
+            head.put(MSG_AUDIO).put((byte) codec).putLong(atUs);
+            LinuxStreamSocket s = ws;
+            if (s == null || closing) throw new IOException("closed");
+            s.sendBinary(head.array(), data, len);
+            soundSent.addAndGet(len);
+        }
+
+        /** Sound sent since the last stats, in kb/s over {@code secs}. Drain thread. */
+        private long soundKbps(double secs) {
+            long total = soundSent.get();
+            long d = total - soundSeen;
+            soundSeen = total;
+            return Math.round(d * 8 / 1000.0 / secs);
         }
 
         /** Frames the link holds: its round trip in frames, and the one on the wire. Under {@link #pace}. */
@@ -899,6 +1274,19 @@ final class LinuxStream {
             if (closing) return;
             closing = true;
             if (why != null) DexLog.step("stream", "ending the session: " + why);
+            if (onMainThread()) {
+                // A browser's stream says goodbye over TLS, and Android allows
+                // no network on the main thread: NetworkOnMainThreadException
+                // took :linux down, Linux with it, when the switch went off on
+                // the S25. The service's onDestroy closes sessions from there
+                // too.
+                offMain("linux-stream-close", this::release);
+                return;
+            }
+            release();
+        }
+
+        private void release() {
             LinuxStreamSocket s = ws;
             if (s != null) s.close();
             LinuxStreamRfb r = rfb;

@@ -53,6 +53,11 @@ final class LinuxStreamSocket implements Closeable {
      * a buffer on the far end's say-so.
      */
     private static final int MAX_INBOUND = 2 * 1024 * 1024;
+    /**
+     * Pieces one message may come in. A browser sends a message whole; a
+     * stream of empty continuation frames is someone keeping a thread busy.
+     */
+    private static final int MAX_FRAGMENTS = 1024;
 
     /** The request a connection opened with. */
     static final class Request {
@@ -128,20 +133,34 @@ final class LinuxStreamSocket implements Closeable {
      * two again, looser, for a computer app older or newer than this one.
      */
     void upgrade(Request req) throws IOException {
-        String key = req.headers.get("sec-websocket-key");
         String host = req.headers.get("host");
         String origin = req.headers.get("origin");
-        if (!"GET".equals(req.method)) throw new IOException("not a GET");
-        if (!"websocket".equalsIgnoreCase(req.headers.get("upgrade")) || key == null) {
-            throw new IOException("not a WebSocket upgrade");
-        }
+        checkUpgrade(req);
         if (host != null && !loopback(host)) throw new IOException("another host: " + host);
         if (origin != null && !allowedOrigin(origin)) throw new IOException("another origin: " + origin);
+        accept(req);
+    }
+
+    /**
+     * The handshake alone, for a caller that has settled who is asking by
+     * rules of its own: a browser on the phone's network, which
+     * {@link LinuxBrowserServer} lets in by its origin and a token.
+     */
+    void accept(Request req) throws IOException {
+        checkUpgrade(req);
+        String key = req.headers.get("sec-websocket-key");
         String accept = Base64.getEncoder().encodeToString(sha1(key + GUID));
         writeRaw(("HTTP/1.1 101 Switching Protocols\r\n"
                 + "Upgrade: websocket\r\n"
                 + "Connection: Upgrade\r\n"
                 + "Sec-WebSocket-Accept: " + accept + "\r\n\r\n").getBytes(StandardCharsets.US_ASCII));
+    }
+
+    private static void checkUpgrade(Request req) throws IOException {
+        if (!"GET".equals(req.method)) throw new IOException("not a GET");
+        if (!"websocket".equalsIgnoreCase(req.headers.get("upgrade")) || req.headers.get("sec-websocket-key") == null) {
+            throw new IOException("not a WebSocket upgrade");
+        }
     }
 
     /** A plain HTTP answer, after which the connection closes. */
@@ -226,8 +245,12 @@ final class LinuxStreamSocket implements Closeable {
      * answered on the way. Null once the computer closed it.
      */
     Message read() throws IOException {
-        byte[] assembled = null;
+        // Grown as pieces come, never copied whole for each: a message in a
+        // thousand pieces costs what it would whole, and no more pieces than
+        // MAX_FRAGMENTS are taken for one.
+        java.io.ByteArrayOutputStream assembled = null;
         int assembledOp = 0;
+        int fragments = 0;
         while (true) {
             int b0 = in.read();
             if (b0 < 0) return null;
@@ -242,8 +265,11 @@ final class LinuxStreamSocket implements Closeable {
                 len = 0;
                 for (int i = 0; i < 8; i++) len = (len << 8) | readByte();
             }
-            long already = assembled == null ? 0 : assembled.length;
+            long already = assembled == null ? 0 : assembled.size();
             if (len < 0 || len + already > MAX_INBOUND) throw new IOException("message too large");
+            // RFC 6455: a control frame carries at most 125 bytes. A larger
+            // ping would be answered with a pong as large, as often as sent.
+            if (opcode >= 0x8 && len > 125) throw new IOException("control frame too large");
             byte[] mask = new byte[4];
             if (masked) readFully(mask);
             byte[] payload = new byte[(int) len];
@@ -261,17 +287,19 @@ final class LinuxStreamSocket implements Closeable {
                     continue;
                 case OP_CONT:
                     if (assembled == null) continue; // a stray continuation
-                    byte[] joined = new byte[assembled.length + payload.length];
-                    System.arraycopy(assembled, 0, joined, 0, assembled.length);
-                    System.arraycopy(payload, 0, joined, assembled.length, payload.length);
-                    assembled = joined;
+                    if (++fragments > MAX_FRAGMENTS) throw new IOException("a message in too many pieces");
+                    assembled.write(payload, 0, payload.length);
                     break;
                 default:
-                    assembled = payload;
+                    assembled = new java.io.ByteArrayOutputStream(Math.max(32, payload.length));
+                    assembled.write(payload, 0, payload.length);
                     assembledOp = opcode;
+                    fragments = 0;
             }
             if (fin && assembled != null) {
-                if (assembledOp == OP_TEXT || assembledOp == OP_BINARY) return new Message(assembledOp, assembled);
+                if (assembledOp == OP_TEXT || assembledOp == OP_BINARY) {
+                    return new Message(assembledOp, assembled.toByteArray());
+                }
                 assembled = null;
             }
         }
@@ -330,6 +358,49 @@ final class LinuxStreamSocket implements Closeable {
 
     boolean isClosed() {
         return closed;
+    }
+
+    /**
+     * The close after a last word ({@code {"t":"state",..}}) on a socket
+     * nothing else is reading: the goodbye, then whatever the other end still
+     * sends, read and dropped, until it closes too or {@code waitMs} passes,
+     * and only then the socket. Closed with bytes of the other end's unread (a
+     * hello, a ping), TCP answers with a reset instead, and a reset can take
+     * the last word with it before the other end reads it: a page told it was
+     * signed out would say only that it cannot reach the phone. A browser
+     * closes its end the moment it reads the word.
+     */
+    void closeAfterWord(int waitMs) {
+        if (closed) return;
+        writeLock.lock();
+        try {
+            out.write(new byte[]{(byte) (0x80 | OP_CLOSE), 0});
+            out.flush();
+        } catch (IOException e) {
+            // gone already: nothing to wait for
+            close();
+            return;
+        } finally {
+            writeLock.unlock();
+        }
+        long end = System.currentTimeMillis() + waitMs;
+        byte[] drop = new byte[4096];
+        int dropped = 0;
+        try {
+            for (long left; (left = end - System.currentTimeMillis()) > 0 && dropped < 256 * 1024; ) {
+                if (underlying instanceof java.net.Socket) ((java.net.Socket) underlying).setSoTimeout((int) Math.max(1, left));
+                int n = in.read(drop);
+                if (n < 0) break;
+                dropped += n;
+            }
+        } catch (IOException e) {
+            // its time, or the other end is gone: either way, done waiting
+        }
+        closed = true;
+        try {
+            underlying.close();
+        } catch (IOException ignored) {
+        }
     }
 
     /**

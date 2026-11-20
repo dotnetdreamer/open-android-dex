@@ -136,6 +136,16 @@ public final class LinuxStreamEncoder {
      */
     static LinuxStreamEncoder create(int fbW, int fbH, int bitrate, int fps, String swizzle, Output out)
             throws IOException {
+        return create(fbW, fbH, bitrate, fps, 1.0, swizzle, out);
+    }
+
+    /**
+     * As above, the picture drawn no larger than {@code maxScale} of the
+     * desktop: a browser's Low quality, where a smaller picture is less to
+     * encode, to send and to decode, and keeps up on a slow link.
+     */
+    static LinuxStreamEncoder create(int fbW, int fbH, int bitrate, int fps, double maxScale, String swizzle,
+                                     Output out) throws IOException {
         List<String> tried = new ArrayList<>();
         for (MediaCodecInfo info : candidates()) {
             MediaCodecInfo.VideoCapabilities vc;
@@ -144,7 +154,7 @@ public final class LinuxStreamEncoder {
             } catch (Exception e) {
                 continue;
             }
-            int[] size = fit(vc, fbW, fbH, fps);
+            int[] size = fit(vc, fbW, fbH, fps, maxScale);
             if (size == null) {
                 tried.add(info.getName() + " (no size)");
                 continue;
@@ -223,11 +233,17 @@ public final class LinuxStreamEncoder {
      * otherwise the largest step down that it does. Null if none.
      */
     public static int[] fit(MediaCodecInfo.VideoCapabilities vc, int w, int h, int fps) {
+        return fit(vc, w, h, fps, 1.0);
+    }
+
+    /** As above, starting from {@code maxScale} of the desktop rather than all of it. */
+    public static int[] fit(MediaCodecInfo.VideoCapabilities vc, int w, int h, int fps, double maxScale) {
         int wa = Math.max(2, vc.getWidthAlignment());
         int ha = Math.max(2, vc.getHeightAlignment());
         double[] steps = {1.0, 0.875, 0.75, 2.0 / 3.0, 0.5};
         for (int pass = 0; pass < 2; pass++) {
             for (double s : steps) {
+                if (s > maxScale + 1e-6) continue;
                 int ew = s == 1.0 ? alignUp(w, wa) : alignDown((int) (w * s), wa);
                 int eh = s == 1.0 ? alignUp(h, ha) : alignDown((int) (h * s), ha);
                 if (ew <= 0 || eh <= 0) continue;
