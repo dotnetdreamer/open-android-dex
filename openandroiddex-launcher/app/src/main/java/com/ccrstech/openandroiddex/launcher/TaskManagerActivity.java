@@ -408,6 +408,9 @@ public class TaskManagerActivity extends Activity {
             } else if (LinuxRemoteActivity.class.getName().equals(activity)) {
                 label = getString(R.string.rm_label);
                 glyph = "📡";
+            } else if (LinuxSettingsActivity.class.getName().equals(activity)) {
+                label = getString(R.string.ln_settings_title);
+                glyph = "⚙";
             } else {
                 continue;
             }

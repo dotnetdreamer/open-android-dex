@@ -76,9 +76,20 @@ final class WebFiles {
      *             own default — only the desktop can shape a freeform rect.
      */
     static void requestAllFiles(android.app.Activity act, android.os.Bundle opts) {
+        // The one way to the grant, so the one place it is refused: a build
+        // that does not declare the permission (LinuxOnDroid's Play build)
+        // never sends anyone to a Settings screen that cannot grant it, from
+        // a button that should not be there or from any added later.
+        if (!Linux.sharedFolderOffered(act)) {
+            DexLog.warn("web", "All files access asked for in a build without it; not asking");
+            return;
+        }
+        // What switching it off again takes down: the desktop, which restarts,
+        // or in LinuxOnDroid (no desktop) the app, and Linux with it.
         new android.app.AlertDialog.Builder(act)
                 .setTitle(act.getString(R.string.ln_shared_grant_title))
-                .setMessage(act.getString(R.string.ln_shared_grant_body))
+                .setMessage(act.getString(Linux.hasHomeScreen(act)
+                        ? R.string.ln_shared_grant_body_app : R.string.ln_shared_grant_body))
                 .setNegativeButton(act.getString(R.string.st_cancel), null)
                 .setPositiveButton(act.getString(R.string.ln_shared_grant_go),
                         (d, w) -> openAllFilesScreen(act, opts))

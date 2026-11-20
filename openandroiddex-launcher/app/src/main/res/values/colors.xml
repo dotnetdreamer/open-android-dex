@@ -4,4 +4,8 @@
          caption bar (0xFF0a0c10), and the darker end of the icon's background
          gradient — so the splash the icon sits on is the same surface. -->
     <color name="dex_chrome">#FF0B1320</color>
+    <!-- LinuxOnDroid's page colour: DexTheme's dark window, which its home
+         screen and its Linux window both paint. Behind the first frame and the
+         splash too, so neither opens on a sheet of another colour. -->
+    <color name="ln_home_bg">#FF0D1117</color>
 </resources>

@@ -593,7 +593,7 @@
     <string name="ln_apps_go_none">Install Ubuntu only</string>
     <string name="ln_apps_menu">Choose Linux apps…</string>
     <string name="ln_installing">Installing Ubuntu…</string>
-    <string name="ln_waiting">Waiting for the desktop app to start the install…</string>
+    <string name="ln_waiting">Waiting for the install to start…</string>
     <!-- The install screen's controls for the step it is on, and the error screen's Skip
          (LinuxActivity.updateStepRow). %1$s is the app's name as the chooser shows it. -->
     <string name="ln_step_skip">Skip %1$s</string>
@@ -621,6 +621,7 @@
     <string name="ln_reinstall_started">Reinstalling Linux. Open the Linux window to watch it.</string>
     <string name="ln_uninstall">Uninstall Linux…</string>
     <string name="ln_uninstall_body">This deletes the Ubuntu container and frees the storage it was using — every app you installed and every file inside it. Linux will not reinstall itself; opening Linux again downloads it fresh. Your shared folder is kept, and nothing outside Linux is affected.</string>
+    <string name="ln_uninstall_body_noshare">This deletes the Ubuntu container and frees the storage it was using — every app you installed and every file inside it. Linux will not reinstall itself; opening Linux again downloads it fresh. Nothing outside Linux is affected.</string>
     <string name="ln_uninstall_go">Uninstall</string>
     <string name="ln_uninstall_done">Linux uninstalled. The storage it was using is free.</string>
     <string name="ln_session_failed">The Linux session ended unexpectedly</string>
@@ -995,6 +996,7 @@ If you switch this off again later, Android force-closes Linux and the desktop r
     <string name="rm_ssh_install_failed">The SSH server could not be installed in Linux. Check the phone\'s connection, then turn remote access off and on to try again.</string>
     <string name="rm_ssh_starting">Starting the SSH server inside Linux…</string>
     <string name="rm_ssh_failed">The SSH server inside Linux would not start. Reinstalling Linux usually fixes this; your files in the shared folder are kept.</string>
+    <string name="rm_ssh_failed_noshare">The SSH server inside Linux would not start. Reinstalling Linux usually fixes this.</string>
     <string name="rm_battery">Android can pause remote access when the screen is off. Let it keep running in the background so computers can always reach the phone.</string>
     <string name="rm_battery_allow">Allow</string>
     <string name="rm_battery_desktop">On the phone, open Settings → Apps → %1$s → Battery and choose Unrestricted.</string>
@@ -1062,6 +1064,8 @@ If you switch this off again later, Android force-closes Linux and the desktop r
     <!-- The Linux tile's menu -->
     <string name="ln_remote_menu">Remote access…</string>
     <string name="ln_gpu_menu">Use the GPU</string>
+    <string name="ln_settings_menu">Linux settings…</string>
+    <string name="ln_settings_title">Linux settings</string>
     <string name="ln_gpu_on">Linux apps will use the GPU from the next time Linux starts.</string>
     <string name="ln_gpu_off">Linux apps will use the CPU from the next time Linux starts.</string>
 
@@ -1105,4 +1109,248 @@ If you switch this off again later, Android force-closes Linux and the desktop r
     <string name="sc_try_again">Try again</string>
     <string name="sc_close">Close</string>
     <string name="sc_cancel">Cancel</string>
+    <!-- ── LinuxOnDroid home screen ── -->
+    <!-- The first screen of LinuxOnDroid, the Linux-only app (LinuxHomeActivity): what Linux is doing, and the one button that starts it. Written for someone who has just installed the app from the Play Store: plain words, no em dashes. The desktop never shows this screen. -->
+    <string name="hm_more">More options</string>
+    <string name="hm_privacy">Privacy policy</string>
+    <!-- The Linux window, in recent apps beside the home screen, whose card carries the app name. -->
+    <string name="hm_window_label">Linux desktop</string>
+    <!-- The status pill at the top of the hero. -->
+    <string name="hm_pill_new">Not installed</string>
+    <string name="hm_pill_installing">Installing</string>
+    <string name="hm_pill_installing_pct">Installing · %1$d%%</string>
+    <string name="hm_pill_failed">Needs attention</string>
+    <string name="hm_pill_ready">Ready</string>
+    <string name="hm_pill_running">Running</string>
+    <string name="hm_pill_unsupported">Not supported</string>
+    <!-- Not installed yet. hm_new_space: %1$s is the free space on the phone, e.g. "45 GB". -->
+    <string name="hm_new_title">Linux in your pocket</string>
+    <string name="hm_new_sub">A full Ubuntu desktop on your phone, with apps like Firefox and VS Code. No root and no computer needed.</string>
+    <string name="hm_new_go">Install Linux</string>
+    <string name="hm_new_space">Needs about 3 GB of free space. You have %1$s.</string>
+    <string name="hm_new_space_low">Needs about 3 GB of free space, and this phone has %1$s. Free up some space first.</string>
+    <!-- Installing. -->
+    <string name="hm_installing_title">Setting up Linux</string>
+    <string name="hm_installing_sub">This takes a while. You can leave this screen, and setup carries on in the background.</string>
+    <string name="hm_installing_go">Show progress</string>
+    <!-- The install stopped with an error. -->
+    <string name="hm_failed_title">Setup stopped</string>
+    <string name="hm_failed_sub">Something went wrong while setting up Linux. Trying again usually picks up where it stopped.</string>
+    <string name="hm_failed_go">Try again</string>
+    <string name="hm_failed_more">Show details</string>
+    <!-- Installed and not running. -->
+    <string name="hm_ready_title">Ready when you are</string>
+    <string name="hm_ready_sub">Ubuntu 24.04 with the XFCE desktop</string>
+    <string name="hm_ready_go">Start Linux</string>
+    <!-- Running. hm_stop_body is the question behind its Shut down button. -->
+    <string name="hm_running_title">Linux is running</string>
+    <string name="hm_running_sub">Pick up right where you left off</string>
+    <string name="hm_running_go">Open desktop</string>
+    <string name="hm_stop_body">This ends the Ubuntu session and stops Linux. Anything unsaved inside it is lost.</string>
+    <!-- A phone Linux cannot run on. -->
+    <string name="hm_unsupported_title">Linux can\'t run on this phone</string>
+    <string name="hm_unsupported_sub">LinuxOnDroid needs a phone with a 64-bit processor.</string>
+    <!-- What you get, shown before the first install. Bullet-like: no full stop at the end. -->
+    <string name="hm_get_title">What you get</string>
+    <string name="hm_get_desktop">A real Ubuntu desktop</string>
+    <string name="hm_get_desktop_sub">Ubuntu 24.04 with the XFCE desktop, right on your phone</string>
+    <string name="hm_get_apps">The apps you know</string>
+    <string name="hm_get_apps_sub">Firefox, VS Code, GIMP and more. You pick what to install</string>
+    <string name="hm_get_files">Your files, both ways</string>
+    <string name="hm_get_files_sub">A shared folder connects Android and Linux</string>
+    <string name="hm_get_safe">No root, no computer</string>
+    <string name="hm_get_safe_sub">Everything runs inside this app, on your phone</string>
+    <!-- What is inside, once installed. -->
+    <string name="hm_inside_title">Inside your Linux</string>
+    <string name="hm_inside_add">Add apps</string>
+    <!-- The tiles under the hero. -->
+    <string name="hm_tools_title">Tools</string>
+    <string name="hm_on">On</string>
+    <string name="hm_off">Off</string>
+    <string name="hm_remote_sub_off">Use Linux from a computer</string>
+    <string name="hm_shared_sub">Files for Android and Linux</string>
+    <string name="hm_shared_sub_grant">Needs a permission</string>
+    <string name="hm_gpu_sub">Faster graphics in Linux apps</string>
+    <string name="hm_set_startup">Startup</string>
+    <string name="hm_set_boot">Start Linux with the phone</string>
+    <string name="hm_set_boot_sub">After the phone restarts, the Linux desktop starts in the background, ready when you open it.</string>
+    <string name="hm_set_boot_hint">Some phones stop apps from starting by themselves. If Linux does not start, allow %1$s to start by itself or run in the background in its app settings.</string>
+    <string name="hm_set_app_settings">Open app settings</string>
+    <string name="hm_set_graphics">Graphics</string>
+    <string name="hm_set_gpu_none">Not available on this phone</string>
+    <string name="hm_boot_refused">Linux did not start with the phone. Tap to start it.</string>
+    <!-- The line at the bottom. %1$s: storage, e.g. "2.4 GB". -->
+    <string name="hm_used">Using %1$s</string>
+    <string name="hm_version">Version %1$s</string>
+    <!-- ── LinuxOnDroid, second round: removing, the terminal's words, Add apps, install steps ── -->
+    <!-- An uninstall asked for and still under way (LinuxService stops an install first, then deletes the container). The storage is only said to be free once it is (ln_uninstall_done). -->
+    <string name="hm_pill_removing">Removing</string>
+    <string name="hm_removing_title">Removing Linux</string>
+    <string name="hm_removing_sub">Deleting Ubuntu and everything in it. Your shared folder stays where it is.</string>
+    <string name="hm_removing_sub_noshare">Deleting Ubuntu and everything in it.</string>
+    <!-- The home screen's little terminal. Commands (apt install xfce4, uname, startxfce4) stay as they are in every language; these are what Linux says back, as apt and the shell would say it in that language. hm_term_continue keeps apt's own [Y/n], with the yes letter apt uses in that language. -->
+    <string name="hm_term_need">Need to get about 1 GB of archives.</string>
+    <string name="hm_term_continue">Do you want to continue? [Y/n]</string>
+    <string name="hm_term_progress">Progress:</string>
+    <string name="hm_term_up">desktop up %1$s</string>
+    <string name="hm_term_running">desktop running</string>
+    <string name="hm_term_killed">Killed</string>
+    <string name="hm_term_exit">exit status %1$d</string>
+    <string name="hm_term_removing">Removing everything inside Linux…</string>
+    <string name="hm_term_needs_64">Linux needs a 64-bit phone</string>
+    <!-- The Add apps sheet on the home screen. An app already in Linux cannot be unticked (nothing there uninstalls), so it says Installed instead of its line. hm_apps_save: the button when the only change is dropping an app that was never fetched. -->
+    <string name="hm_apps_installed">Installed</string>
+    <string name="hm_apps_save">Save</string>
+    <!-- The desktop tile's Uninstall, as it starts: the wipe waits for an install in flight to stop. -->
+    <string name="ln_uninstall_started">Removing Linux. This can take a minute.</string>
+    <!-- The install's steps, as the Linux window and the home screen show them (state.env's MSG, from LinuxService and linux-setup.sh). %1$s is an app's name or a Debian package name exactly as apt spells it (libgtk-3-0t64), which is never translated. Several are also the reason an install stopped, after "E: ". -->
+    <string name="ln_step_preparing">Preparing</string>
+    <string name="ln_step_resuming">Picking up where it stopped</string>
+    <string name="ln_step_resetting">Starting over</string>
+    <string name="ln_step_download_ubuntu">Downloading Ubuntu</string>
+    <string name="ln_step_unpack_tools">Unpacking the Linux tools</string>
+    <string name="ln_step_unpack_ubuntu">Unpacking Ubuntu</string>
+    <string name="ln_step_configure">Configuring Ubuntu</string>
+    <string name="ln_step_apt_update">Updating the package lists</string>
+    <string name="ln_step_apt_install">Installing packages</string>
+    <string name="ln_step_reading_lists">Reading package lists</string>
+    <string name="ln_step_resolving">Working out what to install</string>
+    <string name="ln_step_desktop">Installing the desktop</string>
+    <string name="ln_step_display">Setting up the display</string>
+    <string name="ln_step_sound">Setting up sound</string>
+    <string name="ln_step_ssh">Setting up remote access</string>
+    <string name="ln_step_browsers">Installing the browsers</string>
+    <string name="ln_step_browsers_config">Setting up the browsers</string>
+    <string name="ln_step_share">Setting up the shared folder</string>
+    <string name="ln_step_desktop_icons">Setting up the desktop icons</string>
+    <string name="ln_step_vscode_links">Setting up VS Code links</string>
+    <string name="ln_step_dock">Setting up the dock</string>
+    <string name="ln_step_theme">Applying the theme</string>
+    <string name="ln_step_ready">Ready</string>
+    <string name="ln_step_interrupted">Interrupted</string>
+    <string name="ln_step_download_failed">The download failed</string>
+    <string name="ln_step_setup_failed">Setup could not run</string>
+    <string name="ln_step_unsupported">Processor not supported</string>
+    <string name="ln_step_downloading">Downloading %1$s</string>
+    <string name="ln_step_unpacking">Unpacking %1$s</string>
+    <string name="ln_step_setting_up">Setting up %1$s</string>
+    <string name="ln_step_finishing">Finishing %1$s</string>
+    <string name="ln_step_installing">Installing %1$s</string>
+    <string name="ln_step_preparing_app">Preparing %1$s</string>
+    <!-- GPT review 2 (2026-11-19). ln_remove_*: an uninstall that stopped with files it could not delete (LinuxService.uninstall keeps the removing marker; the Linux window, the home screen and a notification say so, with Try again). %1$s is a size, as Settings writes it. hm_term_remove_failed follows "rm: " in the home screen's terminal. ln_step_reset_failed: a Reinstall that could not move the old container aside. ln_step_skip_body_app and ln_shared_grant_body_app: LinuxOnDroid's words where the desktop's point at things it does not have (the tile's right-click menu, a desktop that restarts); %1$s in the first is hm_inside_add. -->
+    <string name="ln_remove_failed_title">Linux was not fully removed</string>
+    <string name="ln_remove_failed_sub">%1$s of its files could not be deleted. Try again.</string>
+    <string name="ln_remove_again">Try again</string>
+    <string name="hm_term_remove_failed">%1$s could not be deleted</string>
+    <string name="ln_step_reset_failed">The old Linux could not be cleared</string>
+    <string name="ln_step_skip_body_app">It will not be installed, and the rest of Linux goes ahead without it. You can add it later with %1$s in LinuxOnDroid.</string>
+    <string name="ln_shared_grant_body_app">The shared folder sits at the top of your internal storage. Android only lets an app create a folder there, or read the files you copy into it, with this permission. Without it there is no shared folder at all. If you switch this off again later, Android closes LinuxOnDroid, and Linux with it.</string>
+    <!-- The child-process limit ("signal 9") on LinuxOnDroid's home screen: a card at the top while it is on, and a dialog with how to switch it off (2026-11-19). The switch's name is the one ln_killed_switch uses; About phone, Software information and Build number are Samsung's words, where they differ from other phones'. The adb commands are shown as they are, never translated. -->
+    <string name="hm_limit_title">Android may close Linux</string>
+    <string name="hm_limit_body">From Android 12, phones close background programs once apps run more than 32 of them, and Linux runs dozens. Switch the limit off once and it stays off.</string>
+    <string name="hm_limit_fix">How to fix</string>
+    <string name="hm_limit_hide">Hide</string>
+    <string name="hm_limit_dialog_title">Stop Android closing Linux</string>
+    <string name="hm_limit_why">From Android 12, Android closes background programs once the apps on a phone run more than 32 of them, and Linux runs dozens. When it does, the desktop closes, or an install stops part way. Other Linux apps show this as “signal 9”.</string>
+    <string name="hm_limit_turn_off">Switch the limit off</string>
+    <string name="hm_limit_step1">Turn on Developer options: open Settings, then About phone (on Samsung, then Software information), and tap Build number 7 times.</string>
+    <string name="hm_limit_step2">Open Developer options and turn on “Disable child process restrictions”.</string>
+    <string name="hm_limit_vendor">Some Samsung and other phones give it another name. On Android 12 and 13 some have it under Feature flags as settings_enable_monitor_phantom_procs, which you turn off. Search Developer options for “child process” or “phantom”.</string>
+    <string name="hm_limit_keep_on">Leave Developer options on: turning them off turns the limit back on.</string>
+    <string name="hm_limit_no_switch">No switch on your phone?</string>
+    <string name="hm_limit_computer">Connect the phone to Open Android DeX on a computer and it switches the limit off for you. Or run these with adb, from a computer or on the phone with Wireless debugging:</string>
+    <string name="hm_limit_commands_note">The first stops Android undoing the second after a restart. The third switches the limit off entirely, from Android 12L.</string>
+    <string name="hm_limit_open_dev">Open Developer options</string>
+    <string name="hm_limit_open_about">Open About phone</string>
+    <string name="hm_limit_copy">Copy commands</string>
+    <string name="hm_limit_copied">Commands copied</string>
+
+    <!-- The Linux viewer page (assets/linux/novnc), handed to it by LinuxViewerText. -->
+    <string name="vw_starting">Starting…</string>
+    <string name="vw_connecting">Connecting…</string>
+    <string name="vw_connected">Connected</string>
+    <string name="vw_reconnecting">Reconnecting…</string>
+    <string name="vw_mode_direct">Interaction method: Direct</string>
+    <string name="vw_mode_touch">Interaction method: Touch</string>
+    <string name="vw_mode_mouse">Interaction method: Mouse</string>
+    <string name="vw_kb_show">Show keyboard</string>
+    <string name="vw_kb_hide">Hide keyboard</string>
+    <string name="vw_fit">Fit</string>
+    <string name="vw_coach_collapse">Tap the chevron to free the whole screen.</string>
+    <string name="vw_coach_bubble">Tap the bubble for controls. Hold and drag to move it.</string>
+    <string name="vw_toast_mouse">Drag anywhere to move the pointer.</string>
+    <string name="vw_toast_touch">Tap the desktop the way you would touch it.</string>
+    <string name="vw_toast_direct">The pointer goes where you point.</string>
+    <string name="vw_toast_cad">Ctrl+Alt+Del sent</string>
+    <string name="vw_toast_middle">Next tap is a middle click</string>
+    <string name="vw_toast_right">Next tap is a right click</string>
+    <string name="vw_foot_desktop">A mouse is connected. These methods apply to touch only.</string>
+    <string name="vw_foot_touch">A keyboard or mouse plugged into the desktop always works as it normally does.</string>
+    <string name="vw_full_on">Leave fullscreen</string>
+    <string name="vw_full_off">Fullscreen</string>
+    <string name="vw_clip_on">Clipboard shared with this computer</string>
+    <string name="vw_clip_off">Clipboard not shared</string>
+    <string name="vw_controls">Controls</string>
+    <string name="vw_mode">Interaction method</string>
+    <string name="vw_keyboard">Keyboard</string>
+    <string name="vw_keys">Keys</string>
+    <string name="vw_zoom">Zoom</string>
+    <string name="vw_clipboard">Clipboard</string>
+    <string name="vw_full_title">Fullscreen (F11)</string>
+    <string name="vw_hide_bar">Hide the bar</string>
+    <string name="vw_zoom_out">Zoom out</string>
+    <string name="vw_zoom_in">Zoom in</string>
+    <string name="vw_zoom_level">Zoom level</string>
+    <string name="vw_show_controls">Show the controls</string>
+    <string name="vw_dock">Dock to the top</string>
+    <string name="vw_direct">Direct</string>
+    <string name="vw_direct_hint">The pointer goes where you point. Best with a mouse.</string>
+    <string name="vw_touch">Touch</string>
+    <string name="vw_touch_hint">Use your device as a remote touchscreen.</string>
+    <string name="vw_mouse">Mouse</string>
+    <string name="vw_mouse_hint">Use your device as a touchpad to control the mouse.</string>
+    <string name="vw_speed">Pointer speed</string>
+    <string name="vw_speed_hint">Slower on the left, faster on the right. Mouse only.</string>
+    <string name="vw_scrolling">Scrolling</string>
+    <string name="vw_natural">Natural</string>
+    <string name="vw_reverse">Reverse</string>
+    <string name="vw_next_tap">Next tap</string>
+    <string name="vw_middle_click">Middle click</string>
+    <string name="vw_right_click">Right click</string>
+    <string name="vw_arm_hint">Arms one tap, then goes back to normal.</string>
+    <string name="vw_g_works">Works as usual</string>
+    <string name="vw_g_tap">Tap</string>
+    <string name="vw_g_click">Click</string>
+    <string name="vw_g_two_tap">Two-finger tap</string>
+    <string name="vw_g_right_click">Right-click</string>
+    <string name="vw_g_drag">Drag</string>
+    <string name="vw_g_drag_act">Drag</string>
+    <string name="vw_g_two_fingers">Two fingers</string>
+    <string name="vw_g_scroll">Scroll</string>
+    <string name="vw_g_wheel">Wheel</string>
+    <string name="vw_g_long_tap">Long tap</string>
+    <string name="vw_g_one_finger">One finger</string>
+    <string name="vw_g_pan">Pan the view</string>
+    <string name="vw_g_pinch">Pinch</string>
+    <string name="vw_g_zoom">Zoom</string>
+    <string name="vw_g_long_drag">Long press and drag</string>
+    <string name="vw_g_select">Select</string>
+    <string name="vw_g_move_mouse">Move the mouse</string>
+    <string name="vw_g_double_drag">Double-tap and drag</string>
+    <string name="vw_key_esc">Escape</string>
+    <string name="vw_key_tab">Tab</string>
+    <string name="vw_key_ctrl">Control</string>
+    <string name="vw_key_alt">Alt</string>
+    <string name="vw_key_super">Super</string>
+    <string name="vw_key_shift">Shift</string>
+    <string name="vw_key_left">Left arrow</string>
+    <string name="vw_key_up">Up arrow</string>
+    <string name="vw_key_down">Down arrow</string>
+    <string name="vw_key_right">Right arrow</string>
+    <string name="vw_key_home">Home</string>
+    <string name="vw_key_end">End</string>
+    <string name="vw_key_pg_up">Page up</string>
+    <string name="vw_key_pg_dn">Page down</string>
+    <string name="vw_key_del">Delete</string>
+    <string name="vw_key_cad">Control Alt Delete</string>
 </resources>

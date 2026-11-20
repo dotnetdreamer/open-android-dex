@@ -11,6 +11,16 @@
          duplicating the theme or tripping the NewApi lint on older devices. -->
     <style name="Theme.OpenAndroidDeX" parent="Base.Theme.OpenAndroidDeX" />
 
+    <!-- LinuxOnDroid's own (linuxapp's manifest puts it on the application):
+         the shell's theme, on the page colour rather than black, and on S+
+         with its own icon on the splash (values-v31) instead of the desktop
+         shell's. Split like the shell's, for the same reason. -->
+    <style name="Base.Theme.LinuxOnDroid" parent="Theme.OpenAndroidDeX">
+        <item name="android:windowBackground">@color/ln_home_bg</item>
+    </style>
+
+    <style name="Theme.LinuxOnDroid" parent="Base.Theme.LinuxOnDroid" />
+
     <!-- The widget detour trampoline: a task-shaped hole. It never sets a
          content view, so every attribute here exists to keep the freeform
          window it owns from drawing or animating anything of its own while

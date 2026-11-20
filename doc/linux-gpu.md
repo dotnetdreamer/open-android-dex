@@ -29,7 +29,7 @@ S24 (Exynos 2400, Xclipse 940, Android 15)**, in the app's own sessions; see
 | Whether to try | `LinuxGpu.env` | which GPU (`LinuxGpu.driver`), switch on, staged → `LINUX_GPU=turnip` or `xclipse` |
 | Whether it works | `linux-rt.sh`, `linux-win.sh` | the probe, and only on its yes, the GL environment |
 | What it said | `LinuxGpu.reportVerdict` | the session's `gpu:` line, copied into the app's log |
-| The switch | `LauncherActivity.showLinuxMenu` | "Use the GPU" on the Linux tile, `filesDir/linux-gpu` |
+| The switch | `LinuxSettingsActivity` | "Use the GPU" on the Linux settings page: the desktop's Linux tile menu opens it, and so does LinuxOnDroid's home screen menu; `filesDir/linux-gpu` |
 
 ```
 Linux app ──GL──▶ Ubuntu's Mesa: Zink ──Vulkan──▶ Turnip (ours) ──ioctl──▶ /dev/kgsl-3d0 ──▶ Adreno
@@ -244,7 +244,8 @@ the phone's desktop; the GPU runs had the three variables and
 any of it.
 
 Before it had this driver, the S24 was the check that a phone without one is
-left alone: no "Use the GPU" in the menu, nothing copied into the guest, no
+left alone: no "Use the GPU" in the desktop's menu (today the Linux settings
+page shows it greyed, with the reason), nothing copied into the guest, no
 probe, no `gpu:` line, and none of the 34 processes of the two sessions with a
 GL variable. Linux had never run on it before that: it first needed the proot
 fix in `openandroiddex-linux/proot/README.md`.

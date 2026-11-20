@@ -339,7 +339,8 @@ public class LinuxRemoteActivity extends Activity {
             } else if (!usable) {
                 card.addView(note(s(R.string.rm_linux_installing), theme.textDim));
             } else if ("failed".equals(snap.status.ssh)) {
-                card.addView(note(s(R.string.rm_ssh_failed), theme.danger));
+                card.addView(note(s(Linux.sharedFolderOffered(this) ? R.string.rm_ssh_failed
+                        : R.string.rm_ssh_failed_noshare), theme.danger));
             } else if ("starting".equals(snap.status.ssh) || "down".equals(snap.status.ssh)) {
                 card.addView(note(s(R.string.rm_ssh_starting), theme.textFaint));
             }
@@ -413,9 +414,13 @@ public class LinuxRemoteActivity extends Activity {
 
         LinearLayout text = new LinearLayout(this);
         text.setOrientation(LinearLayout.VERTICAL);
-        text.setPadding(dp(12), 0, dp(8), 0);
+        // Relative: LinuxOnDroid lays out right to left in Arabic.
+        text.setPaddingRelative(dp(12), 0, dp(8), 0);
         TextView name = new TextView(this);
         name.setText(p.name.isEmpty() ? LinuxRemote.shortId(p.id) : p.name);
+        // On the language's side: a computer called "Laptop" in an Arabic list
+        // sits on the right with the rest, not on the left by its own letters.
+        DexLocale.followLayout(name);
         name.setTextColor(theme.text);
         name.setTextSize(TypedValue.COMPLEX_UNIT_PX, sp(14));
         text.addView(name);
@@ -442,6 +447,7 @@ public class LinuxRemoteActivity extends Activity {
             sub.setTextColor(theme.textFaint);
         }
         sub.setTextSize(TypedValue.COMPLEX_UNIT_PX, sp(11.5f));
+        DexLocale.followLayout(sub);
         text.addView(sub);
         row.addView(text, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
 
@@ -554,7 +560,7 @@ public class LinuxRemoteActivity extends Activity {
         LinearLayout.LayoutParams blp = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         blp.topMargin = dp(12);
-        blp.rightMargin = dp(8);
+        blp.setMarginEnd(dp(8));
         buttons.addView(button(s(R.string.rm_done), theme.hover, theme.text, () -> {
             shownSignature = "";
             pollHandler.post(() -> {
@@ -612,6 +618,7 @@ public class LinuxRemoteActivity extends Activity {
         text.addView(v);
         TextView c = new TextView(this);
         c.setText(caption);
+        DexLocale.followLayout(c);
         c.setTextColor(theme.textFaint);
         c.setTextSize(TypedValue.COMPLEX_UNIT_PX, sp(11.5f));
         text.addView(c);

@@ -3336,15 +3336,11 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
         if (LinuxRemote.available(this)) {
             menu.getMenu().add(0, 7, 3, getString(R.string.ln_remote_menu));
         }
-        // GL on the phone's GPU (doc/linux-gpu.md). Only where it can work,
-        // an Adreno or an Xclipse: anywhere else there is nothing to switch,
-        // and a box that did nothing would be a lie. On by default; this is
-        // the way out for an app that draws wrongly on it.
-        if (LinuxGpu.available()) {
-            menu.getMenu().add(0, 8, 3, getString(R.string.ln_gpu_menu))
-                    .setCheckable(true)
-                    .setChecked(LinuxGpu.enabled(this));
-        }
+        // The same Settings page LinuxOnDroid has: Start Linux with the
+        // phone, and Use the GPU, which used to be a tick in this menu. The
+        // GPU switch shows on every phone there, greyed with the reason where
+        // there is no GPU we drive.
+        menu.getMenu().add(0, 9, 3, getString(R.string.ln_settings_menu));
         menu.getMenu().add(0, 4, 4, getString(R.string.ln_reinstall));
         // Only while there is something to remove. Offering "Uninstall" over a
         // container that is already gone is an action that would do nothing,
@@ -3371,17 +3367,36 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
                 chooseLinuxApps();
             } else if (id == 7) {
                 openLinuxRemote();
-            } else if (id == 8) {
-                // Read at every start, so a session already up keeps what it
-                // started with; the note says when the change lands.
-                boolean on = !LinuxGpu.enabled(this);
-                LinuxGpu.setEnabled(this, on);
-                Toast.makeText(this, getString(on ? R.string.ln_gpu_on : R.string.ln_gpu_off),
-                        Toast.LENGTH_LONG).show();
+            } else if (id == 9) {
+                openLinuxSettings();
             }
             return true;
         });
         menu.show();
+    }
+
+    /** Linux settings, freeform on this display like the Remote access window. */
+    private void openLinuxSettings() {
+        hideDrawer();
+        dismissPopups();
+        if (minimisedActivities.contains(LinuxSettingsActivity.class.getName())) {
+            sendBroadcast(new Intent(ACTION_RESTORE)
+                    .setPackage(getPackageName())
+                    .putExtra("pkg", getPackageName())
+                    .putExtra("activity", LinuxSettingsActivity.class.getName()));
+            return;
+        }
+        Intent intent = new Intent(this, LinuxSettingsActivity.class)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        ActivityOptions opts = shapeForDesktop(
+                ActivityOptions.makeBasic(),
+                desktopWindowRect(LinuxSettingsActivity.class, dp(520), dp(640)));
+        try {
+            startActivity(intent, opts.toBundle());
+        } catch (Exception e) {
+            DexLog.warn("linux", "cannot open the Linux settings window", e);
+            Toast.makeText(this, getString(R.string.ln_cannot_open), Toast.LENGTH_SHORT).show();
+        }
     }
 
     /**
@@ -3451,19 +3466,9 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
 
     /**
      * The shared folder, in an Android file manager, as a freeform window on
-     * this display like everything else the desktop launches.
-     *
-     * Named through ExternalStorageProvider rather than as a {@code file://}
-     * path: the launcher holds no storage permission by default (the folder
-     * deliberately needs none), so a file URI would open a manager that then
-     * shows nothing.
-     *
-     * The handler is RESOLVED rather than left implicit, for the reason
-     * TransferHud records: more than one app answers this on a Samsung phone,
-     * and the system chooser — launched into a freeform window on a secondary
-     * display — opens and closes again without ever showing anything. With no
-     * concrete handler we say where the folder is instead of firing an intent
-     * that would vanish.
+     * this display like everything else the desktop launches. Which file
+     * manager, and why it is chosen rather than left to the system, is
+     * {@link Linux#sharedFolderIntent}'s business; placing the window is ours.
      */
     private void openSharedFolder() {
         dismissPopups();
@@ -3476,40 +3481,8 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
             requestAllFilesAccess();
             return;
         }
-        Uri uri = DocumentsContract.buildDocumentUri(
-                "com.android.externalstorage.documents", "primary:" + Linux.SHARED_NAME);
-        Intent intent = new Intent(Intent.ACTION_VIEW)
-                .setDataAndType(uri, DocumentsContract.Document.MIME_TYPE_DIR)
-                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION
-                        | Intent.FLAG_ACTIVITY_NEW_TASK);
-        ComponentName target = null;
-        try {
-            ComponentName fallback = null;
-            for (ResolveInfo ri : getPackageManager().queryIntentActivities(intent, 0)) {
-                if (ri.activityInfo == null) continue;
-                String pkg = ri.activityInfo.packageName;
-                if ("android".equals(pkg)) continue;
-                ComponentName cn = new ComponentName(pkg, ri.activityInfo.name);
-                // NOT the head of the list, unlike TransferHud's version of
-                // this: that intent carries no URI, and this one carries a
-                // document URI that MANAGE_DOCUMENTS protects. We cannot grant
-                // read on a URI we do not own, so handing it to whichever app
-                // happens to answer first opens a window onto nothing. The
-                // documents UI and Samsung's My Files are the two that hold it.
-                if (pkg.contains("documentsui") || pkg.contains("myfiles")) {
-                    target = cn;
-                    break;
-                }
-                if (fallback == null) fallback = cn;
-            }
-            if (target == null) target = fallback;
-        } catch (Exception e) {
-            DexLog.warn("linux", "cannot resolve a file manager for the shared folder", e);
-        }
-        DexLog.step("linux", "open shared folder " + dir + " → "
-                + (target != null ? target.flattenToShortString() : "no handler"));
-        if (target != null) {
-            intent.setComponent(target);
+        Intent intent = Linux.sharedFolderIntent(this);
+        if (intent != null) {
             ActivityOptions opts = shapeForDesktop(
                     ActivityOptions.makeBasic(), desktopWindowRect(dp(900), dp(640)));
             try {
@@ -3580,7 +3553,9 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
                 .setNegativeButton(getString(R.string.st_cancel), null)
                 .setPositiveButton(getString(R.string.ln_uninstall_go), (d, w) -> {
                     LinuxService.uninstall(this);
-                    Toast.makeText(this, getString(R.string.ln_uninstall_done),
+                    // Started, not done: the wipe waits its turn on the
+                    // service's queue, and an install has to stop first.
+                    Toast.makeText(this, getString(R.string.ln_uninstall_started),
                             Toast.LENGTH_LONG).show();
                 })
                 .show();
@@ -6559,6 +6534,9 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
             } else if (LinuxRemoteActivity.class.getName().equals(activity)) {
                 label = getString(R.string.rm_label);
                 glyph = "📡";
+            } else if (LinuxSettingsActivity.class.getName().equals(activity)) {
+                label = getString(R.string.ln_settings_title);
+                glyph = "⚙"; // gear
             } else {
                 continue;
             }
@@ -6585,6 +6563,8 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
                     launchFileTransfer();
                 } else if (LinuxRemoteActivity.class.getName().equals(target)) {
                     openLinuxRemote();
+                } else if (LinuxSettingsActivity.class.getName().equals(target)) {
+                    openLinuxSettings();
                 } else {
                     launchSettings();
                 }

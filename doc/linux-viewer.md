@@ -559,6 +559,165 @@ window is instead. That question is asked of the WINDOW, not of the session: a
 desktop can be running with this window open on the phone, and there the right
 answer is to raise it.
 
+**LinuxOnDroid opens on a home screen; the desktop never does.** In the
+standalone app the icon opens `LinuxHomeActivity`, which shows what Linux is
+doing (not installed, installing, failed, ready, running, being removed) and
+starts it with one button. That button goes through
+`LinuxAppActivity.openWindow`, the same way in as the icon above, uninstall
+marker and desktop-display check included. Only linuxapp's manifest declares
+the home screen. The desktop's tile and the launcher's own "LinuxOnDroid" icon
+still open this window at once, and LinuxOnDroid keeps `LinuxAppActivity`
+exported with no intent filter, as the way in that skips its home screen: the
+notification uses it, and a DeX desktop can, by name.
+
+What the home screen asks of this window, and what it keeps away from it:
+
+- **A session that ends by itself goes back to the home screen.** After a
+  logout, a crash or Android closing the session, the desktop's window stops on a
+  screen saying so, with a Start of its own. LinuxOnDroid's does not: it closes
+  (`backToHome`) and brings the home screen forward, which says how the session
+  ended in this window's words, with How to fix when Android closed it. It closes
+  without the STOP every other close sends, because a stop deletes `rt.exit`,
+  which is what the home screen reads. A window that sees its session end from
+  behind another app closes without bringing anything forward.
+- **Start sends `EXTRA_START`.** With the extra (in `onCreate`, or `onNewIntent`
+  on a window already open) the window goes straight to a fresh session over an
+  ended one, as the ended screen's button would, and drops the extra so a
+  rebuilt window does not restart a session that ended again.
+- **Android's child-process limit is at the top of the home screen.** The card
+  ("Android may close Linux") shows on Android 12 and later while
+  `ChildProcessLimit.state` reads on, before any install, since the limit stops
+  installs as well as desktops. How to fix opens the explanation other Linux apps
+  give for "signal 9". It covers the Developer options switch, and that some
+  Samsung and other phones name it differently or keep it under Feature flags.
+  It also covers the computer app that switches the limit off, and the three adb
+  commands with a Copy button. Its button goes to Developer options, or to About
+  phone when they are off. Hide is remembered, because a cap raised over adb
+  still reads as on.
+- **Add apps never opens this window.** The home screen asks in a sheet of its
+  own, from the same table (`Linux.OPTIONAL_APPS`, `appNameRes`, `appSubRes`),
+  and answers with the tick list and a provision, as the chooser's Install does.
+  A window opened only to ask the question would own the session the way every
+  window here does, so closing it, even with nothing ticked, stopped a session
+  that a computer had started while the question was up.
+- **Running means the runtime's own process is alive.** `rt.pid` outlives a
+  runtime killed with its process, and any later start of the service (remote
+  access coming back) brings a new `:linux` up beside it, possibly with the same
+  pid, so no pid is compared anywhere. `:linux` holds an exclusive lock on
+  `files/linux-rt.lock` (`RuntimeLock`) from just before it spawns the runtime
+  until its watcher sees that process exit, and the kernel drops the lock if
+  `:linux` dies. The home screen calls the desktop running only while `rt.pid` is
+  there and that lock is held. It asks with a shared lock for an instant, from
+  its own process: `:linux` must never open the file anywhere else, because
+  closing any descriptor of a file drops the process's lock on it. A service
+  starting in a `:linux` with no runtime of its own up or on its way drops any
+  `rt.pid` it finds, under the lock's guard so that a spawn in flight in the
+  same process is never dropped. An app cannot read another process's `/proc`,
+  so a pid-plus-start-time check would never pass.
+- **Shut down goes through this window** when one is open (`shutdownIfOpen`),
+  because its next poll would otherwise see no runtime and start one.
+- **Uninstall is reported when it is done, and only then.** `LinuxService.uninstall`
+  sets a `linux-removing` marker before it sends. The service clears it only when
+  the wipe has left nothing, which `TreeDelete` checks by measuring what is left
+  after its walk. That walk lstats each entry and never follows a link. It gives
+  a directory u+rwx back before it lists and empties it (Go's module cache is
+  0555, for one). A second pass with toybox `rm -rf` reaches paths longer than
+  an absolute path may be. The container is moved to a fresh
+  `linux-deleting-<time>` first and every trash folder is retried at each wipe.
+  A reset never deletes the live tree in place: if the move fails, it writes
+  `reset-failed`, and Retry runs the reset again (`LinuxService.retry`).
+- **A removal that leaves something stays a removal.** The marker stays, and
+  `linux-remove-failed` records the bytes, the count and the first error.
+  This window and the home screen say "Linux was not fully removed", with the
+  size and Try again, and a notification offers the same. The home screen does
+  not resend it by itself. Any start of the service tries again, and so does
+  `LinuxService.provision`, which every way in calls: the desktop 3 s into its
+  start, this window, the home screen. So does `RemoteResumeReceiver`, on a
+  boot, an update or a desktop session's end. Nothing else would ever finish an
+  interrupted removal: the marker holds provisioning off, and the uninstall
+  switched remote access off first. While the marker is down this window shows
+  the removal instead of "Waiting for the install to start".
+- **A wipe never waits for the network.** The rootfs download reads on a thread
+  of its own. The service's io thread waits for it a quarter second at a time,
+  and on a reset or an uninstall abandons it: its file is closed and its
+  connection disconnected off the main thread. A read stalled for up to the 60 s
+  read timeout, or a connect that never answers, no longer holds the wipe up.
+  Otherwise a reset or an uninstall stops an install in flight (the setup run is
+  killed), a provision queued ahead of the wipe stands aside, and `idleStop`
+  keeps the service up while a wipe is still queued.
+- **No desktop directions in LinuxOnDroid.** Where a shared screen points the user
+  somewhere, `Linux.hasHomeScreen` picks the standalone words: Skip's "add it later
+  with Add apps in LinuxOnDroid" instead of "right-click Linux", and the
+  shared-folder question's "Android closes LinuxOnDroid" instead of "the desktop
+  restarts".
+- **Settings is a page of its own, in both apps.** LinuxOnDroid's home screen
+  menu starts with Settings (`LinuxSettingsActivity`), above Reinstall,
+  Uninstall and the privacy policy, and the page wears the home screen's
+  colours. The desktop's Linux tile menu has Linux settings… in place of the
+  Use the GPU tick it had, and opens the same page as a window of its own
+  (named "Linux settings", listed on the taskbar like the desktop's other
+  windows, in the desktop's light, dark or paper theme, with Back left to the
+  window's bar). CaptionService draws that bar only for the launcher's windows
+  it names in `isDesktopTask` and takes every other task of the package for
+  the desktop itself, so a new window of ours must be added there too, or it
+  opens with no bar, no Back and no close. It holds two switches:
+  - **Use the GPU**, which was a tile on the home screen. On a phone whose GPU
+    has no driver here it is shown greyed, with the reason, instead of left out.
+  - **Start Linux with the phone** (`LinuxBoot`). On BOOT_COMPLETED,
+    `RemoteResumeReceiver` starts the desktop with no window
+    (`LinuxService.ACTION_BOOT_START`): the size it last had, sound off until a
+    window opens, and "LinuxOnDroid" on the notification from its first moment.
+    Android does not let an app open a window at boot; the home screen shows the
+    desktop as running and Open goes straight into it. Nothing starts if Linux is
+    not installed, is still installing, has an update to bring in first, or is
+    being removed. A boot only: not an update, not a desktop session's clean-up.
+    Android 15 and later also send BOOT_COMPLETED to a force-stopped app when it
+    is next opened, so each start is recorded against `Settings.Global.BOOT_COUNT`
+    (the boot's wall-clock time on a phone without it), and switching it on
+    records the boot already running. If Android or a phone maker's rules
+    refuse the start, with an exception or quietly (a restricted app's start
+    comes back null, and `LinuxService.start` counts that as a refusal too), a
+    notification says Linux did not start; tapping it opens the Linux window,
+    which starts Linux, since a start from the notification could be refused
+    for the same reason. The page links to the app's info page, where those
+    rules live.
+- **The Play build has no shared folder, and nothing points at one.**
+  `Linux.sharedFolderOffered` reads the merged manifest and answers no when it
+  cannot, rather than yes. `WebFiles.requestAllFiles`, the one way to the All
+  files access screen, refuses in such a build whoever calls it. The words that
+  name the folder have a version without it: the uninstall question
+  (`ln_uninstall_body_noshare`), the Removing screen on the home screen and in
+  this window (`hm_removing_sub_noshare`), Remote access's "SSH server would
+  not start" (`rm_ssh_failed_noshare`), and the install step the setup script
+  calls `share`, which in that build only sets the desktop's icons up
+  (`ln_step_desktop_icons`). `linux-setup.sh` is told by
+  `LINUX_SHARED_OFFERED=0` to write no Thunar and GTK bookmark to
+  `~/Desktop/LinuxOnDeX`, and to take out one of ours that is there; unset, as in
+  a bare shell run, it writes it as before.
+- **The viewer page is in the window's language.** The page is served from inside
+  the guest, out of reach of Android's resources, so the window writes its words
+  beside it as `dex-text-<lang>.json` (`LinuxViewerText`, from the `vw_*`
+  strings) and adds `&lang=<lang>` to the URL. dex.js loads them before it boots
+  and fills every element marked `data-t`, `data-t-title` or `data-t-aria`, and
+  its own `TEXT` table. English, or a file that does not come within 2 s, leaves
+  the page as written; a computer's page is never given a language, since the
+  computer app is in English. A file that comes later still translates the
+  page, and then `relabel` paints every label the script keeps up to date (the
+  status word, the method, the keyboard, fullscreen, the clipboard, the zoom,
+  the sheet's footnote) again from what is true at that moment, so a page that
+  has connected never goes back to saying "Connecting". In Arabic the sheet and the tips run right to left
+  while the bar, a row of pictures placed by coordinates, does not, and the speed
+  slider stays left to right so "slower on the left" stays true. `#status` is
+  never translated: it is the health probe's contract above. The keys row keeps
+  its keycaps (Esc, Ctrl, Alt, Del).
+
+The install's step words are translated (`msgText`, in this window and on the
+home screen alike), with `msgWords`' plain English for any word a newer script
+sends that this build does not know. LinuxOnDroid declares `supportsRtl`, so in
+Arabic every screen it shows is laid out right to left, this one included;
+`DexLocale.followLayout` puts Latin names such as "Firefox" on the layout's side.
+The desktop build does not declare it, so none of this changes there.
+
 **The phone's window opens as a trackpad.** `&ctx=phone` in the viewer URL makes
 Mouse the default there and Direct the default on the desktop display — see
 "Three interaction methods" above for why, and for what happens to a method the

@@ -374,6 +374,20 @@
             android:resizeableActivity="true"
             android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|navigation|uiMode" />
 
+        <!-- Linux settings: Start Linux with the phone, and Use the GPU. Opened
+             from the Linux tile's menu as a window of its own, beside the
+             Linux window rather than in it, like Remote access above. The
+             same page LinuxOnDroid opens from its home screen. -->
+        <activity
+            android:name=".LinuxSettingsActivity"
+            android:exported="false"
+            android:icon="@mipmap/ic_linux"
+            android:label="@string/ln_settings_title"
+            android:launchMode="singleTask"
+            android:taskAffinity="com.ccrstech.openandroiddex.launcher.linuxsettings"
+            android:resizeableActivity="true"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|navigation|uiMode" />
+
         <!-- In-desktop Docker window (the container list, the image list and
              the VM's serial console). Same task rules as Settings and Linux,
              for the same reasons: singleTask so the tile refocuses the open

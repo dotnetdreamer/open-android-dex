@@ -533,7 +533,7 @@ body.keys .coach, body.keys .toast { bottom: calc(var(--keyrow) + var(--kb-h) + 
   gap: 12px;
   width: 100%;
   padding: 13px 14px;
-  text-align: left;
+  text-align: start;   /* right-aligned in a right-to-left language (dex.js, applyText) */
   background: var(--surface-2);
   border: 1px solid var(--line);
   border-radius: var(--r-lg);
@@ -555,7 +555,9 @@ body.keys .coach, body.keys .toast { bottom: calc(var(--keyrow) + var(--kb-h) + 
   font-size: 11.5px;
   color: var(--faint);
 }
-.opt-list span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* Wrapped rather than cut off: in English every line fits a phone's sheet,
+   and in some of the window's other languages they do not. */
+.opt-list > span { overflow-wrap: anywhere; }
 .opt-list b { color: var(--dim); font-weight: 500; }
 @media (max-width: 380px) { .opt-list { grid-template-columns: 1fr; } }
 

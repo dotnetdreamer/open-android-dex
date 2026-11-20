@@ -44,7 +44,18 @@ android {
         // proot needs a directory it can write.
         applicationId "com.ccrstech.linuxondroid"
         minSdk 26
-        targetSdk 35
+        // 36, one above :app, because this is the build that goes to Play, and
+        // since 31 August 2026 Play refuses a new app or an update that targets
+        // less than Android 16 (API 36). :app ships over adb and stays at 35.
+        //
+        // What 36 changes for this app, checked against the sources: Back.
+        // Android 16+ stops calling onBackPressed for a target-36 app, and
+        // LinuxActivity's Back is the "keep Linux running?" question, so the
+        // manifest opts out (enableOnBackInvokedCallback="false", see there).
+        // Edge to edge was already enforced at 35 (no theme opts out), nothing
+        // here locks orientation or resizability, and elegantTextHeight is
+        // never set, so the rest of Android 16's target changes are moot.
+        targetSdk 36
         versionCode appConfig.versionCode
         versionName appConfig.versionName
 
@@ -129,6 +140,26 @@ dependencies {
     // all because the Web viewer's sources are part of the tree this module
     // reuses and they must still compile.
     implementation 'io.github.webrtc-sdk:android:144.7559.12'
+}
+
+// The Play build's package: com.dotnetdreamer.linuxondroid, which is what the
+// app's Play Console entry was created with, and a Play entry's package can
+// never change. Release builds only, which are exactly what goes to Play (see
+// .github/workflows/android.yml); debug builds, the GitHub APK and what the
+// desktop app installs among them, stay com.ccrstech.linuxondroid.
+//
+// So the two are different apps on a phone and can both be installed, each
+// with its own container (the defaultConfig note above applies between them
+// too). Nothing in the code names the package: the manifest's task affinities
+// are built from ${applicationId}, and Linux.hasHomeScreen asks the manifest
+// for a component, not for a package name.
+//
+// Set here rather than as a product flavour for the reason at the top of this
+// file: a flavour would rename :linuxapp:assembleDebug, which desktop.yml runs.
+androidComponents {
+    onVariants(selector().withBuildType('release')) { variant ->
+        variant.applicationId.set('com.dotnetdreamer.linuxondroid')
+    }
 }
 
 // Same key as :app — see release-signing.gradle. Applied last, because it

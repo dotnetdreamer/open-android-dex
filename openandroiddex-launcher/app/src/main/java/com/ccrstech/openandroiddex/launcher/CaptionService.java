@@ -704,7 +704,9 @@ public final class CaptionService extends AccessibilityService {
      * desktop still wearing One UI's own title bar. Settings runs in its own
      * task (see its taskAffinity in the manifest), so the activity name tells
      * the two apart — and the Linux window is exempted the same way, for the
-     * same reason.
+     * same reason. Every window of ours that the taskbar lists (OwnWindows)
+     * has to be here too, or it opens with no bar, and so no Back and no ✕:
+     * Linux settings did, until it was added.
      */
     private boolean isDesktopTask(WmClient.Task t) {
         return getPackageName().equals(t.pkg)
@@ -714,6 +716,7 @@ public final class CaptionService extends AccessibilityService {
                 && !TaskManagerActivity.class.getName().equals(t.activity)
                 && !FileTransferActivity.class.getName().equals(t.activity)
                 && !LinuxRemoteActivity.class.getName().equals(t.activity)
+                && !LinuxSettingsActivity.class.getName().equals(t.activity)
                 && !LinuxWindowActivity.class.getName().equals(t.activity);
     }
 

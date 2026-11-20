@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The Play build only: release variants merge this over src/main's manifest.
+
+  It takes MANAGE_EXTERNAL_STORAGE ("All files access") out. Play allows that
+  permission only for apps whose core purpose is file management, backup and
+  restore, antivirus, document management, on-device search, encryption or
+  phone transfer, and a Linux container is none of them, so declaring it would
+  fail review. The only thing it serves here is the shared folder, so the Play
+  build goes without that folder: Linux.sharedFolderOffered reads this APK's
+  merged manifest and the home screen drops the tile and the line about it.
+
+  Debug builds keep the permission and the folder. They are the LinuxOnDroid
+  APK on the GitHub releases (desktop.yml builds :linuxapp:assembleDebug) and
+  what the desktop app pushes, neither of which goes near Play.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <uses-permission
+        android:name="android.permission.MANAGE_EXTERNAL_STORAGE"
+        tools:node="remove" />
+
+</manifest>

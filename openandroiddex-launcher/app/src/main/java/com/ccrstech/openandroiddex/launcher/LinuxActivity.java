@@ -128,6 +128,18 @@ public class LinuxActivity extends Activity {
      * is shown once, before the first install, and never again.
      */
     static final String EXTRA_CHOOSE_APPS = "choose_apps";
+    /**
+     * The user pressed Start: LinuxOnDroid's home screen sends this with its
+     * Start Linux button. A session that ended by itself (a logout, a crash,
+     * Android closing it) normally holds this window on a screen that says so,
+     * with a Start button of its own, so the poll does not boot a desktop
+     * nobody asked for. Behind a Start that was just pressed, that screen is a
+     * second tap for the same wish, so with this the window goes straight to a
+     * fresh session, as that screen's button would. Taken once, then dropped
+     * from the intent, so a window rebuilt later does not restart a session
+     * that has ended again since.
+     */
+    static final String EXTRA_START = "start";
 
     private DexTheme theme;
     /** Off-main thread for the status poll (it reads files, not a socket). */
@@ -331,6 +343,9 @@ public class LinuxActivity extends Activity {
         DexCursors.decorate(root);
         chooserForced = getIntent() != null
                 && getIntent().getBooleanExtra(EXTRA_CHOOSE_APPS, false);
+        // Not on a rebuild: the extra is dropped once taken, and a window
+        // brought back from a saved state has had its Start already.
+        if (savedInstanceState == null) takeStart(getIntent());
         // Kick provisioning ourselves — the app owns it now, no PC push. Safe
         // and idempotent: the service no-ops if the distro is already installed
         // AND already carries this build's features, and it stays out of the
@@ -383,7 +398,10 @@ public class LinuxActivity extends Activity {
         // so a Display size change destroys and recreates it — and stopping
         // there would kill a live Ubuntu session because the user moved a
         // slider in Settings.
-        if (!isChangingConfigurations()) LinuxService.stop(this);
+        // Nor when closing for the home screen after the session ended by
+        // itself: there is nothing to stop, and a stop would delete the
+        // rt.exit that screen reads (backToHome).
+        if (!isChangingConfigurations() && !leavingForHome) LinuxService.stop(this);
     }
 
     /**
@@ -424,6 +442,9 @@ public class LinuxActivity extends Activity {
     protected void onNewIntent(Intent intent) {
         super.onNewIntent(intent);
         setIntent(intent);
+        // The home screen's Start, reaching a window that is already open,
+        // which is where an ended session's screen is most often sitting.
+        takeStart(intent);
         if (intent == null || !intent.getBooleanExtra(EXTRA_CHOOSE_APPS, false)) return;
         chooserForced = true;
         showAppChooser();
@@ -452,6 +473,18 @@ public class LinuxActivity extends Activity {
         if (destroyed) return;
         if (st == null) return;
 
+        // An uninstall under way, or one that stopped with files left: ahead
+        // of everything, since nothing below can make progress until it is
+        // done (the removing marker holds provisioning off), and every screen
+        // below would say something untrue about a container being deleted —
+        // "Waiting for the install to start" was what this one said. Opening
+        // this window asked the service to finish it (onCreate's provision).
+        // When it is done, the uninstalled branch below closes the window.
+        if (Linux.isRemoving(this)) {
+            showRemoving(Linux.removeFailure(this));
+            return;
+        }
+
         // Ahead of every branch below, because none of them can make progress
         // while this is true: with no choice made, provisioning is deliberately
         // inert, so the window would sit on "waiting for the install to start"
@@ -476,7 +509,7 @@ public class LinuxActivity extends Activity {
         }
 
         if ("error".equals(st.phase) && !retryPending) {
-            showError(s(R.string.ln_error), msgWords(st), st.step);
+            showError(s(R.string.ln_error), msgText(this, st), st.step);
             return;
         }
 
@@ -488,6 +521,15 @@ public class LinuxActivity extends Activity {
             // otherwise. The "no runtime? start one" rule below is what made a
             // logout boot a fresh desktop a second later.
             if (!st.running && st.sessionEnded && !sessionRestartPending) {
+                // LinuxOnDroid goes back to its home screen, which says how the
+                // session ended (logged out, broke, Android closed it, with
+                // Developer options for that) and has the Start for the next
+                // one. A screen of this window's own would say it a second time,
+                // a tap further from that Start. The desktop has no home screen.
+                if (Linux.hasHomeScreen(this)) {
+                    backToHome(st);
+                    return;
+                }
                 if (ChildProcessLimit.killedByLimit(this, st)) {
                     showKilled();
                     return;
@@ -794,21 +836,43 @@ public class LinuxActivity extends Activity {
      */
     private void retryProvision() {
         if (connectFailed || Linux.rtExit(this).exists()) {
-            connectFailed = false;
-            // The stop below clears rt.exit, but asynchronously — hold the
-            // ended screen off until the poll actually sees it gone.
-            sessionRestartPending = true;
-            vncConnected = false;
-            loadTries = 0;
-            startSentAt = 0;
-            uiState = UI_NONE;
-            shownActionTitle = null;
-            LinuxService.stop(this);
-            enterStarting();
+            restartSession();
             return;
         }
-        LinuxService.provision(this);
+        LinuxService.retry(this);
         leaveErrorForInstall();
+    }
+
+    /**
+     * A fresh session in place of one that ended, or one the viewer could not
+     * reach: stop what is there and let the poll boot a new one.
+     */
+    private void restartSession() {
+        connectFailed = false;
+        // The stop below clears rt.exit, but asynchronously — hold the
+        // ended screen off until the poll actually sees it gone.
+        sessionRestartPending = true;
+        vncConnected = false;
+        loadTries = 0;
+        startSentAt = 0;
+        uiState = UI_NONE;
+        shownActionTitle = null;
+        LinuxService.stop(this);
+        enterStarting();
+    }
+
+    /**
+     * {@link #EXTRA_START}, if this intent carries it: a session that ended is
+     * restarted at once instead of being reported. Only an ENDED one, which is
+     * what rt.exit marks: a session that is up is simply shown, and with no
+     * session at all the poll starts one anyway.
+     */
+    private void takeStart(Intent intent) {
+        if (intent == null || !intent.getBooleanExtra(EXTRA_START, false)) return;
+        intent.removeExtra(EXTRA_START);
+        if (!Linux.rtExit(this).exists()) return;
+        DexLog.step("linux", "Start pressed over an ended session: starting a fresh one");
+        restartSession();
     }
 
     /**
@@ -978,6 +1042,20 @@ public class LinuxActivity extends Activity {
         }
     }
 
+    /**
+     * Shut Linux down through the open window, if there is one. LinuxOnDroid's
+     * home screen asks this first: stopping the service alone would leave a
+     * window whose very next poll sees no runtime and starts one again.
+     *
+     * @return false when there is no window, and stopping is the caller's to do
+     */
+    static boolean shutdownIfOpen() {
+        LinuxActivity a = live == null ? null : live.get();
+        if (a == null || a.isDestroyed() || a.isFinishing()) return false;
+        a.shutdownAndFinish();
+        return true;
+    }
+
     /** Stop the container for real, then close the viewer. */
     private void shutdownAndFinish() {
         DexLog.step("linux", "shutdown requested");
@@ -1056,13 +1134,13 @@ public class LinuxActivity extends Activity {
         listLp.gravity = Gravity.CENTER_HORIZONTAL;
         column.addView(list, listLp);
 
-        appOption(list, "firefox", R.string.ln_apps_firefox, R.string.ln_apps_firefox_sub, go);
-        appOption(list, "chromium", R.string.ln_apps_chromium, R.string.ln_apps_chromium_sub, go);
-        appOption(list, "code", R.string.ln_apps_code, R.string.ln_apps_code_sub, go);
-        appOption(list, "git", R.string.ln_apps_git, R.string.ln_apps_git_sub, go);
-        appOption(list, "nodejs", R.string.ln_apps_node, R.string.ln_apps_node_sub, go);
-        appOption(list, "gimp", R.string.ln_apps_gimp, R.string.ln_apps_gimp_sub, go);
-        appOption(list, "intellij", R.string.ln_apps_intellij, R.string.ln_apps_intellij_sub, go);
+        // Linux.OPTIONAL_APPS is the order and appNameRes / appSubRes the
+        // words, here and on LinuxOnDroid's home screen alike, so a new app is
+        // one row in each table and not a second copy of this list to keep true.
+        for (String id : Linux.OPTIONAL_APPS) {
+            if (appNameRes(id) == 0) continue;
+            appOption(list, id, appNameRes(id), appSubRes(id), go);
+        }
 
         go.setText(goLabel());
         go.setOnClickListener(v -> {
@@ -1124,7 +1202,9 @@ public class LinuxActivity extends Activity {
         LinearLayout row = new LinearLayout(this);
         row.setOrientation(LinearLayout.HORIZONTAL);
         row.setGravity(Gravity.CENTER_VERTICAL);
-        row.setPadding(dp(8), dp(9), dp(12), dp(9));
+        // Relative: LinuxOnDroid lays out right to left in Arabic, and there
+        // the box is on the right. The desktop build is left to right only.
+        row.setPaddingRelative(dp(8), dp(9), dp(12), dp(9));
         row.setBackground(tapBackground(0x00000000, theme.hover, 10));
 
         final android.widget.CheckBox box = new android.widget.CheckBox(this);
@@ -1142,18 +1222,22 @@ public class LinuxActivity extends Activity {
         name.setTextColor(theme.text);
         name.setTextSize(TypedValue.COMPLEX_UNIT_PX, sp(13.5f));
         name.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        // The language's side, not the name's: "Firefox" over an Arabic line
+        // would otherwise sit on the left, away from its box.
+        DexLocale.followLayout(name);
         labels.addView(name);
         TextView sub = new TextView(this);
         sub.setText(s(subRes));
         sub.setTextColor(theme.textFaint);
         sub.setTextSize(TypedValue.COMPLEX_UNIT_PX, sp(11.5f));
+        DexLocale.followLayout(sub);
         LinearLayout.LayoutParams subLp = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         subLp.topMargin = dp(1);
         labels.addView(sub, subLp);
         LinearLayout.LayoutParams labelsLp = new LinearLayout.LayoutParams(
                 0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
-        labelsLp.leftMargin = dp(6);
+        labelsLp.setMarginStart(dp(6));
         row.addView(labels, labelsLp);
 
         row.setOnClickListener(v -> {
@@ -1270,8 +1354,13 @@ public class LinuxActivity extends Activity {
     /** Skip, asked first: the step's app comes off the list, and the install goes on without it. */
     private void askSkip(String step, boolean fromError) {
         final String name = stepName(step);
-        confirmStep(getString(R.string.ln_step_skip_title, name),
-                getString(R.string.ln_step_skip_body, s(R.string.ln_apps_menu)),
+        // Where an app skipped now is added back later: the Linux tile's menu
+        // on the desktop, the home screen's Add apps in LinuxOnDroid, which
+        // has no tile and nothing to right-click.
+        String later = Linux.hasHomeScreen(this)
+                ? getString(R.string.ln_step_skip_body_app, s(R.string.hm_inside_add))
+                : getString(R.string.ln_step_skip_body, s(R.string.ln_apps_menu));
+        confirmStep(getString(R.string.ln_step_skip_title, name), later,
                 s(R.string.ln_step_skip_go), () -> {
                     LinuxService.skipStep(this, step);
                     if (fromError) leaveErrorForInstall();
@@ -1290,15 +1379,38 @@ public class LinuxActivity extends Activity {
 
     /** The name the chooser gives a step's app, for the buttons and the questions. */
     private String stepName(String step) {
-        switch (step) {
-            case "firefox": return s(R.string.ln_apps_firefox);
-            case "chromium": return s(R.string.ln_apps_chromium);
-            case "code": return s(R.string.ln_apps_code);
-            case "git": return s(R.string.ln_apps_git);
-            case "nodejs": return s(R.string.ln_apps_node);
-            case "gimp": return s(R.string.ln_apps_gimp);
-            case "intellij": return s(R.string.ln_apps_intellij);
-            default: return step;
+        int res = appNameRes(step);
+        return res != 0 ? s(res) : step;
+    }
+
+    /**
+     * The chooser's name for one of its apps, by id, or 0 for an id it does not
+     * offer. Also what LinuxOnDroid's home screen lists what is inside with.
+     */
+    static int appNameRes(String id) {
+        switch (id == null ? "" : id) {
+            case "firefox": return R.string.ln_apps_firefox;
+            case "chromium": return R.string.ln_apps_chromium;
+            case "code": return R.string.ln_apps_code;
+            case "git": return R.string.ln_apps_git;
+            case "nodejs": return R.string.ln_apps_node;
+            case "gimp": return R.string.ln_apps_gimp;
+            case "intellij": return R.string.ln_apps_intellij;
+            default: return 0;
+        }
+    }
+
+    /** The chooser's one line about each of its apps, by id; 0 for an id it does not offer. */
+    static int appSubRes(String id) {
+        switch (id == null ? "" : id) {
+            case "firefox": return R.string.ln_apps_firefox_sub;
+            case "chromium": return R.string.ln_apps_chromium_sub;
+            case "code": return R.string.ln_apps_code_sub;
+            case "git": return R.string.ln_apps_git_sub;
+            case "nodejs": return R.string.ln_apps_node_sub;
+            case "gimp": return R.string.ln_apps_gimp_sub;
+            case "intellij": return R.string.ln_apps_intellij_sub;
+            default: return 0;
         }
     }
 
@@ -1486,8 +1598,14 @@ public class LinuxActivity extends Activity {
         //
         // The ctx half is appended at every load rather than baked in here —
         // see vncUrl().
+        //
+        // lang: the page's words in this window's language, written beside
+        // it just now (LinuxViewerText); none for English, which is the page's
+        // own. A change of language rebuilds this window, and this with it.
+        String lang = LinuxViewerText.stage(this);
         vncBase = "http://127.0.0.1:" + st.port
-                + "/dex.html?password=" + st.pass + "&v=" + st.rtPid;
+                + "/dex.html?password=" + st.pass + "&v=" + st.rtPid
+                + (lang != null ? "&lang=" + lang : "");
         webView.setWebViewClient(new WebViewClient() {
             /** RUNNING=1 means the session leader is alive, not that websockify
              *  is accepting yet — the first load usually races it. Keep
@@ -1616,6 +1734,99 @@ public class LinuxActivity extends Activity {
                     // NOW (see vncUrl).
                     webView.loadUrl(vncUrl());
                 });
+    }
+
+    /** Closing for LinuxOnDroid's home screen after the session ended (backToHome). */
+    private boolean leavingForHome;
+    /** Between onResume and onPause: this window is the one on screen. */
+    private boolean resumedNow;
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        resumedNow = true;
+    }
+
+    @Override
+    protected void onPause() {
+        super.onPause();
+        resumedNow = false;
+    }
+
+    /**
+     * Close this window for LinuxOnDroid's home screen, after a session that
+     * ended by itself. Without the STOP that closing a window sends
+     * (onDestroy): nothing is left to stop, and a stop deletes rt.exit, the
+     * very file the home screen reads to say how the session ended. The home
+     * screen is brought forward only when this window is the one on screen.
+     * A window that saw its session end from behind another app just goes,
+     * and LinuxOnDroid opens on the home screen saying so.
+     */
+    private void backToHome(Linux.Status st) {
+        if (leavingForHome) return;
+        leavingForHome = true;
+        DexLog.step("linux", "session ended (exit " + st.sessionExit + "); back to the home screen"
+                + (resumedNow ? "" : ", from the background"));
+        if (resumedNow) {
+            try {
+                startActivity(new Intent(this, LinuxHomeActivity.class)
+                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+            } catch (Exception e) {
+                DexLog.warn("linux", "cannot bring the home screen back", e);
+            }
+        }
+        finish();
+    }
+
+    /** Try again on a removal that stopped: until then, as long as its run has not yet begun. */
+    private long removeAgainAt;
+    /** How long Try again shows Removing before the new run has cleared the failure. */
+    private static final long REMOVE_AGAIN_MS = 10_000;
+
+    /**
+     * Linux being removed, or a removal that stopped with files it could not
+     * delete. The first has nothing to press: the service is at it, and the
+     * window closes when it is done. The second says how much is left and
+     * offers Try again, which runs the removal again.
+     */
+    private void showRemoving(Linux.RemoveFailure failed) {
+        if (failed != null && removeAgainAt != 0
+                && SystemClock.uptimeMillis() - removeAgainAt < REMOVE_AGAIN_MS) {
+            failed = null; // asked again a moment ago: that run has yet to begin
+        }
+        String head = failed == null ? s(R.string.hm_removing_title) : s(R.string.ln_remove_failed_title);
+        if ("removing".equals(uiState) && head.equals(shownActionTitle)) return;
+        uiState = "removing";
+        shownActionTitle = head;
+        LinearLayout column = centeredColumn();
+        glyph(column);
+        title(column, head);
+        if (failed == null) {
+            subtext(column, s(Linux.sharedFolderOffered(this) ? R.string.hm_removing_sub
+                    : R.string.hm_removing_sub_noshare)).setMaxWidth(dp(360));
+            ProgressBar spin = new ProgressBar(this);
+            spin.setIndeterminateTintList(ColorStateList.valueOf(theme.accent));
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(dp(28), dp(28));
+            lp.topMargin = dp(18);
+            lp.gravity = Gravity.CENTER_HORIZONTAL;
+            column.addView(spin, lp);
+        } else {
+            subtext(column, getString(R.string.ln_remove_failed_sub,
+                    android.text.format.Formatter.formatShortFileSize(this, failed.bytes)))
+                    .setMaxWidth(dp(360));
+            TextView again = primaryButton(s(R.string.ln_remove_again), () -> {
+                DexLog.step("linux", "window: try the removal again");
+                removeAgainAt = SystemClock.uptimeMillis();
+                LinuxService.uninstall(this);
+                showRemoving(null);
+            });
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            lp.topMargin = dp(20);
+            lp.gravity = Gravity.CENTER_HORIZONTAL;
+            column.addView(again, lp);
+        }
+        present(column);
     }
 
     private void showError(String titleText, String detail) {
@@ -1848,8 +2059,101 @@ public class LinuxActivity extends Activity {
         }
         // How far through its step, when the script can tell: a line that
         // moves is the difference between a long step and one that looks hung.
-        String words = msgWords(st);
+        String words = msgText(this, st);
         return st.stepPct >= 0 ? words + " · " + st.stepPct + "%" : words;
+    }
+
+    /**
+     * state.env's MSG for people, in their language: one of the setup's own
+     * words, with the app or the package it names where it names one. A word
+     * this build has no entry for (a newer script's, say) falls back to
+     * {@link #msgWords}, the plain English every screen showed before.
+     */
+    static String msgText(Context ctx, Linux.Status st) {
+        String m = "-".equals(st.msg) ? st.phase : st.msg;
+        if (m == null) m = "";
+        int c = m.indexOf(':');
+        String verb = c < 0 ? m : m.substring(0, c);
+        String name = c < 0 ? "" : m.substring(c + 1).trim();
+        if (!name.isEmpty()) {
+            int res = namedStepRes(verb);
+            if (res != 0) return ctx.getString(res, stepSubject(ctx, name));
+        } else {
+            int res = stepRes(verb);
+            // The step is "share" in every build, but a build with no shared
+            // folder (Linux.sharedFolderOffered) only sets the desktop's icons
+            // up in it (linux-setup.sh, setup_share).
+            if (res == R.string.ln_step_share && !Linux.sharedFolderOffered(ctx)) {
+                res = R.string.ln_step_desktop_icons;
+            }
+            if (res != 0) return ctx.getString(res);
+        }
+        return msgWords(st);
+    }
+
+    /**
+     * A word from state.env, as LinuxService and linux-setup.sh write them
+     * (their writeState / state calls, apt_msg and fail): a step, or a reason
+     * the install stopped. A phase name stands in when MSG is "-".
+     */
+    private static int stepRes(String verb) {
+        switch (verb) {
+            case "pushing":
+            case "preparing": return R.string.ln_step_preparing;
+            case "resuming": return R.string.ln_step_resuming;
+            case "resetting": return R.string.ln_step_resetting;
+            case "downloading-ubuntu": return R.string.ln_step_download_ubuntu;
+            case "extract-proot": return R.string.ln_step_unpack_tools;
+            case "extracting":
+            case "extract-rootfs": return R.string.ln_step_unpack_ubuntu;
+            case "configuring":
+            case "configure": return R.string.ln_step_configure;
+            case "apt-update": return R.string.ln_step_apt_update;
+            case "apt-install": return R.string.ln_step_apt_install;
+            case "reading-package-lists": return R.string.ln_step_reading_lists;
+            case "resolving-dependencies": return R.string.ln_step_resolving;
+            case "installing-desktop": return R.string.ln_step_desktop;
+            case "vnc-setup": return R.string.ln_step_display;
+            case "sound": return R.string.ln_step_sound;
+            case "ssh": return R.string.ln_step_ssh;
+            case "install-browsers": return R.string.ln_step_browsers;
+            case "configure-browsers": return R.string.ln_step_browsers_config;
+            case "share": return R.string.ln_step_share;
+            case "vscode-url-handler": return R.string.ln_step_vscode_links;
+            case "dock": return R.string.ln_step_dock;
+            case "theme": return R.string.ln_step_theme;
+            case "ready": return R.string.ln_step_ready;
+            case "interrupted": return R.string.ln_step_interrupted;
+            case "download-failed": return R.string.ln_step_download_failed;
+            case "provision-failed": return R.string.ln_step_setup_failed;
+            case "reset-failed": return R.string.ln_step_reset_failed;
+            case "unsupported-abi": return R.string.ln_step_unsupported;
+            default: return 0;
+        }
+    }
+
+    /** A step with a name after its colon: "setting-up:libgtk-3-0t64", "preparing:firefox". */
+    private static int namedStepRes(String verb) {
+        switch (verb) {
+            case "downloading": return R.string.ln_step_downloading;
+            case "unpacking":
+            case "extracting": return R.string.ln_step_unpacking;
+            case "setting-up": return R.string.ln_step_setting_up;
+            case "finishing": return R.string.ln_step_finishing;
+            case "installing": return R.string.ln_step_installing;
+            case "preparing": return R.string.ln_step_preparing_app;
+            default: return 0;
+        }
+    }
+
+    /**
+     * What a step names: the chooser's own name for one of its apps (the
+     * script says "vscode" where the chooser says "code"), otherwise a package
+     * exactly as apt spells it, which is never translated.
+     */
+    private static String stepSubject(Context ctx, String name) {
+        int res = appNameRes("vscode".equals(name) ? "code" : name);
+        return res != 0 ? ctx.getString(res) : name;
     }
 
     /**
@@ -1862,7 +2166,7 @@ public class LinuxActivity extends Activity {
      * instead of one. No colon means the whole token is ours, and the old
      * blanket rule is still right for it.
      */
-    private static String msgWords(Linux.Status st) {
+    static String msgWords(Linux.Status st) {
         String m = "-".equals(st.msg) ? st.phase : st.msg;
         int c = m.indexOf(':');
         if (c < 0) return m.replace('-', ' ');

@@ -72,6 +72,11 @@ public class LinuxService extends Service {
     static final String ACTION_WIN_RUN = "com.ccrstech.openandroiddex.launcher.linux.WIN_RUN";
     /** End the window session, and every app in it. */
     static final String ACTION_WIN_STOP = "com.ccrstech.openandroiddex.launcher.linux.WIN_STOP";
+    /**
+     * Start the desktop with no window: "Start Linux with the phone" (see
+     * {@link LinuxBoot}), at the size it last had and with its sound off.
+     */
+    static final String ACTION_BOOT_START = "com.ccrstech.openandroiddex.launcher.linux.BOOT_START";
     static final String EXTRA_W = "w";
     static final String EXTRA_H = "h";
     static final String EXTRA_CODE = "code";
@@ -132,6 +137,19 @@ public class LinuxService extends Service {
     private volatile boolean runtimeUp;
     /** elapsedRealtime of the last spawn; see idleStop. */
     private volatile long runtimeSpawnedAt;
+    /**
+     * Wipes (a reset or an uninstall) sent to io and not yet finished.
+     *
+     * A wipe is queued like everything else, and io is a single thread, so
+     * without this one sent during an install waited out the whole install,
+     * which can be most of an hour, and only then deleted what it had just
+     * built. While this is above zero an install in flight is stopped
+     * (onStartCommand, runSetup, the download loop), a provision queued ahead
+     * of the wipe stands aside, and idleStop leaves the service up: the work
+     * still queued behind it would go with the service.
+     */
+    private final java.util.concurrent.atomic.AtomicInteger wipesQueued =
+            new java.util.concurrent.atomic.AtomicInteger();
     /** Newest start we have seen, so idleStop cannot cancel a start in flight. */
     private volatile int lastStartId;
 
@@ -151,6 +169,20 @@ public class LinuxService extends Service {
     static void provision(Context ctx) {
         final Context app = ctx.getApplicationContext();
         new Thread(() -> {
+            // An uninstall that was asked for and is not done: the process
+            // died in the middle of the wipe, or the start that asked for it
+            // never landed. Every way the app opens comes through here (the
+            // desktop 3 s into its start, the Linux window, the home screen),
+            // and nothing else would come back for it: the removing marker
+            // holds provisioning off, and the uninstall turned remote access,
+            // the one thing that restarts the service by itself, off first.
+            // So it is finished from here. A removal that is running already
+            // ignores the second ask (queueWipe).
+            if (Linux.isRemoving(app)) {
+                DexLog.step("linux", "an uninstall is not finished; asking the service to finish it");
+                send(app, ACTION_UNINSTALL, 0, 0);
+                return;
+            }
             // Linux.needsProvision answers false while the chooser has not been
             // through, which is what keeps the desktop's provision-on-launch
             // from starting a 1.5 GB download behind a question nobody has been
@@ -183,8 +215,31 @@ public class LinuxService extends Service {
         return send(ctx, ACTION_PROVISION, 0, 0);
     }
 
+    /**
+     * Finish an uninstall that was cut off: what RemoteResumeReceiver does on
+     * a boot, an update or the end of a desktop session, synchronously for the
+     * same reason {@link #resumeInstall} is.
+     *
+     * @return false when Android refused the start from where we are
+     */
+    static boolean finishRemoval(Context ctx) {
+        return send(ctx, ACTION_UNINSTALL, 0, 0);
+    }
+
     static void start(Context ctx, int w, int h) {
         send(ctx, ACTION_START, w, h);
+    }
+
+    /**
+     * The desktop, started at boot with nobody looking (LinuxBoot): no window
+     * to give it a size, so the size it last had, and no sound until a window
+     * opens. Synchronous, like {@link #resumeInstall}, because it is called
+     * from inside a broadcast.
+     *
+     * @return false when Android refused the start from where we are
+     */
+    static boolean bootStart(Context ctx) {
+        return send(ctx, ACTION_BOOT_START, 0, 0);
     }
 
     static void stop(Context ctx) {
@@ -196,8 +251,31 @@ public class LinuxService extends Service {
         send(ctx, ACTION_RESET, 0, 0);
     }
 
-    /** Throw the container away and leave the storage free. Not reversible. */
+    /**
+     * Try again, for an install that failed, as both screens send it: an
+     * install, except after a Reinstall that could not clear the old
+     * container, where it is the Reinstall again; an install there would build
+     * on the old guest.
+     */
+    static void retry(Context ctx) {
+        if ("reset-failed".equals(Linux.readStatus(ctx).msg)) {
+            reset(ctx);
+        } else {
+            provision(ctx);
+        }
+    }
+
+    /**
+     * Throw the container away and leave the storage free. Not reversible.
+     *
+     * The removing marker goes down here, before the intent, so that anything
+     * reading the container from now on sees an uninstall under way rather
+     * than whatever it was before. It stays until the wipe is done, and a
+     * start that could not be delivered is not lost: the next start of the
+     * service, for anything, finishes it (see onStartCommand).
+     */
     static void uninstall(Context ctx) {
+        Linux.setRemoving(ctx, true);
         send(ctx, ACTION_UNINSTALL, 0, 0);
     }
 
@@ -309,7 +387,15 @@ public class LinuxService extends Service {
 
     private static boolean start(Context ctx, Intent i) {
         try {
-            ctx.startForegroundService(i);
+            // null is a refusal too, and the quiet kind: ActiveServices drops
+            // a start of an app the user restricted in the background
+            // without an exception ("Background start not allowed"), and an
+            // answer of "started" would leave its caller waiting for a
+            // service that never comes, with nothing offered instead.
+            if (ctx.startForegroundService(i) == null) {
+                DexLog.warn("linux", "Android dropped the start of the service for " + i.getAction());
+                return false;
+            }
             return true;
         } catch (Exception e) {
             // Background-start restrictions can refuse this outright. Losing a
@@ -406,6 +492,34 @@ public class LinuxService extends Service {
             }
         });
         goForeground(getString(R.string.ln_installing));
+        dropStaleRuntime();
+    }
+
+    /**
+     * Forget a runtime that an earlier {@code :linux} process started.
+     *
+     * A runtime dies with the process that spawned it ({@link #runtimeAlive}),
+     * but its rt.pid stays on disk when that death was a kill: nothing gets to
+     * run the clean-up. Read by anyone after this process came up, that file
+     * says a desktop is running that is not.
+     *
+     * There is only ever one {@code :linux} process, so a service starting in
+     * one with no runtime of its own up or on its way knows every rt.pid it
+     * finds is a leftover. No pid is compared: the old rt.owner named the
+     * spawning process by pid, and a new process given the same number kept
+     * the leftover. The check and the drop run under RuntimeLock's guard, so
+     * a spawn by an earlier instance of this service in the same process (its
+     * io thread can outlive it) either counts as this process's runtime or
+     * writes its rt.pid after the drop, never before it.
+     */
+    private void dropStaleRuntime() {
+        final File dir = Linux.root(this);
+        RuntimeLock.unlessHeldHere(() -> {
+            boolean hadPid = new File(dir, "rt.pid").delete();
+            // rt.owner was written by a build between rt.pid and the lock.
+            new File(dir, "rt.owner").delete();
+            if (hadPid) DexLog.step("linux", "rt.pid of a runtime this process never started dropped");
+        });
     }
 
     @Override
@@ -414,15 +528,26 @@ public class LinuxService extends Service {
         // call, and a start that arrives after an idleStop dropped us out of the
         // foreground has its own five seconds to satisfy.
         lastStartId = startId;
+        String action = intent != null ? intent.getAction() : null;
         // What it said last, not "Installing…" every time: a start that is
         // about nothing the text describes (remote access going off with the
-        // desktop up, say) must not leave it claiming an install.
-        goForeground(foregroundText != null ? foregroundText : getString(R.string.ln_installing));
-        String action = intent != null ? intent.getAction() : null;
+        // desktop up, say) must not leave it claiming an install. A desktop
+        // started with the phone says "Linux" from its first moment.
+        goForeground(foregroundText != null ? foregroundText
+                : getString(ACTION_BOOT_START.equals(action) ? R.string.ln_label : R.string.ln_installing));
         // A null intent is Android restarting us after killing the process —
         // which only happens because the return below said START_STICKY, which
         // it only says while remote access is on. So: bring that back.
         if (intent == null) action = ACTION_REMOTE_RESUME;
+        // An uninstall that was asked for and is not done: the process died in
+        // the middle of the wipe, or the start that asked for it never landed.
+        // It is finished before anything else this start wants, because the
+        // user asked for the storage back and the marker holds every install
+        // off until it is (Linux.needsProvision).
+        if (!ACTION_UNINSTALL.equals(action) && Linux.isRemoving(this) && !removalQueued.get()) {
+            DexLog.step("linux", "an uninstall was left unfinished; finishing it");
+            queueWipe(true);
+        }
         // Not only on the null intent, though: Android re-creates a sticky
         // service with whatever start was pending when it died, and only
         // falls back to null when there was none — closing the Linux window
@@ -433,7 +558,8 @@ public class LinuxService extends Service {
         // Ahead of remote.start(), so the sshd it starts is born on the big
         // cores too. Every switch of remote access comes through here.
         SamsungSlowdown.sync(this, remoteWanted);
-        if (remoteWanted && !ACTION_REMOTE_OFF.equals(action) && !ACTION_UNINSTALL.equals(action)) {
+        if (remoteWanted && !ACTION_REMOTE_OFF.equals(action) && !ACTION_UNINSTALL.equals(action)
+                && !Linux.isRemoving(this)) {
             remote.start();
             // RemoteResumeReceiver's "paused — tap to resume", if one is up:
             // whatever brought remote access back, it is not paused now.
@@ -504,6 +630,21 @@ public class LinuxService extends Service {
             final int w = intent.getIntExtra(EXTRA_W, 1280);
             final int h = intent.getIntExtra(EXTRA_H, 800);
             io.execute(() -> startRuntime(w, h, true));
+        } else if (ACTION_BOOT_START.equals(action)) {
+            // "Linux", not the "Installing…" every first start begins with:
+            // nothing is being installed. The window that opens later sends
+            // its own START, which finds this desktop up, brings the sound on
+            // and has the guest take the window's size (the viewer asks).
+            if (!provisioning.get()) goForeground(getString(R.string.ln_label));
+            io.execute(() -> {
+                int[] size = lastGeometry();
+                DexLog.step("linux", "starting the desktop with the phone at "
+                        + size[0] + "x" + size[1]);
+                startRuntime(size[0], size[1], false);
+                // Nothing started (not ready after all, or the spawn failed):
+                // nothing else would take the service down.
+                idleStop();
+            });
         } else if (ACTION_STOP.equals(action)) {
             io.execute(() -> {
                 stopRuntime();
@@ -522,15 +663,9 @@ public class LinuxService extends Service {
                 idleStop();
             });
         } else if (ACTION_RESET.equals(action)) {
-            io.execute(() -> {
-                reset();
-                provision();
-            });
+            queueWipe(false);
         } else if (ACTION_UNINSTALL.equals(action)) {
-            io.execute(() -> {
-                uninstall();
-                idleStop(); // nothing left to be foreground for
-            });
+            queueWipe(true);
         } else if (ACTION_RERUN.equals(action)) {
             // NOT on io: io is the thread blocked in runSetup on the very run
             // this replaces. The flag goes up before the kill, so provision()
@@ -547,6 +682,45 @@ public class LinuxService extends Service {
         }
         return stickiness();
     }
+
+    /**
+     * Queue a wipe: a reset, which installs a fresh container after it, or an
+     * uninstall, which leaves the storage free. An install in flight is
+     * stopped first rather than waited out (see {@link #wipesQueued}); the
+     * next run, if there is one, repairs whatever dpkg was in the middle of,
+     * and here there is nothing left for it to repair.
+     */
+    private void queueWipe(boolean remove) {
+        // One removal on its way is enough: the window's own STOP can land
+        // around the uninstall, and every start finishes a removal it finds.
+        if (remove && !removalQueued.compareAndSet(false, true)) return;
+        wipesQueued.incrementAndGet();
+        if (remove) goForeground(getString(R.string.hm_removing_title));
+        if (provisioning.get()) {
+            DexLog.step("linux", "stopping the install in flight for "
+                    + (remove ? "an uninstall" : "a reinstall"));
+            final File dir = Linux.root(this);
+            // Off io, which is the thread blocked in runSetup on that very run.
+            new Thread(() -> stopSetup(dir), "linux-setup-stop").start();
+        }
+        io.execute(() -> {
+            boolean build = false;
+            try {
+                if (remove) uninstall(); else build = reset();
+            } finally {
+                if (remove) removalQueued.set(false);
+                wipesQueued.decrementAndGet();
+            }
+            if (build) {
+                provision();
+            } else {
+                idleStop(); // nothing left to be foreground for
+            }
+        });
+    }
+
+    /** An uninstall is queued and not yet done; see {@link #queueWipe}. */
+    private final AtomicBoolean removalQueued = new AtomicBoolean(false);
 
     /**
      * Sticky only while remote access is on. A container the user is looking
@@ -579,6 +753,13 @@ public class LinuxService extends Service {
     // ── provisioning ──
 
     private void provision() {
+        // A reset or an uninstall is queued behind this: it goes first, and a
+        // reset's own provision follows it. Nothing to idle out either: that
+        // work is still to come (idleStop says the same).
+        if (wipesQueued.get() > 0) {
+            DexLog.step("linux", "a wipe is queued; not provisioning ahead of it");
+            return;
+        }
         // Re-checked HERE and not only in the static provision(): that one
         // decides on its own thread and then sends an intent, so an uninstall
         // landing in between would be undone by a decision taken before it.
@@ -638,19 +819,34 @@ public class LinuxService extends Service {
             copyAsset("linux/linux-setup.sh", Linux.setupScript(this));
             copyAsset("linux/linux-rt.sh", Linux.rtScript(this));
             if (!ensureRootfs()) {
-                writeError("download-failed");
+                // Stopped for a wipe is not a failed download: the container
+                // this would describe is about to be deleted. Nor is one cut
+                // off because this service is going (onDestroy interrupts io):
+                // its phase stays on the way, as a killed process leaves it,
+                // and RemoteResumeReceiver picks it up again.
+                if (wipesQueued.get() == 0 && !Thread.currentThread().isInterrupted()) {
+                    writeError("download-failed");
+                }
                 return;
             }
+            if (wipesQueued.get() > 0) return;
             runSetup(); // blocks here until the script exits
         } catch (Exception e) {
             DexLog.step("linux", "provision error: " + e);
-            writeError("provision-failed");
+            if (wipesQueued.get() == 0) writeError("provision-failed");
         } finally {
             provisioning.set(false);
-            // Skip or Restart stopped the run above so a fresh one could take
-            // over: straight into it, and not by way of idleStop, which could
-            // stop the service in between the two.
-            if (rerun.getAndSet(false)) {
+            boolean again = rerun.getAndSet(false);
+            if (wipesQueued.get() > 0) {
+                // A wipe stopped this run, or arrived during it. It is next on
+                // io, so nothing is queued and nothing is idled out here: a
+                // rerun would build what the wipe is about to delete, and an
+                // idleStop could take the service, and the wipe, with it.
+                DexLog.step("linux", "install stopped for a wipe");
+            } else if (again) {
+                // Skip or Restart stopped the run above so a fresh one could take
+                // over: straight into it, and not by way of idleStop, which could
+                // stop the service in between the two.
                 try {
                     io.execute(this::provision);
                 } catch (java.util.concurrent.RejectedExecutionException destroyed) {
@@ -665,14 +861,29 @@ public class LinuxService extends Service {
     /**
      * Delete the container outright: the rootfs, every phase stamp, the state
      * file and the downloaded tarball. The caller follows this with a
-     * provision, so the next thing the user sees is a fresh install running.
+     * provision when it says so, so the next thing the user sees is a fresh
+     * install running.
+     *
+     * @return false when the old container is still where it was: an error
+     *         says so, and no install may follow
      */
-    private void reset() {
+    private boolean reset() {
         DexLog.step("linux", "reset — wiping the container");
-        wipe();
+        TreeDelete.Result left = wipe(false);
+        if (Linux.root(this).exists()) {
+            // Not even moved aside (wipe() deletes nothing in place for a
+            // reset): building on it would be building on the old guest.
+            // It is whole, and Retry runs the reset again.
+            DexLog.step("linux", "reset — the container could not be moved aside: " + left);
+            writeError("reset-failed");
+            return false;
+        }
         Linux.root(this).mkdirs();
         writeState("pushing", 0, "resetting");
-        DexLog.step("linux", "reset — container removed");
+        // What an earlier container left is in the trash, apart from the new
+        // one, and the next wipe tries it again. Nothing of it is built on.
+        DexLog.step("linux", "reset — container removed" + (left.clean() ? "" : "; " + left));
+        return true;
     }
 
     /**
@@ -694,6 +905,10 @@ public class LinuxService extends Service {
      */
     private void uninstall() {
         DexLog.step("linux", "uninstall — wiping the container");
+        // This attempt's own verdict replaces the last one's: until it has
+        // one, the screens say Removing, not "could not remove".
+        Linux.clearRemoveFailure(this);
+        cancelRemoveFailedNote();
         // Remote access is SSH into this container, so it goes off with it —
         // otherwise a tunnel would keep the phone awake and online to answer
         // "Linux is not installed" for ever. The paired computers are KEPT
@@ -702,20 +917,47 @@ public class LinuxService extends Service {
         LinuxRemote.setEnabled(this, false);
         SamsungSlowdown.sync(this, false);
         remote.stop();
-        wipe();
+        TreeDelete.Result left = wipe(true);
+        // Uninstalled whether or not every file went: what is left is not a
+        // container any more, and nothing is ever built on it (wipe()).
         Linux.setUninstalled(this, true);
-        DexLog.step("linux", "uninstall — container removed, provisioning off");
+        if (!left.clean()) {
+            // NOT done, so not said to be: the removing marker stays down,
+            // which keeps the screens on this removal (with what it left and
+            // a Try again), holds provisioning off, and has the next start of
+            // this service, for anything at all, try again.
+            Linux.setRemoveFailure(this, left.bytesLeft, left.left, left.firstError);
+            DexLog.step("linux", "uninstall — NOT finished: " + left);
+            noteRemoveFailed(left.bytesLeft);
+            return;
+        }
+        // Last, after the uninstall marker: between the two, a reader would
+        // see neither and take the container for one waiting to be installed.
+        Linux.setRemoving(this, false);
+        DexLog.step("linux", "uninstall — container removed, nothing left, provisioning off");
     }
 
+    /** Folders a container is moved into to be deleted: linux-deleting, and linux-deleting-&lt;time&gt;. */
+    private static final String TRASH = "linux-deleting";
+
     /**
-     * Stop the runtime and delete the container tree.
+     * Stop the runtime and delete the container tree, and everything an
+     * earlier wipe could not.
      *
-     * The runtime is stopped FIRST and the directory is renamed out of the way
+     * The runtime is stopped FIRST and the directory is moved out of the way
      * before it is walked: a live guest writing into a tree being deleted
      * underneath it leaves a half-rootfs behind, and a half-rootfs looks
-     * provisioned to the setup script's stamps.
+     * provisioned to the setup script's stamps. It is moved to a name no
+     * earlier wipe can have used, because a rename onto a folder that still
+     * has something in it fails, and the old code then deleted the live tree
+     * in place. Here nothing is ever deleted in place for a reset (it is left
+     * whole, and reset() says so); for an uninstall, which builds nothing
+     * after it, in place is what is left.
+     *
+     * @param leaveNothing an uninstall: delete in place when the move fails
+     * @return what is left, in the container and in the trash; empty when nothing is
      */
-    private void wipe() {
+    private TreeDelete.Result wipe(boolean leaveNothing) {
         stopRuntime();
         // The window session's apps run in this same rootfs.
         stopWin();
@@ -729,47 +971,111 @@ public class LinuxService extends Service {
         remote.holdSsh();
         try {
             File dir = Linux.root(this);
-            File doomed = new File(dir.getParentFile(), "linux-deleting");
-            deleteTree(doomed);
-            if (dir.exists() && !dir.renameTo(doomed)) {
-                doomed = dir; // rename refused; delete in place rather than not at all
+            File files = dir.getParentFile();
+            TreeDelete.Result left = new TreeDelete.Result();
+            if (dir.exists()) {
+                long stamp = System.currentTimeMillis();
+                File trash = new File(files, TRASH + "-" + stamp);
+                while (trash.exists()) trash = new File(files, TRASH + "-" + (++stamp));
+                if (!dir.renameTo(trash)) {
+                    DexLog.step("linux", "wipe — the container could not be moved aside");
+                    if (leaveNothing) {
+                        left.add(deleteAll(dir));
+                    } else {
+                        left.add(TreeDelete.measure(dir));
+                        left.note(dir, "could not be moved aside");
+                    }
+                }
             }
-            deleteTree(doomed);
+            File[] trash = files.listFiles((d, name) -> name.equals(TRASH) || name.startsWith(TRASH + "-"));
+            if (trash != null) for (File t : trash) left.add(deleteAll(t));
+            return left;
         } finally {
             remote.releaseSsh();
         }
     }
 
-    private static void deleteTree(File f) {
-        if (f == null || !f.exists()) return;
-        // Iterative: a rootfs is deep enough that recursion is a real risk, and
-        // symlinks must be unlinked, never followed — the guest is full of them
-        // and one pointing at /data would take the app's own storage with it.
-        java.util.ArrayDeque<File> stack = new java.util.ArrayDeque<>();
-        stack.push(f);
-        java.util.ArrayDeque<File> dirs = new java.util.ArrayDeque<>();
-        while (!stack.isEmpty()) {
-            File cur = stack.pop();
-            File[] kids = isLink(cur) ? null : cur.listFiles();
-            if (kids == null) {
-                cur.delete();
-                continue;
-            }
-            dirs.push(cur);
-            for (File kid : kids) stack.push(kid);
-        }
-        while (!dirs.isEmpty()) dirs.pop().delete();
-    }
-
-    private static boolean isLink(File f) {
+    /**
+     * {@link TreeDelete}, and toybox's rm after it for whatever that left: rm
+     * walks relative to each directory (openat), so it reaches paths longer
+     * than the 4096 bytes an absolute path may have. It follows no links
+     * either. What both leave is the answer.
+     */
+    private static TreeDelete.Result deleteAll(File t) {
+        TreeDelete.Result left = TreeDelete.delete(t);
+        if (left.clean() || !new File("/system/bin/rm").exists()) return left;
         try {
-            return !f.getCanonicalPath().equals(f.getAbsolutePath());
+            new ProcessBuilder("/system/bin/rm", "-rf", t.getAbsolutePath())
+                    .redirectErrorStream(true).start().waitFor();
         } catch (Exception e) {
-            return true; // cannot tell — treat as a link and never descend
+            DexLog.step("linux", "rm -rf error: " + e);
+        }
+        TreeDelete.Result after = TreeDelete.measure(t);
+        after.firstError = after.clean() ? null : left.firstError;
+        return after;
+    }
+
+    private static final int NOTE_REMOVE_FAILED = 0x1F;
+
+    /**
+     * "Linux was not fully removed": the one word from an uninstall that did
+     * not finish, wherever the user is. The desktop has no screen watching the
+     * removal (its menu toasts that it began), and the home screen may be
+     * closed. Tapping it, or its Try again, runs the removal again.
+     */
+    private void noteRemoveFailed(long bytes) {
+        try {
+            NotificationManager nm = getSystemService(NotificationManager.class);
+            if (nm == null) return;
+            if (nm.getNotificationChannel(CHANNEL) == null) {
+                NotificationChannel ch = new NotificationChannel(
+                        CHANNEL, getString(R.string.ln_label), NotificationManager.IMPORTANCE_LOW);
+                ch.setShowBadge(false);
+                nm.createNotificationChannel(ch);
+            }
+            PendingIntent again = PendingIntent.getForegroundService(this, 4,
+                    new Intent(this, LinuxService.class).setAction(ACTION_UNINSTALL),
+                    PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
+            String text = getString(R.string.ln_remove_failed_sub,
+                    android.text.format.Formatter.formatShortFileSize(this, bytes));
+            Notification n = new Notification.Builder(this, CHANNEL)
+                    .setSmallIcon(android.R.drawable.ic_menu_manage)
+                    .setContentTitle(getString(R.string.ln_remove_failed_title))
+                    .setContentText(text)
+                    .setStyle(new Notification.BigTextStyle().bigText(text))
+                    .setContentIntent(again)
+                    .addAction(new Notification.Action.Builder(null,
+                            getString(R.string.ln_remove_again), again).build())
+                    .setAutoCancel(true)
+                    .build();
+            nm.notify(NOTE_REMOVE_FAILED, n);
+        } catch (Exception e) {
+            DexLog.warn("linux", "cannot post the removal failure", e);
         }
     }
 
-    /** Download + verify the rootfs tarball unless a good copy is already here. */
+    private void cancelRemoveFailedNote() {
+        try {
+            NotificationManager nm = getSystemService(NotificationManager.class);
+            if (nm != null) nm.cancel(NOTE_REMOVE_FAILED);
+        } catch (Exception ignored) {
+        }
+    }
+
+    /**
+     * Download + verify the rootfs tarball unless a good copy is already here.
+     *
+     * The network is read on a thread of the download's own, and io only
+     * waits for it, a quarter second at a time, looking for a wipe in between.
+     * A read blocks for as long as the network gives nothing, up to the 60 s
+     * read timeout (plus the 30 s connect timeout before it), and a wipe is
+     * queued on io behind this: when the read was on io, a reset or an
+     * uninstall sent during a stalled download waited all of that out. Now it
+     * waits a quarter second. The abandoned download is cut off (its
+     * connection disconnected, its file closed) and touches nothing after
+     * that: the .part file was opened here, before the thread started, so all
+     * it can ever write is the file it was given.
+     */
     private boolean ensureRootfs() {
         File out = Linux.rootfsTarball(this);
         String want = Linux.rootfsSha256();
@@ -780,51 +1086,147 @@ public class LinuxService extends Service {
         if (url == null || want == null) return false;
         writeState("pushing", 0, "downloading-ubuntu");
         File part = new File(out.getAbsolutePath() + ".part");
-        HttpURLConnection conn = null;
+        Download d;
         try {
-            conn = (HttpURLConnection) new URL(url).openConnection();
-            conn.setInstanceFollowRedirects(true);
-            conn.setConnectTimeout(30000);
-            conn.setReadTimeout(60000);
-            if (conn.getResponseCode() / 100 != 2) {
-                DexLog.step("linux", "rootfs http " + conn.getResponseCode());
-                return false;
-            }
-            long total = conn.getContentLengthLong();
-            MessageDigest md = MessageDigest.getInstance("SHA-256");
-            long seen = 0;
-            int lastPct = -1;
-            try (InputStream in = conn.getInputStream();
-                 OutputStream fout = new FileOutputStream(part)) {
-                byte[] buf = new byte[1 << 16];
-                int n;
-                while ((n = in.read(buf)) > 0) {
-                    fout.write(buf, 0, n);
-                    md.update(buf, 0, n);
-                    seen += n;
-                    if (total > 0) {
-                        int pct = (int) (seen * 25 / total); // download spans 0..25%
-                        if (pct != lastPct) {
-                            lastPct = pct;
-                            writeState("pushing", pct, "downloading-ubuntu");
-                        }
+            d = new Download(url, new FileOutputStream(part).getChannel());
+        } catch (Exception e) {
+            DexLog.step("linux", "rootfs download error: " + e);
+            return false;
+        }
+        Thread t = new Thread(d, "linux-rootfs-download");
+        t.setDaemon(true);
+        t.start();
+        int lastPct = -1;
+        try {
+            while (!d.finished.await(250, java.util.concurrent.TimeUnit.MILLISECONDS)) {
+                // A reset or an uninstall is waiting: this download is for a
+                // container that is about to go. See wipesQueued.
+                if (wipesQueued.get() > 0) {
+                    d.abandon();
+                    DexLog.step("linux", "rootfs download abandoned for a wipe at " + d.seen + " bytes");
+                    return false;
+                }
+                long total = d.total;
+                if (total > 0) {
+                    int pct = (int) (d.seen * 25 / total); // download spans 0..25%
+                    if (pct != lastPct) {
+                        lastPct = pct;
+                        writeState("pushing", pct, "downloading-ubuntu");
                     }
                 }
             }
-            String got = hex(md.digest());
-            if (!want.equalsIgnoreCase(got)) {
-                DexLog.step("linux", "rootfs sha mismatch");
-                part.delete();
-                return false;
-            }
-            out.delete();
-            return part.renameTo(out);
-        } catch (Exception e) {
-            DexLog.step("linux", "rootfs download error: " + e);
+        } catch (InterruptedException e) {
+            // onDestroy's shutdownNow: nobody is left to wait for it.
+            d.abandon();
+            Thread.currentThread().interrupt();
+            return false;
+        }
+        if (d.error != null) {
+            DexLog.step("linux", "rootfs download error: " + d.error);
             part.delete();
             return false;
-        } finally {
-            if (conn != null) conn.disconnect();
+        }
+        if (!want.equalsIgnoreCase(d.sha)) {
+            DexLog.step("linux", "rootfs sha mismatch");
+            part.delete();
+            return false;
+        }
+        out.delete();
+        return part.renameTo(out);
+    }
+
+    /** One rootfs download, run on a thread of its own; see {@link #ensureRootfs}. */
+    private static final class Download implements Runnable {
+        private final String url;
+        /**
+         * A channel and not a stream, because abandon() closes it from another
+         * thread: a channel's close waits for a write in progress to leave the
+         * descriptor first, where a stream's can close it under one, and the
+         * write lands in whatever file is opened on that number next.
+         */
+        private final java.nio.channels.FileChannel file;
+        final java.util.concurrent.CountDownLatch finished = new java.util.concurrent.CountDownLatch(1);
+        volatile long total = -1;
+        volatile long seen;
+        /** SHA-256 of what was read, when all of it was. */
+        volatile String sha;
+        volatile Exception error;
+        private volatile boolean abandoned;
+        private volatile HttpURLConnection conn;
+
+        Download(String url, java.nio.channels.FileChannel file) {
+            this.url = url;
+            this.file = file;
+        }
+
+        @Override
+        public void run() {
+            HttpURLConnection c = null;
+            try {
+                c = (HttpURLConnection) new URL(url).openConnection();
+                conn = c;
+                // abandon() reads conn: one side or the other sees the other.
+                if (abandoned) return;
+                c.setInstanceFollowRedirects(true);
+                c.setConnectTimeout(30000);
+                c.setReadTimeout(60000);
+                int code = c.getResponseCode();
+                if (code / 100 != 2) throw new java.io.IOException("http " + code);
+                total = c.getContentLengthLong();
+                MessageDigest md = MessageDigest.getInstance("SHA-256");
+                try (InputStream in = c.getInputStream()) {
+                    byte[] buf = new byte[1 << 16];
+                    int n;
+                    while ((n = in.read(buf)) > 0) {
+                        if (abandoned) return;
+                        java.nio.ByteBuffer chunk = java.nio.ByteBuffer.wrap(buf, 0, n);
+                        while (chunk.hasRemaining()) file.write(chunk);
+                        md.update(buf, 0, n);
+                        seen += n;
+                    }
+                }
+                if (!abandoned) sha = hex(md.digest());
+            } catch (Exception e) {
+                if (!abandoned) error = e;
+            } finally {
+                try {
+                    file.close();
+                } catch (Exception ignored) {
+                }
+                if (c != null) {
+                    try {
+                        c.disconnect();
+                    } catch (Throwable ignored) {
+                    }
+                }
+                finished.countDown();
+            }
+        }
+
+        /**
+         * Stop waiting for this download and cut it off. The file is closed
+         * here (a local close, so a phone can delete it and Windows, in the
+         * tests, can too); the connection on a thread of its own, because
+         * closing a TLS socket writes to the network, which Android refuses
+         * on the main thread, and some HTTP stacks hold a disconnect back
+         * behind the read it is meant to end.
+         */
+        void abandon() {
+            abandoned = true;
+            try {
+                file.close();
+            } catch (Exception ignored) {
+            }
+            final HttpURLConnection c = conn;
+            if (c == null) return;
+            Thread cut = new Thread(() -> {
+                try {
+                    c.disconnect();
+                } catch (Throwable ignored) {
+                }
+            }, "linux-rootfs-cut");
+            cut.setDaemon(true);
+            cut.start();
         }
     }
 
@@ -858,6 +1260,11 @@ public class LinuxService extends Service {
             wake = setupWake();
             Process p = pb.start();
             setupProc = p;
+            // A wipe that arrived after provision() last looked, and before
+            // the line above, found no run to stop: stopSetup reads setupProc.
+            // Looked at again from this side, after setupProc is set, so one
+            // side or the other always sees the other.
+            if (wipesQueued.get() > 0) stopSetup(dir);
             rc = p.waitFor();
         } finally {
             setupProc = null;
@@ -912,7 +1319,7 @@ public class LinuxService extends Service {
             p.destroyForcibly();
         } catch (Throwable ignored) {
         }
-        DexLog.step("linux", "setup run stopped, to be replaced");
+        DexLog.step("linux", "setup run stopped");
     }
 
     // ── runtime ──
@@ -927,6 +1334,27 @@ public class LinuxService extends Service {
         long sinceSpawn = android.os.SystemClock.elapsedRealtime() - runtimeSpawnedAt;
         if (runtimeUp && sinceSpawn < 15_000) return;
         startRuntime(w, h, false);
+    }
+
+    /**
+     * The size the desktop was last started at, from the geometry file
+     * startRuntime writes; 1280x800, START's own default, when there is none
+     * or it does not read. Only a first guess: the viewer that connects asks
+     * the guest for its own size.
+     */
+    private int[] lastGeometry() {
+        String g = Linux.readFile(new File(Linux.root(this), "geometry")).trim();
+        int x = g.indexOf('x');
+        if (x > 0) {
+            try {
+                int w = Integer.parseInt(g.substring(0, x));
+                int h = Integer.parseInt(g.substring(x + 1));
+                if (w > 0 && h > 0) return new int[]{w, h};
+            } catch (NumberFormatException ignored) {
+                // the default, below
+            }
+        }
+        return new int[]{1280, 800};
     }
 
     /**
@@ -1012,9 +1440,22 @@ public class LinuxService extends Service {
             // force-stop (DeX session end) tears the whole container down; the
             // service staying foreground is what keeps it alive until then.
             String cores = coreGroupForLinux("the desktop");
+            // The runtime's lock, taken before the spawn and held until the
+            // runtime has exited: what any other process asks to know whether
+            // a desktop is up (RuntimeLock). rt.pid outlives a runtime killed
+            // with this process; the kernel drops the lock with it.
+            if (!RuntimeLock.beforeSpawn(Linux.rtLock(this))) {
+                DexLog.step("linux", "runtime lock not taken; the home screen will not see this desktop");
+            }
             runtimeUp = true;
             runtimeSpawnedAt = android.os.SystemClock.elapsedRealtime();
-            runtimeProc = pb.start();
+            try {
+                runtimeProc = pb.start();
+            } catch (Exception e) {
+                RuntimeLock.spawnFailed();
+                throw e;
+            }
+            RuntimeLock.spawned(runtimeProc);
             liveRuntime = runtimeProc;
             watchRuntime(runtimeProc);
             LinuxGpu.reportVerdict(pb.environment(), new File(dir, "rt.log"));
@@ -1108,8 +1549,13 @@ public class LinuxService extends Service {
             try {
                 code = p.waitFor();
             } catch (InterruptedException e) {
+                // Not seen to exit, so the lock stays: a desktop that might be
+                // up is never reported as down. This thread is never interrupted.
                 return;
             }
+            // Gone, however it went (ended, stopped, killed): the lock goes
+            // with it, here rather than in runtimeEnded, which a stop skips.
+            RuntimeLock.exited(p);
             try {
                 io.execute(() -> runtimeEnded(p, code));
             } catch (java.util.concurrent.RejectedExecutionException destroyed) {
@@ -1560,6 +2006,10 @@ public class LinuxService extends Service {
      */
     private void idleStop() {
         if (provisioning.get()) return;
+        // A wipe still queued behind whatever called this: stopping now would
+        // take it with the service (onDestroy shuts io down), and an uninstall
+        // or a reinstall the user confirmed would simply never happen.
+        if (wipesQueued.get() > 0) return;
         // A desktop start in flight: runtimeUp goes true before linux-rt.sh has
         // written the rt.pid that readStatus looks for. Only for a moment after
         // the spawn, though — a session that has since ended by itself leaves

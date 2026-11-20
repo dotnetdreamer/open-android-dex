@@ -12,6 +12,16 @@
     </style>
 
     <!--
+      LinuxOnDroid's splash: its own icon, the one in the phone's app list, on
+      the colour its home screen opens onto. Without this it inherited the
+      desktop shell's icon above, which is a different app's.
+    -->
+    <style name="Theme.LinuxOnDroid" parent="Base.Theme.LinuxOnDroid">
+        <item name="android:windowSplashScreenBackground">@color/ln_home_bg</item>
+        <item name="android:windowSplashScreenAnimatedIcon">@mipmap/ic_linux</item>
+    </style>
+
+    <!--
       Same attributes, opposite goal: windowDisablePreview does not reliably
       suppress the S+ splash for the root activity of a task, and this task
       must show nothing at all before the system dialog attaches to it.

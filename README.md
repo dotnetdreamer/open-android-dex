@@ -370,8 +370,10 @@ How it works: [doc/linux-windows.md](doc/linux-windows.md).
 [releases page](https://github.com/dotnetdreamer/open-android-dex/releases/latest)
 there is a separate download called **LinuxOnDroid**. It is about 1 MB, you
 install it on the phone by itself, and that is all you need. No computer, no
-cable, no desktop app. Tap the icon and Ubuntu opens on your phone. Keep about
-3 GB free for it.
+cable, no desktop app. Tap the icon and its home screen shows what Linux is
+doing: press **Install Linux** the first time, and **Start Linux** after that.
+The same screen opens remote access and the shared folder, and adds apps to
+Ubuntu later. Keep about 3 GB free for it.
 
 <img src="doc/img/phone-linux.png" alt="Ubuntu running on the phone on its own, with the control strip along the top" width="300">
 
@@ -612,8 +614,8 @@ for Wi-Fi connections, and Accessibility, which is only used for full screen
 
 Yes. That is what the separate **LinuxOnDroid** download on the
 [releases page](https://github.com/dotnetdreamer/open-android-dex/releases/latest)
-is for. About 1 MB, installed on the phone, and you tap the icon to get Ubuntu
-fullscreen. No cable and no desktop app.
+is for. About 1 MB, installed on the phone. Tap the icon, then **Start Linux**,
+and Ubuntu fills the screen. No cable and no desktop app.
 
 If you install both, they keep their own separate copies of Ubuntu, because
 Android does not let one app read another's files. That means two downloads.

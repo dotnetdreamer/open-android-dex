@@ -19,6 +19,12 @@ import android.widget.Toast;
  * the desktop is up. This activity is that way in, and it is the ONLY thing
  * this class does — it starts the window and finishes.
  *
+ * In LinuxOnDroid, the app of its own, it is no longer what the icon opens:
+ * that app opens on its home screen ({@link LinuxHomeActivity}), where Start
+ * goes through {@link #openWindow}. This stays as the way in that SKIPS the
+ * home screen and starts Linux at once: the ongoing notification's, and the
+ * one an Open Android DeX desktop will use when it opens this app's Linux.
+ *
  * Why a trampoline rather than an {@code <activity-alias>} on LinuxActivity,
  * which is the shorter way to put a second icon in a drawer: an alias is its
  * OWN component as far as the window manager is concerned. The activity the
@@ -72,12 +78,28 @@ public class LinuxAppActivity extends Activity {
     }
 
     private void open() {
+        openWindow(this, null, null);
+        finish();
+    }
+
+    /**
+     * Open the one Linux window from {@code from}, on the phone's own screen:
+     * what this icon does, and what LinuxOnDroid's home screen
+     * ({@link LinuxHomeActivity}) does with its Start button, so the two can
+     * never disagree about the rules below.
+     *
+     * @param extras  handed to the window with the start, or null
+     * @param options the start's ActivityOptions bundle (an opening animation),
+     *                or null
+     * @return true when the window was asked to open
+     */
+    static boolean openWindow(Activity from, Bundle extras, Bundle options) {
         // Opening Linux is the way back from an uninstall, and the only one —
         // the same rule LauncherActivity.launchLinux follows, and it has to be
         // here too or this icon would open a window that immediately closes
         // itself (LinuxActivity finishes while the marker is set, because
         // provisioning is deliberately inert there).
-        Linux.setUninstalled(this, false);
+        Linux.setUninstalled(from, false);
 
         // One window, wherever it already is. A start from this task cannot
         // reach the desktop display — it would MOVE the window's task to the
@@ -91,22 +113,24 @@ public class LinuxAppActivity extends Activity {
         // raise the window we have, which is exactly what the start below does.
         if (LinuxActivity.isOnDesktopDisplay()) {
             DexLog.step("linux", "app icon: already open on the desktop");
-            Toast.makeText(this, getString(R.string.ln_on_desktop), Toast.LENGTH_LONG).show();
-            finish();
-            return;
+            Toast.makeText(from, from.getString(R.string.ln_on_desktop), Toast.LENGTH_LONG).show();
+            return false;
         }
 
         // No launch bounds and no display: this is the phone's own screen, where
         // a window is the whole panel. FLAG_ACTIVITY_NEW_TASK because the window
-        // belongs in ITS task (its own taskAffinity), never in this one — and
-        // because this activity is finishing out from under it.
+        // belongs in ITS task (its own taskAffinity), never in the caller's —
+        // and, from the trampoline, because that is finishing out from under it.
+        Intent intent = new Intent(from, LinuxActivity.class)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        if (extras != null) intent.putExtras(extras);
         try {
-            startActivity(new Intent(this, LinuxActivity.class)
-                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+            from.startActivity(intent, options);
+            return true;
         } catch (Exception e) {
             DexLog.warn("linux", "app icon: cannot open the window", e);
-            Toast.makeText(this, getString(R.string.ln_cannot_open), Toast.LENGTH_SHORT).show();
+            Toast.makeText(from, from.getString(R.string.ln_cannot_open), Toast.LENGTH_SHORT).show();
+            return false;
         }
-        finish();
     }
 }

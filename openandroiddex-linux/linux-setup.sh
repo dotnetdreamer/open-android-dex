@@ -1706,7 +1706,20 @@ setup_share() {
   mkdir -p rootfs/root/.config/gtk-3.0 || return 1
   _bm=rootfs/root/.config/gtk-3.0/bookmarks
   _line='file:///root/Desktop/LinuxOnDeX LinuxOnDeX'
-  if ! grep -qxF "$_line" "$_bm" 2>/dev/null; then
+  # Not every build has the folder. LinuxOnDroid's Play build ships without
+  # the Android permission it needs, so linux-rt.sh never binds it there, and
+  # a bookmark to it would be a sidebar entry that opens nothing. The app says
+  # which kind of build this is (LINUX_SHARED_OFFERED, from Linux.scriptEnv;
+  # LINUX_SHARED cannot say, being unset too before the grant). 0: no bookmark,
+  # and one already there, of ours and only ours, comes out. Unset, as in a
+  # bare shell run: the folder is assumed, as it always was.
+  if [ "${LINUX_SHARED_OFFERED:-1}" = 0 ]; then
+    if grep -qxF "$_line" "$_bm" 2>/dev/null; then
+      # grep -v exits 1 when it keeps no line at all, which here is success.
+      grep -vxF "$_line" "$_bm" > "$_bm.tmp"
+      [ $? -le 1 ] && mv -f "$_bm.tmp" "$_bm" || { rm -f "$_bm.tmp"; return 1; }
+    fi
+  elif ! grep -qxF "$_line" "$_bm" 2>/dev/null; then
     # A file that does not end in a newline would otherwise get this
     # concatenated onto its last line, which `grep -qxF` then never matches --
     # so it would be appended again on every pass and the sidebar entry would
@@ -1764,7 +1777,11 @@ EOF
   if ! ls rootfs/usr/lib/*/gdk-pixbuf-2.0/*/loaders/libpixbufloader-svg.so        >/dev/null 2>&1; then
     guest_or_note "share-icons"       "apt-get install -y --no-install-recommends librsvg2-common" || true
   fi
-  note "share: sidebar bookmark + desktop icon style configured"
+  if [ "${LINUX_SHARED_OFFERED:-1}" = 0 ]; then
+    note "share: no shared folder in this build; no sidebar bookmark; desktop icon style configured"
+  else
+    note "share: sidebar bookmark + desktop icon style configured"
+  fi
   return 0
 }
 

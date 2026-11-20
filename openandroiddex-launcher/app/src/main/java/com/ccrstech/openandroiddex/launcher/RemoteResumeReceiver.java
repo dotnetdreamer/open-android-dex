@@ -13,7 +13,8 @@ import android.content.Intent;
  * this app without asking it: a reboot, an update, and the desktop app's own
  * clean-up at the end of a DeX session, which force-stops the launcher to give
  * the phone its home screen back. An install any of them cut off is picked up
- * here too, whatever remote access is doing.
+ * here too, whatever remote access is doing. And at a boot, LinuxOnDroid's
+ * "Start Linux with the phone" starts the desktop from here ({@link LinuxBoot}).
  *
  * That last one is why {@link #ACTION_RESUME} exists and why this receiver is
  * exported at all: the desktop app sends it over adb right after the
@@ -50,7 +51,18 @@ public class RemoteResumeReceiver extends BroadcastReceiver {
         // up right here instead, it runs on in the background. The start is
         // allowed for the reasons remote access's is (see above); the desktop
         // app takes its battery exemption back only after this broadcast.
-        if (Linux.installInterrupted(ctx)) {
+        // An uninstall the process died in the middle of, before anything else:
+        // the user asked for the storage back, and the removing marker holds
+        // every install off until it is done. Nothing else here would bring
+        // the service up for it, since the uninstall turned remote access off.
+        if (Linux.isRemoving(ctx)) {
+            if (LinuxService.finishRemoval(ctx)) {
+                DexLog.step("linux", "an uninstall was not finished — finishing it after " + action);
+            } else {
+                DexLog.step("linux", "an uninstall was not finished and Android refused to finish it from "
+                        + action + " — it finishes when Linux or the desktop opens next");
+            }
+        } else if (Linux.installInterrupted(ctx)) {
             if (LinuxService.resumeInstall(ctx)) {
                 DexLog.step("linux", "the install was cut off — resuming it after " + action);
             } else {
@@ -58,6 +70,12 @@ public class RemoteResumeReceiver extends BroadcastReceiver {
                         + action + " — it carries on when Linux opens next");
             }
         }
+        // "Start Linux with the phone" (LinuxOnDroid's Settings): the desktop
+        // itself, at a boot and at nothing else. Not after an update or a
+        // desktop session's clean-up, which end a Linux the user may have
+        // meant to end; LinuxBoot also tells a real boot from the
+        // BOOT_COMPLETED Android 15 sends to an app opened after a force-stop.
+        if (Intent.ACTION_BOOT_COMPLETED.equals(action)) LinuxBoot.onBoot(ctx);
         // Samsung's background slowdown as remote access wants it, whichever way
         // that is. This is what finishes switching it back on when remote access
         // went off without the permission to: the desktop app keeps it in place

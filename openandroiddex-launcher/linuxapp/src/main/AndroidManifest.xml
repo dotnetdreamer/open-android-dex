@@ -1,7 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
   LinuxOnDroid, standalone. The whole difference between this app and the
-  desktop shell is this file: same code, same resources, same proot — the
+  desktop shell is this file: same code, same resources, same proot — a home
+  screen to start Linux from (LinuxHomeActivity, which only this app has), the
   Linux window and its service, plus remote access's window and receiver,
   instead of a dozen components, and only the permissions those need.
 
@@ -48,8 +49,11 @@
          they do — PermissionPolicyService resets an app-op-backed permission
          the package never requested.
 
-         It also makes this APK ineligible for Play without a declaration form.
-         Moot while it is debug-signed, which Play rejects outright. -->
+         Play allows it only for file managers, backup, antivirus and the
+         like, so the Play (release) build removes it again in
+         src/release/AndroidManifest.xml and goes without the shared folder
+         (Linux.sharedFolderOffered). Debug builds, the GitHub APK among them,
+         keep both. -->
     <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
 
     <!-- Remote access: SSH into this Linux from a computer anywhere. The same
@@ -58,11 +62,23 @@
          lock while a computer is connected, coming back after a reboot, and
          the battery exemption the Remote access window asks for. This app is
          the one most likely to be left running as a pocket server, which is
-         exactly the case these exist for. -->
+         exactly the case these exist for. RECEIVE_BOOT_COMPLETED also serves
+         Settings' "Start Linux with the phone". -->
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+
+    <!-- The shared folder's file manager (Linux.sharedFolderIntent, from the
+         home screen's tile). From Android 11 a query sees only the apps a
+         manifest says it looks for, and this one would otherwise come back
+         empty and leave the tile showing a path instead of the folder. -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:mimeType="vnd.android.document/directory" />
+        </intent>
+    </queries>
 
     <!-- label + icon are the product's, not the shell's: this app IS
          LinuxOnDroid, so it says so in the app list, in Settings → Apps, and on
@@ -73,59 +89,112 @@
          cleartext for 127.0.0.1 and nothing else.
 
          extractNativeLibs: proot must be a real file in nativeLibraryDir to be
-         exec'd — see build.gradle's useLegacyPackaging. -->
+         exec'd — see build.gradle's useLegacyPackaging.
+
+         Theme.LinuxOnDroid is the shell's theme on this app's page colour,
+         with this app's own icon on the splash rather than the desktop's. -->
+    <!-- supportsRtl: Arabic is one of this app's languages, and without it
+         Android lays every screen out left to right whatever the language.
+         The desktop build does not set it; its shell is not mirrored. -->
+    <!-- enableOnBackInvokedCallback="false": this app targets 36 (Play's
+         floor, see build.gradle), and from Android 16 a target-36 app no
+         longer gets onBackPressed or KEYCODE_BACK unless it opts out. Without
+         them, Back on the Linux window would skip its "keep Linux running?"
+         question and finish() it, and finishing it stops the container: one
+         key press ending a live session or a 1.5 GB install. Opting out keeps
+         Back exactly as it was at 35, on every Android version. -->
     <application
         android:label="@string/ln_label"
         android:icon="@mipmap/ic_linux"
         android:extractNativeLibs="true"
+        android:supportsRtl="true"
+        android:enableOnBackInvokedCallback="false"
         android:networkSecurityConfig="@xml/network_security_config"
-        android:theme="@style/Theme.OpenAndroidDeX">
+        android:theme="@style/Theme.LinuxOnDroid">
 
-        <!-- The launcher entry. The same trampoline the desktop build puts in
-             the phone's app list, kept rather than pointing the icon straight
-             at the window, because it owns the two things opening Linux means:
-             clearing the uninstall marker, and raising the one window there is
-             instead of building another. See LinuxAppActivity. -->
+        <!-- The launcher entry: the home screen, where Linux is started from
+             and where what it is doing is shown. This app's alone; the desktop
+             build's Linux entries open the window straight away, and so does
+             the trampoline below. singleTop, so tapping the icon while it is
+             in front does not stack a second one.
+
+             configChanges: turning the phone, folding it or resizing the window
+             re-lays the page out in place rather than rebuilding it, which
+             would type the terminal out again. -->
         <activity
-            android:name=".LinuxAppActivity"
+            android:name=".LinuxHomeActivity"
             android:exported="true"
-            android:launchMode="singleTask"
-            android:taskAffinity="com.ccrstech.linuxondroid.open"
-            android:theme="@style/Theme.OpenAndroidDeX.Detour"
-            android:excludeFromRecents="true"
-            android:autoRemoveFromRecents="true"
+            android:launchMode="singleTop"
             android:resizeableActivity="true"
-            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|density|keyboard|keyboardHidden|navigation|uiMode|locale|layoutDirection|fontScale">
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|navigation|uiMode">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
 
+        <!-- The way in that skips the home screen and starts Linux at once. It
+             was the launcher entry before the home screen existed, and it is
+             still the trampoline the desktop build puts in the phone's app
+             list, because it owns the two things opening Linux means: clearing
+             the uninstall marker, and raising the one window there is instead
+             of building another. See LinuxAppActivity.
+
+             The ongoing notification opens it, and an Open Android DeX desktop
+             will, to start this app's Linux without a stop at the home screen.
+             Exported for that, and safe to be: everything it can do is what
+             the Start button does. No intent filter, so it is reached by name
+             and never listed. -->
+        <activity
+            android:name=".LinuxAppActivity"
+            android:exported="true"
+            android:launchMode="singleTask"
+            android:taskAffinity="${applicationId}.open"
+            android:theme="@style/Theme.OpenAndroidDeX.Detour"
+            android:excludeFromRecents="true"
+            android:autoRemoveFromRecents="true"
+            android:resizeableActivity="true"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|density|keyboard|keyboardHidden|navigation|uiMode|locale|layoutDirection|fontScale" />
+
         <!-- The window itself: the noVNC viewer over the container, plus the
              install narration in front of it. Not exported — it is reached
-             through the trampoline above, and from the notification.
+             from the home screen's Start, and through the trampoline above.
 
              taskAffinity is this app's own. The string differs from the desktop
              build's on purpose: affinity is matched by string, and two installed
              apps offering the same one is a way for a window to be pulled into
-             a task that is not its own.
+             a task that is not its own. Built from ${applicationId} for the
+             same reason: the Play build (com.dotnetdreamer.linuxondroid) and
+             the GitHub one (com.ccrstech.linuxondroid) can both be installed,
+             and a fixed string would be shared between them.
 
              adjustResize, spelled out because the default is not it: an
              unspecified soft-input mode resolves to PAN, which slides the whole
              window up when the keyboard opens and takes the viewer's control
              bar off the top of the screen. Resizing lets the page see the space
-             it has left and put its key row above the keyboard. -->
+             it has left and put its key row above the keyboard.
+
+             label: what its card says in recent apps, where it sits beside the
+             home screen's, which carries the app's name. -->
         <activity
             android:name=".LinuxActivity"
             android:exported="false"
             android:icon="@mipmap/ic_linux"
-            android:label="@string/ln_label"
+            android:label="@string/hm_window_label"
             android:launchMode="singleTask"
-            android:taskAffinity="com.ccrstech.linuxondroid.window"
+            android:taskAffinity="${applicationId}.window"
             android:resizeableActivity="true"
             android:windowSoftInputMode="adjustResize"
             android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|navigation|uiMode" />
+
+        <!-- Settings: Start Linux with the phone, and Use the GPU. Reached from
+             the home screen's menu, in the home screen's own task (no
+             affinity of its own), so Back returns there. -->
+        <activity
+            android:name=".LinuxSettingsActivity"
+            android:exported="false"
+            android:label="@string/settings_label"
+            android:resizeableActivity="true" />
 
         <!-- The Remote access window. Reached from the viewer's control bar and
              from the notification; an affinity of this app's own, like the
@@ -136,12 +205,14 @@
             android:icon="@mipmap/ic_linux"
             android:label="@string/rm_label"
             android:launchMode="singleTask"
-            android:taskAffinity="com.ccrstech.linuxondroid.remote"
+            android:taskAffinity="${applicationId}.remote"
             android:resizeableActivity="true"
             android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|navigation|uiMode" />
 
-        <!-- Brings remote access back after a reboot or an update. Guarded by
-             DUMP like the desktop build's: the system sends these, apps may not. -->
+        <!-- Brings remote access back after a reboot or an update, and at a
+             boot starts the desktop when Settings' "Start Linux with the
+             phone" is on (LinuxBoot). Guarded by DUMP like the desktop
+             build's: the system sends these, apps may not. -->
         <receiver
             android:name=".RemoteResumeReceiver"
             android:exported="true"
