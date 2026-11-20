@@ -102,7 +102,21 @@
 #include "zkde-screencast-unstable-v1-client-protocol.h"
 
 /* What `version` prints; pmos.rs compares the whole file's hash, not this. */
-#define VERSION "6"
+#define VERSION "7"
+
+/*
+ * The fewest bits a second the encoder is asked for. The computer's window
+ * on a cable never goes near it; a browser across the internet (the Galaxy
+ * S24 port's Remote Desktop, s24-remote) follows its link down to here.
+ */
+#define MIN_BITRATE 200000
+
+/*
+ * videoconvert's threads (BGRx to I420 on the CPU). One: on the Galaxy S24,
+ * 1600x900 at 30 frames a second took 88% of a core with one and 99% with
+ * four (2026-11-19), as with x264's sliced threads (prefer_fast_cores).
+ */
+#define CONVERT_THREADS 1
 
 /*
  * Frames sent and not yet acknowledged before new ones stop going into the
@@ -2934,6 +2948,20 @@ static GstPadProbeReturn gate(GstPad *pad, GstPadProbeInfo *info, gpointer d) {
     return GST_PAD_PROBE_OK;
 }
 
+/*
+ * The same test before the colour conversion, so that a frame the encoder
+ * won't take is never converted: KWin may send 60 a second where a browser
+ * across the internet takes 20. It only drops; the gate above is the one that
+ * decides when a silent window has been waited for long enough.
+ */
+static GstPadProbeReturn early_gate(GstPad *pad, GstPadProbeInfo *info, gpointer d) {
+    if (!g_atomic_int_get(&app.attached)) return GST_PAD_PROBE_DROP;
+    if (g_atomic_int_get(&app.acks) && g_atomic_int_get(&app.inflight) >= MAX_INFLIGHT &&
+        g_get_monotonic_time() - app.last_ack < G_USEC_PER_SEC)
+        return GST_PAD_PROBE_DROP;
+    return GST_PAD_PROBE_OK;
+}
+
 static void send_video_config(void) {
     char *msg = g_strdup_printf("{\"t\":\"video\",\"dw\":%d,\"dh\":%d,\"cw\":%d,\"ch\":%d,\"encoder\":\"%s\","
                                 "\"hw\":%s,\"bitrate\":%d}",
@@ -3038,10 +3066,12 @@ static GPtrArray *encoder_candidates(void) {
  */
 static char *convert_desc(const char *format) {
     if (app.convert && strcmp(app.convert, "gl") == 0)
-        return g_strdup_printf("glupload ! glcolorconvert ! video/x-raw(memory:GLMemory),format=%s ! gldownload ! "
+        return g_strdup_printf("glupload name=conv ! glcolorconvert ! video/x-raw(memory:GLMemory),format=%s ! gldownload ! "
                                "video/x-raw,format=%s",
                                format, format);
-    return g_strdup_printf("videoconvert n-threads=4 ! video/x-raw,format=%s", format);
+    const char *threads = g_getenv("OADX_CONVERT_THREADS"); /* for measuring; see CONVERT_THREADS */
+    return g_strdup_printf("videoconvert name=conv n-threads=%d ! video/x-raw,format=%s",
+                           threads ? CLAMP(atoi(threads), 1, 8) : CONVERT_THREADS, format);
 }
 
 static char *pipeline_desc(const char *enc) {
@@ -3144,6 +3174,13 @@ static gboolean start_video(GString *why) {
         GstPad *in = gst_element_get_static_pad(app.encoder_el, "sink");
         gst_pad_add_probe(in, GST_PAD_PROBE_TYPE_BUFFER, gate, NULL, NULL);
         gst_object_unref(in);
+        GstElement *conv = gst_bin_get_by_name(GST_BIN(p), "conv");
+        if (conv) {
+            GstPad *cin = gst_element_get_static_pad(conv, "sink");
+            gst_pad_add_probe(cin, GST_PAD_PROBE_TYPE_BUFFER, early_gate, NULL, NULL);
+            gst_object_unref(cin);
+            gst_object_unref(conv);
+        }
         app.sizecaps = gst_bin_get_by_name(GST_BIN(p), "size");
         ask_stream_size(g_atomic_int_get(&app.stream_w), g_atomic_int_get(&app.stream_h));
         app.appsink = gst_bin_get_by_name(GST_BIN(p), "out");
@@ -5160,7 +5197,7 @@ static void on_hello(const char *json) {
     if (json_raw(json, "bitrate", v, sizeof v)) {
         int b = atoi(v);
         /* The software encoder's cost grows with its bits; past this a cable gains nothing visible. */
-        app.bitrate = CLAMP(b, 2000000, app.hw ? 40000000 : 16000000);
+        app.bitrate = CLAMP(b, MIN_BITRATE, app.hw ? 40000000 : 16000000);
         apply_bitrate();
     }
     g_atomic_int_set(&app.inflight, 0);
@@ -5199,7 +5236,7 @@ static void on_text(const char *json) {
     } else if (strcmp(t, "bitrate") == 0) {
         char v[32];
         if (json_raw(json, "bitrate", v, sizeof v)) {
-            app.bitrate = CLAMP(atoi(v), 2000000, app.hw ? 40000000 : 16000000);
+            app.bitrate = CLAMP(atoi(v), MIN_BITRATE, app.hw ? 40000000 : 16000000);
             apply_bitrate();
         }
     } else if (strcmp(t, "bye") == 0) {
