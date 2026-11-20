@@ -392,6 +392,11 @@ pub struct PmosPhone {
 /// per plug-in; after that this is a routing-table lookup.
 #[tauri::command]
 pub async fn pmos_status(app: AppHandle) -> Option<PmosPhone> {
+    // A test run that names its phones (OADX_ONLY_PHONES) leaves a
+    // postmarketOS phone alone unless `pmos` is one of them.
+    if !crate::adb::pmos_allowed() {
+        return None;
+    }
     if !link_up() {
         *seen().lock().unwrap() = None;
         return None;

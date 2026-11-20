@@ -1611,6 +1611,11 @@ fn moved_beside(app: &tauri::AppHandle, saved: &str, now: &str) {
 /// `moved` is told of one that answered at another address than it had.
 fn reconnect_these(app: &tauri::AppHandle, known: Vec<KnownDevice>, moved: fn(&tauri::AppHandle, &str, &str)) -> Vec<String> {
     let app = app.clone();
+    // A test run's phones only (OADX_ONLY_PHONES): another phone is not called back.
+    let known: Vec<KnownDevice> = known
+        .into_iter()
+        .filter(|d| crate::adb::remembered_phone_allowed(d.hardware_serial.as_deref(), &d.address))
+        .collect();
     if known.is_empty() {
         return Vec::new();
     }

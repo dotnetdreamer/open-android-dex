@@ -114,7 +114,11 @@ fn parse_devices(list: &str) -> Vec<Device> {
 async fn attached() -> Result<Vec<Device>, String> {
     let mut s = adb_connect().await?;
     adb_ask(&mut s, "host:devices").await?;
-    Ok(parse_devices(&adb_string(&mut s).await?))
+    // A test run's phones only (OADX_ONLY_PHONES): the others are not probed.
+    Ok(parse_devices(&adb_string(&mut s).await?)
+        .into_iter()
+        .filter(|d| crate::adb::phone_allowed(&d.serial))
+        .collect())
 }
 
 /// A byte stream to the launcher's socket on `serial`, straight through adb's

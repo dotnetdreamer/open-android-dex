@@ -54,6 +54,16 @@ for the measurements behind them.
 - Run the app with `npm run tauri dev` from `open-android-dex-tauri/`. That is the
   only flow that stages the payloads and applies permissions in the order that
   matters — never hand-launch scrcpy or sideload the APK to test.
+- When phones that are not under test are plugged in (someone else's, or ones
+  another session is using), start the app with `OADX_ONLY_PHONES` naming the
+  phone under test: its serial as `adb devices` shows it, or its `ro.serialno`,
+  which also matches it on wireless debugging. Several go with commas, and add
+  `pmos` to use a postmarketOS phone too. Without it, starting the app touches
+  every attached phone: it switches off the child-process limit, pushes a helper
+  and starts its app server and notifications, calls remembered Wi-Fi phones back,
+  and can open a desktop on the first phone that is ready. With it, the other
+  phones are left out of the device list and the log says
+  `phones: leaving … alone`.
 - Always kill any server or port you launch when you are done.
 - The launcher's desktop windows have unit tests that run on the computer
   (Robolectric): `./gradlew :app:testDebugUnitTest` from `openandroiddex-launcher/`,
