@@ -381,6 +381,34 @@ def main():
 main()
 PYEOF
 
+# How Chromium draws, written into the guest at every start for the reason the
+# dock's keeper is: a guest built by an older setup gets it with no setup pass.
+# Ubuntu's /usr/bin/chromium empties CHROMIUM_FLAGS and then reads every file in
+# /etc/chromium.d, so a flag for every launch goes there; the session's own
+# environment never reaches it. The file decides at each launch, from that
+# launch's environment: on an Adreno phone whose GPU probe passed (OADX_GPU is
+# turnip and GL points at Zink, below), ANGLE on Vulkan, straight on Turnip;
+# anywhere else, nothing, and dex-chromium's own choice stands. Measured on the
+# S25 against GL through Zink (doc/linux-gpu.md): CSS animations, canvas 2D and
+# scrolling 60 frames a second where Zink held them near 45, a 1080p60 video
+# with no frame dropped where Zink dropped 29 to 30%, and full screen that
+# stays, where Chromium on Zink left it the moment it entered it; WebGL 16%
+# slower. Only where Chromium is installed (the directory is its package's).
+if [ -d "$ROOT/rootfs/etc/chromium.d" ]; then
+  cat > "$ROOT/rootfs/etc/chromium.d/oadx-gpu" 2>/dev/null <<'GPUEOF'
+# Written by LinuxOnDroid each time one of its X displays starts: the desktop's
+# (linux-rt.sh) or the one for apps in windows of their own (linux-win.sh).
+# Read by /usr/bin/chromium on every launch, in that launch's environment.
+# On an Adreno phone whose session found the GPU working, Chromium draws through
+# ANGLE on Vulkan, straight on the phone's driver (Turnip), not GL through Zink:
+# with Zink under its GPU compositing, Chromium leaves full screen the moment it
+# enters it (a video's, F11's). Anywhere else this adds nothing.
+if [ "$OADX_GPU" = turnip ] && [ "$MESA_LOADER_DRIVER_OVERRIDE" = zink ]; then
+  CHROMIUM_FLAGS="$CHROMIUM_FLAGS --use-angle=vulkan --enable-features=Vulkan"
+fi
+GPUEOF
+fi
+
 # The guest session, as one string so the quoting stays in one place.
 #
 # A stale X lock from a killed session would stop Xvnc starting again, hence

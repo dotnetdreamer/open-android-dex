@@ -28,6 +28,7 @@ S24 (Exynos 2400, Xclipse 940, Android 15)**, in the app's own sessions; see
 | Into the guest | `LinuxGpu.stage` (from `LinuxService.startRuntime` / `startWin`) | copying this phone's driver in once per `DRIVER_VERSION` |
 | Whether to try | `LinuxGpu.env` | which GPU (`LinuxGpu.driver`), switch on, staged → `LINUX_GPU=turnip` or `xclipse` |
 | Whether it works | `linux-rt.sh`, `linux-win.sh` | the probe, and only on its yes, the GL environment |
+| How Chromium draws | `linux-rt.sh`, `linux-win.sh` → the guest's `/etc/chromium.d/oadx-gpu` | on an Adreno whose probe said yes, ANGLE on Vulkan straight on Turnip ("Chromium", under "Measured") |
 | What it said | `LinuxGpu.reportVerdict` | the session's `gpu:` line, copied into the app's log |
 | The switch | `LinuxSettingsActivity` | "Use the GPU" on the Linux settings page: the desktop's Linux tile menu opens it, and so does LinuxOnDroid's home screen menu; `filesDir/linux-gpu` |
 
@@ -36,6 +37,8 @@ Linux app ──GL──▶ Ubuntu's Mesa: Zink ──Vulkan──▶ Turnip (ou
                        │                  or ──▶ RADV (ours) ──ioctl──▶ /dev/dri/renderD128 ──▶ Xclipse
                        │
                        └── kopper swapchain ──WSI software path, XPutImage──▶ Xvnc ──▶ viewer
+
+Chromium, on an Adreno ──ANGLE──Vulkan──▶ Turnip (ours), no Zink in between
 ```
 
 ## Why Turnip, and not a bridge to Android's driver
@@ -250,6 +253,79 @@ probe, no `gpu:` line, and none of the 34 processes of the two sessions with a
 GL variable. Linux had never run on it before that: it first needed the proot
 fix in `openandroiddex-linux/proot/README.md`.
 
+### Chromium
+
+Since 2026-11-20, Linux's Chromium on an Adreno draws through ANGLE on Vulkan,
+straight on Turnip, instead of GL through Zink. Ubuntu's `/usr/bin/chromium`
+empties `CHROMIUM_FLAGS` and then reads every file in `/etc/chromium.d`, so a
+flag meant for every launch has to be there; the session's own environment
+never reaches it. `linux-rt.sh` and `linux-win.sh` write
+`/etc/chromium.d/oadx-gpu` at every start, so a guest built by an older setup
+gets it too. At each launch it adds `--use-angle=vulkan
+--enable-features=Vulkan` when that launch's environment has `OADX_GPU=turnip`
+and the probe's `MESA_LOADER_DRIVER_OVERRIDE=zink`. Anywhere else it adds
+nothing: `dex-chromium` still decides `--disable-gpu`, and an Xclipse phone
+keeps Zink (not measured there).
+
+Why: on Zink, Chromium leaves full screen the moment it enters it. A page's
+`requestFullscreen()` resolves, `fullscreenchange` fires true and then false,
+and YouTube's full screen (its button, its `f` key) never takes
+(`doc/linux-browser.md`). Xfwm4 is not the cause: asked by hand, it makes
+Chromium's window full screen. With `--disable-gpu-compositing`, or on Vulkan,
+full screen stays.
+
+Measured on the S25 Ultra on 2026-11-20, before the change: a test page in
+Linux's Chromium, a 1600x900 window on a private 1920x1080 Xvnc with Xfwm4
+(compositing off), the app's desktop session running beside it, the phone
+awake, unlocked and on AC power. One fresh Chromium on a fresh profile per
+run, in this order: Zink, Vulkan, no GPU, Vulkan, Zink, Vulkan. Frames a
+second are the page's own (`requestAnimationFrame` over 6 s, after 1 s of
+warm-up); CPU is Chromium's whole process tree, in cores. The video is a
+generated test pattern with noise, VP9 at 8 Mb/s, decoded in software.
+
+| | GL through Zink (before) | ANGLE on Vulkan (now) | no GPU |
+| --- | ---: | ---: | ---: |
+| CSS animations, 320 boxes | 42–43 | 60 | 34 |
+| WebGL, a full-window shader | 43–47 | 37–38 | none |
+| canvas 2D, 1,500 shapes and 100 texts a frame | 48 | 60 | 60 |
+| scrolling 400 styled cards | 41–45 | 60 | 60 |
+| scrolling plain text | 47–48 | 60 | 60 |
+| 1080p60 VP9 video, frames dropped (the player's count) | 29–30% | 0 | 19% |
+| the same, frames shown a second (`requestVideoFrameCallback`) | 40–41 | 44–46 | 43 |
+| a page's full screen, 2.5 s after a click | left at once | stays, 1920x1080 | stays |
+| CPU, scrolling plain text | 0.32–0.49 | 0.42–0.44 | 0.75 |
+| CPU, CSS animations | 0.75–1.06 | 1.16–1.26 | 1.18 |
+
+Vulkan reaches the 60 frames a second the CPU path gets, on less CPU than it
+(0.42–0.44 cores against 0.75 scrolling text), and keeps what the GPU gave CSS.
+It spends more CPU than Zink, for more frames: about 0.02 core-seconds a frame
+on the CSS animations either way. WebGL is slower: 37.6 against 44.9 frames a
+second, the runs' averages, 16% less. The ceiling near 45 that the runs of
+2026-11-13 put down to the copy (see "What is next") came with Zink: with the
+same session variables, Chromium on Vulkan paints 60. Each run's renderer says
+which path drew: `ANGLE (Mesa, zink Vulkan 1.4(Adreno (TM) 830v1
+(MESA_TURNIP)), OpenGL 4.6)` against `ANGLE (Qualcomm, Vulkan 1.4.363 (Adreno
+(TM) 830v1 (0x44050001)), turnip Mesa driver)`. Vulkan's GPU process held
+`/dev/kgsl-3d0` open twice, Zink's once.
+
+Then in the app's own session, with the change installed, watched in a
+browser on a computer (`doc/linux-browser.md`): the session's Chromium had
+`--use-angle=vulkan` on its command line and its GPU process the Adreno open.
+YouTube's `f` key made its window full screen (Xfwm4: `FULLSCREEN`, 1920x1080
+at 0,0), and *Stats for nerds* counted 1,085 frames of the 60 fps video (AV1,
+1280x720) in 18 s, none dropped: 60 a second. On Zink, in theater mode, it had
+painted 43.6 a second of the same video.
+
+A trap for whoever measures this again: an Xfwm4 of your own on a second
+Xvnc, started without the session's `XDG_CONFIG_DIRS=/usr/local/etc/xdg:/etc/xdg`,
+starts an xfconfd that saves XFCE's stock window manager settings into
+`/root`'s own (Ubuntu's theme, compositing on). theme.py, which puts those
+right, runs once per guest, so nothing undid it: the desktop's own Xfwm4 then
+crashed as it started (`malloc(): corrupted top size`), and the panel and the
+desktop, finding no window manager, did not come up either, until the settings
+were put back by theme.py's rule. Give that Xfwm4 the session's
+`XDG_CONFIG_DIRS`, or a `HOME` of its own.
+
 ## Costs
 
 The drivers are in the APK's assets, in both the launcher and LinuxOnDroid:
@@ -286,11 +362,16 @@ short process per session start.
   WebGL none → 44–50 fps, scrolling the same (47–50 fps) on about half the CPU
   (0.96 → 0.55 cores). But canvas 2D 58 → 45–47 fps, a plain page's scroll
   (Wikipedia) 60 → 47 fps, 1080p60 VP9 video 11% → 27% of frames dropped,
-  and pages load about 0.3 s later. The GPU path tops out near 45–50 fps, and
-  this CPU gets past that without it: the copy above is what holds it back.
-  Kept on all the same, the user's call: the CPU it frees is worth more than
-  the frames it costs. The window session (`:2`) draws on the GPU too (the
-  same wrapper; its GPU process loads Turnip). Eight minutes of CSS and WebGL
-  held steady with no crash. Firefox (software WebRender) and VS Code
-  (`--disable-gpu`) still start and run; they are unchanged and unmeasured.
+  and pages load about 0.3 s later. The GPU path topped out near 45–50 fps,
+  and this CPU gets past that without it. Kept on all the same, the user's
+  call: the CPU it frees is worth more than the frames it costs. That ceiling
+  was put down to the copy above; it was Zink's: since 2026-11-20 Chromium on
+  an Adreno draws on Vulkan and reaches 60 ("Chromium", under "Measured").
+  The window session (`:2`) draws on the GPU too (the same wrapper; its GPU
+  process loads Turnip). Eight minutes of CSS and WebGL held steady with no
+  crash. Firefox (software WebRender) and VS Code (`--disable-gpu`) still start
+  and run; they are unchanged and unmeasured.
+- Chromium on Vulkan in the window session (`:2`): linux-win.sh writes the
+  same file and gives its apps the same variables, but Chromium there has only
+  been run on Zink. On an Xclipse, Chromium on Vulkan (RADV) is unmeasured.
 - A display path with DRI3 would let finished frames skip the CPU entirely.
