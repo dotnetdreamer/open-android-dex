@@ -1,21 +1,33 @@
 package com.ccrstech.openandroiddex.launcher;
 
 import android.animation.ValueAnimator;
+import android.app.Activity;
 import android.content.Context;
+import android.content.res.ColorStateList;
 import android.graphics.Canvas;
 import android.graphics.Paint;
 import android.graphics.RadialGradient;
 import android.graphics.RectF;
 import android.graphics.Shader;
 import android.graphics.Typeface;
+import android.graphics.drawable.Drawable;
+import android.graphics.drawable.GradientDrawable;
+import android.graphics.drawable.RippleDrawable;
+import android.os.Build;
 import android.os.SystemClock;
 import android.text.TextPaint;
 import android.text.TextUtils;
 import android.util.TypedValue;
+import android.view.Display;
+import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.accessibility.AccessibilityNodeInfo;
 import android.view.animation.LinearInterpolator;
+import android.widget.Button;
+import android.widget.ImageView;
 import android.widget.LinearLayout;
+import android.widget.TextView;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -32,6 +44,89 @@ final class LinuxHomeViews {
 
     /** The prompt, the caret and the progress marks: the app icon's amber. */
     static final int AMBER = 0xFFFFC131;
+
+    // ── a page's top bar ──
+
+    /**
+     * The top of a page that opens from the home screen, Settings and Remote
+     * access: Back, then the page's name. One builder, so the pages look and
+     * work alike.
+     *
+     * Back only where the page needs one of its own: in LinuxOnDroid, and on
+     * the phone's own screen. A window on a desktop display has Back on its own
+     * bar (CaptionService), so there the page shows only its name.
+     *
+     * @param color the arrow's and the name's colour
+     * @param dark  a dark page, for the colour of the press ripple
+     */
+    static View pageBar(Activity a, String name, int color, boolean dark) {
+        LinearLayout bar = new LinearLayout(a);
+        bar.setOrientation(LinearLayout.HORIZONTAL);
+        bar.setGravity(Gravity.CENTER_VERTICAL);
+        bar.setMinimumHeight(dp(a, 56));
+        if (Linux.hasHomeScreen(a) || onPhoneDisplay(a)) {
+            ImageView back = new ImageView(a);
+            Drawable arrow = a.getDrawable(R.drawable.hm_ic_back).mutate();
+            arrow.setTint(color);
+            back.setImageDrawable(arrow);
+            back.setScaleType(ImageView.ScaleType.CENTER);
+            GradientDrawable rest = new GradientDrawable();
+            rest.setColor(0x00000000);
+            rest.setCornerRadius(dp(a, 22));
+            GradientDrawable mask = new GradientDrawable();
+            mask.setColor(0xFFFFFFFF);
+            mask.setCornerRadius(dp(a, 22));
+            // A white ripple vanishes on a light desktop's page; a dark one shows.
+            back.setBackground(new RippleDrawable(
+                    ColorStateList.valueOf(dark ? 0x24FFFFFF : 0x1F000000), rest, mask));
+            back.setContentDescription(a.getString(R.string.lx_back));
+            back.setFocusable(true);
+            back.setAccessibilityDelegate(new View.AccessibilityDelegate() {
+                @Override
+                public void onInitializeAccessibilityNodeInfo(View host, AccessibilityNodeInfo info) {
+                    super.onInitializeAccessibilityNodeInfo(host, info);
+                    info.setClassName(Button.class.getName());
+                }
+            });
+            back.setOnClickListener(v -> a.finish());
+            LinearLayout.LayoutParams backLp = new LinearLayout.LayoutParams(dp(a, 44), dp(a, 44));
+            // The arrow's stroke sits where the page's text starts.
+            backLp.setMarginStart(-dp(a, 10));
+            bar.addView(back, backLp);
+        }
+        TextView title = new TextView(a);
+        title.setText(name);
+        title.setTextSize(TypedValue.COMPLEX_UNIT_SP, 20);
+        title.setTextColor(color);
+        title.setTypeface(Build.VERSION.SDK_INT >= 28
+                ? Typeface.create(Typeface.DEFAULT, 700, false) : Typeface.DEFAULT_BOLD);
+        // The language's direction, as on the home screen.
+        DexLocale.followLayout(title);
+        title.setLetterSpacing(-0.01f);
+        if (Build.VERSION.SDK_INT >= 28) title.setAccessibilityHeading(true);
+        LinearLayout.LayoutParams nameLp = new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+        nameLp.setMarginStart(dp(a, 6));
+        bar.addView(title, nameLp);
+        DexFonts.applyTo(a, bar);
+        return bar;
+    }
+
+    /** On the phone's own screen, not a desktop's: a window there has no bar of ours. */
+    static boolean onPhoneDisplay(Activity a) {
+        try {
+            Display d = Build.VERSION.SDK_INT >= 30 ? a.getDisplay()
+                    : a.getWindowManager().getDefaultDisplay();
+            return d == null || d.getDisplayId() == Display.DEFAULT_DISPLAY;
+        } catch (Exception e) {
+            return true;
+        }
+    }
+
+    private static int dp(Context c, float v) {
+        return Math.round(TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, v,
+                c.getResources().getDisplayMetrics()));
+    }
 
     // ── the terminal ──
 

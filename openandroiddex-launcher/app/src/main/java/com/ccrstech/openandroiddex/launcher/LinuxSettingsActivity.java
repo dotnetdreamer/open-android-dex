@@ -209,47 +209,12 @@ public class LinuxSettingsActivity extends Activity {
     }
 
     /**
-     * Back, and the page's name. A window on the desktop display has Back on
-     * its own bar (CaptionService), so there the page shows only its name.
+     * Back, and the page's name: the same top bar as Remote access
+     * ({@link LinuxHomeViews#pageBar}). A window on the desktop display has
+     * Back on its own bar (CaptionService), so there the page shows only its name.
      */
     private View topBar() {
-        LinearLayout bar = new LinearLayout(this);
-        bar.setOrientation(LinearLayout.HORIZONTAL);
-        bar.setGravity(Gravity.CENTER_VERTICAL);
-        bar.setMinimumHeight(dp(56));
-        boolean withBack = homeLook || onPhoneDisplay();
-        if (withBack) {
-            ImageView back = new ImageView(this);
-            back.setImageDrawable(tinted(R.drawable.hm_ic_back, title));
-            back.setScaleType(ImageView.ScaleType.CENTER);
-            back.setBackground(pressable(0x00000000, dp(22), 0));
-            asButton(back, getString(R.string.lx_back));
-            back.setOnClickListener(v -> finish());
-            LinearLayout.LayoutParams backLp = new LinearLayout.LayoutParams(dp(44), dp(44));
-            // The arrow's stroke sits where the home screen's icon sits.
-            backLp.setMarginStart(-dp(10));
-            bar.addView(back, backLp);
-        }
-        TextView name = text(pageName(), 20, title, 700);
-        name.setLetterSpacing(-0.01f);
-        if (Build.VERSION.SDK_INT >= 28) name.setAccessibilityHeading(true);
-        LinearLayout.LayoutParams nameLp = new LinearLayout.LayoutParams(
-                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
-        nameLp.setMarginStart(dp(6));
-        bar.addView(name, nameLp);
-        DexFonts.applyTo(this, bar);
-        return bar;
-    }
-
-    /** On the phone's own screen, not a desktop's: a window there has no bar of ours. */
-    private boolean onPhoneDisplay() {
-        try {
-            android.view.Display d = Build.VERSION.SDK_INT >= 30 ? getDisplay()
-                    : getWindowManager().getDefaultDisplay();
-            return d == null || d.getDisplayId() == android.view.Display.DEFAULT_DISPLAY;
-        } catch (Exception e) {
-            return true;
-        }
+        return LinuxHomeViews.pageBar(this, pageName(), title, homeLook || theme.dark);
     }
 
     /** The sections, as things stand now. */
