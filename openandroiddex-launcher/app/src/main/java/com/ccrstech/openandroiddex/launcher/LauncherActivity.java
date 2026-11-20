@@ -6537,6 +6537,9 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
             } else if (LinuxSettingsActivity.class.getName().equals(activity)) {
                 label = getString(R.string.ln_settings_title);
                 glyph = "⚙"; // gear
+            } else if (WebActivity.class.getName().equals(activity)) {
+                label = getString(R.string.wb_label);
+                glyph = "🌐"; // the drawer's own tile for it
             } else {
                 continue;
             }
@@ -6565,6 +6568,8 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
                     openLinuxRemote();
                 } else if (LinuxSettingsActivity.class.getName().equals(target)) {
                     openLinuxSettings();
+                } else if (WebActivity.class.getName().equals(target)) {
+                    launchWeb();
                 } else {
                     launchSettings();
                 }

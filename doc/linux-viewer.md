@@ -660,7 +660,15 @@ What the home screen asks of this window, and what it keeps away from it:
   window's bar). CaptionService draws that bar only for the launcher's windows
   it names in `isDesktopTask` and takes every other task of the package for
   the desktop itself, so a new window of ours must be added there too, or it
-  opens with no bar, no Back and no close. It holds two switches:
+  opens with no bar, no Back and no close. One UI on Android 17 gives our own
+  windows no caption window of their own, so the bar is hosted on the window
+  itself and lies over its first 40 px (seen on the S25: the page's heading
+  sat half under it, and the desktop's own Settings window still does).
+  CaptionService works out how far each bar reaches over its window and
+  reports it for our tasks (`OwnWindows.barsOver`), and every window of ours
+  keeps its content below that (`OwnWindows.keepClearOfBar`): `OwnWindows.opened`
+  does it for each window on the taskbar, and a Linux app's window calls it
+  itself. It holds two switches:
   - **Use the GPU**, which was a tile on the home screen. On a phone whose GPU
     has no driver here it is shown greyed, with the reason, instead of left out.
   - **Start Linux with the phone** (`LinuxBoot`). On BOOT_COMPLETED,

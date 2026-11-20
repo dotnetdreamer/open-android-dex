@@ -55,3 +55,11 @@ for the measurements behind them.
   only flow that stages the payloads and applies permissions in the order that
   matters — never hand-launch scrcpy or sideload the APK to test.
 - Always kill any server or port you launch when you are done.
+- The launcher's desktop windows have unit tests that run on the computer
+  (Robolectric): `./gradlew :app:testDebugUnitTest` from `openandroiddex-launcher/`,
+  with `JAVA_HOME` set to Android Studio's `jbr`. They build the real activities at
+  a desktop's size. `DesktopWindowsTest` reads the desktop windows from the
+  manifest, so a new window fails there unless it wears a bar, keeps clear of it,
+  and has a taskbar tile and a Task Manager row. `DesktopRaiseTest` runs a fake
+  window daemon on 127.0.0.1:7191: run it with no PC app session open, since the
+  PC app forwards that port.

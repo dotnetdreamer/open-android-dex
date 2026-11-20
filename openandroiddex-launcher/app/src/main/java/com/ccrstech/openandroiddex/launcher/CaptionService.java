@@ -421,6 +421,13 @@ public final class CaptionService extends AccessibilityService {
         int windowId;
         /** Hosted on the app's own window, not on a shell caption window: see followAppWindow. */
         boolean onApp;
+        /**
+         * How far the bar reaches down over the top of the window hosting it, px: the whole
+         * bar on an app window that starts at the task's top (One UI on Android 17, for our
+         * own tasks), nothing on a shell caption window. Our own windows keep clear of it
+         * (OwnWindows.keepClearOfBar).
+         */
+        int over;
         /** Passes in a row that window has been missing from the accessibility list. */
         int awayPasses;
     }
@@ -574,6 +581,7 @@ public final class CaptionService extends AccessibilityService {
         }
         for (int i = 0; i < captions.size(); i++) release(captions.valueAt(i));
         captions.clear();
+        OwnWindows.barsOver(null);                 // no bar over any window of ours now
         for (int i = 0; i < curtains.size(); i++) {
             try {
                 View v = curtains.valueAt(i);
@@ -706,7 +714,9 @@ public final class CaptionService extends AccessibilityService {
      * the two apart — and the Linux window is exempted the same way, for the
      * same reason. Every window of ours that the taskbar lists (OwnWindows)
      * has to be here too, or it opens with no bar, and so no Back and no ✕:
-     * Linux settings did, until it was added.
+     * Linux settings did, until it was added. So did the Web viewer, which
+     * was on neither list: on One UI 17, which gives our windows no caption
+     * of its own, it had no title bar at all.
      */
     private boolean isDesktopTask(WmClient.Task t) {
         return getPackageName().equals(t.pkg)
@@ -717,7 +727,8 @@ public final class CaptionService extends AccessibilityService {
                 && !FileTransferActivity.class.getName().equals(t.activity)
                 && !LinuxRemoteActivity.class.getName().equals(t.activity)
                 && !LinuxSettingsActivity.class.getName().equals(t.activity)
-                && !LinuxWindowActivity.class.getName().equals(t.activity);
+                && !LinuxWindowActivity.class.getName().equals(t.activity)
+                && !WebActivity.class.getName().equals(t.activity);
     }
 
     /** @return true if any caption geometry changed, i.e. windows are on the move. */
@@ -894,7 +905,25 @@ public final class CaptionService extends AccessibilityService {
         hostWaitSince.keySet().retainAll(tasks.keySet());
         updateEdges(display, stack, windows);
         rememberGeometry(display, stack);
+        reportOwnBars();
         return moved;
+    }
+
+    /**
+     * Tell our own windows where the bar lies over them (OwnWindows.barsOver), once a pass
+     * has settled: a theme or density rebuild drops every bar between passes and puts it
+     * back in the next, and a window told in between would jump down and up again.
+     */
+    private void reportOwnBars() {
+        android.util.SparseIntArray over = new android.util.SparseIntArray();
+        for (int i = 0; i < captions.size(); i++) {
+            Caption c = captions.valueAt(i);
+            WmClient.Task t = tasks.get(captions.keyAt(i));
+            if (c.over > 0 && t != null && getPackageName().equals(t.pkg)) {
+                over.put(captions.keyAt(i), c.over);
+            }
+        }
+        OwnWindows.barsOver(over);
     }
 
     // ── resize edges (ResizeEdges) ─────────────────────────────────────────
@@ -1482,6 +1511,8 @@ public final class CaptionService extends AccessibilityService {
                     .apply();
             made.windowId = id;
             made.onApp = onApp;
+            // dy is the strip's share of the bar: above the host's top, over nothing.
+            made.over = onApp ? Math.max(0, height + Math.round(dy)) : 0;
             captions.put(task.taskId, made);
             // The real caption now covers the platform's — retire the launch curtain and
             // stop curtaining this task (a later host blink-out must not re-cover it).
@@ -2788,17 +2819,127 @@ public final class CaptionService extends AccessibilityService {
                     // windows (ours: Settings and Linux). Absent = any window
                     // of the package, the taskbar's meaning.
                     String activity = i.getStringExtra("activity");
+                    final int display = desktopDisplayId;
                     for (Map.Entry<Integer, Min> e : minimised.entrySet()) {
                         if (!pkg.equals(e.getValue().pkg)) continue;
                         if (activity != null && !activity.equals(e.getValue().activity)) continue;
                         final int taskId = e.getKey();
-                        final int display = desktopDisplayId;
-                        wm.post(() -> wm.show(display, taskId));
-                        break;
+                        // The reconcile drops it from `minimised` once it is visible again.
+                        wm.post(() -> unhide(display, taskId, pkg, 0));
+                        return;
                     }
-                    // The reconcile drops it from `minimised` once it is visible again.
+                    // Not minimised. Every sender means "show me this window": the Task
+                    // Manager's row for a window of ours, or a taskbar pin that went stale.
+                    // A window that is open behind others is shown by bringing it to the
+                    // front, as a click on it does. This used to do nothing at all, so the
+                    // Task Manager's row only ever worked on a minimised window.
+                    wm.post(() -> raise(display, pkg, activity));
                 }
             };
+
+    /**
+     * The open window of {@code pkg} (and of {@code activity}, when one is named) to the
+     * front. On the daemon's thread.
+     *
+     * A hidden one this service no longer remembers hiding (the minimised set does not
+     * survive a restart of the service) is un-hidden, since a reorder alone leaves it
+     * hidden.
+     */
+    private void raise(int display, String pkg, String activity) {
+        List<WmClient.Task> live = wm.list(display);
+        if (live == null) return;
+        for (WmClient.Task t : live) {                       // topmost first
+            if (!pkg.equals(t.pkg) || isDesktopTask(t)) continue;
+            if (activity != null && !activity.equals(t.activity)) continue;
+            if (t.visible) {
+                bringForward(display, t, pkg);
+            } else {
+                unhide(display, t.taskId, pkg, 0);
+            }
+            return;
+        }
+    }
+
+    /**
+     * A shown window to the front. On the daemon's thread.
+     *
+     * Where the daemon will not raise it (FRONT answers ERR: Android 10 has no reorder, and
+     * Android 12 ignores one across a fullscreen app), a window of ours is started again
+     * instead. Each is singleTask on a task of its own, so that brings forward the window
+     * it already has, as its taskbar tile does, and opens no second one.
+     */
+    private void bringForward(int display, WmClient.Task t, String pkg) {
+        if (wm.front(display, t.taskId)) return;
+        trace("raise: the daemon would not raise task " + t.taskId + " (" + t.activity + ")");
+        if (getPackageName().equals(pkg)) {
+            final String own = t.activity;
+            main.post(() -> startOwnWindow(own));
+        }
+    }
+
+    /** When an un-hide is read back, per try: the daemon answers before the window manager acts. */
+    private static final long[] SHOW_CHECK_MS = {600, 2000};
+
+    /**
+     * Un-hide a task, then read it back. On the daemon's thread.
+     *
+     * SHOW's answer proves little: the daemon answers once it has handed the change over,
+     * and answers OK either way. So a moment later the task is looked at again:
+     * - shown and in front: done;
+     * - shown but behind (Android 12 un-hides, then ignores a reorder across a fullscreen
+     *   app): brought forward like any window behind others ({@link #bringForward});
+     * - still hidden: asked once more, a little later (a daemon that was restarting, a
+     *   transition that was dropped);
+     * - gone: nothing left to show, and its pin and row go with it.
+     *
+     * Starting the activity again is no fallback for a task that stays hidden, unlike for
+     * one that will not come forward: it does not clear the hidden flag (measured, see
+     * LauncherActivity.launch). Only the daemon can. A task still hidden after the second
+     * try stays minimised, where its taskbar pin still offers it, and the breadcrumb says so.
+     */
+    private void unhide(int display, int taskId, String pkg, int attempt) {
+        boolean answered = wm.show(display, taskId);
+        wm.postDelayed(() -> {
+            List<WmClient.Task> live = wm.list(display);
+            WmClient.Task t = live == null ? null : byId(live, taskId);
+            if (live != null && t == null) {
+                trace("restore: task " + taskId + " is gone");
+                return;
+            }
+            if (t != null && t.visible) {
+                if (!inFront(live, t)) bringForward(display, t, pkg);
+                return;
+            }
+            if (attempt + 1 < SHOW_CHECK_MS.length) {
+                unhide(display, taskId, pkg, attempt + 1);
+                return;
+            }
+            trace("restore: task " + taskId + " is still hidden after " + SHOW_CHECK_MS.length
+                    + " tries" + (answered ? "" : "; the daemon refused or did not answer")
+                    + (live == null ? "; no window list" : ""));
+        }, SHOW_CHECK_MS[attempt]);
+    }
+
+    /** Whether {@code t} is the front window: the first shown one in the daemon's topmost-first list, the desktop aside. */
+    private boolean inFront(List<WmClient.Task> live, WmClient.Task t) {
+        for (WmClient.Task o : live) {
+            if (!o.visible || isDesktopTask(o)) continue;
+            return o.taskId == t.taskId;
+        }
+        return false;
+    }
+
+    /** One of our windows, started again to bring it forward. Main thread: OwnWindows is. */
+    private void startOwnWindow(String activity) {
+        if (!OwnWindows.list().contains(activity)) return;  // only a window of ours that is open
+        try {
+            startActivity(new android.content.Intent()
+                    .setClassName(this, activity)
+                    .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK));
+        } catch (RuntimeException e) {
+            trace("raise: could not start " + activity + ": " + e);
+        }
+    }
 
     private static WmClient.Task byId(List<WmClient.Task> tasks, int taskId) {
         for (WmClient.Task t : tasks) {

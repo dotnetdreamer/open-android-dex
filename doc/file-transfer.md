@@ -44,8 +44,8 @@ coincidences.
 
 Every other SYSTEM APPS tile — Settings, Linux, Docker, the Web viewer, the Task
 Manager — opens a freeform window **on the DeX desktop**, with a caption strip, a
-taskbar tile and remembered geometry (the Web viewer is supposed to and does not,
-which is a pre-existing omission, not a different design — see below). Two
+taskbar tile and remembered geometry (the Web viewer only got its caption strip and
+taskbar tile on 2026-11-19: it had been left out, not designed differently; see below). Two
 PC-side designs were considered and both fail structurally, not fixably:
 
 - A pane inside the Tauri window means the user leaves the mirrored desktop to
@@ -61,8 +61,8 @@ registers in all six of the places a window has to register: the manifest,
 `CaptionService.isDesktopTask`, `CaptionService.onClose`, **both** chains of
 `addOwnWindowTiles`, and `TaskManagerActivity.ownRows`. Missing any of them is
 silent — a window absent from `isDesktopTask` is classified as the desktop
-background and wears no caption at all, which is the defect `WebActivity` has
-today, and one added to `addOwnWindowTiles`' glyph chain but not its click chain
+background and wears no caption at all, which is the defect `WebActivity` had
+until 2026-11-19, and one added to `addOwnWindowTiles`' glyph chain but not its click chain
 opens Settings instead of itself. `WindowMemory` is the one place that needs no
 registration: it keys on the activity name, so the geometry is remembered the
 moment the window exists, and only the comment that counts the windows had to

@@ -411,6 +411,9 @@ public class TaskManagerActivity extends Activity {
             } else if (LinuxSettingsActivity.class.getName().equals(activity)) {
                 label = getString(R.string.ln_settings_title);
                 glyph = "⚙";
+            } else if (WebActivity.class.getName().equals(activity)) {
+                label = getString(R.string.wb_label);
+                glyph = "🌐";
             } else {
                 continue;
             }
@@ -442,6 +445,10 @@ public class TaskManagerActivity extends Activity {
 
     /**
      * A row for one of our own windows.
+     *
+     * A click shows the window, as its taskbar tile does: CaptionService
+     * un-hides it when it is minimised and brings it to the front when it is
+     * open behind other windows (its restore receiver handles both).
      *
      * "End task" is offered only for Linux, and it goes to the window's own
      * close path so the same question gets asked — ending a Linux session is

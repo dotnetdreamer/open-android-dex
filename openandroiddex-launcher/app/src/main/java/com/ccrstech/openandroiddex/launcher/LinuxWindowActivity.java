@@ -85,6 +85,9 @@ public class LinuxWindowActivity extends Activity {
                 FrameLayout.LayoutParams.MATCH_PARENT));
         setContentView(root);
         root.requestApplyInsets();
+        // Where the shell publishes no captionBar inset (One UI on Android 17
+        // gives our windows no caption of its own), the bar lies over the app.
+        OwnWindows.keepClearOfBar(this);
         view.requestFocus();
         IntentFilter f = new IntentFilter(LauncherActivity.ACTION_CLOSE_WINDOW);
         if (android.os.Build.VERSION.SDK_INT >= 33) {
@@ -131,6 +134,7 @@ public class LinuxWindowActivity extends Activity {
     @Override
     protected void onDestroy() {
         super.onDestroy();
+        OwnWindows.stopKeepingClear(this);
         if (listening) {
             listening = false;
             try {

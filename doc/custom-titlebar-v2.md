@@ -241,6 +241,40 @@ Two more that were visual rather than silent:
   latch the height at whatever we last drew. That is how a 34 px bar survived under a 40 px
   platform caption, leaving the 6 px sliver visible in `coveredRegion`. `Math.max(h,
   CAPTION_PX)` makes the height monotone; being a few px too tall costs nothing.
+- **Our own windows get no platform caption (One UI on Android 17, S25 Ultra, 2026-11-19).**
+  A third-party freeform task has a "Caption of Task" window to host our bar, and the app
+  is laid out below it. The launcher's own tasks (Settings, Linux, Docker, Task Manager,
+  File transfer, Remote access, Linux settings, the Web viewer, a Linux app's window) have
+  none, so the bar is hosted on the app window, whose frame is the whole task.
+  - STRIP reserves app bounds only (appBounds top 122 against bounds 82), with no captionBar
+    inset, so nothing tells the window. Our windows draw edge to edge (targetSdk 35).
+  - So each lost its first 40 px under the bar: the Settings window's "DeX Settings" was
+    cut in half.
+  - `ensureCaption` records how far the bar reaches over its host (`height + dy`, 0 on a
+    caption window). After each pass `reportOwnBars` hands our tasks' values to
+    `OwnWindows.barsOver`.
+  - The windows pad `android.R.id.content` by that, minus any captionBar inset they get:
+    `OwnWindows.opened` does it for every window on the taskbar, and `LinuxWindowActivity`
+    calls `keepClearOfBar` itself.
+  - The Web viewer was on neither list: `isDesktopTask` took it for the desktop, so on One
+    UI 17 it had no bar at all, and no taskbar tile or Task Manager row either. It is on all
+    of them now.
+  - A Task Manager row for one of our windows used to bring it back only when it was
+    minimised: CaptionService's restore receiver looked among the windows it had hidden and
+    nowhere else. Now a window open behind others is raised (`FRONT`), one hidden by an
+    earlier run of the service is un-hidden (`SHOW`), and where the daemon will not raise it
+    (`FRONT` answers ERR) a window of ours is started again, which brings its task forward.
+    Checked on the S25 Ultra on 2026-11-19: the Web viewer fully under the Task Manager came
+    to the front from its row, and came back from minimised the same way.
+  - A `SHOW` is read back. The daemon answers OK whether or not the window manager carried it
+    out, so 600 ms later the task is listed again: still hidden, it gets one more `SHOW` (read
+    back after 2 s); shown but left behind (Android 12 ignores the reorder across a fullscreen
+    app), it is raised as above; gone, it is left alone. Starting the activity again is no
+    remedy for a task that stays hidden: it does not clear the hidden flag. Such a task stays
+    minimised, its pin still offers it, and `caption.log` says so.
+  - Tests: `app/src/test` (`DesktopWindowsTest`, `DesktopBarRoomTest`, `DesktopRaiseTest`).
+  - Reported once a pass has settled, because a theme or density rebuild drops every bar
+    between passes.
 
 ### 0.2.4 Host selection must be stable, not merely correct
 
