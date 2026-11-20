@@ -198,6 +198,11 @@ public final class BrowserHarness {
     /** How long a stream let in waits before it takes the desktop (said with HANDOFF); 0 for not at all. */
     static volatile long slowHandoffMs;
 
+    /** Linux's files (the page's Files), over a folder standing in for the guest's /; null without one. */
+    static LinuxFiles files;
+    /** What the stand-in Linux is: "ready", "missing" or "installing" (`fsstate`). */
+    static volatile String fsState = "ready";
+
     /** The stream watching now, as LinuxStream.endBrowser reads it. */
     static Session watching() {
         synchronized (CLAIM) {
@@ -218,6 +223,47 @@ public final class BrowserHarness {
             final List<byte[]> mono = oggPackets(Files.readAllBytes(new File(args[5]).toPath()));
             final List<byte[]> stereo = oggPackets(Files.readAllBytes(new File(args[6]).toPath()));
             LinuxStreamAudio.opus = (channels, bitrate, out) -> new StandinOpus(channels, channels == 1 ? mono : stereo, out);
+        }
+        if (args.length > 7) {
+            // The guest's / and, if given, the phone's shared folder at
+            // ~/Desktop/LinuxOnDeX, as linux-rt.sh binds it.
+            final File rootfs = new File(args[7]);
+            final File shared = args.length > 8 ? new File(args[8]) : null;
+            // The test's symbolic links, made here with the targets Linux would
+            // hold ("/etc", "../.."): Node on Windows writes "/etc" as "C:\etc".
+            File wanted = new File(rootfs, ".links");
+            if (wanted.isFile()) {
+                for (String line : new String(Files.readAllBytes(wanted.toPath()), StandardCharsets.UTF_8).split("\n")) {
+                    int tab = line.indexOf('\t');
+                    if (tab <= 0) continue;
+                    java.nio.file.Path link = new File(rootfs, line.substring(0, tab)).toPath();
+                    Files.deleteIfExists(link);
+                    Files.createSymbolicLink(link, java.nio.file.Paths.get(line.substring(tab + 1).trim()));
+                }
+                wanted.delete();
+            }
+            LinuxFiles.Layout layout = new LinuxFiles.Layout() {
+                @Override
+                public File rootfs() {
+                    return "ready".equals(fsState) ? rootfs : null;
+                }
+
+                @Override
+                public String state() {
+                    return fsState;
+                }
+
+                @Override
+                public List<LinuxFiles.Mount> mounts() {
+                    List<LinuxFiles.Mount> m = new ArrayList<>();
+                    if (shared != null) m.add(new LinuxFiles.Mount("/root/Desktop/LinuxOnDeX", shared, "shared"));
+                    return m;
+                }
+            };
+            // Android's decoders are not here: a small picture is its own thumbnail.
+            LinuxFiles.Thumbs thumbs = (f, kind, size) -> "image".equals(kind) && f.length() < 512 * 1024
+                    ? Files.readAllBytes(f.toPath()) : null;
+            files = new LinuxFiles(layout, thumbs, on -> ev("{\"busy\":" + on + "}"));
         }
         LinuxBrowser store = new LinuxBrowser(dir);
         store.setOn(true);
@@ -298,6 +344,11 @@ public final class BrowserHarness {
             public void changed() {
                 ev("{\"changed\":" + q(store.state()) + ",\"tokens\":" + store.tokenCount() + "}");
             }
+
+            @Override
+            public LinuxFiles files() {
+                return files;
+            }
         };
         LinuxBrowserServer server = LinuxBrowserServer.start(store, cert, hostImpl, null, port);
         final int boundPort = server.port();
@@ -322,6 +373,18 @@ public final class BrowserHarness {
                 System.out.flush();
             } else if (line.equals("state?")) {
                 System.out.println("STATE " + store.state());
+                System.out.flush();
+            } else if (line.startsWith("fsstate ")) {
+                fsState = line.substring(8).trim();
+                System.out.println("OK fsstate " + fsState);
+                System.out.flush();
+            } else if (line.startsWith("zip64 ")) {
+                // ZIP64's fields from this size on, to see them without four gigabytes
+                LinuxFiles.zip64At = Long.parseLong(line.substring(6).trim());
+                System.out.println("OK zip64 " + LinuxFiles.zip64At);
+                System.out.flush();
+            } else if (line.equals("fsbusy?")) {
+                System.out.println("FSBUSY " + (files == null ? -1 : files.busyCount()));
                 System.out.flush();
             } else if (line.equals("conns")) {
                 System.out.println("CONNS " + server.connections());

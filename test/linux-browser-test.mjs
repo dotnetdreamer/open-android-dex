@@ -138,7 +138,7 @@ const classes = path.join(tmp, 'classes');
 fs.mkdirSync(classes);
 const javac = spawnSync(JAVAC, [
   '-nowarn', '-d', classes,
-  ...['LinuxBrowser', 'LinuxBrowserCert', 'LinuxBrowserServer', 'LinuxStreamSocket', 'LinuxStreamAudio', 'LinuxAudioLag']
+  ...['LinuxBrowser', 'LinuxBrowserCert', 'LinuxBrowserServer', 'LinuxStreamSocket', 'LinuxStreamAudio', 'LinuxAudioLag', 'LinuxFiles']
     .map((c) => path.join(LAUNCHER, `${c}.java`)),
   path.join(HERE, 'linux-browser/DexLog.java'),
   path.join(HERE, 'linux-browser/BrowserHarness.java'),
@@ -394,8 +394,12 @@ console.log('the door');
   const r = await request('GET', '/', { plain: true });
   check('plain http on the same port is served too, for a browser that refuses the certificate: the same page',
     r.status === 200 && r.body.includes('viewer.js') && r.body.includes('id="choose"'), `${r.status} ${r.body.slice(0, 60)}`);
-  check('…under the same policy, which lets the page play a MediaSource of its own and nothing else',
-    (r.headers['content-security-policy'] || '').includes("media-src blob:") && (r.headers['content-security-policy'] || '').includes("script-src 'self'"));
+  // Media from the page's own MediaSource, and from its own address (a video
+  // or a song of Linux's in Files); frames only from there (a PDF of Linux's).
+  check('…under the same policy, which lets the page play a MediaSource of its own and its own address\'s files, and nothing else',
+    / media-src 'self' blob:;/.test(r.headers['content-security-policy'] || '') && / frame-src 'self';/.test(r.headers['content-security-policy'] || '')
+      && (r.headers['content-security-policy'] || '').includes("script-src 'self'") && (r.headers['content-security-policy'] || '').includes("default-src 'none'"),
+    r.headers['content-security-policy']);
   const mse = await request('GET', '/mse.js', { plain: true });
   check("…and the video player's part is served, as a script", mse.status === 200 && /javascript/.test(mse.headers['content-type']) && mse.body.includes('class MsePlayer'));
 
@@ -1103,7 +1107,7 @@ console.log('the first look');
   check('…as a secure context, with WebCodecs', await js(`window.isSecureContext && typeof VideoDecoder === 'function'`));
   await until(() => visible('pair'), 5000);
   check('a browser seen for the first time is asked for the code', await visible('pair'));
-  check('…and told where the phone shows it', (await js(`document.getElementById('pair-lede').textContent`)) === 'Find it on your phone: LinuxOnDroid › Settings › Open in a browser.');
+  check('…and told where the phone shows it', (await js(`document.getElementById('pair-lede').textContent`)) === 'Find the code on your phone: LinuxOnDroid › Settings › Open in a browser.');
   check("…without the phone's name, which is not told before the code", (await js('document.title')) === 'Linux');
   await shot('02-pair');
 }
@@ -1380,14 +1384,14 @@ console.log('every way it ends');
 
   say('state replaced');
   await until(() => visible('ended'), 3000);
-  check('opened in another window: said, with Show it here, and no taking it back by itself',
+  check('opened in another window: said, with Show the desktop here, and no taking the desktop back by itself',
     (await js(`document.getElementById('ended-title').textContent`)) === 'Linux opened somewhere else');
   t = Date.now();
   await sleep(2500);
   check('…nothing reconnects behind the person\'s back, and the card stays', !evSince(t, (e) => e.hello) && (await visible('ended')));
   await js(`document.getElementById('ended-go').click()`);
   await until(isUp, 6000);
-  check('Show it here: the desktop is back', await isUp());
+  check('Show the desktop here: the desktop is back', await isUp());
 
   t = Date.now();
   say('drop');
@@ -1460,7 +1464,7 @@ console.log('every way it ends');
   fresh.close();
   await js(`document.getElementById('ended-go').click()`);
   await until(isUp, 6000);
-  check('Show it here: the first tab has it back', await isUp());
+  check('Show the desktop here: the first tab has the desktop back', await isUp());
 
   await cdp('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 800, y: 1 });
   await until(() => js(`document.body.classList.contains('bar-on')`), 2000);
@@ -1688,7 +1692,7 @@ async function onDevice() {
   const built = spawnSync(JAVAC, [
     '-nowarn', '-source', '17', '-target', '17', '-cp', path.join(SDK, 'platforms', platform, 'android.jar'), '-d', hc,
     ...['LinuxStream', 'LinuxStreamRfb', 'LinuxStreamEncoder', 'LinuxStreamSocket', 'LinuxStreamAudio', 'LinuxStreamOpus',
-      'LinuxAudio', 'LinuxAudioLag', 'DexLog', 'LinuxBrowser', 'LinuxBrowserCert', 'LinuxBrowserServer', 'LinuxBrowserPeek']
+      'LinuxAudio', 'LinuxAudioLag', 'DexLog', 'LinuxBrowser', 'LinuxBrowserCert', 'LinuxBrowserServer', 'LinuxBrowserPeek', 'LinuxFiles']
       .map((c) => path.join(LAUNCHER, `${c}.java`)),
     path.join(HERE, 'linux-browser/PhoneHarness.java'),
     path.join(HERE, 'usb-desktop/StandinXvnc.java'),

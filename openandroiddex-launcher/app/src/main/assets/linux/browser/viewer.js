@@ -25,11 +25,16 @@
 // The phone still lowers the bitrate under any of them when the link falls
 // behind (LinuxStream.adapt), so a frame is dropped before one is late.
 //
+// Linux's files are here as well, without the picture (files.js): the
+// phone reads them straight off its storage, so nothing is encoded, and
+// Linux need not be running. Files sent there go at the Wi-Fi's speed.
+//
 // Design record: doc/linux-browser.md. The wire: LinuxStream.java's header.
 
 import { avcC, codecString, sameBytes, splitAccessUnit } from './h264.js';
 import { ALTS, charKeysym, isModifier, keyDown, XK_ISO_LEVEL3_SHIFT } from './keysym.js';
 import { MsePlayer } from './mse.js';
+import { createFiles } from './files.js';
 
 const $ = (id) => document.getElementById(id);
 const PLATFORM = (navigator.userAgentData && navigator.userAgentData.platform) || navigator.platform || navigator.userAgent;
@@ -38,48 +43,48 @@ const MAC = /mac|iphone|ipad/i.test(PLATFORM);
 // ── words ──────────────────────────────────────────────────────────────
 
 const TEXT = {
-  pairLede: 'Find it on your phone: LinuxOnDroid › Settings › Open in a browser.',
-  pairLedeNamed: (name) => `Find it on ${name}: LinuxOnDroid › Settings › Open in a browser.`,
-  pairFine: 'Linux stays on your phone. This browser shows it, and nothing is installed here.',
+  pairLede: 'Find the code on your phone: LinuxOnDroid › Settings › Open in a browser.',
+  pairLedeNamed: (name) => `Find the code on ${name}: LinuxOnDroid › Settings › Open in a browser.`,
+  pairFine: 'Linux stays on your phone. This browser shows Linux, and nothing is installed on this computer.',
   wrong: 'That code did not match. Check the phone and try again.',
   locked: (t) => `Too many tries. Try again in ${t}.`,
-  pairClosed: 'Open Settings › Open in a browser on the phone, then type the code it shows. A code works while that page is open and for 10 minutes after.',
+  pairClosed: 'Open Settings › Open in a browser on the phone, then type the code the phone shows. A code works while the Open in a browser page is open, and for 10 minutes after.',
   pairUsedUp: 'Too many wrong codes were tried. The phone can make a new one, in the same place.',
   signedOut: 'This browser was signed out on the phone. Enter the code to come back in.',
-  offline: 'The phone did not answer. Check it is on the same Wi-Fi as this computer.',
+  offline: 'The phone did not answer. Check that the phone is on the same Wi-Fi as this computer.',
   connectingTitle: 'Connecting',
   connectingText: (name) => `Reaching ${name}`,
   startingTitle: 'Starting Linux',
-  startingText: 'The desktop is starting on the phone. It takes a few seconds.',
+  startingText: 'The desktop is starting on the phone. Starting takes a few seconds.',
   drawingTitle: 'Almost there',
-  drawingText: 'Linux is up. The first picture is on its way.',
+  drawingText: 'Linux is up. The first picture is on the way.',
   reconnectTitle: 'Reconnecting',
   reconnectText: (name) => `The connection to ${name} dropped. Trying again.`,
   unreachableTitle: 'Cannot reach the phone',
   unreachableText: 'Check that the phone and this computer are on the same Wi-Fi, and that Open in a browser is on in LinuxOnDroid’s Settings.',
   stoppedTitle: 'Linux is not running',
-  stoppedText: 'It was shut down or logged out of on the phone.',
+  stoppedText: 'Linux was shut down or logged out of on the phone.',
   replacedTitle: 'Linux opened somewhere else',
-  replacedText: 'Another window is showing the desktop now. Bring it back here whenever you like.',
+  replacedText: 'Another window is showing the desktop now. Show the desktop here again whenever you like.',
   missingTitle: 'Linux is not installed yet',
-  missingText: 'Open LinuxOnDroid on the phone to install it, then try again.',
+  missingText: 'Open LinuxOnDroid on the phone to install Linux, then try again.',
   installingTitle: 'Linux is still being set up',
-  installingText: 'LinuxOnDroid is installing Linux on the phone. Try again when it is done.',
+  installingText: 'LinuxOnDroid is installing Linux on the phone. Try again when the install is done.',
   unfinishedTitle: 'Linux did not finish setting up',
-  unfinishedText: 'Open LinuxOnDroid on the phone to finish it, then try again.',
+  unfinishedText: 'Open LinuxOnDroid on the phone to finish setting up Linux, then try again.',
   failedTitle: 'Linux could not be shown',
   failedText: 'Something went wrong on the phone.',
   disconnectedTitle: 'Disconnected',
   disconnectedText: 'Linux keeps running on the phone.',
   offTitle: 'Turned off on the phone',
-  offText: 'Open in a browser was switched off in LinuxOnDroid’s Settings. Switch it on again there, then try again.',
+  offText: 'Open in a browser was switched off in LinuxOnDroid’s Settings. Switch Open in a browser on again in Settings, then try again.',
   reload: 'Reload the page',
   oldTitle: 'This browser cannot show Linux',
-  oldText: 'It needs WebCodecs or Media Source Extensions, which current Chrome, Edge, Firefox and Safari all have.',
+  oldText: 'Showing Linux needs WebCodecs or Media Source Extensions, which current Chrome, Edge, Firefox and Safari all have.',
   playerTitle: 'The picture could not be played',
   playerText: (why) => `This browser’s video player stopped (${why}). The secure address, which starts with https, uses the computer’s video decoder instead.`,
   chooseTitle: 'Open Linux securely',
-  chooseText: 'The phone made its own certificate, so the browser warns about it the first time. Choose Advanced, then Continue.',
+  chooseText: 'The phone made the certificate for the connection, so the browser shows a warning the first time. Choose Advanced, then Continue.',
   chooseSecure: 'Continue securely',
   choosePlain: 'Continue without encryption',
   chooseFine: 'If the browser will not let you continue, come back here and choose Continue without encryption. Then others on this Wi-Fi could see the desktop and what you type.',
@@ -89,18 +94,20 @@ const TEXT = {
   soundTitleOn: 'Sound from Linux: on',
   soundTitleOff: 'Sound from Linux: off',
   soundOn: 'Sound on. Linux plays here.',
-  soundOff: 'Sound off. The phone sends none.',
+  soundOff: 'Sound off. The phone sends no sound.',
   soundClick: 'Click the desktop to hear Linux.',
   start: 'Start Linux',
-  showHere: 'Show it here',
+  showHere: 'Show the desktop here',
   tryAgain: 'Try again',
   tryNow: 'Try now',
   connectAgain: 'Connect again',
+  openFiles: 'Open Linux’s files',
+  filesTitle: 'Linux’s files without the desktop picture. Send files to Linux, or download files from Linux.',
   enterCode: 'Enter the code again',
   mode: {
     low: ['Low', 'Fastest. A smaller picture and mono sound that keep up on slow Wi-Fi.'],
     medium: ['Medium', 'Balanced. The whole desktop at a Wi-Fi bitrate, stereo sound.'],
-    high: ['High', 'Sharpest. The whole desktop at the highest bitrate, sound as Linux makes it.'],
+    high: ['High', 'Sharpest. The whole desktop at the highest bitrate, and Linux’s sound untouched.'],
   },
   fullOn: 'Full screen. Every key goes to Linux; hold Esc to leave.',
   fullOnNoLock: 'Full screen. Press Esc to leave.',
@@ -109,11 +116,11 @@ const TEXT = {
   clipOff: 'Clipboard not shared.',
   clipTitleOn: 'Clipboard shared with Linux',
   clipTitleOff: 'Clipboard not shared with Linux',
-  clipWaiting: 'Linux copied something. Click here to bring it to this computer.',
+  clipWaiting: 'Linux copied some text. Click the page to bring the text to this computer.',
   moreTitle: 'More',
   still: 'still',
   statsTitle: (s) => `Frames drawn each second, the stream's bitrate and the round trip to the phone.\n` +
-    `Encoded on the phone in ${s.encodeMs} ms by ${s.encoder || 'its encoder'}${s.hw === false ? ' (software)' : ''}; ` +
+    `Encoded on the phone in ${s.encodeMs} ms by ${s.encoder || 'the phone’s encoder'}${s.hw === false ? ' (software)' : ''}; ` +
     (s.player ? `on screen here ${s.decodeMs} ms after it arrived (the browser's video player).` : `decoded here in ${s.decodeMs} ms.`) +
     ` Picture ${s.size}.${s.soundKbps ? ` Sound ${s.sound}, ${s.soundKbps} kb/s.` : ''}`,
 };
@@ -325,6 +332,10 @@ async function submitCode() {
     store.set('lod.token', token);
     codeInput.blur();
     void learnName();
+    if (wantsFiles()) {
+      openFiles(hashPath());
+      return;
+    }
     // The code was typed to see Linux: this start is the person's own.
     connect(true);
     return;
@@ -1146,7 +1157,7 @@ $('m-disconnect').addEventListener('click', () => {
   closeMenu();
   quiet = true;
   closeSocket();
-  ended(TEXT.disconnectedTitle, TEXT.disconnectedText, TEXT.connectAgain, () => connect(true));
+  ended(TEXT.disconnectedTitle, TEXT.disconnectedText, TEXT.connectAgain, () => connect(true), TEXT.openFiles, () => openFiles());
 });
 $('m-forget').addEventListener('click', async () => {
   closeMenu();
@@ -1410,9 +1421,10 @@ function onText(m) {
           store.set('lod.token', null);
           showPair(TEXT.signedOut);
         } else if (state === 'stopped') {
-          ended(TEXT.stoppedTitle, message || TEXT.stoppedText, TEXT.start, again);
+          // Linux is off, and its files are still there to see.
+          ended(TEXT.stoppedTitle, message || TEXT.stoppedText, TEXT.start, again, TEXT.openFiles, () => openFiles());
         } else if (state === 'replaced') {
-          ended(TEXT.replacedTitle, TEXT.replacedText, TEXT.showHere, again);
+          ended(TEXT.replacedTitle, TEXT.replacedText, TEXT.showHere, again, TEXT.openFiles, () => openFiles());
         } else if (state === 'off') {
           ended(TEXT.offTitle, TEXT.offText, TEXT.tryAgain, () => connect(false));
         } else if (state === 'missing') {
@@ -1422,7 +1434,7 @@ function onText(m) {
         } else if (state === 'unfinished') {
           ended(TEXT.unfinishedTitle, TEXT.unfinishedText, TEXT.tryAgain, again);
         } else {
-          ended(TEXT.failedTitle, message || TEXT.failedText, TEXT.tryAgain, again);
+          ended(TEXT.failedTitle, message || TEXT.failedText, TEXT.tryAgain, again, TEXT.openFiles, () => openFiles());
         }
       }
       break;
@@ -1622,14 +1634,89 @@ async function begin() {
   // A page loaded again (a reload, a tab the browser brought back) shows the
   // desktop if it is running and asks before starting one: only a person's
   // own action starts Linux.
-  if (token) connect(false);
-  else showPair();
+  if (!token) showPair();
+  else if (wantsFiles()) openFiles(hashPath());
+  else connect(false);
 }
 
 $('m-secure').addEventListener('click', () => {
   closeMenu();
   goSecure();
 });
+
+// ── Linux's files ───────────────────────────────────────────────────
+
+const files = createFiles({
+  token: () => token,
+  phoneName: () => phoneName,
+  // Signed out on the phone, seen by a request of the Files'.
+  unauthorized: () => {
+    token = null;
+    store.set('lod.token', null);
+    leaveFiles();
+    showPair(TEXT.signedOut);
+  },
+  toDesktop: () => {
+    leaveFiles();
+    connect(true);
+  },
+  toFiles: (path, select) => openFiles(path, select),
+});
+
+/** The address asks for Files (#files, or #files=/root/Documents): a bookmark, or a reload in them. */
+function wantsFiles() {
+  return location.hash === '#files' || location.hash.startsWith('#files=');
+}
+
+function hashPath() {
+  if (!location.hash.startsWith('#files=')) return null;
+  try {
+    const p = decodeURI(location.hash.slice('#files='.length));
+    return p.startsWith('/') ? p : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Files, with the picture let go: the phone stops encoding the desktop,
+ * which keeps running, and every byte of the Wi-Fi is the files'.
+ */
+function openFiles(path = null, select = null) {
+  closeMenu();
+  clearTimeout(retryTimer);
+  quiet = true;
+  closeSocket();
+  up = false;
+  letScreenGo();
+  body.classList.remove('bar-on');
+  body.classList.add('files-on');
+  if (!wantsFiles()) {
+    try {
+      history.replaceState(null, '', '#files');
+    } catch {
+      // the address stays: a reload opens the desktop
+    }
+  }
+  document.title = phoneName ? `Files · ${phoneName}` : 'Files · Linux';
+  void files.show(path, select);
+}
+
+function leaveFiles() {
+  files.hide();
+  body.classList.remove('files-on');
+  if (wantsFiles()) {
+    try {
+      history.replaceState(null, '', location.pathname + location.search);
+    } catch {
+      // kept: harmless
+    }
+  }
+  document.title = phoneName ? `Linux · ${phoneName}` : 'Linux';
+}
+
+$('files-btn').addEventListener('click', () => openFiles());
+$('files-btn').title = TEXT.filesTitle;
 
 /** The phone's name, which it gives only to a browser it let in. */
 async function learnName() {

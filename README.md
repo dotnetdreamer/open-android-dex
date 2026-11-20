@@ -426,6 +426,15 @@ browser remembers that you let it in, so next time it is just the address. To
 shut every browser out again, use **Sign them out** on the same page. How it
 works: [doc/linux-browser.md](doc/linux-browser.md).
 
+**Files** on that bar shows Linux's files instead of the desktop. Drag files or
+whole folders from your computer onto the page to copy the files to Linux, or
+onto the desktop picture to put the files on Linux's desktop. Click a file to
+preview the file: photos, videos, music, PDFs and text open right in the
+browser. Download one file, or a whole folder as a ZIP. Deleting moves files to
+Linux's Trash, and Undo puts the files back. Files works even when Linux is shut
+down, and with no desktop picture being made, files move as fast as your Wi-Fi
+allows. To open Files straight away, add `#files` to the address.
+
 A control strip sits along the top wherever Linux is running, on the phone or in
 a window. It holds the pointer, the keyboard, the screen and zoom. Tap the
 pointer and you pick how touch should behave: point where you look, use the

@@ -862,6 +862,52 @@ public class LinuxService extends Service {
     private volatile boolean destroyed;
     private final Map<String, byte[]> browserAssets = new java.util.concurrent.ConcurrentHashMap<>();
 
+    /**
+     * Linux's files for a browser's Files: the rootfs as it is on this
+     * phone's storage, with proot's binds where linux-rt.sh puts them, read
+     * and written by this process directly, so Linux need not be running. A
+     * transfer keeps the CPU awake as a stream does (streamAwake): a phone in
+     * a pocket with its screen off would otherwise doze half way through a
+     * folder.
+     */
+    private final LinuxFiles browserFiles = new LinuxFiles(new LinuxFiles.Layout() {
+        @Override
+        public File rootfs() {
+            if (Linux.isRemoving(LinuxService.this)) return null;
+            File rootfs = new File(Linux.root(LinuxService.this), "rootfs");
+            if (!new File(rootfs, "root").isDirectory()) return null;
+            // Still being unpacked: half a tree, and the installer's to write.
+            String phase = Linux.readStatus(LinuxService.this).phase;
+            if ("pushing".equals(phase) || "extracting".equals(phase)) return null;
+            return rootfs;
+        }
+
+        @Override
+        public String state() {
+            if (Linux.isRemoving(LinuxService.this)) return "missing";
+            if (Linux.isInstallPhase(Linux.readStatus(LinuxService.this).phase)) return "installing";
+            return new File(new File(Linux.root(LinuxService.this), "rootfs"), "root").isDirectory() ? "ready" : "missing";
+        }
+
+        @Override
+        public java.util.List<LinuxFiles.Mount> mounts() {
+            // As linux-rt.sh binds them: /tmp, the app's storage at ~/storage,
+            // and the shared folder in ~/Desktop where this build has it.
+            java.util.List<LinuxFiles.Mount> m = new java.util.ArrayList<>();
+            File tmp = new File(Linux.root(LinuxService.this), "tmp");
+            if (tmp.isDirectory()) m.add(new LinuxFiles.Mount("/tmp", tmp, ""));
+            File storage = getExternalFilesDir(null);
+            if (storage != null && storage.canRead()) m.add(new LinuxFiles.Mount("/root/storage", storage, ""));
+            if (Linux.sharedFolderOffered(LinuxService.this) && Linux.hasAllFiles()) {
+                File shared = Linux.sharedDir();
+                if (shared.isDirectory() && shared.canWrite()) {
+                    m.add(new LinuxFiles.Mount("/root/Desktop/" + Linux.SHARED_NAME, shared, "shared"));
+                }
+            }
+            return m;
+        }
+    }, new LinuxFilesThumbs(), on -> streamAwake(on));
+
     private final LinuxBrowserServer.Host browserHost = new LinuxBrowserServer.Host() {
         @Override
         public boolean stream(LinuxStreamSocket ws, String hello, java.io.Closeable sock, String who,
@@ -897,6 +943,11 @@ public class LinuxService extends Service {
         @Override
         public void changed() {
             mainHandler.post(LinuxService.this::refreshForeground);
+        }
+
+        @Override
+        public LinuxFiles files() {
+            return browserFiles;
         }
     };
 

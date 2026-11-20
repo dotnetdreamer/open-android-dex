@@ -243,6 +243,24 @@ body.bar-on .bar {
 #sound[aria-pressed="false"] { color: var(--ink-3); }
 #sound[aria-pressed="false"] .waves { display: none; }
 #sound[aria-pressed="false"] .strike { display: inline; }
+/* Files: Linux's files without the picture, a word and not only an icon. */
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 34px;
+  padding: 0 14px 0 11px;
+  border: 0;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.07);
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 650;
+  cursor: pointer;
+  transition: background 0.2s var(--ease);
+}
+.pill:hover { background: rgba(255, 255, 255, 0.13); }
+.pill svg { width: 17px; height: 17px; flex: none; color: var(--amber); }
 #full .leave { display: none; }
 body.fullscreen #full .enter { display: none; }
 body.fullscreen #full .leave { display: inline; }

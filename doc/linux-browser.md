@@ -47,7 +47,11 @@ look arbitrary until you know what was measured, or what a browser refuses.
 | Coming back | `RemoteResumeReceiver.java` | a boot or an update |
 | The card | `LinuxSettingsActivity.java` | LinuxOnDroid only; the desktop build has the desktop app |
 | The page | `assets/linux/browser/` | `index.html`, `viewer.css`, `viewer.js`, `h264.js`, `keysym.js`, `icon.svg`; `mse.js`, the picture over plain http |
+| Linux's files | `LinuxFiles.java` | `/fs/`: listing, sending (resumable, and many small files to a request), bringing back (ranges, ZIP), the Trash, tickets; Linux's paths, its links followed as Linux follows them |
+| Their pictures | `LinuxFilesThumbs.java` | small pictures of photos (HEIC too), videos, songs' covers and PDFs, with Android's decoders |
+| Files, the page | `files.js`, `files.css`, `transfer.js`, `peek.js`, `fileicons.js` | the file manager, the transfers and their panel, Quick look, kinds and icons |
 | Check | `test/linux-browser-test.mjs`, `test/linux-browser/` | the server on a JVM and the page in a real browser; `--device`: the same on a phone |
+| Check, Files | `test/linux-files-test.mjs` | the same server over a stand-in Linux, from Node and in a browser window |
 
 ## Why this picture, and not another
 
@@ -341,6 +345,92 @@ moves changes too. No reconnect, no gap in the picture.
   thread as each run is read: a packet each 20 ms. A new quality makes a new
   encoder at the next read. An encoder that cannot be made leaves that
   quality as PCM, and the page is told so.
+
+## Files
+
+**Files** on the bar shows Linux's files instead of the desktop's picture: a
+file manager in the page, with places down the side (Home, the folders
+`~/.config/user-dirs.dirs` names, the phone's shared folder where the build has
+it, all of Linux at `/`, the Trash), the path across the top, a list or a grid,
+and the keys and the mouse doing what they do in a desktop's file manager.
+Files dropped onto it, or whole folders, are copied to Linux; files dropped onto
+the desktop's picture land in `~/Desktop`, where Linux's desktop shows them.
+`#files` at the end of the address opens Files straight away, and the cards
+that say the desktop is not there (stopped, replaced, disconnected) offer Files
+instead.
+
+**Off the phone's storage, not through Linux.** The guest's `/` is a folder of
+the app's (`files/linux/rootfs`), and proot runs as the app's own user, so the
+server's process reads and writes it directly (`LinuxFiles`). Nothing is
+encoded and nothing waits for Linux, which need not be running at all: a
+person can fetch a file from a Linux that is shut down. Opening Files lets go
+of the picture's stream (the phone stops encoding; Linux keeps running), so the
+Wi-Fi is the files' alone. Where Linux sees a folder of the phone's (proot's
+`-b`), Files sees it there too: `/tmp`, `~/storage`, and the shared folder at
+`~/Desktop/LinuxOnDeX`.
+
+**Linux's paths, and only Linux's.** The page names guest paths
+(`/root/Documents`); the server turns each into a file of the phone's one
+name at a time, following every symbolic link the way Linux would: an absolute
+link starts again at the guest's `/`, `..` stops there, forty links at most,
+and a link proot made itself (a path of the phone's into the rootfs, which is
+what `--link2symlink` writes) reads as the guest path it is. So no link in
+Linux reaches outside it, whatever it says. `/proc`, `/sys` and `/dev` are the
+phone's own, bound in: they are not listed and cannot be opened. `/`, the
+folders right under it, the home folder, the Trash's folders and every bind's
+mount point cannot be renamed, moved or deleted from a browser; inside them,
+anything can, as in a terminal.
+
+**Who gets in** is who gets the picture: the browser's token, in
+`Authorization` on every request. A download the browser makes by itself (an
+`<a download>`, a video's `src`, a PDF in a frame, a file dragged out to the
+computer's desktop in Chrome and Edge) cannot carry that header, so the page
+first asks for a ticket: 24 random bytes, for those files only, for six hours,
+and only while that browser stays signed in. A ticket in a downloads list
+opens nothing else. Every change comes from the page itself (`Origin`); a sign
+out, or the switch going off, closes every transfer under way along with the
+tickets. A file served for the page to look at always comes with a sandbox
+(`Content-Security-Policy: sandbox`), and text-like files as `text/plain`: an
+HTML file of Linux's shows as its text and never runs as this page, which holds
+the token. The one exception is a PDF, which the browser's own viewer draws.
+
+**Sending.** A file of 8 MB or more is one `PUT` into a hidden part file beside
+where it goes (`.lodpart-` and a hash of its name, size and time), renamed into
+place once whole. Cut off (the Wi-Fi, a pause, a sleeping laptop), the page
+asks what arrived and sends the rest from there. Smaller files go many to a
+request (`POST /fs/batch`): a `Blob` made of record heads and the `File`s
+themselves, which refers to them rather than reading them, so a folder of a
+thousand photos is a few requests rather than a thousand round trips. A file
+already there with the same size and time (to the two seconds a FAT folder
+keeps) is not written again: sending something twice is cheap, and a retry
+after a cut never makes copies. Three requests run at a time. A name already
+taken in the folder is asked about once, for all of them: Replace (folders
+merge), Keep both ("photo (2).jpg", picked as the phone would), or Skip. A
+file keeps its time. The phone stays awake while anything moves (the same
+wake lock as a stream).
+
+**Bringing back.** One file is the browser's own download, with `Range`, so a
+download resumes and a video seeks. Several, or a folder, are one ZIP made on
+the way: stored, not compressed (most of what people move is compressed
+already, and the phone keeps up with the Wi-Fi), with each file's CRC-32 worked
+out just before it is sent, so the ZIP's length is known before its first
+byte and the browser shows the time left; ZIP64 where a size or an offset
+needs it. Chrome and Edge can also save into a folder of the computer's
+(`showDirectoryPicker`), folders and all, each file streamed to the disk with
+its progress in the page.
+
+**Deleting** moves to Linux's own Trash, laid out as freedesktop.org's spec
+says (`~/.local/share/Trash/files`, and an `info/*.trashinfo` with where from
+and when), which is where Linux's file manager looks; Undo is a rename back.
+What is in a bind (the phone's shared folder) cannot go there (on a phone it is
+another filesystem), and the page asks before deleting it for good.
+
+**Seeing.** Quick look (Space) shows a photo, plays a video or a song from the
+phone as it streams, opens a PDF in the browser's own viewer, and shows the
+first 512 kB of text or code with line numbers. A picture the browser cannot
+draw (a HEIC from a phone's camera) is shown through the phone's decoder
+instead. The grid's small pictures come from the phone too
+(`LinuxFilesThumbs`), two at a time, about the size they are shown.
 
 ## Verified, and not yet
 
@@ -794,6 +884,51 @@ Not yet:
 - The notification's address is the one at its last update; the card follows
   a change of network within a second.
 - A network with IPv6 alone: the addresses offered are IPv4.
+
+### Files, on a computer (2026-11-20)
+
+`node test/linux-files-test.mjs`: the launcher's own `LinuxBrowserServer` and
+`LinuxFiles` on a JVM, over a stand-in Linux (a home with Documents and
+Pictures, the phone's shared folder bound at `~/Desktop/LinuxOnDeX`, `/proc`,
+`/sys` and `/dev`, and links: one inside, one absolute to `/etc`, one climbing
+past `/`, one to a path of the computer's outside it, one as proot writes them,
+one to itself), then the page in a visible Edge window. 123 checks, all passed:
+
+- Who gets in: no token, a made-up token, a change without the page's
+  `Origin` or from another site's, a name instead of the address, a made-up
+  ticket, a ticket for anything but a download, a change sent as a GET: each
+  refused
+- Paths: `/proc` never listed nor opened, `..` stops at `/`, each link above
+  where Linux would take it, the outside one nowhere, the loop refused
+- Sending: whole, half then the rest, a connection really cut half way and
+  finished, a wrong resume point told where to start, a cancel leaving nothing,
+  a taken name refused, kept beside or replaced, forty files and an empty
+  folder in one request with two bad paths refused and the rest landing, the
+  same batch again doubling nothing
+- Bringing back: whole, three kinds of range, past the end, `If-Range` on a
+  changed file, an HTML file served as sandboxed text, a ticket's file and no
+  other, a ZIP read back by this test and by Windows' own `tar` (libarchive),
+  and ZIP64's fields forced and read back by both
+- The Trash as Linux's file manager lays it out, Undo, the shared folder's
+  file refused and then deleted when asked, a link deleted and not what it
+  points to, `/` and the like protected
+- A sign-out on the phone cutting a download under way, its ticket and token
+  opening nothing after
+- In the browser: `#files` opening Files once the code is typed (no stream
+  started), files and a whole folder dropped onto the list (an empty folder
+  too), the question for a taken name, Upload's picker, F2, Delete with Undo,
+  Quick look (an HTML file shown as text and not run), the grid with a
+  photo's own small picture, a photo, a video playing and seeking, a download
+  and a folder's ZIP saved by the browser, search in a folder and under it,
+  the Trash and Put back, a new folder named where it appears, Backspace and
+  Enter, a sign-out met by Files, Linux not installed, and a file dropped on
+  the desktop's picture landing in `~/Desktop`; nothing thrown by the page
+
+This computer to itself over its own network address, TLS: 64 MB up at
+62–148 MB/s and down at 24–39 MB/s across runs (the JVM's TLS, and Windows
+scanning a file just written; the phone's TLS is BoringSSL). Not yet run on a
+phone: the real rootfs and its links, Android's thumbnails, the speed over
+Wi-Fi, the shared folder on a real second filesystem.
 
 ## Costs
 

@@ -98,6 +98,11 @@ final class LinuxBrowserServer {
 
         /** Something the Settings page shows has changed. */
         void changed();
+
+        /** Linux's files for the page's Files, or null where there are none to give. */
+        default LinuxFiles files() {
+            return null;
+        }
     }
 
     /**
@@ -169,6 +174,11 @@ final class LinuxBrowserServer {
         FILES.put("h264.js", "text/javascript; charset=utf-8");
         FILES.put("mse.js", "text/javascript; charset=utf-8");
         FILES.put("keysym.js", "text/javascript; charset=utf-8");
+        FILES.put("files.js", "text/javascript; charset=utf-8");
+        FILES.put("fileicons.js", "text/javascript; charset=utf-8");
+        FILES.put("transfer.js", "text/javascript; charset=utf-8");
+        FILES.put("peek.js", "text/javascript; charset=utf-8");
+        FILES.put("files.css", "text/css; charset=utf-8");
         FILES.put("icon.svg", "image/svg+xml");
     }
 
@@ -176,12 +186,14 @@ final class LinuxBrowserServer {
      * Itself and nothing else. connect-src 'self' covers this origin's wss://,
      * and from the plain page its ws:// and the same address over https, which
      * it looks for (CSP 3); img-src data: is the pointer's shape, which
-     * arrives as pixels and is shown as a data URL; media-src blob: is the
-     * plain page's picture, a MediaSource the page fills itself.
+     * arrives as pixels and is shown as a data URL, and blob: the Files'
+     * thumbnails; media-src blob: is the plain page's picture, a MediaSource
+     * the page fills itself, and 'self' a video or a song of Linux's played in
+     * Files; frame-src 'self' a PDF of Linux's, in the browser's own viewer.
      */
     private static final String CSP = "default-src 'none'; script-src 'self'; style-src 'self'; "
-            + "img-src 'self' data: blob:; media-src blob:; connect-src 'self'; font-src 'self'; manifest-src 'self'; "
-            + "frame-ancestors 'none'; base-uri 'none'; form-action 'none'";
+            + "img-src 'self' data: blob:; media-src 'self' blob:; frame-src 'self'; connect-src 'self'; "
+            + "font-src 'self'; manifest-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'";
 
     private final LinuxBrowser store;
     private final Host host;
@@ -194,6 +206,19 @@ final class LinuxBrowserServer {
     private final Set<Socket> open = ConcurrentHashMap.newKeySet();
     /** When each of those must have been let in by. */
     private final Map<Socket, Long> deadlines = new ConcurrentHashMap<>();
+    /**
+     * Connections a browser let in uses for its files, and when each last
+     * moved a byte: past every deadline for being let in (a big file takes
+     * minutes), closed by a sign-out like the rest, and by the reaper once one
+     * has not moved for {@link #STALL_MS} (a laptop shut mid-download leaves a
+     * write that would wait for ever).
+     */
+    private final Map<Socket, long[]> working = new ConcurrentHashMap<>();
+    private static final long STALL_MS = 90_000;
+    /** A request's body may stop this long before the transfer is given up (the page carries on from what came). */
+    private static final int BODY_READ_MS = 45_000;
+    /** A form of the Files' (the paths of what is chosen) may be this long; an upload is a stream, never read whole. */
+    private static final int MAX_FILES_FORM = 1 << 20;
     private final Map<String, AtomicInteger> perPeer = new ConcurrentHashMap<>();
     private volatile LinuxBrowserCert cert;
     private volatile boolean stopped;
@@ -284,6 +309,10 @@ final class LinuxBrowserServer {
      */
     void dropOpen() {
         for (Socket s : open.toArray(new Socket[0])) closeQuietly(s);
+        // A transfer too: the browsers it was for are signed out, all of them.
+        for (Socket s : working.keySet().toArray(new Socket[0])) closeQuietly(s);
+        LinuxFiles files = host.files();
+        if (files != null) files.dropTickets();
     }
 
     private void acceptLoop() {
@@ -323,6 +352,7 @@ final class LinuxBrowserServer {
                 } finally {
                     open.remove(s);
                     deadlines.remove(s);
+                    working.remove(s);
                     mine.decrementAndGet();
                     handlers.decrementAndGet();
                 }
@@ -344,6 +374,12 @@ final class LinuxBrowserServer {
             for (Map.Entry<Socket, Long> e : deadlines.entrySet()) {
                 if (e.getValue() < now) {
                     deadlines.remove(e.getKey());
+                    closeQuietly(e.getKey());
+                }
+            }
+            for (Map.Entry<Socket, long[]> e : working.entrySet()) {
+                if (now - e.getValue()[0] > STALL_MS) {
+                    working.remove(e.getKey());
                     closeQuietly(e.getKey());
                 }
             }
@@ -481,6 +517,10 @@ final class LinuxBrowserServer {
             boolean sameOrigin = origin != null && origin.toLowerCase(Locale.ROOT).equals(self);
             boolean keep = !"close".equalsIgnoreCase(r.headers.get("connection"));
 
+            if (r.path.startsWith("/fs/")) {
+                if (!files(in, out, r, io, raw, sameOrigin, keep) || !keep) return false;
+                continue;
+            }
             if ("GET".equals(r.method) && "/stream".equals(r.path)
                     && "websocket".equalsIgnoreCase(r.headers.get("upgrade"))) {
                 if (!sameOrigin) {
@@ -495,7 +535,7 @@ final class LinuxBrowserServer {
                     send(out, 411, "Length Required", "text/plain", new byte[0], false);
                     return false;
                 }
-                byte[] body = readBody(in, r);
+                byte[] body = readBody(in, r, MAX_BODY);
                 if (!sameOrigin) {
                     send(out, 403, "Forbidden", "text/plain", new byte[0], false);
                     return false;
@@ -535,6 +575,106 @@ final class LinuxBrowserServer {
             if (!keep) return false;
         }
         return false;
+    }
+
+    // ── Linux's files ──
+
+    /**
+     * One request of the page's Files ({@link LinuxFiles}). In by the
+     * browser's token (Authorization, as {@code /hello} takes it), or, for the
+     * two things a browser fetches by itself (a download, a video's source),
+     * by a ticket the page was given for exactly that, which holds only while
+     * its browser stays signed in. Every change comes from the page itself
+     * ({@code Origin}), as a pairing does. A connection let in this way is
+     * past the deadline for being let in, and in {@link #working} instead.
+     *
+     * @return whether the connection may carry another request
+     */
+    private boolean files(InputStream in, OutputStream out, Req r, Socket io, Socket raw, boolean sameOrigin,
+                          boolean keep) throws IOException {
+        LinuxFiles files = host.files();
+        String op = r.path.substring("/fs/".length());
+        boolean read = "GET".equals(r.method) || "HEAD".equals(r.method);
+        boolean hasBody = r.contentLength > 0;
+        byte[] no = "{\"error\":\"unauthorized\"}".getBytes(StandardCharsets.UTF_8);
+        if (files == null || (!read && !"POST".equals(r.method) && !"PUT".equals(r.method))) {
+            send(out, files == null ? 404 : 405, files == null ? "Not Found" : "Method Not Allowed", "application/json",
+                    "{\"error\":\"op\"}".getBytes(StandardCharsets.UTF_8), keep && !hasBody);
+            return keep && !hasBody;
+        }
+        if (r.headers.containsKey("transfer-encoding") || r.contentLength < 0) {
+            send(out, 411, "Length Required", "text/plain", new byte[0], false);
+            return false;
+        }
+        String auth = r.headers.getOrDefault("authorization", "");
+        String token = auth.startsWith("Bearer ") ? auth.substring(7).trim() : null;
+        LinuxFiles.Ticket ticket = null;
+        if (token == null && read && ("get".equals(op) || "zip".equals(op))) {
+            ticket = files.ticket(r.query.get("k"));
+            if (ticket != null) token = ticket.token;
+        }
+        if (token == null || !store.tokenValid(token)) {
+            // Its body, if it has one, unread: this connection carries no more.
+            send(out, 401, "Unauthorized", "application/json", no, keep && !hasBody);
+            return keep && !hasBody;
+        }
+        if (!read && !sameOrigin) {
+            send(out, 403, "Forbidden", "application/json", "{\"error\":\"origin\"}".getBytes(StandardCharsets.UTF_8), false);
+            return false;
+        }
+        deadlines.remove(raw);
+        open.remove(raw);
+        final long[] moved = working.computeIfAbsent(raw, k -> new long[1]);
+        moved[0] = System.currentTimeMillis();
+        Runnable alive = () -> moved[0] = System.currentTimeMillis();
+        Map<String, List<String>> params = multiForm(r.rawQuery);
+        LinuxFiles.Body body = null;
+        if (hasBody) {
+            if ("100-continue".equalsIgnoreCase(r.headers.get("expect"))) {
+                out.write("HTTP/1.1 100 Continue\r\n\r\n".getBytes(StandardCharsets.US_ASCII));
+                out.flush();
+            }
+            if ("put".equals(op) || "batch".equals(op)) {
+                body = new LinuxFiles.Body(in, r.contentLength, alive);
+            } else if (r.contentLength > MAX_FILES_FORM) {
+                send(out, 413, "Payload Too Large", "application/json",
+                        "{\"error\":\"toolarge\"}".getBytes(StandardCharsets.UTF_8), false);
+                return false;
+            } else {
+                String form = new String(readBody(in, r, MAX_FILES_FORM), StandardCharsets.ISO_8859_1);
+                for (Map.Entry<String, List<String>> e : multiForm(form).entrySet()) {
+                    params.computeIfAbsent(e.getKey(), k -> new java.util.ArrayList<>()).addAll(e.getValue());
+                }
+            }
+        }
+        try {
+            io.setSoTimeout(BODY_READ_MS);
+            return files.handle(new LinuxFiles.Call(r.method, op, params, r.headers, body, token, ticket, alive), out, keep);
+        } finally {
+            moved[0] = System.currentTimeMillis();
+            try {
+                io.setSoTimeout(IDLE_MS);
+            } catch (IOException ignored) {
+                // closed: nothing to wait for
+            }
+        }
+    }
+
+    /** {@code a=1&a=2&b=3}, every value of every name, UTF-8. */
+    static Map<String, List<String>> multiForm(String s) {
+        Map<String, List<String>> m = new HashMap<>();
+        if (s == null || s.isEmpty()) return m;
+        for (String pair : s.split("&")) {
+            int eq = pair.indexOf('=');
+            if (eq <= 0) continue;
+            try {
+                m.computeIfAbsent(URLDecoder.decode(pair.substring(0, eq), "UTF-8"), k -> new java.util.ArrayList<>())
+                        .add(URLDecoder.decode(pair.substring(eq + 1), "UTF-8"));
+            } catch (Exception ignored) {
+                // a broken pair: left out
+            }
+        }
+        return m;
     }
 
     // ── the code, for a token ──
@@ -707,13 +847,17 @@ final class LinuxBrowserServer {
         final String method;
         final String path;
         final Map<String, String> query;
+        /** The query as it came, for a name given more than once (the Files' paths). */
+        final String rawQuery;
         final Map<String, String> headers;
-        final int contentLength;
+        final long contentLength;
 
-        Req(String method, String path, Map<String, String> query, Map<String, String> headers, int contentLength) {
+        Req(String method, String path, Map<String, String> query, String rawQuery, Map<String, String> headers,
+            long contentLength) {
             this.method = method;
             this.path = path;
             this.query = query;
+            this.rawQuery = rawQuery;
             this.headers = headers;
             this.contentLength = contentLength;
         }
@@ -746,23 +890,25 @@ final class LinuxBrowserServer {
         }
         String path = first[1];
         Map<String, String> query = new HashMap<>();
+        String rawQuery = "";
         int q = path.indexOf('?');
         if (q >= 0) {
-            query = form(path.substring(q + 1).getBytes(StandardCharsets.ISO_8859_1));
+            rawQuery = path.substring(q + 1);
+            query = form(rawQuery.getBytes(StandardCharsets.ISO_8859_1));
             path = path.substring(0, q);
         }
-        int len;
+        long len;
         try {
-            len = Integer.parseInt(headers.getOrDefault("content-length", "0").trim());
+            len = Long.parseLong(headers.getOrDefault("content-length", "0").trim());
         } catch (NumberFormatException e) {
             throw new IOException("bad length");
         }
-        return new Req(first[0], path, query, headers, len);
+        return new Req(first[0], path, query, rawQuery, headers, len);
     }
 
-    private static byte[] readBody(InputStream in, Req r) throws IOException {
-        if (r.contentLength < 0 || r.contentLength > MAX_BODY) throw new IOException("body too large");
-        byte[] b = new byte[r.contentLength];
+    private static byte[] readBody(InputStream in, Req r, int max) throws IOException {
+        if (r.contentLength < 0 || r.contentLength > max) throw new IOException("body too large");
+        byte[] b = new byte[(int) r.contentLength];
         int off = 0;
         while (off < b.length) {
             int got = in.read(b, off, b.length - off);
