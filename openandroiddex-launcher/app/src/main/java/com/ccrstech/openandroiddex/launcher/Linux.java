@@ -760,6 +760,11 @@ final class Linux {
         return new File(root(ctx), "linux-win.sh");
     }
 
+    /** One Linux app in a proot of its own, for LinuxAppsService (doc/linux-apps-process.md). */
+    static File appScript(Context ctx) {
+        return new File(root(ctx), "linux-app.sh");
+    }
+
     static File rootfsTarball(Context ctx) {
         return new File(root(ctx), "linux-rootfs.tar.gz");
     }

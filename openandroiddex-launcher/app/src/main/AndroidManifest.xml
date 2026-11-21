@@ -649,6 +649,21 @@
                 android:value="Runs a user-launched Linux (Ubuntu/XFCE) container under proot" />
         </service>
 
+        <!-- The Linux apps the desktop starts, each in a proot of its own, in an
+             Android process apart from the desktop (doc/linux-apps-process.md).
+
+             android:process — ITS OWN, and that is the feature. Android 12+
+             closes the processes apps start once the phone has more than 32,
+             least important Android process first, oldest first. LinuxService
+             binds this with BIND_NOT_PERCEPTIBLE, which ranks it one step below
+             :linux, so Android closes an app before the desktop. Never started,
+             never in the foreground: as important as :linux, the desktop would
+             be the oldest again. -->
+        <service
+            android:name=".LinuxAppsService"
+            android:exported="false"
+            android:process=":linuxapps" />
+
         <!-- Owns the Web viewer while it is serving: the screen capture, the
              HTTP server and the WebSocket its viewers hang off.
 

@@ -241,5 +241,14 @@
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="Runs a user-launched Linux (Ubuntu/XFCE) container under proot" />
         </service>
+
+        <!-- The Linux apps the desktop starts, in an Android process apart from
+             the desktop, as in the desktop build: when the phone has more than
+             32 processes started by apps, Android closes this process's first,
+             so an app goes and the desktop stays (doc/linux-apps-process.md). -->
+        <service
+            android:name=".LinuxAppsService"
+            android:exported="false"
+            android:process=":linuxapps" />
     </application>
 </manifest>

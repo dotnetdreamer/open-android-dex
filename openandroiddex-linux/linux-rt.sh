@@ -575,6 +575,17 @@ if [ -f /usr/local/share/openandroiddex/theme.py ] && \
   python3 /usr/local/share/openandroiddex/theme.py >/dev/null 2>&1 &
   THEME=$!
 fi
+# Apps the desktop starts run in an Android process of their own, so that when
+# the phone has too many processes Android closes an app and not the desktop
+# (see oadx-run, and doc/linux-apps-process.md). This points the Applications
+# menu at them, beside Xvnc like the two above; the dock waits for dock.py,
+# below. Only where the app put oadx-apps-menu in: Android 12 and later, which
+# is where that limit is.
+APPSMENU=
+if [ -x /usr/local/bin/oadx-apps-menu ]; then
+  /usr/local/bin/oadx-apps-menu --menu-only >/dev/null 2>&1 &
+  APPSMENU=$!
+fi
 # Now the waits, each one asking the thing itself. The display: Xvnc answers
 # a client once it is up, and xset is the client linux-win.sh asks with too.
 # Thirty seconds at most, and no more polls once Xvnc has died -- XFCE then
@@ -611,6 +622,13 @@ done
 # Both config edits on disk before xfce4-panel and xfconfd first read them.
 [ -n "$DOCK" ] && wait $DOCK
 [ -n "$THEME" ] && wait $THEME
+# The dock and the desktop icons through oadx-run too: after dock.py, which may
+# have just added launchers, and before the panel reads them -- the panel writes
+# its launchers back out when it exits, so an edit under a live one is lost.
+if [ -n "$APPSMENU" ]; then
+  /usr/local/bin/oadx-apps-menu --launchers-only >/dev/null 2>&1
+  wait $APPSMENU
+fi
 # Sound: the volume plugin and every app that starts with the session pick
 # their audio output once, at start, so they get the server or nothing -- the
 # reason linux-win.sh waits for its own. A few seconds at most.
@@ -662,6 +680,11 @@ SESSION=$(echo "$SESSION" | sed "s/GEOMETRY/$GEO/")
 # NOT exec'd: proot runs as a child so this script outlives it by exactly long
 # enough to clear rt.pid, which is how the app learns the session is over.
 #
+# XDG_DATA_DIRS puts oadx-apps-menu's copies of the menu entries in front of
+# the packages' own, which is how a menu launch reaches oadx-run; the rest is
+# the freedesktop default. Here for the reason XDG_CONFIG_DIRS is, below:
+# Thunar and other bus-activated apps get the bus's environment.
+#
 # XDG_CONFIG_DIRS is what puts our theme defaults in front of the distro's.
 # linux-setup.sh writes them to /usr/local/etc/xdg rather than /etc/xdg,
 # because three of those channel files are dpkg conffiles owned by
@@ -680,6 +703,7 @@ SESSION=$(echo "$SESSION" | sed "s/GEOMETRY/$GEO/")
   -w /root /usr/bin/env -i HOME=/root TERM=xterm-256color DEBIAN_FRONTEND=noninteractive \
   PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
   XDG_CONFIG_DIRS=/usr/local/etc/xdg:/etc/xdg \
+  XDG_DATA_DIRS=/usr/local/share/oadx-apps:/usr/local/share:/usr/share \
   OADX_GPU="${LINUX_GPU:-}" \
   /bin/sh -c "$SESSION" &
 PROOT_PID=$!

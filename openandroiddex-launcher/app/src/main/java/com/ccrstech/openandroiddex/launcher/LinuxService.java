@@ -113,6 +113,12 @@ public class LinuxService extends Service {
 
     private final ExecutorService io = Executors.newSingleThreadExecutor();
     private final android.os.Handler mainHandler = new android.os.Handler(android.os.Looper.getMainLooper());
+    /**
+     * ":linuxapps", where the apps a session starts run (LinuxAppsService):
+     * held while a desktop or a window session is up, so that Android, short
+     * of processes, closes an app before the session itself.
+     */
+    private final LinuxAppsLink appsProcess = new LinuxAppsLink(this);
     /** Remote access, while it is on. Never null after onCreate. */
     private RemoteHost remote;
     /** What the notification said last, so a remote change can repost it. */
@@ -1059,6 +1065,8 @@ public class LinuxService extends Service {
         // The pumps are daemon threads, so the process usually takes them with
         // it. This is for the case where the service goes and the process does not.
         LinuxAudio.stopAll();
+        // Unbound, the apps process's service goes, and every app it runs.
+        appsProcess.release();
     }
 
     // ── provisioning ──
@@ -1732,6 +1740,11 @@ public class LinuxService extends Service {
                 // The copy the last provision left still starts the desktop.
                 DexLog.step("linux", "runtime script refresh failed: " + e);
             }
+            // The apps the desktop starts run in an Android process of their
+            // own (LinuxAppsService): its guest half in place, and the process
+            // bound before XFCE can start anything.
+            appsProcess.stage();
+            appsProcess.hold();
             // The ceiling is the daemon's too: a computer's screen may ask for
             // a desktop, and every pixel of it is drawn by this phone's CPU.
             // The floor only keeps out nonsense. Every window floors its own
@@ -1786,6 +1799,8 @@ public class LinuxService extends Service {
         } catch (Exception e) {
             runtimeUp = false;
             DexLog.step("linux", "runtime start error: " + e);
+            // Bound before the spawn that failed: with no session, let it go.
+            appsIdle();
         }
     }
 
@@ -1811,6 +1826,9 @@ public class LinuxService extends Service {
         // Before the kill, so the pump's socket dies with the guest that feeds
         // it rather than a second later, on a read of a container that is gone.
         LinuxAudio.stop(LinuxAudio.DESKTOP);
+        // The desktop's apps run in the apps process, not under its proot, so
+        // the group kill below does not reach them: they are closed there.
+        appsProcess.stopDisplay(LinuxAppsLink.DESKTOP);
         File dir = Linux.root(this);
         // /system/bin/kill, not the builtin: toybox sh's own kill rejects a
         // negative pid outright ("arguments must be jobs or process IDs"), so
@@ -1852,7 +1870,16 @@ public class LinuxService extends Service {
         runtimeProc = null;
         liveRuntime = null;
         runtimeUp = false;
+        // Again, now that it is dead: an app it asked for between the first
+        // stop and the kill would have counted as newer.
+        appsProcess.stopDisplay(LinuxAppsLink.DESKTOP);
+        appsIdle();
         DexLog.step("linux", "runtime stopped");
+    }
+
+    /** Neither a desktop nor a window session left: the apps process can go. */
+    private void appsIdle() {
+        if (!runtimeUp && !winAlive()) appsProcess.release();
     }
 
     /**
@@ -1909,6 +1936,9 @@ public class LinuxService extends Service {
         runtimeUp = false;
         // The sound pump is the desktop's; it would retry against a guest that is gone.
         LinuxAudio.stop(LinuxAudio.DESKTOP);
+        // And its apps, in the apps process: under one proot, they always went with it.
+        appsProcess.stopDisplay(LinuxAppsLink.DESKTOP);
+        appsIdle();
         File dir = Linux.root(this);
         File pidFile = new File(dir, "rt.pid");
         String pid = Linux.readFile(pidFile).trim();
@@ -2022,6 +2052,9 @@ public class LinuxService extends Service {
             stopWin();
             File dir = Linux.root(this);
             copyAsset("linux/linux-win.sh", Linux.winScript(this));
+            // Its apps run in the apps process too, as the desktop's do.
+            appsProcess.stage();
+            appsProcess.hold();
             writeFile(new File(dir, "win-geometry"),
                     Math.min(Math.max(w, 640), 7680) + "x" + Math.min(Math.max(h, 400), 4320));
             writeFile(new File(dir, "win-dpi"), String.valueOf(Math.min(Math.max(dpi, 48), 384)));
@@ -2040,6 +2073,7 @@ public class LinuxService extends Service {
             Process p = pb.start();
             winInput = p.getOutputStream();
             liveWin = p;
+            watchWin(p);
             LinuxGpu.reportVerdict(pb.environment(), new File(dir, "win.log"));
             LinuxAudio.start(LinuxAudio.WINDOWS);
             goForeground(getString(R.string.ln_label));
@@ -2047,8 +2081,53 @@ public class LinuxService extends Service {
             return true;
         } catch (Exception e) {
             DexLog.step("linux", "window session start error: " + e);
+            // Bound before the spawn that failed: with no session, let it go.
+            appsIdle();
             return false;
         }
+    }
+
+    /**
+     * Wait on the window session just spawned, on a thread of its own, and
+     * settle what it leaves behind if it ends without being asked to
+     * ({@link #winEnded}) -- as {@link #watchRuntime} does for the desktop.
+     */
+    private void watchWin(Process p) {
+        Thread t = new Thread(() -> {
+            try {
+                p.waitFor();
+            } catch (InterruptedException e) {
+                return; // never interrupted
+            }
+            try {
+                io.execute(() -> winEnded(p));
+            } catch (java.util.concurrent.RejectedExecutionException destroyed) {
+                // onDestroy has run, and closed everything already.
+            }
+        }, "linux-win-watch");
+        t.setDaemon(true);
+        t.start();
+    }
+
+    /**
+     * The window session ended, and not through {@link #stopWin}: Xvnc :2
+     * died, proot was killed, the script was. Its apps run in the apps process,
+     * out of reach of anything that happened to it, and they went with it as
+     * long as they shared its proot: so they are closed now, its sound pump
+     * stops retrying, what of its group outlived it goes, and with no desktop
+     * either, the apps process is let go. That is stopWin from its first line,
+     * on a session already gone. io thread.
+     */
+    private void winEnded(Process p) {
+        if (liveWin != p) return; // stopWin got here first, or a newer session replaced it
+        int code;
+        try {
+            code = p.exitValue();
+        } catch (IllegalThreadStateException e) {
+            code = -1;
+        }
+        DexLog.step("linux", "window session ended by itself, exit " + code);
+        stopWin();
     }
 
     /** End the window session: asked first, then the group kill — linux-rt.sh's rule. io thread. */
@@ -2057,9 +2136,14 @@ public class LinuxService extends Service {
         // Ahead of the test below too, because a session that ended by itself
         // leaves its pump retrying.
         LinuxAudio.stop(LinuxAudio.WINDOWS);
+        // Its apps are in the apps process, out of reach of the group kill below.
+        appsProcess.stopDisplay(LinuxAppsLink.WINDOWS);
         Process p = liveWin;
         File dir = Linux.root(this);
-        if (p == null && !new File(dir, "win.pid").exists()) return;
+        if (p == null && !new File(dir, "win.pid").exists()) {
+            appsIdle();
+            return;
+        }
         try {
             if (winInput != null) {
                 winInput.write("quit\n".getBytes(java.nio.charset.StandardCharsets.US_ASCII));
@@ -2094,6 +2178,9 @@ public class LinuxService extends Service {
             }
         }
         liveWin = null;
+        // Again, now that it is dead: see stopRuntime.
+        appsProcess.stopDisplay(LinuxAppsLink.WINDOWS);
+        appsIdle();
         DexLog.step("linux", "window session stopped");
     }
 
@@ -2393,6 +2480,7 @@ public class LinuxService extends Service {
         if (browser(this).isOn() && !Linux.isRemoving(this)) return;
         if (stopSelfResult(lastStartId)) {
             stopForeground(STOP_FOREGROUND_REMOVE);
+            appsProcess.release();
         }
     }
 

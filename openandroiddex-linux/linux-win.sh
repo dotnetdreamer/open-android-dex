@@ -191,7 +191,13 @@ while read -r verb arg; do
       cmd=$(printf %s "$arg" | base64 -d 2>/dev/null)
       [ -n "$cmd" ] || continue
       echo "run: $cmd"
-      sh -c "$cmd" </dev/null >>/tmp/oadx-win-apps.log 2>&1 &
+      # Through oadx-run where the app put it in: the app then runs in an
+      # Android process of its own, apart from this session (see oadx-run).
+      if [ -x /usr/local/bin/oadx-run ]; then
+        /usr/local/bin/oadx-run /bin/sh -c "$cmd" </dev/null >>/tmp/oadx-win-apps.log 2>&1 &
+      else
+        sh -c "$cmd" </dev/null >>/tmp/oadx-win-apps.log 2>&1 &
+      fi
       ;;
     quit)
       break
@@ -217,6 +223,7 @@ exec 3<&0
   -w /root /usr/bin/env -i HOME=/root TERM=xterm-256color \
   PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
   XDG_CONFIG_DIRS=/usr/local/etc/xdg:/etc/xdg \
+  XDG_DATA_DIRS=/usr/local/share/oadx-apps:/usr/local/share:/usr/share \
   OADX_GPU="${LINUX_GPU:-}" \
   /bin/sh -c "$SESSION" <&3 &
 PROOT_PID=$!
