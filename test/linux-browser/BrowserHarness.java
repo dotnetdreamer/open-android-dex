@@ -33,7 +33,21 @@ import java.util.regex.Pattern;
  * {@code stop}, {@code restart}, {@code rival}, {@code refuse on|off},
  * {@code state?}, {@code slowhandoff <ms>} (a stream let in waits that long,
  * said with {@code HANDOFF}, before it takes the desktop: the moment a
- * sign-out or the switch could miss it).
+ * sign-out or the switch could miss it), {@code hb} (the word LinuxStream
+ * sends while a hidden tab's picture is off), {@code wallclock on|off}
+ * (frames timed by this computer's clock, which the page then measures how
+ * late each frame is drawn by, end to end), {@code pace on|off} (frames
+ * held to LinuxStream's window of frames in flight, as acknowledgements come).
+ *
+ * <p>A browser's microphone ({@code {"t":"mic","on":true}}, then {@code 0x13}
+ * and PCM) is answered as LinuxStreamMic answers, {@code on} or, after
+ * {@code mic unavailable}, {@code unavailable}; what comes is counted and
+ * measured, and said in the once-a-second {@code EV}.
+ *
+ * <p>A page's {@code {"t":"picture","on":false}} (its tab hidden) stops the
+ * frames, as LinuxStream stops the encoder; {@code on} starts them again
+ * from the file's key frame. Acknowledgements are counted, and those that
+ * say when their frame arrived ({@code 0x12} and a double) are read.
  *
  * <p>Sound is the launcher's own LinuxStreamAudio, reading a stand-in for the
  * guest's tap: a loopback port that plays a second of a 440 Hz tone and a
@@ -80,13 +94,24 @@ public final class BrowserHarness {
         return out;
     }
 
-    /** MediaCodec's place: one of libopus's packets for each 20 ms of sound fed in. */
+    /**
+     * MediaCodec's place: one of libopus's packets for each 20 ms of sound fed
+     * in, and for 20 ms of exact zeroes Opus's own frame of silence, as a real
+     * encoder makes of the silence the phone sends before it holds the rest
+     * back. A tone's packet there would be a run the page hears as sound right
+     * before the pause, and the pause a gap of the link's (before 2026-11-20:
+     * the sound in hand at 350 ms whenever the pause came under half a second).
+     */
     static final class StandinOpus implements LinuxStreamAudio.Encoder {
+        /** A CELT frame, 20 ms, with its silence flag set: what libopus sends for digital silence. */
+        static final byte[] SILENCE = {(byte) 0xF8, (byte) 0xFF, (byte) 0xFE};
         final int channels;
         final List<byte[]> packets;
         final LinuxStreamAudio.Sink out;
         long frames;
         int next;
+        /** Anything but zeroes fed in since the last packet. */
+        boolean loud;
 
         StandinOpus(int channels, List<byte[]> packets, LinuxStreamAudio.Sink out) {
             this.channels = channels;
@@ -97,11 +122,13 @@ public final class BrowserHarness {
 
         @Override
         public void encode(byte[] pcm, int off, int len, long atUs) throws IOException {
+            for (int i = off; i < off + len && !loud; i++) loud = pcm[i] != 0;
             frames += len / (channels * 2);
             while (frames >= 960) {
                 frames -= 960;
-                byte[] p = packets.get(next++ % packets.size());
+                byte[] p = loud ? packets.get(next++ % packets.size()) : SILENCE;
                 out.audio(LinuxStreamAudio.OPUS, p, 0, p.length, atUs);
+                loud = false;
             }
         }
 
@@ -134,22 +161,28 @@ public final class BrowserHarness {
 
     static void feed(java.net.Socket c) {
         ev("{\"tap\":\"open\"}");
-        byte[] chunk = new byte[960 * 4]; // 20 ms of s16le stereo at 48 kHz
         long sample = 0;
         long t0 = System.nanoTime();
+        long due = t0;
         try (java.io.OutputStream out = c.getOutputStream()) {
-            for (long n = 0; ; n++) {
-                boolean tone = (n / 50) % 2 == 0; // fifty chunks a second
-                for (int i = 0; i < 960; i++, sample++) {
+            while (true) {
+                // tapChunkMs of s16le stereo at 48 kHz; a second of tone, a second of silence
+                int frames = 48 * tapChunkMs;
+                byte[] chunk = new byte[frames * 4];
+                for (int i = 0; i < frames; i++, sample++) {
+                    boolean tone = (sample / 48000) % 2 == 0;
                     short v = tone ? (short) (Math.sin(2 * Math.PI * 440 * sample / 48000.0) * 8000) : 0;
                     chunk[i * 4] = chunk[i * 4 + 2] = (byte) v;
                     chunk[i * 4 + 1] = chunk[i * 4 + 3] = (byte) (v >> 8);
                 }
                 out.write(chunk);
                 out.flush();
-                long due = t0 + (n + 1) * 20_000_000L;
-                long left = due - System.nanoTime();
-                if (left > 0) Thread.sleep(left / 1_000_000L, (int) (left % 1_000_000L));
+                due += frames * 1_000_000_000L / 48000;
+                // To the millisecond: Windows sleeps in coarse steps, so the last of each wait is spun.
+                for (long left; (left = due - System.nanoTime()) > 0; ) {
+                    if (left > 2_000_000L) Thread.sleep(1);
+                    else Thread.onSpinWait();
+                }
             }
         } catch (IOException | InterruptedException e) {
             // the reader went
@@ -197,6 +230,27 @@ public final class BrowserHarness {
     static volatile boolean refuse;
     /** How long a stream let in waits before it takes the desktop (said with HANDOFF); 0 for not at all. */
     static volatile long slowHandoffMs;
+    /** Frames timed by this computer's clock, in µs since 1970 ({@code wallclock}); else by System.nanoTime. */
+    static volatile boolean wallClock;
+    /** Frames held to LinuxStream's window of frames in flight ({@code pace}). */
+    static volatile boolean paced;
+    /** What a browser's microphone is told: it reaches Linux ("on"), or not ("unavailable"). */
+    static volatile String micState = "on";
+    /** How much sound the stand-in tap hands over at a time, in ms ({@code tapchunk}): 20, as PulseAudio does for many apps. */
+    static volatile int tapChunkMs = 20;
+    /** This computer's clock in µs, from Instant.now() once and System.nanoTime since. */
+    static final long WALL0_US;
+    static final long NANO0;
+
+    static {
+        java.time.Instant now = java.time.Instant.now();
+        NANO0 = System.nanoTime();
+        WALL0_US = now.getEpochSecond() * 1_000_000L + now.getNano() / 1000;
+    }
+
+    static long wallUs() {
+        return WALL0_US + (System.nanoTime() - NANO0) / 1000;
+    }
 
     /** Linux's files (the page's Files), over a folder standing in for the guest's /; null without one. */
     static LinuxFiles files;
@@ -441,6 +495,26 @@ public final class BrowserHarness {
                 if (s != null) s.burstThen("{\"t\":\"state\",\"state\":" + q(line.substring(6).trim()) + "}");
             } else if (line.equals("drop")) {
                 if (s != null) s.drop();
+            } else if (line.equals("hb")) {
+                if (s != null) s.text("{\"t\":\"hb\"}");
+                System.out.println("OK hb");
+                System.out.flush();
+            } else if (line.startsWith("wallclock ")) {
+                wallClock = line.endsWith(" on");
+                System.out.println("OK wallclock " + wallClock);
+                System.out.flush();
+            } else if (line.startsWith("tapchunk ")) {
+                tapChunkMs = Integer.parseInt(line.substring(9).trim());
+                System.out.println("OK tapchunk " + tapChunkMs);
+                System.out.flush();
+            } else if (line.startsWith("mic ")) {
+                micState = line.substring(4).trim();
+                System.out.println("OK mic " + micState);
+                System.out.flush();
+            } else if (line.startsWith("pace ")) {
+                paced = line.endsWith(" on");
+                System.out.println("OK pace " + paced);
+                System.out.flush();
             } else if (line.equals("signout")) {
                 // as LinuxService does it: the tokens, the watcher told and ended, the half-open dropped
                 store.signOutAll();
@@ -469,11 +543,31 @@ public final class BrowserHarness {
         final List<byte[]> big;
         final List<byte[]> small;
         volatile boolean closing;
+        /** Told its last word ({@link #tell}): nothing more sent; the input loop drains until the page closes. */
+        volatile boolean lastWord;
         volatile double scale = 1;
         volatile int dw;
         volatile int dh;
         volatile boolean restart = true;
         volatile int acks;
+        /** Acknowledgements that said when their frame arrived, and the last such time (ms, the page's clock). */
+        volatile int timedAcks;
+        volatile double lastArrived;
+        /** The page's tab is hidden: no frames until it is back. */
+        volatile boolean pictureOff;
+        /** Frames sent while the picture was off: none, if the stand-in is right. */
+        volatile int sentWhileOff;
+        /** When each frame not yet acknowledged was sent (nanoTime), for {@code pace}'s window. */
+        final java.util.ArrayDeque<Long> sentAt = new java.util.ArrayDeque<>();
+        final long[] rtts = new long[32];
+        int rttCount;
+        volatile long rttMedianNs = -1;
+        volatile long sentFrames;
+        /** The browser's microphone: messages and bytes of PCM, and the loudest 10 ms lately (RMS of s16). */
+        volatile int micMsgs;
+        volatile long micBytes;
+        volatile int micOdd;
+        volatile double micRms;
         Thread pump;
         /** The launcher's own relay, as LinuxStream runs it for a browser; null while sound is off. */
         LinuxStreamAudio sound;
@@ -546,6 +640,8 @@ public final class BrowserHarness {
         }
 
         void text(String json) {
+            // Nothing after the last word and its close frame.
+            if (lastWord) return;
             try {
                 ws.sendText(json);
             } catch (IOException e) {
@@ -559,7 +655,8 @@ public final class BrowserHarness {
             int ch = scaled ? 480 : 720;
             text("{\"t\":\"video\",\"codec\":\"avc\",\"encoder\":\"harness.h264\",\"hw\":true,\"w\":" + cw + ",\"h\":" + ch
                     + ",\"cw\":" + cw + ",\"ch\":" + ch + ",\"dw\":" + dw + ",\"dh\":" + dh
-                    + ",\"bitrate\":10000000,\"fps\":60,\"lowLatency\":true}");
+                    + ",\"bitrate\":10000000,\"fps\":60,\"lowLatency\":true"
+                    + (wallClock ? ",\"clock\":\"wall\"" : "") + "}");
             restart = true;
         }
 
@@ -597,7 +694,30 @@ public final class BrowserHarness {
             long t0 = System.nanoTime();
             long frame = 0;
             try {
-                while (!closing) {
+                while (!closing && !lastWord) {
+                    if (pictureOff) {
+                        // A hidden tab: nothing, as LinuxStream sends nothing.
+                        Thread.sleep(10);
+                        t0 = System.nanoTime() - frame * 16_666_667L;
+                        continue;
+                    }
+                    if (paced) {
+                        // As LinuxStream: no more frames in flight than the
+                        // round trip holds, plus one; given up on after 3 s.
+                        long until = System.currentTimeMillis() + 3000;
+                        while (!closing && !lastWord && !pictureOff && System.currentTimeMillis() < until) {
+                            int window;
+                            synchronized (sentAt) {
+                                long m = rttMedianNs;
+                                window = m < 0 ? 3 : (int) Math.max(2, Math.min(12, (m + 16_666_666L) / 16_666_667L + 1));
+                                if (sentAt.size() < window) break;
+                                sentAt.wait(5);
+                            }
+                        }
+                        // A frame that waited is late: the next one is due a frame from now.
+                        long due = t0 + frame * 16_666_667L;
+                        if (System.nanoTime() > due + 16_666_667L) t0 = System.nanoTime() - frame * 16_666_667L;
+                    }
                     List<byte[]> file = scale < 0.99 ? small : big;
                     if (restart) {
                         i = 0;
@@ -607,8 +727,13 @@ public final class BrowserHarness {
                     byte[] au = file.get(i++);
                     int flags = hasIdr(au) ? 1 : 0;
                     ByteBuffer head = ByteBuffer.allocate(10);
-                    head.put(MSG_VIDEO).put((byte) flags).putLong(System.nanoTime() / 1000);
+                    head.put(MSG_VIDEO).put((byte) flags).putLong(wallClock ? wallUs() : System.nanoTime() / 1000);
+                    synchronized (sentAt) {
+                        sentAt.addLast(System.nanoTime());
+                    }
                     ws.sendBinary(head.array(), au, au.length);
+                    sentFrames++;
+                    if (pictureOff) sentWhileOff++;
                     frame++;
                     // Sixty a second, to the frame: Windows sleeps in 15.6 ms
                     // steps, so the last of each wait is spun.
@@ -623,7 +748,10 @@ public final class BrowserHarness {
                         long soundKbps = (sb - soundSeen) * 8 / 1000;
                         soundSeen = sb;
                         text("{\"t\":\"stats\",\"fps\":60,\"kbps\":7700,\"encodeMs\":4.2,\"soundKbps\":" + soundKbps + "}");
-                        ev("{\"acks\":" + acks + ",\"frames\":" + frame + ",\"soundBytes\":" + soundBytes.get() + "}");
+                        ev("{\"acks\":" + acks + ",\"micMsgs\":" + micMsgs + ",\"micBytes\":" + micBytes + ",\"micOdd\":" + micOdd
+                                + ",\"micRms\":" + Math.round(micRms) + ",\"timedAcks\":" + timedAcks + ",\"lastArrived\":" + lastArrived
+                                + ",\"frames\":" + frame + ",\"soundBytes\":" + soundBytes.get()
+                                + ",\"sentWhileOff\":" + sentWhileOff + ",\"rttMs\":" + (rttMedianNs < 0 ? -1 : rttMedianNs / 1_000_000.0) + "}");
                     }
                 }
             } catch (Exception e) {
@@ -636,6 +764,8 @@ public final class BrowserHarness {
                 while (!closing) {
                     LinuxStreamSocket.Message m = ws.read();
                     if (m == null) break;
+                    // Told its last word: read and dropped until the page closes its end.
+                    if (lastWord) continue;
                     if (m.opcode == LinuxStreamSocket.OP_BINARY) {
                         byte[] d = m.data;
                         if (d.length >= 6 && d[0] == 0x10) {
@@ -644,8 +774,35 @@ public final class BrowserHarness {
                         } else if (d.length >= 6 && d[0] == 0x11) {
                             int ks = ((d[2] & 0xff) << 24) | ((d[3] & 0xff) << 16) | ((d[4] & 0xff) << 8) | (d[5] & 0xff);
                             ev("{\"key\":[" + (d[1] & 0xff) + "," + ks + "]}");
+                        } else if (d.length > 1 && d[0] == 0x13) {
+                            // The browser's microphone: PCM s16le, 48 kHz, one channel, 10 ms a message.
+                            micMsgs++;
+                            micBytes += d.length - 1;
+                            if (d.length - 1 != 960) micOdd++;
+                            double sum = 0;
+                            int n = (d.length - 1) / 2;
+                            for (int k = 0; k < n; k++) {
+                                short v = (short) ((d[1 + 2 * k] & 0xff) | (d[2 + 2 * k] << 8));
+                                sum += (double) v * v;
+                            }
+                            double rms = n > 0 ? Math.sqrt(sum / n) : 0;
+                            micRms = Math.max(rms, micRms * 0.97);
                         } else if (d.length >= 1 && d[0] == 0x12) {
                             acks++;
+                            if (d.length >= 9) {
+                                lastArrived = ByteBuffer.wrap(d, 1, 8).getDouble();
+                                timedAcks++;
+                            }
+                            synchronized (sentAt) {
+                                Long at = sentAt.pollFirst();
+                                if (at != null) {
+                                    rtts[rttCount++ % rtts.length] = System.nanoTime() - at;
+                                    long[] sorted = java.util.Arrays.copyOf(rtts, Math.min(rttCount, rtts.length));
+                                    java.util.Arrays.sort(sorted);
+                                    rttMedianNs = sorted[sorted.length / 2];
+                                }
+                                sentAt.notifyAll();
+                            }
                         }
                         continue;
                     }
@@ -675,6 +832,20 @@ public final class BrowserHarness {
                         video();
                     } else if (t.contains("\"t\":\"keyframe\"")) {
                         restart = true;
+                    } else if (t.contains("\"t\":\"mic\"")) {
+                        if (t.matches("(?s).*\"on\"\\s*:\\s*true.*")) text("{\"t\":\"mic\",\"state\":" + q(micState) + "}");
+                    } else if (t.contains("\"t\":\"picture\"")) {
+                        boolean on = !t.matches("(?s).*\"on\"\\s*:\\s*false.*");
+                        if (on && pictureOff) restart = true; // back: from the key frame, as LinuxStream asks the encoder
+                        pictureOff = !on;
+                        if (!on) {
+                            synchronized (sentAt) {
+                                // nothing in flight is waited for while there is no picture
+                                sentAt.clear();
+                                sentAt.notifyAll();
+                            }
+                        }
+                        ev("{\"picture\":" + on + "}");
                     } else if (t.contains("\"t\":\"audio\"")) {
                         if (t.contains("\"codecs\"")) pageOpus = t.matches("(?s).*\"codecs\"\\s*:\\s*\\[[^\\]]*\"opus\".*");
                         sound(t.matches("(?s).*\"on\"\\s*:\\s*true.*"));
@@ -705,10 +876,31 @@ public final class BrowserHarness {
             tell("replaced");
         }
 
-        /** A word, then the end: as LinuxStream.tellThenClose. */
+        /**
+         * A word, then the end, as LinuxStream.tellThenClose and its
+         * closeAfterWord: the close frame, nothing more sent, and what the page
+         * still sends read and dropped until it closes its end (at most
+         * LAST_WORD_MS), so that the close is no reset to take the word with it.
+         */
         void tell(String state) {
             text("{\"t\":\"state\",\"state\":" + q(state) + "}");
-            close();
+            if (closing || lastWord) return;
+            lastWord = true;
+            sound(false);
+            if (!ws.sayClose(100)) {
+                close();
+                return;
+            }
+            Thread t = new Thread(() -> {
+                try {
+                    Thread.sleep(LinuxBrowserServer.LAST_WORD_MS);
+                } catch (InterruptedException ignored) {
+                    // closed below either way
+                }
+                close();
+            }, "harness-last-word");
+            t.setDaemon(true);
+            t.start();
         }
 
         void drop() {

@@ -494,10 +494,39 @@ final class LinuxBrowser {
         try {
             dir.mkdirs();
             Files.write(tmp.toPath(), content.getBytes(StandardCharsets.UTF_8));
-            Files.move(tmp.toPath(), f.toPath(), StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+            replace(tmp, f);
         } catch (IOException e) {
             tmp.delete();
             DexLog.warn("browser", "cannot write " + f.getName() + ": " + e);
+        }
+    }
+
+    /** How many times a refused rename is tried before the write is given up. */
+    private static final int REPLACE_TRIES = 50;
+
+    /**
+     * {@code tmp} renamed over {@code f}. Windows, where the stand-in tests run
+     * this file, refuses to replace a file while another thread has it open,
+     * and every request reads the tokens ({@link #tokenValid}): refused, the
+     * rename is tried again a moment later, under the lock as it was. Given up
+     * on the first refusal, a sign-out that met a request's read left every
+     * browser in (found 2026-11-20, test/linux-browser/StoreCheck.java). On
+     * Android a rename replaces a file whoever is reading it.
+     */
+    private static void replace(File tmp, File f) throws IOException {
+        for (int i = 1; ; i++) {
+            try {
+                Files.move(tmp.toPath(), f.toPath(), StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+                return;
+            } catch (java.nio.file.AccessDeniedException e) {
+                if (i >= REPLACE_TRIES) throw e;
+                try {
+                    Thread.sleep(2);
+                } catch (InterruptedException stop) {
+                    Thread.currentThread().interrupt();
+                    throw e;
+                }
+            }
         }
     }
 }

@@ -16,14 +16,18 @@
 // pointer, keys, the clipboard both ways, a resize, and every way a session
 // ends.
 //
-//   node test/linux-browser-test.mjs --device <serial> [--size 1920x1080]
+//   node test/linux-browser-test.mjs --device <serial> [--size 1920x1080] [--throttle <Mb/s>]
 //
 // …the same on a real phone, over its Wi-Fi: the server, LinuxBrowserPeek,
 // LinuxStream and the phone's hardware encoder, run by app_process as the
 // shell user (test/linux-browser/PhoneHarness.java). Nothing is installed and
 // no app is touched; the desktop is test/usb-desktop/StandinXvnc, changing
 // every pixel of every frame. Says what each quality gets: frames a second,
-// bitrate, the phone's encode time, this computer's decode time.
+// bitrate, the phone's encode time, this computer's decode time. With
+// --throttle, also a second browser through a proxy here that lets the
+// phone's stream through at that many Mb/s, once with the page saying when
+// frames arrived (LinuxStreamRate) and once as a computer's window does (the
+// rule of a full link): what each keeps the round trip at.
 //
 // Needs Node 24, a JDK (JAVA_HOME), ffmpeg, and Chrome or Edge; for --device
 // the Android SDK, with the phone on adb.
@@ -41,8 +45,11 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(HERE, '..');
-const LAUNCHER = path.join(ROOT, 'openandroiddex-launcher/app/src/main/java/com/ccrstech/openandroiddex/launcher');
-const ASSETS = path.join(ROOT, 'openandroiddex-launcher/app/src/main/assets/linux/browser');
+// OADX_LAUNCHER_DIR: another copy of the launcher's classes, as OADX_PAGE_DIR.
+const LAUNCHER = process.env.OADX_LAUNCHER_DIR || path.join(ROOT, 'openandroiddex-launcher/app/src/main/java/com/ccrstech/openandroiddex/launcher');
+// OADX_PAGE_DIR: another copy of the page to test (an older one, for a check
+// that must fail on it), leaving the repo's own to whatever else serves it.
+const ASSETS = process.env.OADX_PAGE_DIR || path.join(ROOT, 'openandroiddex-launcher/app/src/main/assets/linux/browser');
 const args = process.argv.slice(2);
 const argOf = (name) => {
   const i = args.indexOf(name);
@@ -138,11 +145,13 @@ const classes = path.join(tmp, 'classes');
 fs.mkdirSync(classes);
 const javac = spawnSync(JAVAC, [
   '-nowarn', '-d', classes,
-  ...['LinuxBrowser', 'LinuxBrowserCert', 'LinuxBrowserServer', 'LinuxStreamSocket', 'LinuxStreamAudio', 'LinuxAudioLag', 'LinuxFiles']
-    .map((c) => path.join(LAUNCHER, `${c}.java`)),
+  ...['LinuxBrowser', 'LinuxBrowserCert', 'LinuxBrowserServer', 'LinuxStreamSocket', 'LinuxStreamAudio', 'LinuxAudioLag', 'LinuxFiles',
+    'LinuxStreamRate'].map((c) => path.join(LAUNCHER, `${c}.java`)),
   path.join(HERE, 'linux-browser/DexLog.java'),
   path.join(HERE, 'linux-browser/BrowserHarness.java'),
   path.join(HERE, 'linux-browser/ShaperCheck.java'),
+  path.join(HERE, 'linux-browser/RateCheck.java'),
+  path.join(HERE, 'linux-browser/StoreCheck.java'),
 ], { encoding: 'utf8' });
 check("the launcher's browser classes compile on a JVM, with no Android in reach", javac.status === 0, javac.stderr);
 if (javac.status !== 0) process.exit(1);
@@ -166,6 +175,59 @@ console.log("the sound's shapes");
     JSON.stringify([got['24000/2/440'], got['24000/2/5000'], got['24000/2/15000']]));
   check('High: the tap as it is, 48 kHz stereo; and a mono of a tone the same in both ears is that tone',
     got['48000/2/440']?.frames === 48000 && near('48000/2/440', 0.999, 1.001) && near('48000/1/440', 0.999, 1.001));
+}
+
+console.log('the browsers let in, while requests read the list');
+{
+  // test/linux-browser/StoreCheck.java: 200 sign-outs, each with a browser
+  // just let in, while two threads read the list as every request does. On
+  // Windows a file being read cannot be replaced; given up at the first
+  // refusal (before 2026-11-20), 8 to 15 sign-outs in 200 left the browser in.
+  const r = spawnSync(JAVA, ['-cp', classes, 'com.ccrstech.openandroiddex.launcher.StoreCheck'], { encoding: 'utf8' });
+  const m = /STORE signouts=(\d+) left=(\d+) kept=(\d+) reads=(\d+)/.exec(r.stdout || '');
+  check('a sign-out while browsers\' requests read the list: every browser out, and a new code, all 200 times',
+    !!m && Number(m[1]) === 200 && Number(m[2]) === 0 && Number(m[3]) === 0 && Number(m[4]) > 500, (r.stdout + r.stderr).slice(-600));
+}
+
+console.log('the bitrate, from how late frames arrive (simulated links)');
+{
+  // LinuxStreamRate beside the rule it replaced (still the rule for a
+  // computer that says only that a frame arrived), on links simulated in
+  // test/linux-browser/RateCheck.java: frames sized by the bitrate, LinuxStream's
+  // window of frames in flight, one bottleneck, and a phone's Wi-Fi in power
+  // save holding acknowledgements. A simulation, not a network.
+  const r = spawnSync(JAVA, ['-cp', classes, 'com.ccrstech.openandroiddex.launcher.RateCheck'], { encoding: 'utf8' });
+  const got = {};
+  for (const line of (r.stdout || '').split('\n')) {
+    const m = /^RATE (\S+) (\S+) (.*)$/.exec(line.trim());
+    if (!m) continue;
+    const kv = {};
+    for (const part of m[3].split(' ')) {
+      const [k, v] = part.split('=');
+      kv[k] = Number(v);
+    }
+    got[`${m[1]}/${m[2]}`] = kv;
+    console.log(`  ${m[1].padEnd(14)} ${m[2].padEnd(4)} late ${String(kv.medianMs).padStart(6)} ms median, ${String(kv.p95Ms).padStart(6)} ms at 95%, `
+      + `${String(kv.mbps).padStart(6)} Mb/s, ${kv.cuts} cuts${kv.firstCutS >= 0 ? `, first ${kv.firstCutS} s after the drop` : ''}`);
+  }
+  const g = (k) => got[k] || {};
+  check('a cable: neither rule cuts the bitrate', g('cable/new').cuts === 0 && g('cable/old').cuts === 0, r.stdout + r.stderr);
+  check("Wi-Fi in power save, with room to spare: the new rule never cuts (frames arrive on time; only the acknowledgements wait), where the old one cut for nothing",
+    g('powersave/new').cuts === 0 && g('powersave/old').cuts > 0 && g('powersave/new').mbps > g('powersave/old').mbps * 2,
+    JSON.stringify([g('powersave/new'), g('powersave/old')]));
+  check('a link slower than the picture: frames late by under 60 ms at the 95th percentile, a quarter of the old rule\'s or less',
+    g('slow/new').p95Ms < 60 && g('slow/new').p95Ms * 4 < g('slow/old').p95Ms, JSON.stringify([g('slow/new'), g('slow/old')]));
+  check('…the same with power save on top, without the bitrate collapsing',
+    g('slowpowersave/new').p95Ms < 60 && g('slowpowersave/new').mbps >= 3, JSON.stringify(g('slowpowersave/new')));
+  check('a link that drops from 40 to 6 Mb/s: the first cut within half a second, where the old rule took a second, and a quarter of its delay',
+    g('drop/new').firstCutS >= 0 && g('drop/new').firstCutS < 0.5 && g('drop/old').firstCutS >= 1 && g('drop/new').p95Ms * 4 < g('drop/old').p95Ms,
+    JSON.stringify([g('drop/new'), g('drop/old')]));
+  check('a link that comes back: the bitrate climbs back to what the page asked for within 15 s',
+    g('recover/new').mbpsAt >= 20, JSON.stringify([g('recover/new'), g('recover/old')]));
+  check('a stream that starts at 25 Mb/s on a link of 1.5, its first key frame ten frames\' worth: under 100 ms at the 95th percentile, where the old rule took a third of a second',
+    g('start/new').p95Ms < 100 && g('start/old').p95Ms > 2 * g('start/new').p95Ms, JSON.stringify([g('start/new'), g('start/old')]));
+  check('a link that stops now and then (1.5 s of every 6): cut while it is stopped, with no acknowledgement to decide by, and carrying what the old rule carries',
+    g('stalls/new').byHeld > 0 && g('stalls/new').mbps > g('stalls/old').mbps * 0.8, JSON.stringify([g('stalls/new'), g('stalls/old')]));
 }
 
 // The stand-in desktop: two sizes, as the phone's encoder makes them, no B-frames.
@@ -388,6 +450,46 @@ function keepAlive() {
   });
 }
 
+/**
+ * One connection kept for file after file, as a browser keeps one: a file
+ * asked for {@code gap} ms after the last one came, {@code n} times. How many
+ * came, and when the far end closed (0: it did not).
+ */
+function reuse(n, gap) {
+  return new Promise((resolve) => {
+    const t0 = Date.now();
+    let got = '';
+    let answered = 0;
+    const ask = () => s.write(`GET /icon.svg HTTP/1.1\r\nHost: ${IP}:${PORT}\r\nConnection: keep-alive\r\n\r\n`);
+    const s = tls.connect({ host: IP, port: PORT, rejectUnauthorized: false }, ask);
+    s.on('error', () => {});
+    s.on('close', () => resolve({ answered, closedAt: Date.now() - t0 }));
+    s.on('data', (d) => {
+      got += d;
+      for (;;) {
+        const end = got.indexOf('\r\n\r\n');
+        if (end < 0) return;
+        const len = /content-length: (\d+)/i.exec(got.slice(0, end));
+        if (!len || got.length < end + 4 + Number(len[1])) return;
+        if (got.startsWith('HTTP/1.1 200')) answered++;
+        got = got.slice(end + 4 + Number(len[1]));
+        if (answered >= n) {
+          resolve({ answered, closedAt: 0, after: Date.now() - t0 });
+          s.destroy();
+          return;
+        }
+        setTimeout(() => {
+          if (!s.destroyed) ask();
+        }, gap);
+      }
+    });
+    setTimeout(() => {
+      resolve({ answered, closedAt: 0, after: Date.now() - t0 });
+      s.destroy();
+    }, n * gap + 5000);
+  });
+}
+
 
 console.log('the door');
 {
@@ -509,10 +611,11 @@ console.log("the code's own budget");
 console.log('holding the door');
 {
   await sleep(300);
-  const held = await Promise.all(Array.from({ length: 8 }, () => rawConnect()));
+  const held = await Promise.all(Array.from({ length: 16 }, () => rawConnect()));
   await sleep(300);
   const ninth = await rawRequest(`GET / HTTP/1.1\r\nHost: ${IP}:${PORT}\r\n\r\n`, 3000);
-  check('eight connections from one address that say nothing: a ninth is closed unread', ninth.closed && !ninth.data, JSON.stringify(ninth));
+  check('sixteen connections from one address that say nothing (a browser\'s six for each scheme, and more): a seventeenth is closed unread',
+    ninth.closed && !ninth.data, JSON.stringify(ninth));
   held.forEach((h) => h.destroy());
   await sleep(500);
   check('…and once they go, the address is answered again', (await request('GET', '/', { plain: true })).status === 200);
@@ -521,6 +624,13 @@ console.log('holding the door');
   const slow = await trickle(8000);
   check('a request that comes a byte at a time is closed at its deadline, unanswered',
     slow.after >= 1000 && slow.after < 4000 && !slow.got, JSON.stringify(slow));
+  // The deadline times each request, not the connection's life: a browser
+  // keeps a connection for the page's next file, and one cut mid-file at the
+  // deadline set when it came was a module of the page lost (Chrome:
+  // ERR_CONNECTION_ABORTED).
+  const reused = await reuse(8, 500);
+  check('a connection kept for file after file is answered for each, past the time it had to be let in',
+    reused.answered === 8 && reused.closedAt === 0, JSON.stringify(reused));
   await command('timeouts 30000 75000', 'OK timeouts');
 
   const kept = await keepAlive();
@@ -543,14 +653,21 @@ console.log('holding the door');
  * A WebSocket to the stream, by hand: the handshake's headers are the test.
  * Resolves once the server has answered the upgrade (or closed).
  */
-function wsConnect({ origin = BASE, host = `${IP}:${PORT}`, token = null, plain = false } = {}) {
+/**
+ * A WebSocket of this test's own, frame by frame. {@code ack}: each video
+ * frame acknowledged the moment it arrives, as the desktop app does
+ * (UsbDesktop.tsx): 'plain' with one byte (the app before 2026-11-21), 'timed'
+ * with the time it came, in ms (the app from then, and every browser page),
+ * or a function that makes the bytes (the app's own wire.ts).
+ */
+function wsConnect({ origin = BASE, ip = IP, port = PORT, host = `${ip}:${port}`, token = null, plain = false, ack = null } = {}) {
   return new Promise((resolve) => {
     const where = token == null ? '/stream' : `/stream?t=${encodeURIComponent(token)}`;
     const opened = () => {
       const key = crypto.randomBytes(16).toString('base64');
       s.write(`GET ${where} HTTP/1.1\r\nHost: ${host}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: ${key}\r\nSec-WebSocket-Version: 13\r\n${origin ? `Origin: ${origin}\r\n` : ''}\r\n`);
     };
-    const s = plain ? net.connect({ host: IP, port: PORT }, opened) : tls.connect({ host: IP, port: PORT, rejectUnauthorized: false }, opened);
+    const s = plain ? net.connect({ host: ip, port }, opened) : tls.connect({ host: ip, port, rejectUnauthorized: false }, opened);
     // frames: every binary one; sound: the 0x03 ones, when each came, its bytes, and whether it was silence
     const c = { status: 0, texts: [], frames: 0, closedAt: 0, sound: [] };
     c.closed = new Promise((r) => s.on('close', () => {
@@ -569,6 +686,9 @@ function wsConnect({ origin = BASE, host = `${IP}:${PORT}`, token = null, plain 
     };
     c.send = (obj) => c.frame(1, JSON.stringify(obj));
     c.end = () => s.destroy();
+    // Reading stopped and started again, as a page busy elsewhere reads late.
+    c.pause = () => s.pause();
+    c.resume = () => s.resume();
     let buf = Buffer.alloc(0);
     s.on('data', (d) => {
       buf = Buffer.concat([buf, d]);
@@ -596,6 +716,18 @@ function wsConnect({ origin = BASE, host = `${IP}:${PORT}`, token = null, plain 
         if (op === 1) c.texts.push(buf.slice(off, off + len).toString());
         else if (op === 2) {
           c.frames++; // the picture, the pointer, the sound
+          if (ack && buf[off] === 0x01 && len > 10 && !(buf[off + 1] & 2)) {
+            if (typeof ack === 'function') {
+              c.frame(2, ack());
+            } else if (ack === 'timed') {
+              const a = Buffer.alloc(9);
+              a[0] = 0x12;
+              a.writeDoubleBE(performance.timeOrigin + performance.now(), 1);
+              c.frame(2, a);
+            } else {
+              c.frame(2, [0x12]);
+            }
+          }
           if (buf[off] === 0x03) {
             c.sound.push({ at: Date.now(), codec: buf[off + 1], bytes: len - 10, loud: buf.slice(off + 10, off + len).some((v) => v !== 0) });
           }
@@ -944,14 +1076,16 @@ function findBrowser() {
  * A headless browser of its own (its own profile, its own debugging port),
  * driven over the DevTools protocol: what the page does, read and pressed.
  */
-async function launchBrowser() {
+async function launchBrowser(extra = []) {
   const exe = findBrowser();
   if (!exe) return null;
   const cdpPort = await freePort();
   const profile = path.join(tmp, `profile-${cdpPort}`);
-  const proc = spawn(exe, [
+  const proc = spawn(exe, [...extra,
     '--headless=new', `--remote-debugging-port=${cdpPort}`, `--user-data-dir=${profile}`, '--no-first-run',
-    '--no-default-browser-check', '--disable-extensions', '--window-size=1600,900', 'about:blank',
+    '--no-default-browser-check', '--disable-extensions', '--window-size=1600,900',
+    // A microphone that plays a tone, and the browser's question about it answered yes.
+    '--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream', 'about:blank',
   ], { stdio: 'ignore' });
   const kill = () => {
     // Its helpers outlive the main process on Windows unless told to go, and
@@ -1141,19 +1275,13 @@ console.log('the code');
 
 console.log('the picture');
 {
-  await sleep(1500);
-  const px = await js(`(() => {
-    const c = document.getElementById('screen');
-    const g = c.getContext('2d');
-    const d = g.getImageData(0, 0, c.width, c.height).data;
-    let lit = 0, n = 0;
-    for (let i = 0; i < d.length; i += 4 * 997) { n++; if (d[i] + d[i + 1] + d[i + 2] > 60) lit++; }
-    return { w: c.width, h: c.height, lit, n };
-  })()`);
-  check('decoded and drawn: the canvas is the desktop\'s size and the picture is on it', px.w === VW && px.h === VH && px.lit > px.n * 0.5, JSON.stringify(px));
-  check('…one pixel for one, not smoothed', !(await js(`document.getElementById('screen').classList.contains('smooth')`)));
-  // The bar is down for its first 3.2 s: looked at before the seconds counted below.
+  // The bar is down for its first 3.2 s: looked at first, before anything slower.
   check('the bar comes down for a moment when the picture first shows', await js(`document.body.classList.contains('bar-on')`));
+  await sleep(1500);
+  const px = (await js('lodPixels()')) || {};
+  check('decoded and drawn: the canvas is the desktop\'s size and the picture is on it', px.w === VW && px.h === VH && px.lit > px.n * 0.5, JSON.stringify(px));
+  check("…decoded and drawn in a worker, off the page's own thread", (await js('lodVideo()')).decode === 'worker', JSON.stringify(await js('lodVideo()')));
+  check('…one pixel for one, not smoothed', !(await js(`document.getElementById('screen').classList.contains('smooth')`)));
   await shot('04-desktop-bar');
   // Three seconds, not one: a computer busy for a second says nothing of the page.
   const seconds = [];
@@ -1240,6 +1368,91 @@ console.log('the sound follows the quality');
   await sleep(500);
 }
 
+console.log('what the phone reads, and a hidden tab');
+{
+  const hello = events.filter((e) => e.hello).at(-1);
+  check('the page says it acknowledges frames with the time each arrived', hello && hello.hello.acks === true && hello.hello.ackAt === true,
+    JSON.stringify(hello && hello.hello));
+  const a = events.filter((e) => e.timedAcks !== undefined).at(-1);
+  check('…and each acknowledgement carries that time, by this computer\'s clock',
+    a && a.timedAcks > 0 && a.timedAcks >= a.acks - 2 && Math.abs(a.lastArrived - a.at) < 2000, JSON.stringify(a));
+  // Twice, apart: the page's own ping comes every two seconds, and could land
+  // by chance within a moment of one word, but hardly of both.
+  const answered = [];
+  let t = Date.now();
+  for (let i = 0; i < 2; i++) {
+    t = Date.now();
+    await command('hb', 'OK hb');
+    const pinged = await until(() => evSince(t, (e) => e.msg && e.msg.t === 'ping'), 1500, 5);
+    answered.push(pinged ? pinged.at - t : -1);
+    await sleep(700);
+  }
+  check("the phone's word while a hidden tab has no picture is answered at once, not at the page's next timer",
+    answered.every((ms) => ms >= 0 && ms < 150), `${answered.join(', ')} ms`);
+
+  // Another tab in front: this one is hidden, as it is behind a tab, or in a
+  // minimised window.
+  const v0 = await js('lodVideo()');
+  const s0 = await js('lodSound()');
+  t = Date.now();
+  const other = await cdp('Target.createTarget', { url: 'about:blank' });
+  await until(() => js('document.visibilityState === "hidden"'), 3000);
+  const off = await until(() => evSince(t, (e) => e.msg && e.msg.t === 'picture' && e.msg.on === false), 3000);
+  check('a tab out of sight tells the phone it wants no picture', (await js('document.visibilityState')) === 'hidden' && !!off,
+    `${await js('document.visibilityState')} ${JSON.stringify(off)}`);
+  // Frames already on their way when the word went land first.
+  await sleep(500);
+  const vA = await js('lodVideo()');
+  await sleep(2500);
+  const v1 = await js('lodVideo()');
+  const s1 = await js('lodSound()');
+  const quietSince = events.filter((e) => e.sentWhileOff !== undefined).at(-1);
+  check('…then no frame comes, and none is drawn', v1.drawnTotal - vA.drawnTotal <= 1 && quietSince && quietSince.sentWhileOff === 0,
+    `${v0.drawnTotal} → ${vA.drawnTotal} → ${v1.drawnTotal}, ${JSON.stringify(quietSince)}`);
+  // A headless browser slows a hidden tab's page, sound or not (a real one
+  // does not, for a tab playing sound): that it goes on is what counts here.
+  check('…while the sound goes on', s1.runs > s0.runs + 15, `runs ${s0.runs} → ${s1.runs}`);
+  t = Date.now();
+  await cdp('Target.closeTarget', { targetId: other.result.targetId });
+  // In front again for good: a headless browser can leave the tab's next page
+  // (a navigation to another origin) believing it is still behind.
+  await cdp('Page.bringToFront');
+  const firstAt = await until(async () => ((await js('lodVideo()')).drawnTotal > v1.drawnTotal ? Date.now() : null), 4000, 5);
+  const on = await until(() => evSince(t, (e) => e.msg && e.msg.t === 'picture' && e.msg.on === true), 3000);
+  const back = await until(async () => {
+    const v = await js('lodVideo()');
+    return v.drawnTotal > v1.drawnTotal + 10 ? v : null;
+  }, 4000);
+  check('the tab back: the phone is told, and the picture comes again, from a key frame',
+    !!on && !!back && back.keysIn > v1.keysIn, JSON.stringify({ on: !!on, v1, back }));
+  check('…soon: under half a second from the tab in front again to the first new frame drawn', !!firstAt && firstAt - t < 500,
+    firstAt ? `${firstAt - t} ms` : 'no frame');
+
+  // The sound in hand: grown to bridge a hidden tab's bursts, back down with
+  // the tab, and as small as a steady link allows. The stand-in's tap hands
+  // over 20 ms at a time, as PulseAudio does for many apps; at 10 ms a time,
+  // as for an app that asks for less, PCM (High) comes 10 ms a message.
+  await sleep(3000);
+  const s2 = await js('lodSound()');
+  // Down again if it grew; and a tab the browser did not slow (29 ms hidden,
+  // 30 back, 2026-11-21) has nothing to come down from.
+  check(`the sound in hand comes back down when the tab is back: ${s2.cushionMs} ms (${s1.cushionMs} ms while it was hidden)`,
+    s2.cushionMs < 60 && (s1.cushionMs < 60 || s2.cushionMs < s1.cushionMs), JSON.stringify({ s1, s2 }));
+  await command('tapchunk 10', 'OK tapchunk');
+  await js(`${seg('high')}.click()`);
+  await sleep(5000);
+  const s3 = await js('lodSound()');
+  // What the gaps ask for (1.2 times the longest, and 5 ms), not a floor of
+  // 40 ms: how small that is depends on this computer's own timing.
+  check(`…and a tap that hands over 10 ms at a time: ${s3.cushionMs} ms in hand at High's PCM, as the gaps ask (the longest ${s3.gapMs} ms; `
+    + `before, never under 40), ${s3.underruns - s2.underruns} run dry`,
+  s3.format === '48 kHz stereo' && s3.cushionMs <= Math.max(15, 1.2 * s3.gapMs + 5) + 2 && (s3.gapMs >= 25 || s3.cushionMs < 40)
+    && s3.underruns <= s2.underruns + 2, JSON.stringify({ s2, s3 }));
+  await command('tapchunk 20', 'OK tapchunk');
+  await js(`${seg('medium')}.click()`);
+  await sleep(1000);
+}
+
 console.log('the pointer and the keys');
 {
   let t = Date.now();
@@ -1263,6 +1476,317 @@ console.log('the pointer and the keys');
   t = Date.now();
   await press('c', 'KeyC', 67, '', 2);
   check('Ctrl+C goes as Ctrl and c', !!(await until(() => evSince(t, (e) => e.key && e.key[1] === 0x63), 2000)));
+}
+
+// Every microphone the browser gives the page, to see none is left
+// recording: getUserMedia wrapped, the page's own call unchanged, and an
+// answer held back on request (__micDelay), as a person reading the
+// browser's question holds it back.
+const watchMics = () => js(`(() => {
+  if (window.__mics) return;
+  const md = navigator.mediaDevices;
+  const real = md.getUserMedia.bind(md);
+  window.__mics = [];
+  window.__micDelay = 0;
+  md.getUserMedia = async (c) => {
+    const s = await real(c);
+    window.__mics.push(s);
+    if (window.__micDelay) await new Promise((r) => setTimeout(r, window.__micDelay));
+    return s;
+  };
+})()`);
+/**
+ * Each check counts from nothing: the page's microphone off (an earlier one
+ * may have left it on), whatever was left recording stopped. Wrapped again
+ * first, for a page loaded again since.
+ */
+const freshMics = async (delay = 0) => {
+  await watchMics();
+  if ((await js('lodMic()')).on) {
+    await js(`document.getElementById('mic').click()`);
+    await sleep(200);
+  }
+  await js(`(() => { for (const s of window.__mics) for (const k of s.getTracks()) k.stop(); window.__mics = []; window.__micDelay = ${delay}; })()`);
+};
+const recordingMics = () => js(`window.__mics.filter((s) => s.getTracks().some((k) => k.readyState === 'live')).length`);
+const micsSaid = async () => JSON.stringify({ page: await js('lodMic()'), given: await js('window.__mics.length'), recording: await recordingMics() });
+
+console.log('touch, the screen\'s keyboard, and the microphone');
+{
+  await cdp('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 5 });
+  const tp = (x, y, id = 0) => ({ x, y, id, radiusX: 4, radiusY: 4, force: 1 });
+  const touchAt = async (pts, type) => cdp('Input.dispatchTouchEvent', { type, touchPoints: pts });
+  const tapAt = async (x, y) => {
+    await touchAt([tp(x, y)], 'touchStart');
+    await touchAt([], 'touchEnd');
+  };
+  const pointersSince = (t) => events.filter((e) => e.at >= t && e.pointer);
+  // A press of these buttons, and all of them up again after it (the move to
+  // the finger before the press has them up too: not the lift).
+  const pressedAndUp = (t, mask) => {
+    const ps = pointersSince(t);
+    const i = ps.findIndex((e) => e.pointer[0] === mask);
+    return i >= 0 && ps.slice(i + 1).some((e) => e.pointer[0] === 0);
+  };
+  // Touch, the finger the pointer: whichever this screen chose at load, Touch here.
+  if (await js(`document.body.classList.contains('pad')`)) await js(`document.getElementById('tmode').click()`);
+  let t = Date.now();
+  await tapAt(400, 300);
+  await until(() => pressedAndUp(t, 1), 2000);
+  let ps = pointersSince(t);
+  const touchMode = await js(`document.body.classList.contains('touch') && !document.body.classList.contains('pad')`);
+  check('a finger on the picture: the touch buttons appear on the bar, and Touch is the way',
+    touchMode && (await js(`getComputedStyle(document.getElementById('tmode')).display !== 'none'`)), `${touchMode}`);
+  check('Touch: a tap clicks where the finger lands', ps.some((e) => e.pointer[0] === 1 && e.pointer[1] === 400 && e.pointer[2] === 300)
+    && ps.at(-1).pointer[0] === 0, JSON.stringify(ps.map((e) => e.pointer)));
+  t = Date.now();
+  await touchAt([tp(500, 320)], 'touchStart');
+  await sleep(650);
+  const ring = await js(`!document.getElementById('armed').hidden`);
+  await touchAt([], 'touchEnd');
+  await until(() => pressedAndUp(t, 4), 2000);
+  ps = pointersSince(t);
+  check('…a long press shows its ring, and is a right-click on lifting', ring && ps.some((e) => e.pointer[0] === 4 && e.pointer[1] === 500)
+    && ps.at(-1).pointer[0] === 0, JSON.stringify(ps.map((e) => e.pointer)));
+  t = Date.now();
+  await touchAt([tp(600, 300)], 'touchStart');
+  for (let k = 1; k <= 10; k++) await touchAt([tp(600, 300 + k * 20)], 'touchMove');
+  await touchAt([], 'touchEnd');
+  await until(() => pointersSince(t).some((e) => e.pointer[0] === 8), 2000);
+  ps = pointersSince(t);
+  check('…a drag scrolls what is under the finger, the way the finger goes (button 4: up)',
+    ps.some((e) => e.pointer[0] === 8) && !ps.some((e) => e.pointer[0] === 1 || e.pointer[0] === 16), JSON.stringify(ps.map((e) => e.pointer[0])));
+  // A pinch about the window's middle, two times out.
+  await touchAt([tp(540, 360, 1), tp(740, 360, 2)], 'touchStart');
+  await sleep(80);
+  for (let k = 1; k <= 10; k++) {
+    await touchAt([tp(540 - k * 10, 360, 1), tp(740 + k * 10, 360, 2)], 'touchMove');
+    await sleep(16);
+  }
+  await touchAt([], 'touchEnd');
+  const z = await js(`document.getElementById('screen').style.transform`);
+  const scale = Number((/scale\(([\d.]+)\)/.exec(z) || [])[1]);
+  check('…two fingers apart zoom the picture, about where they are, and Fit appears', scale > 1.8 && scale < 2.2
+    && (await js(`!document.getElementById('fit').hidden`)), z);
+  t = Date.now();
+  await tapAt(640 + 200, 360);
+  await until(() => pointersSince(t).some((e) => e.pointer[0] === 1), 2000);
+  const zt = pointersSince(t).find((e) => e.pointer[0] === 1);
+  // At about twice the size, 200 px of window right of the middle is about 100 desktop pixels.
+  check('…a tap on the zoomed picture lands on the desktop point under the finger', zt && Math.abs(zt.pointer[1] - (640 + 200 / scale)) <= 2
+    && Math.abs(zt.pointer[2] - 360) <= 2, `${JSON.stringify(zt && zt.pointer)} at ${scale}`);
+  await js(`document.getElementById('fit').click()`);
+  check('…and Fit shows the whole desktop again', (await js(`document.getElementById('screen').style.transform`)) === ''
+    && (await js(`document.getElementById('fit').hidden`)));
+
+  // Trackpad: the screen as a laptop's trackpad.
+  await js(`document.getElementById('tmode').click()`);
+  check('the Touch/Trackpad button: Trackpad, said', (await js(`document.body.classList.contains('pad')`))
+    && /^Trackpad\. A finger moves the pointer/.test(await js(`document.getElementById('toast').textContent`)),
+    await js(`document.getElementById('toast').textContent`));
+  check("…and the trackpad's pointer is drawn, in Linux's shape", (await js(`!document.getElementById('tcur').hidden`))
+    && (await js(`document.getElementById('tcur-img').src.startsWith('data:image/png')`)));
+  t = Date.now();
+  await touchAt([tp(300, 500)], 'touchStart');
+  for (let k = 1; k <= 12; k++) {
+    await touchAt([tp(300 + k * 10, 500)], 'touchMove');
+    await sleep(16);
+  }
+  await touchAt([], 'touchEnd');
+  await sleep(200);
+  ps = pointersSince(t);
+  const moved = ps.filter((e) => e.pointer[0] === 0);
+  check('Trackpad: a finger moving right moves the pointer right, from where it was, with no button',
+    moved.length > 3 && moved.at(-1).pointer[1] > moved[0].pointer[1] && !ps.some((e) => e.pointer[0] !== 0),
+    JSON.stringify(ps.slice(0, 3).map((e) => e.pointer)) + ' … ' + JSON.stringify(ps.slice(-2).map((e) => e.pointer)));
+  const there = moved.at(-1) ? moved.at(-1).pointer : [0, 0, 0];
+  t = Date.now();
+  await tapAt(100, 100);
+  await until(() => pointersSince(t).some((e) => e.pointer[0] === 1), 2000);
+  const pc = pointersSince(t).find((e) => e.pointer[0] === 1);
+  check('…a tap anywhere clicks where the pointer is, not where the finger is',
+    pc && Math.abs(pc.pointer[1] - there[1]) <= 1 && Math.abs(pc.pointer[2] - there[2]) <= 1, `${JSON.stringify(pc && pc.pointer)} vs ${JSON.stringify(there)}`);
+  await sleep(400); // past a double tap
+  t = Date.now();
+  await touchAt([tp(600, 400, 1), tp(700, 400, 2)], 'touchStart');
+  await sleep(40);
+  await touchAt([], 'touchEnd');
+  await until(() => pointersSince(t).some((e) => e.pointer[0] === 4), 2000);
+  check('…two fingers tapped together are a right-click', pointersSince(t).some((e) => e.pointer[0] === 4),
+    JSON.stringify(pointersSince(t).map((e) => e.pointer)));
+  t = Date.now();
+  await touchAt([tp(600, 300, 1), tp(700, 300, 2)], 'touchStart');
+  await sleep(80);
+  for (let k = 1; k <= 10; k++) {
+    await touchAt([tp(600, 300 - k * 15, 1), tp(700, 300 - k * 15, 2)], 'touchMove');
+    await sleep(16);
+  }
+  await touchAt([], 'touchEnd');
+  await until(() => pointersSince(t).some((e) => e.pointer[0] === 16), 2000);
+  check('…and two fingers up scroll down (button 5), at the pointer', pointersSince(t).some((e) => e.pointer[0] === 16
+    && Math.abs(e.pointer[1] - there[1]) <= 1), JSON.stringify(pointersSince(t).slice(0, 4).map((e) => e.pointer)));
+  await js(`document.getElementById('tmode').click()`);
+
+  // The screen's keyboard: the button, a field out of sight, the strip.
+  await js(`document.getElementById('kbd').click()`);
+  check("the keyboard button: the field the screen's keyboard types into has the focus, and the strip of keys shows",
+    (await js(`document.activeElement && document.activeElement.id`)) === 'kbd-in' && (await js(`document.body.classList.contains('kbd-on')`))
+    && (await js(`getComputedStyle(document.getElementById('keys')).display`)) === 'flex');
+  const keysSince = (t0) => events.filter((e) => e.at > t0 && e.key).map((e) => e.key);
+  // Each step's own keys only: the last step's, all come, are behind it.
+  const settled = async () => {
+    await sleep(250);
+    return Date.now();
+  };
+  t = await settled();
+  await cdp('Input.insertText', { text: 'hi' });
+  await until(() => keysSince(t).length >= 4, 2000);
+  check('…typed text goes to Linux as its keys', JSON.stringify(keysSince(t)) === JSON.stringify([[1, 0x68], [0, 0x68], [1, 0x69], [0, 0x69]]),
+    JSON.stringify(keysSince(t)));
+  t = await settled();
+  await js(`(() => { const f = document.getElementById('kbd-in'); f.value = f.value.slice(0, -1);
+    f.dispatchEvent(new InputEvent('input', { inputType: 'deleteContentBackward' })); return true; })()`);
+  await until(() => keysSince(t).length >= 2, 2000);
+  check("…a screen keyboard's delete is a BackSpace", JSON.stringify(keysSince(t)) === JSON.stringify([[1, 0xff08], [0, 0xff08]]),
+    JSON.stringify(keysSince(t)));
+  t = await settled();
+  await js(`document.querySelector('#keys [data-ks="0xffe3"]').click()`);
+  const held = await js(`document.querySelector('#keys [data-ks="0xffe3"]').getAttribute('aria-pressed')`);
+  await cdp('Input.insertText', { text: 'c' });
+  await until(() => keysSince(t).length >= 4, 2000);
+  check('…Ctrl on the strip holds for the next key: Ctrl+C', held === 'true'
+    && JSON.stringify(keysSince(t)) === JSON.stringify([[1, 0xffe3], [1, 0x63], [0, 0x63], [0, 0xffe3]])
+    && (await js(`document.querySelector('#keys [data-ks="0xffe3"]').getAttribute('aria-pressed')`)) === 'false', JSON.stringify(keysSince(t)));
+  t = await settled();
+  await js(`document.querySelector('#keys [data-ks="0xff1b"]').click()`);
+  await until(() => keysSince(t).length >= 2, 2000);
+  check('…Esc on the strip is Esc', JSON.stringify(keysSince(t)) === JSON.stringify([[1, 0xff1b], [0, 0xff1b]]), JSON.stringify(keysSince(t)));
+  t = await settled();
+  await cdp('Input.dispatchKeyEvent', { type: 'rawKeyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 });
+  await cdp('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 });
+  await until(() => keysSince(t).length >= 2, 2000);
+  check('…and a real keyboard typing into the field is Linux\'s too: Enter is Return, once',
+    JSON.stringify(keysSince(t)) === JSON.stringify([[1, 0xff0d], [0, 0xff0d]]), JSON.stringify(keysSince(t)));
+  await js(`document.getElementById('keys-hide').click()`);
+  check('…and the strip\'s last button hides the keyboard', (await js(`document.activeElement && document.activeElement.id`)) !== 'kbd-in'
+    && !(await js(`document.body.classList.contains('kbd-on')`)));
+  await cdp('Emulation.setTouchEmulationEnabled', { enabled: false });
+
+  // The microphone: this browser's is a tone, and its question is answered yes.
+  t = Date.now();
+  await js(`document.getElementById('mic').click()`);
+  const micOn = await until(() => evSince(t, (e) => e.msg && e.msg.t === 'mic' && e.msg.on === true), 4000);
+  await until(async () => (await js('lodMic()')).reached === true, 3000);
+  await sleep(2200);
+  const m1 = events.filter((e) => e.micMsgs !== undefined).at(-1);
+  await sleep(2000);
+  const m2 = events.filter((e) => e.micMsgs !== undefined).at(-1);
+  const perSecond = m1 && m2 ? ((m2.micMsgs - m1.micMsgs) * 1000) / (m2.at - m1.at) : 0;
+  check('the microphone button: the phone is told, and says the microphone reaches Linux', !!micOn
+    && (await js('lodMic()')).reached === true && (await js(`document.getElementById('mic').getAttribute('aria-pressed')`)) === 'true',
+    JSON.stringify(await js('lodMic()')));
+  check(`…then 10 ms of sound a message, 100 a second (${Math.round(perSecond)}), 48 kHz mono s16: 960 bytes each, and a tone in it`,
+    perSecond > 85 && perSecond < 115 && m2.micOdd === 0 && m2.micRms > 300, JSON.stringify({ m1, m2 }));
+  await command('mic unavailable', 'OK mic');
+  t = Date.now();
+  await js(`document.getElementById('mic').click()`);
+  await js(`document.getElementById('mic').click()`);
+  const warned = await until(async () => (await js(`document.getElementById('mic').classList.contains('warn')`)) || null, 3000);
+  check('…a phone whose Linux cannot hear it: the button turns amber, and the page says what to do',
+    !!warned && /^Linux cannot hear the microphone yet\. Restart Linux on the phone/.test(await js(`document.getElementById('toast').textContent`)),
+    await js(`document.getElementById('toast').textContent`));
+  await command('mic on', 'OK mic');
+  t = Date.now();
+  await js(`document.getElementById('mic').click()`);
+  const offSaid = await until(() => evSince(t, (e) => e.msg && e.msg.t === 'mic' && e.msg.on === false), 3000);
+  await sleep(1200);
+  const m3 = events.filter((e) => e.micMsgs !== undefined).at(-1);
+  await sleep(1500);
+  const m4 = events.filter((e) => e.micMsgs !== undefined).at(-1);
+  check('…off: the phone is told, and nothing more is sent', !!offSaid && m3 && m4 && m4.micMsgs === m3.micMsgs
+    && (await js(`document.getElementById('mic').getAttribute('aria-pressed')`)) === 'false', JSON.stringify({ m3, m4 }));
+
+  // Two presses before the browser answers: one microphone, and off is off.
+  // Each press asked for one of its own until 2026-11-21, and off stopped
+  // only the last: the first went on recording.
+  await watchMics();
+  await freshMics(500);
+  await js(`(() => { const b = document.getElementById('mic'); b.click(); b.click(); })()`);
+  await until(async () => (await js('lodMic()')).on === true, 4000);
+  await sleep(900);
+  const givenTwice = await js('window.__mics.length');
+  await js(`document.getElementById('mic').click()`);
+  await sleep(300);
+  check('two presses while the browser asks: one microphone, and off leaves nothing recording',
+    givenTwice === 1 && (await recordingMics()) === 0 && (await js('lodMic()')).on === false, await micsSaid());
+
+  // On, then Files: the browser stops recording, and Desktop does not start
+  // it again by itself. Until 2026-11-21 it recorded on through Files, and
+  // the desktop's next stream sent the microphone again unasked.
+  await freshMics();
+  await js(`document.getElementById('mic').click()`);
+  await until(async () => (await js('lodMic()')).reached === true, 4000);
+  const recordingBefore = await recordingMics();
+  await js(`document.getElementById('files-btn').click()`);
+  await until(() => js(`document.body.classList.contains('files-on')`), 4000);
+  await sleep(400);
+  check('the microphone on, then Files: the browser stops recording', recordingBefore === 1 && (await recordingMics()) === 0
+    && (await js('lodMic()')).on === false, `before: ${recordingBefore} ${await micsSaid()}`);
+  t = Date.now();
+  await js(`document.querySelector('#files .fx-desk').click()`);
+  await until(isUp, 10000);
+  await sleep(1500);
+  const startedAgain = evSince(t, (e) => e.msg && e.msg.t === 'mic' && e.msg.on === true);
+  check('…and Desktop again: the microphone stays off until pressed, nothing of it goes to Linux',
+    !startedAgain && (await recordingMics()) === 0 && (await js(`document.getElementById('mic').getAttribute('aria-pressed')`)) === 'false',
+    `${JSON.stringify(startedAgain)} ${await micsSaid()}`);
+
+  // Pressed, then Files before the browser answers: the answer that comes
+  // records nothing.
+  await freshMics(800);
+  await js(`document.getElementById('mic').click()`);
+  await sleep(150);
+  await js(`document.getElementById('files-btn').click()`);
+  await until(() => js(`document.body.classList.contains('files-on')`), 4000);
+  await sleep(1300);
+  check('…pressed, then Files before the browser answers: the answer records nothing',
+    (await js('window.__mics.length')) === 1 && (await recordingMics()) === 0 && (await js('lodMic()')).on === false, await micsSaid());
+  await freshMics();
+  await js(`document.querySelector('#files .fx-desk').click()`);
+  await until(isUp, 10000);
+
+  // The browser has answered, and the sound path is still being made (the
+  // worklet slow to come: 1.5 s here): Files then stops the browser recording
+  // at once. Until 2026-11-21 (the audit's second round) a stop could not see
+  // that microphone until the path was made.
+  await js(`(() => {
+    if (!window.__slowWorklet) {
+      const real = AudioWorklet.prototype.addModule;
+      AudioWorklet.prototype.addModule = function (u, o) {
+        const d = window.__workletDelay || 0;
+        return d ? new Promise((r) => setTimeout(r, d)).then(() => real.call(this, u, o)) : real.call(this, u, o);
+      };
+      window.__slowWorklet = true;
+    }
+    window.__workletDelay = 1500;
+  })()`);
+  await freshMics();
+  await js(`document.getElementById('mic').click()`);
+  await until(async () => (await js('window.__mics.length')) === 1, 2000);
+  await sleep(200);
+  const liveWhileMade = await recordingMics();
+  await js(`document.getElementById('files-btn').click()`);
+  await until(() => js(`document.body.classList.contains('files-on')`), 4000);
+  await sleep(250);
+  const afterFiles = await recordingMics();
+  await sleep(1800);
+  check('…the browser answered, its sound path still being made, then Files: the browser stops recording at once',
+    liveWhileMade === 1 && afterFiles === 0 && (await recordingMics()) === 0 && (await js('lodMic()')).on === false,
+    `${JSON.stringify({ liveWhileMade, afterFiles })} ${await micsSaid()}`);
+  await js('window.__workletDelay = 0');
+  await freshMics();
+  await js(`document.querySelector('#files .fx-desk').click()`);
+  await until(isUp, 10000);
 }
 
 console.log('the clipboard');
@@ -1306,8 +1830,9 @@ console.log('the window');
   await cdp('Emulation.setDeviceMetricsOverride', { width: 1920, height: 1080, deviceScaleFactor: 1, mobile: false });
   const r = await until(() => evSince(t, (e) => e.msg && e.msg.t === 'resize'), 3000);
   check('the window resized: the desktop is asked to be its size, once it settles', r && r.msg.w === 1920 && r.msg.h === 1080, JSON.stringify(r && r.msg));
-  await until(() => js(`document.getElementById('screen').width === 1920`), 3000);
-  check('…and the picture follows', (await js(`document.getElementById('screen').width + 'x' + document.getElementById('screen').height`)) === '1920x1080');
+  await until(async () => ((await js('lodPixels()')) || {}).w === 1920, 3000);
+  const px1920 = (await js('lodPixels()')) || {};
+  check('…and the picture follows', `${px1920.w}x${px1920.h}` === '1920x1080', JSON.stringify(px1920));
   const q = await until(() => evSince(t, (e) => e.msg && e.msg.t === 'quality'), 2000);
   check("…with the bitrate for the new size's pixels", q && q.msg.bitrate === rate('medium', 1920, 1080), JSON.stringify(q && q.msg));
   await sleep(600);
@@ -1347,8 +1872,11 @@ console.log('the plain address, once this browser takes the certificate');
   const t = Date.now();
   await cdp('Page.navigate', { url: `http://${IP}:${PORT}/` });
   const back = await until(async () => (await js(`location.protocol === 'https:' && document.body.classList.contains('up')`)) || null, 10000);
+  const connsNow = back ? '' : await command('conns', 'CONNS ');
   check('typed without https again: the plain page finds the secure one works now, and goes there by itself, to the desktop',
-    !!back, await js('location.href'));
+    !!back, `${connsNow} ${await js('location.href')} ${JSON.stringify(await js(`({ vis: document.visibilityState, body: document.body.className,
+      cards: [...document.querySelectorAll('.card')].filter((c) => !c.hidden).map((c) => c.id + ': ' + c.textContent.trim().slice(0, 80)),
+      video: typeof lodVideo === 'function' ? lodVideo() : null })`))} ${JSON.stringify(events.filter((e) => e.at >= t).slice(0, 12))}`);
   const plainHello = events.filter((e) => e.at >= t && e.hello && /not encrypted/.test(e.who || '')).length;
   check('…with no stream ever opened in the clear on the way', plainHello === 0, `${plainHello}`);
   await sleep(4500);
@@ -1404,12 +1932,20 @@ console.log('every way it ends');
   await until(isUp, 6000);
   check('…and the picture is back', await isUp());
 
+  // The microphone on as the phone signs this browser out.
+  await freshMics();
+  await js(`document.getElementById('mic').click()`);
+  await until(async () => (await js('lodMic()')).reached === true, 4000);
+  const recordingAtSignOut = await recordingMics();
   t = Date.now();
   say('signout');
   await until(() => visible('pair'), 4000);
   check('signed out on the phone: the page is told at once, asks for the new code, and says why',
     (await js(`document.getElementById('pair-error').textContent`)).startsWith('This browser was signed out'));
   check('…and forgets the old token', !(await js(`localStorage.getItem('lod.token')`)));
+  await sleep(300);
+  check('…and the microphone that was on stops recording', recordingAtSignOut === 1 && (await recordingMics()) === 0
+    && (await js('lodMic()')).on === false, `before: ${recordingAtSignOut} ${await micsSaid()}`);
   await shot('08-signed-out');
   let code = await askCode();
   await js(`document.getElementById('code').focus()`);
@@ -1458,14 +1994,23 @@ console.log('every way it ends');
   const otherTab = await until(() => visible('ended'), 4000);
   check('…and the other tab is told it opened here', !!otherTab
     && (await js(`document.getElementById('ended-title').textContent`)) === 'Linux opened somewhere else',
-    await js(`document.getElementById('ended-title').textContent + ' / ' + document.getElementById('wait-title').textContent + ' / ' + document.body.className`));
+    `${await js(`document.visibilityState + ' / ' + document.body.className + ' / ' + JSON.stringify([...document.querySelectorAll('.card')]
+      .filter((c) => !c.hidden).map((c) => c.id + ': ' + c.textContent.trim().slice(0, 60)))`)} ${JSON.stringify(events.filter((e) => e.at >= t
+      && (e.hello || e.refused || e.changed || (e.msg && e.msg.t !== 'ping'))).map((e) => ({ at: e.at - t, ...(e.hello ? { hello: e.who } : e) })).slice(0, 14))}`);
   check('no script errors in the new tab', fresh.pageErrors.length === 0, fresh.pageErrors.slice(0, 3).join(' | '));
   await fresh.cdp('Page.navigate', { url: 'about:blank' });
   fresh.close();
+  // In front again: a headless browser can leave this tab believing it is
+  // still behind the other, and a tab out of sight asks for no picture.
+  await cdp('Page.bringToFront');
   await js(`document.getElementById('ended-go').click()`);
   await until(isUp, 6000);
   check('Show the desktop here: the first tab has the desktop back', await isUp());
 
+  await freshMics();
+  await js(`document.getElementById('mic').click()`);
+  await until(async () => (await js('lodMic()')).reached === true, 4000);
+  const recordingAtForget = await recordingMics();
   await cdp('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 800, y: 1 });
   await until(() => js(`document.body.classList.contains('bar-on')`), 2000);
   await js(`document.getElementById('more').click()`);
@@ -1473,12 +2018,30 @@ console.log('every way it ends');
   lastTokens = null;
   say('tokens');
   const before = await until(() => lastTokens, 2000);
+  // The phone slow to answer the forget (2 s here): until 2026-11-21 (the
+  // audit's second round) the microphone stopped only once it had.
+  await js(`(() => {
+    if (!window.__slowForget) {
+      const real = window.fetch;
+      window.fetch = (u, o) => String(u).includes('forget') && window.__forgetDelay
+        ? new Promise((r) => setTimeout(r, window.__forgetDelay)).then(() => real(u, o)) : real(u, o);
+      window.__slowForget = true;
+    }
+    window.__forgetDelay = 2000;
+  })()`);
   await js(`document.getElementById('m-forget').click()`);
-  await until(() => visible('pair'), 4000);
+  await sleep(300);
+  const recordingAfterPress = await recordingMics();
+  const answeredYet = await visible('pair');
+  await until(() => visible('pair'), 5000);
+  await js('window.__forgetDelay = 0');
   lastTokens = null;
   say('tokens');
   const after = await until(() => lastTokens !== null ? { n: lastTokens } : null, 2000);
   check('Forget this browser: the phone lets go of its token, and the page asks for the code', after && after.n === before - 1 && (await visible('pair')), `${before} → ${after && after.n}`);
+  check('…and the microphone that was on stops at the press, before the phone has answered', recordingAtForget === 1
+    && recordingAfterPress === 0 && !answeredYet && (await recordingMics()) === 0 && (await js('lodMic()')).on === false,
+    `before: ${recordingAtForget}, 300 ms after the press: ${recordingAfterPress} (answered: ${answeredYet}) ${await micsSaid()}`);
 }
 
 console.log("the code card's other answers");
@@ -1668,6 +2231,125 @@ process.exit(failed ? 1 : 0);
 
 // ── on a real phone ─────────────────────────────────────────────────────
 
+/**
+ * A SOCKS5 proxy here that lets the far end's bytes through to the browser at
+ * {@code mbps}, and the browser's to the far end as they come: a slow link
+ * that only the stream's own pace can keep up with. What waits for the link
+ * waits in the phone's socket, as it would on slow Wi-Fi.
+ */
+/**
+ * A link of {@code mbps} from the phone to here, as slowLink's, without the
+ * SOCKS: every connection to it goes on to 127.0.0.1:{@code port} (an adb
+ * forward, for the desktop app's stream).
+ */
+function slowRelay(mbps, port) {
+  const rate = (mbps * 1e6) / 8;
+  const server = net.createServer((client) => {
+    client.on('error', () => {});
+    client.pause();
+    const far = net.connect(port, '127.0.0.1', () => {
+      client.pipe(far);
+      client.resume();
+      const queue = [];
+      let queued = 0;
+      let tokens = 0;
+      let last = Date.now();
+      far.on('data', (c) => {
+        queue.push(c);
+        queued += c.length;
+        if (queued > rate / 20) far.pause();
+      });
+      const tick = setInterval(() => {
+        const now = Date.now();
+        tokens = Math.min(rate / 50, tokens + (rate * (now - last)) / 1000);
+        last = now;
+        while (queue.length && tokens >= 1) {
+          const c = queue[0];
+          const n = Math.min(c.length, Math.floor(tokens));
+          client.write(c.subarray(0, n));
+          tokens -= n;
+          queued -= n;
+          if (n === c.length) queue.shift();
+          else queue[0] = c.subarray(n);
+        }
+        if (queued < rate / 40) far.resume();
+      }, 4);
+      far.on('close', () => {
+        clearInterval(tick);
+        client.end();
+      });
+      client.on('close', () => {
+        clearInterval(tick);
+        far.destroy();
+      });
+    });
+    far.on('error', () => client.destroy());
+  });
+  return new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve(server)));
+}
+
+function slowLink(mbps) {
+  const rate = (mbps * 1e6) / 8;
+  const server = net.createServer((client) => {
+    client.on('error', () => {});
+    client.once('data', () => {
+      client.write(Buffer.from([5, 0]));
+      client.once('data', (req) => {
+        let host;
+        let at;
+        if (req[3] === 1) {
+          host = `${req[4]}.${req[5]}.${req[6]}.${req[7]}`;
+          at = 8;
+        } else if (req[3] === 3) {
+          host = req.subarray(5, 5 + req[4]).toString();
+          at = 5 + req[4];
+        } else {
+          client.destroy();
+          return;
+        }
+        const far = net.connect(req.readUInt16BE(at), host, () => {
+          client.write(Buffer.from([5, 0, 0, 1, 0, 0, 0, 0, 0, 0]));
+          client.pipe(far);
+          const queue = [];
+          let queued = 0;
+          let tokens = 0;
+          let last = Date.now();
+          far.on('data', (c) => {
+            queue.push(c);
+            queued += c.length;
+            if (queued > rate / 20) far.pause();
+          });
+          const tick = setInterval(() => {
+            const now = Date.now();
+            tokens = Math.min(rate / 50, tokens + (rate * (now - last)) / 1000);
+            last = now;
+            while (queue.length && tokens >= 1) {
+              const c = queue[0];
+              const n = Math.min(c.length, Math.floor(tokens));
+              client.write(c.subarray(0, n));
+              tokens -= n;
+              queued -= n;
+              if (n === c.length) queue.shift();
+              else queue[0] = c.subarray(n);
+            }
+            if (queued < rate / 40) far.resume();
+          }, 4);
+          far.on('close', () => {
+            clearInterval(tick);
+            client.end();
+          });
+          client.on('close', () => {
+            clearInterval(tick);
+            far.destroy();
+          });
+        });
+        far.on('error', () => client.destroy());
+      });
+    });
+  });
+  return new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve(server)));
+}
+
 async function onDevice() {
   const SDK = process.env.ANDROID_HOME || path.join(os.homedir(), process.platform === 'win32' ? 'AppData/Local/Android/Sdk' : 'Library/Android/sdk');
   const win = process.platform === 'win32';
@@ -1692,9 +2374,11 @@ async function onDevice() {
   const built = spawnSync(JAVAC, [
     '-nowarn', '-source', '17', '-target', '17', '-cp', path.join(SDK, 'platforms', platform, 'android.jar'), '-d', hc,
     ...['LinuxStream', 'LinuxStreamRfb', 'LinuxStreamEncoder', 'LinuxStreamSocket', 'LinuxStreamAudio', 'LinuxStreamOpus',
-      'LinuxAudio', 'LinuxAudioLag', 'DexLog', 'LinuxBrowser', 'LinuxBrowserCert', 'LinuxBrowserServer', 'LinuxBrowserPeek', 'LinuxFiles']
+      'LinuxStreamRate', 'LinuxStreamMic', 'LinuxAudio', 'LinuxAudioLag', 'DexLog', 'LinuxBrowser', 'LinuxBrowserCert',
+      'LinuxBrowserServer', 'LinuxBrowserPeek', 'LinuxFiles']
       .map((c) => path.join(LAUNCHER, `${c}.java`)),
     path.join(HERE, 'linux-browser/PhoneHarness.java'),
+    path.join(HERE, 'linux-browser/CloseCheck.java'),
     path.join(HERE, 'usb-desktop/StandinXvnc.java'),
   ], { encoding: 'utf8' });
   check('the harness compiles against Android', built.status === 0, built.stderr);
@@ -1716,6 +2400,25 @@ async function onDevice() {
   check('the harness and the page go onto the phone', adb('push', path.join(dexDir, 'classes.dex'), DEX).status === 0
     && adb('shell', 'mkdir', '-p', PAGE).status === 0
     && fs.readdirSync(ASSETS).every((f) => adb('push', path.join(ASSETS, f), `${PAGE}/${f}`).status === 0));
+
+  // test/linux-browser/CloseCheck.java, on the phone's own sockets: a close
+  // on a link whose far end stopped reading, the send buffer full and nobody
+  // writing. It waited there for as long as the link stayed up (until
+  // 2026-11-21), and with it whoever ended the session.
+  {
+    const cc = spawnSync(ADB, ['-s', serial, 'shell', `CLASSPATH=${DEX} app_process / com.ccrstech.openandroiddex.launcher.CloseCheck`],
+      { encoding: 'utf8', timeout: 30000 });
+    const said = (name) => {
+      const m = new RegExp(`${name} returned=(\\w+) ms=(\\d+) woke=(\\w+) filled=(\\d+)`).exec(cc.stdout || '');
+      return m ? { returned: m[1] === 'true', ms: Number(m[2]), woke: m[3] === 'true', filled: Number(m[4]) } : null;
+    };
+    const c1 = said('CLOSE');
+    const c2 = said('SAYCLOSE');
+    check(`a close on a link the far end stopped reading, nothing writing: back in ${c1 ? c1.ms : '?'} ms, its goodbye given up, the writer behind it woken`,
+      !!c1 && c1.returned && c1.ms < 1500 && c1.woke && c1.filled > 0, (cc.stdout + cc.stderr).slice(-600));
+    check(`…and with the goodbye stuck in its write: the close that the deadline brings is back in ${c2 ? c2.ms : '?'} ms, and frees it`,
+      !!c2 && c2.returned && c2.ms < 500 && c2.woke, (cc.stdout + cc.stderr).slice(-600));
+  }
 
   const sizeArg = argOf('--size') || '1920x1080';
   const [W, H] = sizeArg.split('x').map(Number);
@@ -1855,6 +2558,141 @@ async function onDevice() {
   await b.js(`document.querySelector('#modes button[data-mode=medium]').click()`);
   await sleep(1500);
 
+  // Key frames only when asked: fifteen seconds of every pixel moving, at
+  // one quality, and no key frame the page did not ask for.
+  check("a browser's encoder makes key frames only when asked (the phone's log says so)",
+    /encoding \d+x\d+ as .*key frames when asked/.test(log), (log.match(/encoding .*$/m) || [''])[0]);
+  const k0 = await b.js('lodVideo()');
+  await sleep(15000);
+  const k1 = await b.js('lodVideo()');
+  check('…and in fifteen seconds of motion, no key frame comes that the page did not ask for',
+    k1.keysIn - k0.keysIn <= k1.keysAsked - k0.keysAsked, JSON.stringify({ k0, k1 }));
+  const st = await b.js('lodStats()');
+  check("the bitrate follows how late frames arrive: the phone reports the queue it reads", st && typeof st.queueMs === 'number' && st.queueMs >= 0,
+    JSON.stringify(st));
+
+  // A hidden tab: no picture made or sent, the sound going on; back, from a key frame.
+  const h0 = await b.js('lodVideo()');
+  // Every change of the tab's visibility from here, as the page saw it: a
+  // headless browser has been seen to show a tab behind another for a moment.
+  await b.js(`window.__vis = []; document.addEventListener('visibilitychange',
+    () => window.__vis.push(document.visibilityState + '@' + Math.round(performance.now()))); true`);
+  const other = await b.cdp('Target.createTarget', { url: 'about:blank' });
+  await until(() => b.js('document.visibilityState === "hidden"'), 3000);
+  // Frames already on their way when the tab went land first, and those the
+  // phone sent before the page's word reached it: until nothing has been
+  // drawn for a second. On a congested Wi-Fi that was seconds (the phone's
+  // own stats: 0.8 s and 4.3 s queued, 2026-11-20), past a fixed wait.
+  const hiddenAt = Date.now();
+  let lastDrawn = (await b.js('lodVideo()')).drawnTotal;
+  let stillSince = Date.now();
+  while (Date.now() - hiddenAt < 8000 && Date.now() - stillSince < 1000) {
+    await sleep(100);
+    const d = (await b.js('lodVideo()')).drawnTotal;
+    if (d !== lastDrawn) {
+      lastDrawn = d;
+      stillSince = Date.now();
+    }
+  }
+  const settledMs = stillSince - hiddenAt;
+  const h1 = await b.js('lodVideo()');
+  const st1 = JSON.stringify(await b.js('lodStats()'));
+  await sleep(3000);
+  const h2 = await b.js('lodVideo()');
+  const st2 = JSON.stringify(await b.js('lodStats()'));
+  const hiddenLog = adb('logcat', '-d', '-v', 'time', '-T', `${phoneStart}.000`, '-s', 'OpenDeX:I').stdout;
+  // The phone sends its stats only with a frame: the same stats, no frame sent.
+  const vis = await b.js('window.__vis');
+  check('a hidden tab: the phone stops the picture (its log says so), sends no frame (its stats stand still), and nothing is drawn',
+    /the browser's tab is hidden/.test(hiddenLog) && st1 === st2 && h2.drawnTotal - h1.drawnTotal <= 1,
+    JSON.stringify({ settledMs, vis, h0, h1, h2, st1, st2, phone: hiddenLog.split('\n').filter((l) => /tab is (hidden|back)/.test(l)).slice(-4) }));
+  console.log(`  the last frame on its way drawn ${settledMs} ms after the tab was hidden`);
+  const backAt = Date.now();
+  await b.cdp('Target.closeTarget', { targetId: other.result.targetId });
+  await b.cdp('Page.bringToFront');
+  const firstBack = await until(async () => ((await b.js('lodVideo()')).drawnTotal > h2.drawnTotal ? Date.now() : null), 5000, 5);
+  const h3 = await b.js('lodVideo()');
+  check('…the tab back: the picture again, from a key frame the phone made at once',
+    !!firstBack && h3.keysIn > h2.keysIn, `${firstBack ? firstBack - backAt : '-'} ms, ${JSON.stringify(h3)}`);
+  console.log(`  the tab back to the first frame drawn: ${firstBack ? firstBack - backAt : '-'} ms`);
+
+  // The microphone: this browser's is a tone, into a pipe on the phone read as
+  // Linux's PulseAudio reads one.
+  const micLines = () => said.filter((l) => l.line.startsWith('MIC ')).map((l) => ({ at: l.at, bytes: Number(l.line.split(' ')[1]), rms: Number(l.line.split(' ')[2]) }));
+  await b.js(`document.getElementById('mic').click()`);
+  await until(async () => (await b.js('lodMic()')).reached === true, 5000);
+  await sleep(3000);
+  const ml = micLines();
+  const ma = ml.at(-3);
+  const mb = ml.at(-1);
+  const rate = ma && mb ? ((mb.bytes - ma.bytes) * 1000) / (mb.at - ma.at) : 0;
+  check(`the microphone reaches Linux's pipe on the phone: ${Math.round(rate / 1000)} kB/s (96 is 48 kHz mono), the tone in it`,
+    (await b.js('lodMic()')).reached === true && rate > 80000 && rate < 115000 && mb.rms > 300, JSON.stringify({ mic: await b.js('lodMic()'), ma, mb }));
+  await b.js(`document.getElementById('mic').click()`);
+  const micT = Date.now();
+  harness.stdin.write('micpipe none\n');
+  await until(() => said.find((l) => l.at >= micT && l.line.startsWith('OK micpipe')), 3000);
+  await b.js(`document.getElementById('mic').click()`);
+  const warned = await until(async () => (await b.js(`document.getElementById('mic').classList.contains('warn')`)) || null, 5000);
+  check('…a Linux with no pipe for it (one started by an older app): the page says so, in amber', !!warned
+    && /^Linux cannot hear the microphone yet/.test(await b.js(`document.getElementById('toast').textContent`)));
+  await b.js(`document.getElementById('mic').click()`);
+  harness.stdin.write('micpipe fifo\n');
+
+  // The same phone through a slow link, each way of reading it in turn.
+  const throttled = async (mbps) => {
+    const proxy = await slowLink(mbps);
+    const pb = await launchBrowser([`--proxy-server=socks5://127.0.0.1:${proxy.address().port}`, '--proxy-bypass-list=<-loopback>']);
+    if (!pb) {
+      check('a second browser, through the slow link', false);
+      return;
+    }
+    await pb.cdp('Emulation.setDeviceMetricsOverride', { width: W, height: H, deviceScaleFactor: 1, mobile: false });
+    await pb.cdp('Page.navigate', { url: `${base}/` });
+    await clickThrough(pb, base);
+    await until(() => pb.js(`!document.getElementById('pair').hidden`), 8000);
+    const t0 = Date.now();
+    harness.stdin.write('code\n');
+    const codeLine = await until(() => said.find((l) => l.at >= t0 && l.line.startsWith('CODE ')), 3000);
+    await pb.js(`document.getElementById('code').focus()`);
+    await pb.cdp('Input.insertText', { text: codeLine ? codeLine.line.slice(5) : '' });
+    const pbUp = await until(() => pb.js(`document.body.classList.contains('up')`), 20000);
+    check(`a second browser, through a link of ${mbps} Mb/s, shows the desktop`, !!pbUp);
+    const rows = {};
+    for (const round of [0, 1]) {
+      for (const rule of round ? ['old', 'new'] : ['new', 'old']) {
+        await pb.js(`localStorage.setItem('lod.ackAt', '${rule === 'new' ? '1' : '0'}'); localStorage.setItem('lod.mode', 'high'); true`);
+        await pb.cdp('Page.reload', {});
+        await until(() => pb.js(`document.body.classList.contains('up')`), 20000);
+        await sleep(8000); // the bitrate finds the link
+        const samples = [];
+        let d0 = (await pb.js('lodVideo()')).drawnTotal;
+        for (let i = 0; i < 10; i++) {
+          await sleep(1000);
+          const v = await pb.js('lodVideo()');
+          const s = (await pb.js('lodStats()')) || {};
+          samples.push({ rtt: s.rttMs, kbps: s.kbps, queue: s.queueMs, fps: v.drawnTotal - d0, target: s.targetKbps });
+          d0 = v.drawnTotal;
+        }
+        const med = (k) => samples.map((x) => x[k]).filter((x) => typeof x === 'number').sort((p, q) => p - q)[5];
+        const p90 = (k) => samples.map((x) => x[k]).filter((x) => typeof x === 'number').sort((p, q) => p - q)[8];
+        const row = { rtt: med('rtt'), rtt90: p90('rtt'), mbps: Math.round(med('kbps') / 100) / 10, fps: med('fps'), queue: med('queue') };
+        (rows[rule] ||= []).push(row);
+        console.log(`  ${mbps} Mb/s, ${rule === 'new' ? 'new rule (arrival times)' : 'old rule (a full link)'}: round trip ${row.rtt} ms median, `
+          + `${row.rtt90} ms at 90%, ${row.mbps} Mb/s, ${row.fps} fps${rule === 'new' ? `, queue ${row.queue} ms` : ''}`);
+      }
+    }
+    // Real Wi-Fi swings from one round to the next: the rounds' average, of
+    // the median and of the 90th percentile, each rule against the other.
+    const avg = (rule, k) => Math.round(rows[rule].reduce((s, r) => s + r[k], 0) / rows[rule].length);
+    check(`on a link of ${mbps} Mb/s, frames come back sooner under the new rule than the old: ${avg('new', 'rtt')} against ${avg('old', 'rtt')} ms `
+      + `at the median, ${avg('new', 'rtt90')} against ${avg('old', 'rtt90')} at 90% (the rounds' average)`,
+    avg('new', 'rtt') < avg('old', 'rtt') && avg('new', 'rtt90') < avg('old', 'rtt90'), JSON.stringify(rows));
+    await pb.quit();
+    pb.close();
+    proxy.close();
+  };
+
   let t = Date.now();
   await b.click(Math.round(W / 3), Math.round(H / 3));
   const p = await until(() => ev.find((e) => e.at >= t && e.type === 'pointer' && e.buttons === 1), 3000);
@@ -1880,18 +2718,69 @@ async function onDevice() {
   await b.cdp('Emulation.setDeviceMetricsOverride', { width: 1600, height: 900, deviceScaleFactor: 1, mobile: false });
   const sized = await until(() => ev.find((e) => e.at >= t && e.type === 'set-desktop-size'), 4000);
   check('the window resized: the desktop on the phone is asked to match', sized && sized.w === 1600 && sized.h === 900, JSON.stringify(sized));
-  const follows = await until(() => b.js(`document.getElementById('screen').width === 1600 && document.getElementById('screen').height === 900`), 6000);
+  const follows = await until(async () => {
+    const px = (await b.js('lodPixels()')) || {};
+    return px.w === 1600 && px.h === 900;
+  }, 6000);
   check('…a new encoder at the new size, and the picture follows', !!follows);
 
   // A second window on the same desktop: the first is told, and does not take it back.
+  // What the phone said meanwhile: LinuxStream logs to logcat (pid, then the line).
+  const secondAt = Date.now();
+  // Since then only (-T, in seconds since 1970): the whole buffer is past
+  // spawnSync's 1 MB. Each line ends in CRLF on Windows: split on that, or no
+  // line matches (until 2026-11-21 this read nothing at all here).
+  const phoneSince = (sinceMs) => (spawnSync(ADB, ['-s', serial, 'logcat', '-d', '-v', 'epoch', '-T', ((sinceMs - 1000) / 1000).toFixed(3),
+    '-s', 'OpenDeX:*'], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 }).stdout || '').split(/\r?\n/)
+    .map((l) => /^\s*(\d+\.\d+)\s+(\d+)\s+\d+\s+\w\s+OpenDeX\s*:\s*(.*)$/.exec(l))
+    .filter((m) => m && Number(m[1]) * 1000 >= sinceMs - 1000 && /\[(stream|browser)\]/.test(m[3]))
+    .map((m) => `${Math.round(Number(m[1]) * 1000 - sinceMs)} ${m[2]} ${m[3].slice(0, 140)}`).slice(0, 30).join(' | ');
+  const firstTab = async () => b.js(`document.visibilityState + ' ' + document.body.className + ' ' + JSON.stringify([...document.querySelectorAll('.card')]
+    .filter((c) => !c.hidden).map((c) => c.id + ': ' + c.textContent.trim().slice(0, 50)))`);
   const second = await b.newTab(`${base}/`);
   await until(() => second.js(`document.body && document.body.classList.contains('up')`), 20000);
   check('a second tab opens the same desktop with the same browser\'s token', await second.js(`document.body.classList.contains('up')`));
   const told = await until(() => b.js(`!document.getElementById('ended').hidden && document.getElementById('ended-title').textContent`), 6000);
-  check('the first is told the desktop opened somewhere else (LinuxStream says so)', told === 'Linux opened somewhere else', String(told));
+  check('the first is told the desktop opened somewhere else (LinuxStream says so)', told === 'Linux opened somewhere else',
+    `${told} / the first tab: ${await firstTab()} / the phone: ${phoneSince(secondAt)}`);
   await sleep(4000);
-  check('…and neither takes it back from the other', (await second.js(`document.body.classList.contains('up')`)) && !(await b.js(`document.body.classList.contains('up')`)));
+  check('…and neither takes it back from the other', (await second.js(`document.body.classList.contains('up')`)) && !(await b.js(`document.body.classList.contains('up')`)),
+    `the first tab: ${await firstTab()} / the phone: ${phoneSince(secondAt)}`);
   await b.shot('device-03-replaced');
+
+  // The last word to a page not reading at that moment, still sending, as a
+  // busy page's acknowledgements and pings keep coming: closed with them
+  // unread, Linux answers with a reset, which throws away what the phone had
+  // not sent yet and what the browser had not read, the word with it. A page
+  // never told it was replaced comes back by itself and takes the desktop.
+  {
+    const token = await second.js(`localStorage.getItem('lod.token')`);
+    const at = { ip: ready.ip, port: ready.port, origin: base, token };
+    const hello = { t: 'hello', v: 1, start: false, w: 640, h: 360, acks: true, mode: 'low', bitrate: 1000000, fps: 30 };
+    const t0 = Date.now();
+    const A = await wsConnect(at);
+    A.send(hello);
+    const going = await until(() => A.texts.some((x) => x.includes('"video"')) && A.frames >= 2, 10000);
+    A.pause();
+    const move = Buffer.from([0x10, 0, 0, 20, 0, 20]);
+    const flood = setInterval(() => {
+      for (let i = 0; i < 20; i++) A.frame(2, move);
+    }, 2);
+    const B = await wsConnect(at);
+    B.send(hello);
+    await sleep(700);
+    A.resume();
+    const word = await until(() => A.texts.find((x) => x.includes('"replaced"')), 4000);
+    clearInterval(flood);
+    A.end();
+    check('told it was replaced while it was not reading and still sending: the word still comes',
+      !!going && !!word, `${!!going} / ${A.texts.slice(-3).join(' ')} / closed ${A.closedAt ? A.closedAt - t0 : 'no'} / the phone: ${phoneSince(t0)}`);
+    B.end();
+    // The second tab, told it was replaced too, takes the desktop back for what follows.
+    await until(() => second.js(`!document.getElementById('ended').hidden`), 6000);
+    await second.js(`document.getElementById('ended-go').click()`);
+    await until(() => second.js(`document.body.classList.contains('up')`), 15000);
+  }
 
   // Signed out, then switched off, as LinuxService does both: from the main
   // thread, where Android allows no network. Both crashed LinuxOnDroid on
@@ -1902,6 +2791,142 @@ async function onDevice() {
     const hit = await until(() => said.find((l) => l.at >= t0 && l.line.startsWith(answer)), ms);
     return hit ? hit.line : null;
   };
+
+  // The same last word to a page whose session still waited for Linux to
+  // start: its own thread was not reading then, and until 2026-11-21 it
+  // closed the moment it saw the word, the page's sends unread: a reset.
+  {
+    const token = await second.js(`localStorage.getItem('lod.token')`);
+    const at = { ip: ready.ip, port: ready.port, origin: base, token };
+    const hello = { t: 'hello', v: 1, start: false, w: 640, h: 360, acks: true, mode: 'low', bitrate: 1000000, fps: 30 };
+    const held = await ask('desktop starting', 'OK desktop');
+    const t0 = Date.now();
+    const A = await wsConnect(at);
+    A.send(hello);
+    const waiting = await until(() => A.texts.some((x) => x.includes('"starting"')), 8000);
+    A.pause();
+    const move = Buffer.from([0x10, 0, 0, 20, 0, 20]);
+    const flood = setInterval(() => {
+      for (let i = 0; i < 20; i++) A.frame(2, move);
+    }, 2);
+    const B = await wsConnect(at);
+    B.send(hello);
+    await sleep(700);
+    A.resume();
+    const word = await until(() => A.texts.find((x) => x.includes('"replaced"')), 4000);
+    clearInterval(flood);
+    A.end();
+    check('told it was replaced while Linux was still starting, not reading and still sending: the word still comes',
+      !!held && !!waiting && !!word, `${held} / ${!!waiting} / ${A.texts.slice(-3).join(' ')} / closed ${A.closedAt ? A.closedAt - t0 : 'no'} / the phone: ${phoneSince(t0)}`);
+    await ask('desktop running', 'OK desktop');
+    B.end();
+    await until(() => second.js(`!document.getElementById('ended').hidden`), 6000);
+    await second.js(`document.getElementById('ended-go').click()`);
+    await until(() => second.js(`document.body.classList.contains('up')`), 15000);
+  }
+
+  // A sign-out to a page not reading at that moment and still sending: the
+  // same ending as being replaced, reached from the main thread.
+  {
+    const token = await second.js(`localStorage.getItem('lod.token')`);
+    const at = { ip: ready.ip, port: ready.port, origin: base, token };
+    const hello = { t: 'hello', v: 1, start: false, w: 640, h: 360, acks: true, mode: 'low', bitrate: 1000000, fps: 30 };
+    const t0 = Date.now();
+    const A = await wsConnect(at);
+    A.send(hello);
+    const going = await until(() => A.texts.some((x) => x.includes('"video"')) && A.frames >= 2, 10000);
+    A.pause();
+    const move = Buffer.from([0x10, 0, 0, 20, 0, 20]);
+    const flood = setInterval(() => {
+      for (let i = 0; i < 20; i++) A.frame(2, move);
+    }, 2);
+    const out = await ask('signout', 'OK signout');
+    await sleep(500);
+    A.resume();
+    const word = await until(() => A.texts.find((x) => x.includes('"unauthorized"')), 4000);
+    clearInterval(flood);
+    A.end();
+    check('told it was signed out while it was not reading and still sending: the word still comes',
+      !!going && !!out && !!word, `${!!going} / ${out} / ${A.texts.slice(-3).join(' ')} / closed ${A.closedAt ? A.closedAt - t0 : 'no'} / the phone: ${phoneSince(t0)}`);
+    // The second tab, replaced by that stream and signed out with it: the new code lets it back in.
+    const code = (await ask('code', 'CODE ')).slice(5);
+    await until(() => second.js(`!document.getElementById('ended').hidden`), 6000);
+    await second.js(`document.getElementById('ended-go').click()`);
+    await until(() => second.js(`!document.getElementById('pair').hidden`), 8000);
+    await second.js(`document.getElementById('code').focus()`);
+    await second.cdp('Input.insertText', { text: code });
+    await until(() => second.js(`document.body.classList.contains('up')`), 20000);
+  }
+
+  // A takeover from a stream whose link has stopped: its page not reading,
+  // and acknowledging all the same, so that the phone sends on until its
+  // buffers are full and its writes wait. The session taking the desktop goes
+  // on at once (the phone's own line: "took the desktop from … in N ms"), and
+  // the stalled one, whose word can find no room, closes soon after. Until
+  // 2026-11-21 (an audit's second round) the takeover waited up to 300 ms on
+  // the old session's word, and then on its microphone. Then a page that
+  // reads the word but never closes its end: the phone's own deadline ends
+  // it, a second after its last word began.
+  {
+    const phoneLog = (sinceMs) => (spawnSync(ADB, ['-s', serial, 'logcat', '-d', '-v', 'epoch', '-T', ((sinceMs - 1000) / 1000).toFixed(3),
+      '-s', 'OpenDeX:*'], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 }).stdout || '').split(/\r?\n/)
+      .map((l) => /^\s*(\d+\.\d+)\s+\d+\s+\d+\s+\w\s+OpenDeX\s*:\s*(.*)$/.exec(l))
+      // A second's margin: the phone's clock is its own (the S25's ran half a second ahead of this computer's).
+      .filter((m) => m && Number(m[1]) * 1000 >= sinceMs - 1000 && /\[stream\]/.test(m[2]))
+      .map((m) => ({ ms: Math.round(Number(m[1]) * 1000 - sinceMs), text: m[2] }));
+    const token = await second.js(`localStorage.getItem('lod.token')`);
+    const at = { ip: ready.ip, port: ready.port, origin: base, token };
+    const A = await wsConnect(at);
+    A.send({ t: 'hello', v: 1, start: false, w: W, h: H, acks: true, mode: 'high', bitrate: 20000000, fps: 60 });
+    const going = await until(() => A.texts.some((x) => x.includes('"video"')) && A.frames >= 2, 10000);
+    A.pause();
+    const ackAll = setInterval(() => A.frame(2, [0x12]), 8);
+    await sleep(7000);
+    const tB = Date.now();
+    const B = await wsConnect(at);
+    B.send({ t: 'hello', v: 1, start: false, w: 640, h: 360, acks: true, mode: 'low', bitrate: 1000000, fps: 30 });
+    const bUp = await until(() => B.texts.some((x) => x.includes('"video"')), 10000);
+    await sleep(2500);
+    clearInterval(ackAll);
+    A.resume();
+    await sleep(800);
+    const lines = phoneLog(tB);
+    const took = lines.map((l) => /took the desktop from .* in (\d+) ms/.exec(l.text)).find(Boolean);
+    const word = lines.find((l) => /ending the session after its last word: replaced/.test(l.text));
+    const ended = word && lines.find((l) => l.ms >= word.ms && /the browser's session ended/.test(l.text));
+    // The premise: the link full, so that no word could go. A word that did
+    // go says the buffers never filled, and then the takeover had nothing to
+    // wait on: said, not counted.
+    const wordGot = A.texts.some((x) => x.includes('"replaced"'));
+    A.end();
+    if (wordGot) {
+      console.log(`  NOT DECIDED the stalled takeover: the old stream's link never filled (its page got the word); took ${took ? took[1] : '?'} ms`);
+    } else {
+      check(`a takeover from a stream stalled on its link goes on at once: took the desktop in ${took ? took[1] : '?'} ms`,
+        !!going && !!bUp && !!took && Number(took[1]) < 100, `${!!going} / ${!!bUp} / ${JSON.stringify(lines.slice(0, 12))}`);
+    }
+    check(`…and the stalled stream closes soon after: ${word && ended ? ended.ms - word.ms : '?'} ms after its last word began`,
+      !!word && !!ended && ended.ms - word.ms <= 1500, JSON.stringify(lines.slice(0, 12)));
+    // B reads on, and never closes its end, as a page stuck in a long task
+    // might not: a third stream takes the desktop, and B's session must end
+    // by the phone's own deadline (LinuxBrowserServer.LAST_WORD_MS).
+    const tC = Date.now();
+    const C = await wsConnect(at);
+    C.send({ t: 'hello', v: 1, start: false, w: 640, h: 360, acks: true, mode: 'low', bitrate: 1000000, fps: 30 });
+    const bTold = await until(() => B.texts.some((x) => x.includes('"replaced"')) && B.closeFrame, 6000);
+    await sleep(2500);
+    const linesC = phoneLog(tC);
+    const wordB = linesC.find((l) => /ending the session after its last word: replaced/.test(l.text));
+    const endedB = wordB && linesC.find((l) => l.ms >= wordB.ms && /the browser's session ended/.test(l.text));
+    check(`a page that read the word and the close and never closed its end: ended by the phone's deadline, ${wordB && endedB ? endedB.ms - wordB.ms : '?'} ms after its last word began`,
+      !!bTold && !!wordB && !!endedB && endedB.ms - wordB.ms >= 900 && endedB.ms - wordB.ms <= 1600, `${!!bTold} / ${JSON.stringify(linesC.slice(0, 12))}`);
+    B.end();
+    C.end();
+    await until(() => second.js(`!document.getElementById('ended').hidden`), 6000);
+    await second.js(`document.getElementById('ended-go').click()`);
+    await until(() => second.js(`document.body.classList.contains('up')`), 15000);
+  }
+
   const okOut = await ask('signout', 'OK signout');
   const signedOut = await until(() => second.js(`!document.getElementById('pair').hidden && document.getElementById('pair-error').textContent`), 8000);
   check('signed out from the main thread: the watching tab is told at once, and asks for the new code',
@@ -1978,6 +3003,175 @@ async function onDevice() {
     `${handoff && handoff.line} / ${offRace} / ${offRaceCard} / streamed: ${!!(handoff && streamedSince(handoff.at))}`);
   check('…and the phone process lives on', !!(await ask('alive', 'ALIVE')) && !exited, out.slice(-600));
   await second.shot('device-05-off-while-let-in');
+
+  // The desktop app's stream: a computer's session over adb, as
+  // open-android-dex-tauri's UsbDesktop.tsx opens it, every frame acknowledged
+  // on arrival; with the time it came (the app from 2026-11-21, its own
+  // wire.ts: the bitrate follows how late frames arrive, as a browser's does),
+  // or without (the app before: the old rule, which an app not yet updated
+  // keeps). Over this phone's adb as it is (a cable, or wireless debugging),
+  // then through a link of 1.5 Mb/s under a ceiling of Wi-Fi's: the round
+  // trips are the phone's own (a frame ready to go, to its acknowledgement),
+  // the median of each second's, then their median and 90th percentile over
+  // ten seconds.
+  {
+    const wire = await import(pathToFileURL(path.join(ROOT, 'open-android-dex-tauri/src/features/remote/usb/wire.ts')).href);
+    const wirelessAdb = serial.includes(':') || serial.includes('adb-tls-connect');
+    const fwd = adb('forward', 'tcp:0', 'localabstract:oadx-browser-test.linux-stream');
+    const fwdPort = Number((fwd.stdout || '').trim());
+    cleanups.push(() => adb('forward', '--remove', `tcp:${fwdPort}`));
+    check(`the desktop app's way in: an adb forward to the stream's socket (${wirelessAdb ? 'wireless debugging' : 'the cable'})`, fwdPort > 0, fwd.stdout + fwd.stderr);
+    // A desktop of 640×400: the stand-in's every pixel changing every frame
+    // is past what an encoder can make small, and at 1920×1080 its least
+    // (the 0.5 Mb/s floor asked for, about 1 Mb/s made) was more than wireless
+    // debugging carried on the S25 (2026-11-21, runs 10 and 11): both rules sat
+    // at the floor through every second measured, with nothing to decide.
+    const DW = 640;
+    const DH = 400;
+    const tierRate = (bpp, lo, hi) => Math.round(Math.min(hi, Math.max(lo, DW * DH * 60 * bpp)));
+    const runRule = async (rule, viaPort, bitrate) => {
+      const c = await wsConnect({ ip: '127.0.0.1', port: viaPort, origin: 'http://tauri.localhost', plain: true,
+        ack: rule === 'new' ? () => wire.ackOf(wire.clock()) : 'plain' });
+      c.send(rule === 'new' ? wire.helloOf(false, DW, DH, bitrate, true) : { t: 'hello', v: 1, start: false, w: DW, h: DH, bitrate, fps: 60, acks: true });
+      const up = await until(() => c.texts.some((x) => x.includes('"video"')), 15000);
+      await sleep(8000); // the bitrate finds the link
+      const from = c.texts.length;
+      await sleep(10000);
+      const statsOf = (texts) => texts.map((x) => {
+        try {
+          return JSON.parse(x);
+        } catch {
+          return null;
+        }
+      }).filter((m) => m && m.t === 'stats');
+      const stats = statsOf(c.texts.slice(from));
+      // Each cut by what made it, the whole round (the counts start at none
+      // with each stream) and the ten seconds measured.
+      const all = statsOf(c.texts);
+      const causes = ['cutsQueue', 'cutsFull', 'cutsHeld', 'cutsOld'];
+      const last = all.at(-1) || {};
+      const atStart = all[all.length - stats.length - 1] || {};
+      const cutsRound = Object.fromEntries(causes.map((k) => [k.slice(4).toLowerCase(), last[k] || 0]));
+      const cutsMeasured = Object.fromEntries(causes.map((k) => [k.slice(4).toLowerCase(), (last[k] || 0) - (atStart[k] || 0)]));
+      c.end();
+      await Promise.race([c.closed, sleep(2000)]);
+      await sleep(500);
+      const sorted = (k) => stats.map((s) => s[k]).filter((v) => typeof v === 'number').sort((p, q) => p - q);
+      const at = (k, q) => {
+        const a = sorted(k);
+        return a.length ? a[Math.min(a.length - 1, Math.floor(a.length * q))] : NaN;
+      };
+      return {
+        up: !!up, seconds: stats.length, rtt: at('rttMs', 0.5), rtt90: at('rttMs', 0.9), mbps: Math.round(at('kbps', 0.5) / 100) / 10,
+        aimed: Math.round(at('targetKbps', 0.5) / 100) / 10, aimedMost: Math.round(at('targetKbps', 1) / 100) / 10,
+        fps: at('fps', 0.5), queue: at('queueMs', 0.5), readsQueue: stats.some((s) => typeof s.queueMs === 'number'),
+        cutsRound, cutsMeasured,
+      };
+    };
+    const cutsSaid = (r) => Object.entries(r.cutsRound).filter(([, n]) => n).map(([k, n]) => `${k} ${n}${r.cutsMeasured[k] ? ` (${r.cutsMeasured[k]} measured)` : ''}`).join(', ') || 'none';
+    /**
+     * Two rules held at the floor through every second measured made the same
+     * choice every time: their round trips then say how the link moved, not
+     * which rule is the better. Said, and not counted either way.
+     */
+    const decided = (cmp) => [...cmp.rows.new, ...cmp.rows.old].some((r) => r.aimedMost > 0.5);
+    const compare = async (label, viaPort, bitrate) => {
+      const rows = { old: [], new: [] };
+      for (const round of [0, 1]) {
+        for (const rule of round ? ['old', 'new'] : ['new', 'old']) {
+          const row = await runRule(rule, viaPort, bitrate);
+          rows[rule].push(row);
+          console.log(`  the desktop app, ${label}, ${rule === 'new' ? 'new rule (arrival times)' : 'old rule (a full link)'}: round trip ${row.rtt} ms median, `
+            + `${row.rtt90} ms at 90%, ${row.mbps} Mb/s (aimed at ${row.aimed}), ${row.fps} fps${rule === 'new' ? `, queue ${row.queue} ms` : ''}; cuts: ${cutsSaid(row)}`);
+        }
+      }
+      const avg = (rule, k) => Math.round(rows[rule].reduce((s, r) => s + r[k], 0) / rows[rule].length * 10) / 10;
+      return { rows, avg };
+    };
+    // This phone's adb as it is, at its route's ceiling (UsbDesktop.tsx: the
+    // cable 0.18 bits a pixel, 10 to 100 Mb/s; Wi-Fi 0.07, 4 to 30).
+    const asIsCeiling = wirelessAdb ? tierRate(0.07, 4e6, 30e6) : tierRate(0.18, 10e6, 100e6);
+    const way = wirelessAdb ? 'over wireless debugging as it is' : 'over the cable';
+    const asIs = await compare(way, fwdPort, asIsCeiling);
+    check('the desktop app saying arrival times gets the new rule (the phone reports the queue it reads), and one that does not keeps the old',
+      asIs.rows.new.every((r) => r.up && r.readsQueue) && asIs.rows.old.every((r) => r.up && !r.readsQueue), JSON.stringify(asIs.rows));
+    const noLater = asIs.avg('new', 'rtt') <= Math.max(asIs.avg('old', 'rtt') + 5, asIs.avg('old', 'rtt') * 1.2);
+    if (!decided(asIs)) {
+      console.log(`  NOT DECIDED ${way}: both rules at the 0.5 Mb/s floor through every second measured (the link carried less than the floor makes); `
+        + `round trips ${asIs.avg('new', 'rtt')} against ${asIs.avg('old', 'rtt')} ms at the median`);
+    } else if (wirelessAdb) {
+      // Measured, not counted: over wireless debugging the desktop app keeps
+      // the old rule (wire.ts readsTimes), since in six runs on the S25
+      // (2026-11-21) the new one's median round trip was the longer in five.
+      console.log(`  MEASURED ${way} (the desktop app keeps the old rule here): ${asIs.avg('new', 'rtt')} against ${asIs.avg('old', 'rtt')} ms at the median, `
+        + `${asIs.avg('new', 'rtt90')} against ${asIs.avg('old', 'rtt90')} at 90%, aimed at ${asIs.avg('new', 'aimed')} against ${asIs.avg('old', 'aimed')} Mb/s (the rounds' average)`);
+    } else {
+      check(`${way} the new rule costs nothing: aimed at ${asIs.avg('new', 'aimed')} Mb/s against ${asIs.avg('old', 'aimed')} (the ceiling ${Math.round(asIsCeiling / 1e5) / 10}), `
+        + `round trips ${asIs.avg('new', 'rtt')} against ${asIs.avg('old', 'rtt')} ms at the median (the rounds' average)`,
+      asIs.avg('new', 'aimed') >= asIs.avg('old', 'aimed') * 0.95 && noLater, JSON.stringify(asIs.rows));
+    }
+    // A link of 1.5 Mb/s under Wi-Fi's ceiling (0.07 bits a pixel, 4 to 30 Mb/s): Wi-Fi that got worse.
+    const relay = await slowRelay(1.5, fwdPort);
+    const slow = await compare('through 1.5 Mb/s', relay.address().port, tierRate(0.07, 4e6, 30e6));
+    relay.close();
+    if (!decided(slow)) {
+      console.log(`  NOT DECIDED through 1.5 Mb/s: both rules at the 0.5 Mb/s floor through every second measured; `
+        + `round trips ${slow.avg('new', 'rtt')} against ${slow.avg('old', 'rtt')} ms at the median`);
+    } else if (wirelessAdb) {
+      // Over wireless debugging too, under the relay: measured, not counted (above).
+      console.log(`  MEASURED through 1.5 Mb/s over wireless debugging (the desktop app keeps the old rule here): ${slow.avg('new', 'rtt')} against ${slow.avg('old', 'rtt')} ms `
+        + `at the median, ${slow.avg('new', 'rtt90')} against ${slow.avg('old', 'rtt90')} at 90% (the rounds' average)`);
+    } else {
+      check(`the desktop app through a link of 1.5 Mb/s: frames come back sooner under the new rule than the old: ${slow.avg('new', 'rtt')} against ${slow.avg('old', 'rtt')} ms `
+        + `at the median, ${slow.avg('new', 'rtt90')} against ${slow.avg('old', 'rtt90')} at 90% (the rounds' average)`,
+      slow.avg('new', 'rtt') < slow.avg('old', 'rtt') && slow.avg('new', 'rtt90') < slow.avg('old', 'rtt90'), JSON.stringify(slow.rows));
+    }
+
+    // The route leaves the local network under a live stream, and comes back
+    // (wire.ts routeChangedOf): the phone stops reading the times, then reads
+    // them again, and the app's acknowledgements change with it. The new
+    // rule takes a round trip over 400 ms for a queue, which on the internet
+    // or a relay it need not be.
+    {
+      let timedNow = true;
+      const c = await wsConnect({ ip: '127.0.0.1', port: fwdPort, origin: 'http://tauri.localhost', plain: true,
+        ack: () => (timedNow ? wire.ackOf(wire.clock()) : wire.PLAIN_ACK) });
+      const ceiling = tierRate(0.07, 4e6, 30e6);
+      c.send(wire.helloOf(false, DW, DH, ceiling, true));
+      await until(() => c.texts.some((x) => x.includes('"video"')), 15000);
+      const statsSince = (n) => c.texts.slice(n).map((x) => {
+        try {
+          return JSON.parse(x);
+        } catch {
+          return null;
+        }
+      }).filter((m) => m && m.t === 'stats');
+      await sleep(3000);
+      const onLan = statsSince(0).slice(-2);
+      let mark = c.texts.length;
+      c.send(wire.routeChangedOf(tierRate(0.012, 1e6, 4e6), false));
+      timedNow = false;
+      await sleep(3500);
+      const offLan = statsSince(mark).slice(1);
+      mark = c.texts.length;
+      c.send(wire.routeChangedOf(ceiling, true));
+      timedNow = true;
+      await sleep(3500);
+      const backOnLan = statsSince(mark).slice(1);
+      c.end();
+      const reads = (s) => s.length > 0 && s.every((m) => typeof m.queueMs === 'number');
+      const readsNot = (s) => s.length > 0 && s.every((m) => m.queueMs === undefined);
+      check('the desktop app\'s route off the local network under a live stream: the phone stops reading the times, and reads them again once it is back',
+        reads(onLan) && readsNot(offLan) && reads(backOnLan), JSON.stringify({ onLan, offLan, backOnLan }).slice(0, 900));
+    }
+  }
+
+  // --throttle 1.5,1000: each in turn (1000, the Wi-Fi as it is). Last, since
+  // its second browser takes the desktop: the switch on again first.
+  if (argOf('--throttle')) {
+    check('switched on again, for the slow links', !!(await ask('on', 'OK on')));
+    for (const r of argOf('--throttle').split(',')) await throttled(Number(r));
+  }
 
   check('no script errors in either tab', b.pageErrors.length === 0 && second.pageErrors.length === 0, [...b.pageErrors, ...second.pageErrors].slice(0, 3).join(' | '));
   second.close();

@@ -435,6 +435,22 @@ Linux's Trash, and Undo puts the files back. Files works even when Linux is shut
 down, and with no desktop picture being made, files move as fast as your Wi-Fi
 allows. To open Files straight away, add `#files` to the address.
 
+**On a tablet or a phone**, the page works with your fingers. Tap the short
+line at the top of the screen to bring the bar down. The hand button switches
+between Touch, where you tap what you want, and Trackpad, where your finger
+moves the pointer like on a laptop. Pinch to zoom in, and **Fit** shows the
+whole desktop again. The keyboard button opens the screen keyboard, with a row
+of the keys a screen keyboard lacks: Esc, Tab, Ctrl, Alt, Super and the arrows.
+
+The **microphone** button lets Linux hear your computer's microphone, for a
+call or a recording in Linux. The browser asks you first, and the microphone
+works on the secure address, the one starting with https.
+
+When you switch to another tab, the phone stops making the picture and keeps
+the sound playing, which saves the phone's battery and your Wi-Fi. When the
+Wi-Fi slows down, the phone lowers the picture's quality as soon as frames
+start arriving late, so the picture stays live instead of falling behind.
+
 A control strip sits along the top wherever Linux is running, on the phone or in
 a window. It holds the pointer, the keyboard, the screen and zoom. Tap the
 pointer and you pick how touch should behave: point where you look, use the

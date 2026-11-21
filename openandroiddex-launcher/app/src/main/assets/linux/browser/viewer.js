@@ -22,8 +22,24 @@
 //           least to encode, send and decode, for slow Wi-Fi
 //   Medium  the whole desktop at a Wi-Fi bitrate
 //   High    the whole desktop at a high bitrate: the sharpest text
-// The phone still lowers the bitrate under any of them when the link falls
-// behind (LinuxStream.adapt), so a frame is dropped before one is late.
+// The phone still lowers the bitrate under any of them the moment frames
+// start to queue on the way here (LinuxStreamRate): each acknowledgement says
+// when its frame arrived, by this page's clock.
+//
+// A tab out of sight (another tab in front, the window minimised or covered)
+// tells the phone, which stops making the picture until the tab is back and
+// then starts again from a key frame. The sound goes on. Key frames come only
+// when this page asks: at the start, after a hidden tab, and whenever the
+// decoder has to start over.
+//
+// On a touch screen (a tablet's browser, a phone's), fingers work as they do
+// in LinuxOnDroid's own window on the phone (touch.js): Touch, where the
+// finger is the pointer, or Trackpad, where the screen is a laptop's
+// trackpad; a pinch zooms the picture; a keyboard button brings up the
+// screen's keyboard, with a strip of the keys a screen keyboard lacks.
+//
+// This computer's microphone can go to Linux too (mic-worklet.js): Linux
+// hears the microphone as one of its own, "Browser microphone".
 //
 // Linux's files are here as well, without the picture (files.js): the
 // phone reads them straight off its storage, so nothing is encoded, and
@@ -35,6 +51,7 @@ import { avcC, codecString, sameBytes, splitAccessUnit } from './h264.js';
 import { ALTS, charKeysym, isModifier, keyDown, XK_ISO_LEVEL3_SHIFT } from './keysym.js';
 import { MsePlayer } from './mse.js';
 import { createFiles } from './files.js';
+import { createTouch } from './touch.js';
 
 const $ = (id) => document.getElementById(id);
 const PLATFORM = (navigator.userAgentData && navigator.userAgentData.platform) || navigator.platform || navigator.userAgent;
@@ -118,6 +135,23 @@ const TEXT = {
   clipTitleOff: 'Clipboard not shared with Linux',
   clipWaiting: 'Linux copied some text. Click the page to bring the text to this computer.',
   moreTitle: 'More',
+  touchTitle: 'Touch: tap where you point, drag to scroll, hold for a right-click',
+  padTitle: 'Trackpad: a finger moves the pointer, tap to click, two fingers scroll',
+  touchOn: 'Touch. Tap where you point. Drag to scroll, hold for a right-click, pinch to zoom.',
+  padOn: 'Trackpad. A finger moves the pointer, tap to click. Two fingers scroll, pinch to zoom.',
+  kbdTitle: 'Keyboard',
+  kbdHide: 'Hide the keyboard',
+  fitTitle: 'Show the whole desktop',
+  handleTitle: 'Show the bar',
+  micTitleOn: 'Microphone on: Linux hears this computer’s microphone',
+  micTitleOff: 'Microphone off: Linux hears nothing from this computer',
+  micTitleUnreached: 'Microphone on, but Linux cannot hear the microphone yet. Restart Linux on the phone.',
+  micOn: 'Microphone on. Linux hears this computer’s microphone.',
+  micOff: 'Microphone off. Linux hears nothing from this computer.',
+  micDenied: 'The browser did not allow the microphone. Allow the microphone for this page in the browser’s site settings, then try again.',
+  micNone: 'This computer has no microphone the browser can use.',
+  micPlain: 'The microphone works on the secure address only, the address starting with https.',
+  micUnreached: 'Linux cannot hear the microphone yet. Restart Linux on the phone, then try again.',
   still: 'still',
   statsTitle: (s) => `Frames drawn each second, the stream's bitrate and the round trip to the phone.\n` +
     `Encoded on the phone in ${s.encodeMs} ms by ${s.encoder || 'the phone’s encoder'}${s.hw === false ? ' (software)' : ''}; ` +
@@ -132,8 +166,19 @@ const MSG_CURSOR = 0x02;
 const MSG_AUDIO = 0x03;
 const IN_POINTER = 0x10;
 const IN_KEY = 0x11;
-/** "A frame arrived": the phone keeps no more frames in the pipe than its round trip holds. */
-const ACK = new Uint8Array([0x12]);
+const IN_ACK = 0x12;
+/** This page's clock, in ms: what an acknowledgement says a frame arrived at. */
+const clock = () => performance.timeOrigin + performance.now();
+/**
+ * "A frame arrived, at this time": the phone keeps no more frames in the pipe
+ * than its round trip holds, and reads from the times how late frames come.
+ */
+function ackOf(arrivedAt) {
+  const a = new Uint8Array(9);
+  a[0] = IN_ACK;
+  new DataView(a.buffer).setFloat64(1, arrivedAt);
+  return a;
+}
 const WHEEL_STEP = 50;
 const MIN_W = 640;
 const MIN_H = 400;
@@ -186,12 +231,40 @@ const store = {
 
 const body = document.body;
 const canvas = $('screen');
-const ctx = canvas.getContext('2d', { alpha: false, desynchronized: true });
+/**
+ * The canvas's 2D context, made the first time this page draws on it: a
+ * canvas that has one can no longer be handed to the worker (video-worker.js).
+ */
+let ctx2d = null;
+function ctx() {
+  if (!ctx2d) ctx2d = canvas.getContext('2d', { alpha: false, desynchronized: true });
+  return ctx2d;
+}
 /** The http page's picture: the browser's own video player, over the canvas, which still takes the input. */
 const video = $('video');
 /** No WebCodecs here (plain http, or an older browser): the video player shows the picture. */
 const USE_PLAYER = !('VideoDecoder' in window);
 const PLAIN = location.protocol === 'http:';
+/**
+ * Where WebCodecs decodes: in a worker with the stream's socket and the canvas
+ * (video-worker.js), where nothing the page does can hold a frame up; or, in
+ * a browser that cannot draw in a worker, or with lod.decode 'main', on this
+ * page's own thread. Measured on this computer's Edge (2026-11-20,
+ * test/linux-browser-latency.mjs): the same when the page is idle, and with
+ * the page busy 60% of the time, frames drawn 6 to 10 ms after they were sent
+ * where this thread took 17 to 28 (and 7 to 10 ms at the 95th percentile
+ * where it took 32 to 43).
+ */
+const DECODE_CHOICE = store.get('lod.decode') === 'main' ? 'main' : 'worker';
+/**
+ * Acknowledgements that say when each frame arrived, which the phone reads
+ * how late frames come from (LinuxStreamRate). lod.ackAt '0' sends them as a
+ * computer's window does, with no time, which puts the phone back on its rule
+ * of a full link: for a test to compare the two on one link.
+ */
+const ACK_AT = store.get('lod.ackAt') !== '0';
+/** The worker that decodes and draws, once it has said it can; null on this thread. */
+let worker = null;
 
 let phoneName = '';
 let token = store.get('lod.token');
@@ -238,6 +311,8 @@ function wait(title, text) {
 /** An end of some kind: a title, a sentence, and what can be done about it. */
 function ended(title, text, goLabel, go, altLabel, alt) {
   up = false;
+  // The person is not at Linux now: the microphone goes off.
+  if (typeof stopMic === 'function') stopMic();
   body.classList.remove('bar-on');
   setDot('warn');
   $('ended-title').textContent = title;
@@ -298,6 +373,8 @@ function paintCode() {
 
 function showPair(note) {
   up = false;
+  // Signed out, or not let in yet: nothing of this computer's goes to Linux.
+  stopMic();
   closeSocket();
   $('pair-lede').textContent = phoneName ? TEXT.pairLedeNamed(phoneName) : TEXT.pairLede;
   $('pair-fine').textContent = TEXT.pairFine;
@@ -398,11 +475,24 @@ let pps = null;
 let needKey = true;
 let askedKeyAt = 0;
 let drawn = 0;
+/** Frames drawn since the page loaded. */
+let drawnTotal = 0;
 let decodeMs = 0;
 /** When each frame went into the decoder, by its timestamp: how long decoding takes here. */
 const decodeStart = new Map();
 let encoderName = '';
 let encoderHw = true;
+/** Key frames that came, and that this page asked for: the phone sends one only when asked. */
+let keysIn = 0;
+let keysAsked = 0;
+/** The phone's clock is this computer's (a test's stand-in says so): how late each frame is drawn, end to end. */
+let wallClock = false;
+const lateness = [];
+function noteLate(pts) {
+  if (!wallClock) return;
+  lateness.push(clock() - pts / 1000);
+  if (lateness.length > 600) lateness.splice(0, lateness.length - 600);
+}
 
 function send(m) {
   if (ws && ws.readyState === WebSocket.OPEN) ws.send(m);
@@ -412,6 +502,7 @@ function askKey() {
   const now = performance.now();
   if (now - askedKeyAt < 500) return;
   askedKeyAt = now;
+  keysAsked++;
   send(JSON.stringify({ t: 'keyframe' }));
 }
 
@@ -431,10 +522,12 @@ function draw(frame) {
     if (canvas.width !== dw || canvas.height !== dh) {
       canvas.width = dw;
       canvas.height = dh;
-      ctx.imageSmoothingQuality = 'high';
+      ctx().imageSmoothingQuality = 'high';
     }
-    ctx.drawImage(frame, 0, 0, cw || frame.displayWidth, ch || frame.displayHeight, 0, 0, dw, dh);
+    ctx().drawImage(frame, 0, 0, cw || frame.displayWidth, ch || frame.displayHeight, 0, 0, dw, dh);
     drawn++;
+    drawnTotal++;
+    noteLate(frame.timestamp);
     if (!up) becameUp();
   }
   frame.close();
@@ -486,7 +579,7 @@ function keepLastPicture() {
     canvas.height = h;
   }
   try {
-    ctx.drawImage(video, 0, 0, w, h);
+    ctx().drawImage(video, 0, 0, w, h);
   } catch {
     // nothing to draw after all
   }
@@ -498,6 +591,7 @@ function onVideo(flags, pts, payload) {
   if (unit.pps) pps = unit.pps;
   if (!unit.data.length) return; // parameter sets only
   const isKey = unit.key || (flags & 1) !== 0;
+  if (isKey) keysIn++;
   if (USE_PLAYER) {
     if (!player) player = newPlayer();
     player.push(unit.data, isKey, sps, pps, performance.now());
@@ -533,6 +627,131 @@ function onVideo(flags, pts, payload) {
   decoder.decode(new EncodedVideoChunk({ type: isKey ? 'key' : 'delta', timestamp: pts, data: unit.data }));
 }
 
+// ── the picture in a worker ──────────────────────────────────────────
+
+/** The sockets the worker holds for this page, by their number: one at a time, the last one live. */
+const workerSockets = new Map();
+let workerSocketIds = 0;
+
+/**
+ * What the rest of this page sees of a socket the worker holds: the same
+ * readyState, send, close, onopen, onmessage and onclose as a WebSocket's,
+ * but for the picture, which the worker decodes and draws itself.
+ */
+class WorkerSocket {
+  constructor(url) {
+    this.id = ++workerSocketIds;
+    this.readyState = WebSocket.CONNECTING;
+    this.binaryType = 'arraybuffer';
+    this.onopen = null;
+    this.onmessage = null;
+    this.onclose = null;
+    workerSockets.set(this.id, this);
+    worker.postMessage({ t: 'open', id: this.id, url });
+  }
+
+  send(data) {
+    if (this.readyState !== WebSocket.OPEN) return;
+    if (data instanceof Uint8Array && data.byteOffset === 0 && data.byteLength === data.buffer.byteLength) {
+      worker.postMessage({ t: 'send', id: this.id, data }, [data.buffer]);
+    } else {
+      worker.postMessage({ t: 'send', id: this.id, data });
+    }
+  }
+
+  close() {
+    if (this.readyState === WebSocket.CLOSED) return;
+    this.readyState = WebSocket.CLOSED;
+    workerSockets.delete(this.id);
+    worker.postMessage({ t: 'close', id: this.id });
+  }
+}
+
+function onWorker(e) {
+  const m = e.data;
+  if (m.t === 'pixels') {
+    const r = pixelAsks.shift();
+    if (r) r(m.data);
+    return;
+  }
+  const s = workerSockets.get(m.id);
+  if (!s) return;
+  if (m.t === 'open') {
+    s.readyState = WebSocket.OPEN;
+    if (s.onopen) s.onopen();
+  } else if (m.t === 'text' || m.t === 'bin') {
+    if (s.onmessage) s.onmessage({ data: m.data });
+  } else if (m.t === 'closed') {
+    s.readyState = WebSocket.CLOSED;
+    workerSockets.delete(m.id);
+    if (s.onclose) s.onclose();
+  } else if (m.t === 'drawn') {
+    keysIn = m.keysIn;
+    keysAsked = m.keysAsked;
+    decodeMs = m.decodeMs;
+    // As draw() does on this thread: not for a stream this page has let go of.
+    if (dw > 0 && ws === s && !told) {
+      drawn++;
+      drawnTotal++;
+      if (typeof m.late === 'number') {
+        lateness.push(m.late);
+        if (lateness.length > 600) lateness.splice(0, lateness.length - 600);
+      }
+      if (!up) becameUp();
+    }
+  }
+}
+
+/**
+ * The worker, if this browser can decode and draw in one: asked first, the
+ * canvas handed over only once the worker says it has a decoder, since a
+ * canvas handed over cannot be drawn on here again.
+ */
+async function startWorker() {
+  if (DECODE_CHOICE !== 'worker' || USE_PLAYER || typeof Worker === 'undefined'
+    || typeof OffscreenCanvas === 'undefined' || !canvas.transferControlToOffscreen) return;
+  let w;
+  try {
+    w = new Worker('video-worker.js', { type: 'module' });
+  } catch {
+    return;
+  }
+  const ok = await new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(false), 3000);
+    w.onmessage = (e) => {
+      if (e.data && e.data.t === 'ready') {
+        clearTimeout(timer);
+        resolve(!!e.data.decoder);
+      }
+    };
+    w.onerror = () => {
+      clearTimeout(timer);
+      resolve(false);
+    };
+  });
+  if (!ok) {
+    w.terminate();
+    return;
+  }
+  let off;
+  try {
+    off = canvas.transferControlToOffscreen();
+  } catch (e) {
+    console.warn('the picture stays on this page:', e);
+    w.terminate();
+    return;
+  }
+  w.postMessage({ t: 'canvas', canvas: off }, [off]);
+  w.onmessage = onWorker;
+  w.onerror = (e) => console.error('video-worker.js:', e.message || e);
+  worker = w;
+}
+
+/** The stream's socket: the worker's where it draws, else this page's own. */
+function openSocket(url) {
+  return worker ? new WorkerSocket(url) : new WebSocket(url);
+}
+
 function becameUp() {
   up = true;
   hasPicture = true;
@@ -565,8 +784,96 @@ function setCursor(hotX, hotY, w, h, rgba) {
   c.width = w;
   c.height = h;
   c.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(rgba.buffer, rgba.byteOffset, w * h * 4), w, h), 0, 0);
-  canvas.style.cursor = `url(${c.toDataURL('image/png')}) ${Math.min(hotX, w - 1)} ${Math.min(hotY, h - 1)}, default`;
+  const url = c.toDataURL('image/png');
+  canvas.style.cursor = `url(${url}) ${Math.min(hotX, w - 1)} ${Math.min(hotY, h - 1)}, default`;
+  // The trackpad's pointer on a touch screen, which shows no pointer of its own.
+  const img = $('tcur-img');
+  img.src = url;
+  img.style.left = `${-Math.min(hotX, w - 1)}px`;
+  img.style.top = `${-Math.min(hotY, h - 1)}px`;
 }
+
+// ── the picture's own zoom (a pinch, on a touch screen) ─────────────────
+
+const ZOOM_MAX = 4;
+let zoom = 1;
+let panX = 0;
+let panY = 0;
+
+/** The picture fitted into the window at zoom 1: its scale, and where it sits. */
+function fitted() {
+  const W = innerWidth;
+  const H = innerHeight;
+  const s = dw && dh ? Math.min(W / dw, H / dh) : 1;
+  return { W, H, s, ox: (W - dw * s) / 2, oy: (H - dh * s) / 2 };
+}
+
+/** A point of the window, as the desktop's pixels, not held to the desktop. */
+function toDesk(cx, cy) {
+  const f = fitted();
+  return { x: (cx - panX - f.ox * zoom) / (f.s * zoom), y: (cy - panY - f.oy * zoom) / (f.s * zoom) };
+}
+
+/** A desktop pixel, as a point of the window. */
+function toClient(x, y) {
+  const f = fitted();
+  return { x: panX + (f.ox + x * f.s) * zoom, y: panY + (f.oy + y * f.s) * zoom };
+}
+
+function overPicture(cx, cy, edge = 0) {
+  const a = toClient(0, 0);
+  const b = toClient(dw, dh);
+  return cx >= a.x - edge && cx < b.x + edge && cy >= a.y - edge && cy < b.y + edge;
+}
+
+/** The zoomed picture kept over the window: no black at an edge where there could be picture. */
+function clampPan() {
+  const f = fitted();
+  const pw = dw * f.s * zoom;
+  const ph = dh * f.s * zoom;
+  const left = panX + f.ox * zoom;
+  const top = panY + f.oy * zoom;
+  const nl = pw <= f.W ? (f.W - pw) / 2 : Math.min(0, Math.max(f.W - pw, left));
+  const nt = ph <= f.H ? (f.H - ph) / 2 : Math.min(0, Math.max(f.H - ph, top));
+  panX = nl - f.ox * zoom;
+  panY = nt - f.oy * zoom;
+}
+
+function applyView() {
+  if (zoom <= 1.001) {
+    zoom = 1;
+    panX = 0;
+    panY = 0;
+  } else {
+    clampPan();
+  }
+  const t = zoom === 1 ? '' : `translate(${panX}px, ${panY}px) scale(${zoom})`;
+  canvas.style.transform = t;
+  video.style.transform = t;
+  $('fit').hidden = zoom === 1;
+  if (touch) touch.paintCursor();
+}
+
+/** Zoom to {@code z}, the desktop's point {@code focal} held under the window's (cx, cy). */
+function setZoom(z, cx, cy, focal = toDesk(cx, cy)) {
+  zoom = Math.max(1, Math.min(ZOOM_MAX, z));
+  const f = fitted();
+  panX = cx - (f.ox + focal.x * f.s) * zoom;
+  panY = cy - (f.oy + focal.y * f.s) * zoom;
+  applyView();
+}
+
+function panBy(dx, dy) {
+  panX += dx;
+  panY += dy;
+  applyView();
+}
+
+$('fit').addEventListener('click', () => {
+  zoom = 1;
+  applyView();
+  canvas.focus({ preventScroll: true });
+});
 
 // ── the pointer ────────────────────────────────────────────────────────
 
@@ -574,16 +881,11 @@ let buttons = 0;
 let lastX = 0;
 let lastY = 0;
 
-/** Where a point of the window falls on the desktop, the picture fitted inside it. */
+/** Where a point of the window falls on the desktop, the picture fitted inside it (and zoomed). */
 function toDesktop(clientX, clientY) {
-  const r = canvas.getBoundingClientRect();
-  if (!dw || !r.width) return [0, 0];
-  const s = Math.min(r.width / dw, r.height / dh);
-  const ox = (r.width - dw * s) / 2;
-  const oy = (r.height - dh * s) / 2;
-  const x = Math.floor((clientX - r.left - ox) / s);
-  const y = Math.floor((clientY - r.top - oy) / s);
-  return [Math.max(0, Math.min(dw - 1, x)), Math.max(0, Math.min(dh - 1, y))];
+  if (!dw || !dh) return [0, 0];
+  const p = toDesk(clientX, clientY);
+  return [Math.max(0, Math.min(dw - 1, Math.floor(p.x))), Math.max(0, Math.min(dh - 1, Math.floor(p.y)))];
 }
 
 function pointer(x, y, mask) {
@@ -596,8 +898,15 @@ function pointer(x, y, mask) {
 const rfbButtons = (b) => (b & 1 ? 1 : 0) | (b & 4 ? 2 : 0) | (b & 2 ? 4 : 0) | (b & 8 ? 128 : 0);
 
 function onPointer(e) {
+  // A finger: touch.js's, in Touch or Trackpad.
+  if (touch.handle(e)) return;
   if (!up) return;
   const [x, y] = toDesktop(e.clientX, e.clientY);
+  if (e.pointerType === 'mouse' || e.pointerType === 'pen') {
+    // A real pointer moved Linux's: the trackpad's goes from there next time.
+    touch.follow(x, y);
+    touch.hideCursor();
+  }
   if (e.type === 'pointerdown') {
     canvas.setPointerCapture(e.pointerId);
     canvas.focus({ preventScroll: true });
@@ -624,9 +933,16 @@ function onWheel(e) {
   e.preventDefault();
   if (!up) return;
   const k = e.deltaMode === 1 ? 40 : e.deltaMode === 2 ? 800 : 1;
-  wheelX += e.deltaX * k;
-  wheelY += e.deltaY * k;
   const [x, y] = toDesktop(e.clientX, e.clientY);
+  wheelAt(x, y, e.deltaX * k, e.deltaY * k);
+}
+
+/** A wheel's pixels at a desktop point, as the notches X knows: buttons 4 to 7, one each 50 px. */
+function wheelAt(px, py, dx, dy) {
+  const x = Math.max(0, Math.min(dw - 1, Math.round(px)));
+  const y = Math.max(0, Math.min(dh - 1, Math.round(py)));
+  wheelX += dx;
+  wheelY += dy;
   const click = (bit) => {
     pointer(x, y, buttons | bit);
     pointer(x, y, buttons);
@@ -639,6 +955,174 @@ function onWheel(e) {
     click(wheelX < 0 ? 32 : 64);
     wheelX -= Math.sign(wheelX) * WHEEL_STEP;
   }
+}
+
+// ── touch ──────────────────────────────────────────────────────────────
+
+const LARGE_SCREEN = Math.min(screen.width, screen.height) >= 600;
+/** Touch or Trackpad: as last chosen in this browser; else Touch on a tablet's screen, Trackpad on a phone's. */
+let touchMode = ['touch', 'trackpad'].includes(store.get('lod.touch')) ? store.get('lod.touch') : LARGE_SCREEN ? 'touch' : 'trackpad';
+
+const touch = createTouch({
+  desk: () => ({ w: dw, h: dh }),
+  toDesk,
+  toClient,
+  overPicture,
+  pointer: (x, y, mask) => {
+    buttons = mask;
+    pointer(Math.max(0, Math.min(dw - 1, x)), Math.max(0, Math.min(dh - 1, y)), mask);
+  },
+  wheel: wheelAt,
+  zoom: () => zoom,
+  setZoom,
+  panBy,
+  mode: () => touchMode,
+  live: () => up,
+  touched: () => {
+    sawTouch();
+    closeMenu();
+    startSound();
+    flushCopy();
+  },
+}, $('tcur'), $('armed'));
+
+/** This screen takes touch: its buttons on the bar, and the handle the bar comes down by. */
+function sawTouch() {
+  if (body.classList.contains('touch')) return;
+  body.classList.add('touch');
+  paintTouchMode();
+}
+
+function paintTouchMode() {
+  const b = $('tmode');
+  const pad = touchMode === 'trackpad';
+  body.classList.toggle('pad', pad);
+  b.setAttribute('aria-pressed', String(pad));
+  b.title = pad ? TEXT.padTitle : TEXT.touchTitle;
+  b.setAttribute('aria-label', b.title);
+  if (pad && up) touch.recentre();
+  else touch.hideCursor();
+}
+
+$('tmode').addEventListener('click', () => {
+  touchMode = touchMode === 'trackpad' ? 'touch' : 'trackpad';
+  store.set('lod.touch', touchMode);
+  paintTouchMode();
+  toast(touchMode === 'trackpad' ? TEXT.padOn : TEXT.touchOn, 3600);
+});
+
+$('handle').addEventListener('click', () => showBar(4000));
+
+// ── the screen's keyboard, on a touch screen ───────────────────────────
+//
+// A field out of sight that the screen's keyboard types into. What it is
+// given goes to Linux as keys, worked out from how the field's text changed
+// (as noVNC does), since a screen keyboard says little in its key events:
+// letters it composes into words, a suggestion it puts in place of a word, a
+// key it deletes with. The field keeps some filler, so a backspace always has
+// something to delete. A real keyboard typing into the field goes to Linux
+// as keys, as it does from the picture. The strip above the screen's
+// keyboard has what it lacks: Esc, Tab, Ctrl, Alt, the Super key and the
+// arrows. Ctrl and Alt hold for the next key.
+
+const kbdIn = $('kbd-in');
+const KBD_FILL = '_'.repeat(40);
+let kbdLast = KBD_FILL;
+/** Ctrl and Alt from the strip, held for the next key. */
+const sticky = new Set();
+
+function kbdReset() {
+  kbdIn.value = KBD_FILL;
+  kbdLast = KBD_FILL;
+  try {
+    kbdIn.setSelectionRange(KBD_FILL.length, KBD_FILL.length);
+  } catch {
+    // not focused
+  }
+}
+
+/** One key, down and up, with whatever the strip holds. */
+function tapKey(ks) {
+  const mods = [...sticky];
+  for (const m of mods) key(m, true);
+  key(ks, true);
+  key(ks, false);
+  for (const m of mods) key(m, false);
+  if (mods.length) {
+    sticky.clear();
+    paintSticky();
+  }
+}
+
+function paintSticky() {
+  for (const b of $('keys').querySelectorAll('[data-sticky]')) {
+    b.setAttribute('aria-pressed', String(sticky.has(Number(b.dataset.ks))));
+  }
+}
+
+kbdIn.addEventListener('input', (e) => {
+  const now = kbdIn.value;
+  let same = 0;
+  const n = Math.min(now.length, kbdLast.length);
+  while (same < n && now[same] === kbdLast[same]) same++;
+  for (let k = kbdLast.length; k > same; k--) tapKey(0xff08);
+  for (const ch of now.slice(same)) tapKey(ch === '\n' ? 0xff0d : charKeysym(ch));
+  kbdLast = now;
+  if (!e.isComposing && (now.length < KBD_FILL.length / 2 || now.length > KBD_FILL.length * 2)) kbdReset();
+});
+kbdIn.addEventListener('compositionend', () => {
+  if (kbdIn.value.length > KBD_FILL.length * 2) kbdReset();
+});
+kbdIn.addEventListener('focus', () => {
+  kbdReset();
+  body.classList.add('kbd-on');
+  $('kbd').setAttribute('aria-pressed', 'true');
+  placeKeys();
+});
+kbdIn.addEventListener('blur', () => {
+  body.classList.remove('kbd-on');
+  $('kbd').setAttribute('aria-pressed', 'false');
+  sticky.clear();
+  paintSticky();
+});
+
+$('kbd').addEventListener('pointerdown', (e) => e.preventDefault());
+$('kbd').addEventListener('click', () => {
+  if (document.activeElement === kbdIn) {
+    kbdIn.blur();
+    return;
+  }
+  kbdIn.focus({ preventScroll: true });
+});
+
+/** The strip sits on the screen's keyboard: the bottom of what the keyboard leaves of the window. */
+function placeKeys() {
+  const vv = window.visualViewport;
+  const lift = vv ? Math.max(0, innerHeight - (vv.offsetTop + vv.height)) : 0;
+  $('keys').style.transform = lift ? `translateY(${-lift}px)` : '';
+}
+if (window.visualViewport) {
+  window.visualViewport.addEventListener('resize', placeKeys);
+  window.visualViewport.addEventListener('scroll', placeKeys);
+}
+
+for (const b of $('keys').querySelectorAll('button')) {
+  // Pressed without taking the focus, or the screen's keyboard would close.
+  b.addEventListener('pointerdown', (e) => e.preventDefault());
+  b.addEventListener('click', () => {
+    if (b.dataset.hide !== undefined) {
+      kbdIn.blur();
+      return;
+    }
+    const ks = Number(b.dataset.ks);
+    if (b.dataset.sticky !== undefined) {
+      if (sticky.has(ks)) sticky.delete(ks);
+      else sticky.add(ks);
+      paintSticky();
+      return;
+    }
+    tapKey(ks);
+  });
 }
 
 canvas.addEventListener('pointermove', onPointer);
@@ -665,6 +1149,7 @@ function key(keysym, isDown) {
 /** Keys for the desktop: unless something of the page's own (the bar, a card) has them. */
 function forGuest(e) {
   const t = e.target;
+  if (t === kbdIn) return up;
   return up && (t === canvas || t === body || t === document.documentElement);
 }
 
@@ -763,6 +1248,7 @@ window.addEventListener(
 
 /** Everything held, let go: the window lost the keyboard, and with it every keyup. */
 function releaseAll() {
+  touch.releaseAll();
   for (const ks of down.values()) key(ks, false);
   down.clear();
   if (buttons) {
@@ -968,11 +1454,16 @@ function onSound(codec, pts, data) {
   if (!frames) return;
   const buf = actx.createBuffer(ch, frames, soundFmt.rate);
   const d = new DataView(data.buffer, data.byteOffset, data.byteLength);
+  let loud = 0;
   for (let c = 0; c < ch; c++) {
     const out = buf.getChannelData(c);
-    for (let i = 0, o = c * 2; i < frames; i++, o += 2 * ch) out[i] = d.getInt16(o, true) / 32768;
+    for (let i = 0, o = c * 2; i < frames; i++, o += 2 * ch) {
+      const v = d.getInt16(o, true);
+      loud |= v > 1 || v < -1 ? 1 : 0;
+      out[i] = v / 32768;
+    }
   }
-  play(buf);
+  play(buf, !loud);
 }
 
 /** What the Opus decoder made, into a buffer to play. */
@@ -992,23 +1483,70 @@ function playDecoded(ad) {
         for (let i = 0; i < ad.numberOfFrames; i++) out[i] = all[i * ch + c];
       }
     }
-    play(buf);
+    let loud = false;
+    for (let c = 0; c < ch && !loud; c++) {
+      const x = buf.getChannelData(c);
+      for (let i = 0; i < x.length; i++) {
+        if (x[i] > 1e-4 || x[i] < -1e-4) {
+          loud = true;
+          break;
+        }
+      }
+    }
+    play(buf, !loud);
   } finally {
     ad.close();
   }
 }
 
+/**
+ * Sound in hand: what the gaps between runs say is needed, and no less than
+ * SOUND_MIN. The phone sends PCM 10 ms at a time and Opus 20 ms at a time,
+ * so on a steady link that is two runs' worth; a link or a tap that hands
+ * sound over in bursts asks for more, up to SOUND_MAX.
+ */
+const SOUND_MIN = 0.015;
+const SOUND_MAX = 0.35;
+/** In hand beyond what is needed by this much: runs are dropped until it is back. */
+const SOUND_SLACK = 0.08;
+let soundUnderruns = 0;
+let soundDropped = 0;
+let soundLead = 0;
+let soundCushion = 0;
+
+/** The run before was silence: the gap after it may be the phone holding silence back. */
+let lastRunSilent = false;
+/** Until then, gaps between runs are not counted (a hidden tab's backlog, arriving). */
+let soundSettleUntil = 0;
+
 /** A run onto actx's clock, right after the one before, with enough in hand. */
-function play(buf) {
+function play(buf, silent = false) {
   const t = performance.now();
   const gap = lastRunAt ? (t - lastRunAt) / 1000 : 0;
   lastRunAt = t;
-  // A gap of over half a second is silence the phone did not send, not a burst.
-  runGap = gap < 0.5 ? Math.max(gap, runGap * 0.995) : runGap;
-  const cushion = Math.min(0.35, Math.max(0.04, runGap * 1.2));
+  // The longest gap lately, forgotten by half every two seconds. Not a gap
+  // after silence: the phone sends half a second of it and then nothing
+  // until there is sound again, and that pause says nothing of the link (it
+  // held the sound at its most, 350 ms, after every pause). Nor a gap of
+  // over half a second, which is the link stopping, not a burst.
+  const afterSilence = lastRunSilent;
+  if (gap < 0.5 && !afterSilence && t > soundSettleUntil) runGap = Math.max(gap, runGap * 0.5 ** (gap / 2));
+  lastRunSilent = silent;
+  const cushion = Math.min(SOUND_MAX, Math.max(SOUND_MIN, runGap * 1.2 + 0.005));
+  soundCushion = cushion;
   const now = actx.currentTime;
-  if (nextAt - now < 0.005) nextAt = now + cushion; // the first run, or ran dry
-  else if (nextAt - now > cushion + 0.25) return; // far behind the picture: this run goes
+  const lead = nextAt - now;
+  if (lead < 0.003) {
+    // The first run, or the sound ran dry: start again a cushion ahead. Dry
+    // after silence is the phone having held the silence back, not a gap.
+    if (nextAt && !afterSilence) soundUnderruns++;
+    nextAt = now + cushion;
+  } else if (lead > cushion + SOUND_SLACK) {
+    // Far behind the picture: this run goes.
+    soundDropped++;
+    return;
+  }
+  soundLead = soundLead * 0.9 + (nextAt - now) * 0.1;
   const src = actx.createBufferSource();
   src.buffer = buf;
   src.connect(actx.destination);
@@ -1019,7 +1557,44 @@ function play(buf) {
 window.lodSound = () => ({
   on: soundOn, state: actx ? actx.state : 'none', asked: soundAsked, runs: soundRuns,
   opus: soundOpus, format: describeSound(soundFmt), decoder: audioDec ? audioDec.state : 'none',
+  leadMs: Math.round(soundLead * 1000), underruns: soundUnderruns, dropped: soundDropped,
+  nowMs: actx && nextAt ? Math.round((nextAt - actx.currentTime) * 1000) : -1,
+  cushionMs: Math.round(soundCushion * 1000), gapMs: Math.round(runGap * 1000),
 });
+/** Asked of the worker: what is on its canvas. */
+const pixelAsks = [];
+/** What is on the canvas, whichever thread draws it: its size and how much of it is lit, for the tests' eyes. */
+window.lodPixels = () => {
+  if (worker) {
+    return new Promise((resolve) => {
+      pixelAsks.push(resolve);
+      worker.postMessage({ t: 'pixels' });
+      setTimeout(() => resolve(null), 3000);
+    });
+  }
+  const d = ctx().getImageData(0, 0, canvas.width, canvas.height).data;
+  let lit = 0;
+  let n = 0;
+  for (let i = 0; i < d.length; i += 4 * 997) {
+    n++;
+    if (d[i] + d[i + 1] + d[i + 2] > 60) lit++;
+  }
+  return { w: canvas.width, h: canvas.height, lit, n };
+};
+/** How late frames were drawn, forgotten: a test measures from now on. */
+window.lodVideoReset = () => {
+  lateness.length = 0;
+  return true;
+};
+/** The picture's counters, for the tests' eyes. */
+window.lodVideo = () => {
+  const s = lateness.slice().sort((a, b) => a - b);
+  const q = (p) => (s.length ? Math.round(s[Math.min(s.length - 1, Math.floor(s.length * p))] * 10) / 10 : -1);
+  return {
+    keysIn, keysAsked, picture: pictureWanted(), lateMedian: q(0.5), late95: q(0.95), lateN: s.length, drawnTotal,
+    decode: worker ? 'worker' : 'main',
+  };
+};
 
 function setSound(on, say) {
   soundOn = on;
@@ -1044,6 +1619,146 @@ $('sound').addEventListener('click', () => {
   setSound(!soundOn, true);
   canvas.focus({ preventScroll: true });
 });
+
+// ── this computer's microphone, into Linux ─────────────────────────────
+//
+// Off at every start, and on only by the button: the browser asks first, and
+// shows that the microphone is in use for as long as it is. What it hears
+// goes to the phone 10 ms at a time (mic-worklet.js, on the browser's audio
+// thread), and the phone writes it into Linux's own microphone
+// (LinuxStreamMic.java). The browser's echo cancelling is asked for, so that
+// Linux's own sound from this computer's speakers is not sent back to it.
+//
+// On across a reconnect, by itself; off the moment the person leaves the
+// desktop (Files, signed out, any end with a card): the browser stops
+// recording then, and Desktop does not start it again by itself.
+
+const MIC_OK = window.isSecureContext && !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia)
+  && typeof AudioWorkletNode !== 'undefined';
+let micOn = false;
+/** The phone says the microphone reaches Linux (true), cannot (false), or has not said (null). */
+let micReached = null;
+let micStream = null;
+let micCtx = null;
+let micSent = 0;
+/** The browser has been asked for the microphone and has not answered yet: a second press waits for the answer. */
+let micAsking = false;
+/**
+ * Moved on by every start and every stop: an answer that comes after a stop
+ * (Files, or a sign-out, while the browser still asked) records nothing.
+ */
+let micGen = 0;
+
+function paintMic() {
+  const b = $('mic');
+  b.setAttribute('aria-pressed', String(micOn));
+  b.classList.toggle('warn', micOn && micReached === false);
+  b.title = !micOn ? TEXT.micTitleOff : micReached === false ? TEXT.micTitleUnreached : TEXT.micTitleOn;
+  b.setAttribute('aria-label', b.title);
+}
+
+function stopMic() {
+  micGen++;
+  micAsking = false;
+  const s = micStream;
+  const c = micCtx;
+  micStream = null;
+  micCtx = null;
+  if (s) for (const t of s.getTracks()) t.stop();
+  if (c) c.close().catch(() => {});
+  if (micOn) {
+    micOn = false;
+    send(JSON.stringify({ t: 'mic', on: false }));
+  }
+  micReached = null;
+  paintMic();
+}
+
+async function startMic() {
+  if (!MIC_OK) {
+    toast(PLAIN ? TEXT.micPlain : TEXT.micNone, 4200);
+    return;
+  }
+  if (micOn || micAsking) return;
+  micAsking = true;
+  const gen = ++micGen;
+  // Stopped while the browser asked, or while the sound path was made: let go.
+  const stale = () => gen !== micGen;
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+    });
+  } catch (e) {
+    if (stale()) return;
+    micAsking = false;
+    toast(e && e.name === 'NotFoundError' ? TEXT.micNone : TEXT.micDenied, 5200);
+    return;
+  }
+  let c;
+  const letGo = () => {
+    for (const t of stream.getTracks()) t.stop();
+    if (c) c.close().catch(() => {});
+  };
+  if (stale()) {
+    letGo();
+    return;
+  }
+  // Where a stop can see it from here on, while the sound path is made: Files
+  // or a sign-out meanwhile stops the browser recording at once, not once the
+  // worklet has come. On only below, when the path is made.
+  micStream = stream;
+  try {
+    c = new AudioContext({ sampleRate: 48000, latencyHint: 'interactive' });
+    micCtx = c;
+    await c.audioWorklet.addModule('mic-worklet.js');
+    const src = c.createMediaStreamSource(stream);
+    const node = new AudioWorkletNode(c, 'mic-tap', { numberOfInputs: 1, numberOfOutputs: 1, channelCount: 1, channelCountMode: 'explicit' });
+    node.port.onmessage = (e) => {
+      // Only this microphone's, while it is the one on.
+      if (!micOn || micCtx !== c) return;
+      micSent++;
+      send(e.data);
+    };
+    src.connect(node);
+    // Pulled by the graph only when it leads somewhere: into a silent gain.
+    const mute = c.createGain();
+    mute.gain.value = 0;
+    node.connect(mute).connect(c.destination);
+    if (c.state === 'suspended') await c.resume();
+  } catch {
+    letGo();
+    // Stopped meanwhile: the stop let go of these, and what is held now may be a newer press's.
+    if (stale()) return;
+    micStream = null;
+    micCtx = null;
+    micAsking = false;
+    toast(TEXT.micNone, 4200);
+    return;
+  }
+  if (stale()) {
+    letGo();
+    return;
+  }
+  micAsking = false;
+  micOn = true;
+  micReached = null;
+  send(JSON.stringify({ t: 'mic', on: true }));
+  paintMic();
+  toast(TEXT.micOn);
+}
+
+$('mic').addEventListener('click', () => {
+  if (micOn) {
+    stopMic();
+    toast(TEXT.micOff);
+  } else {
+    // A second press while the browser still asks waits for the same answer.
+    void startMic();
+  }
+  canvas.focus({ preventScroll: true });
+});
+window.lodMic = () => ({ on: micOn, reached: micReached, sent: micSent, ok: MIC_OK });
 
 // ── the three pictures ─────────────────────────────────────────────────
 
@@ -1162,6 +1877,8 @@ $('m-disconnect').addEventListener('click', () => {
 $('m-forget').addEventListener('click', async () => {
   closeMenu();
   quiet = true;
+  // At the press, not once the phone has answered: on a slow link that is seconds.
+  stopMic();
   const t = token;
   token = null;
   store.set('lod.token', null);
@@ -1240,8 +1957,36 @@ function letScreenGo() {
 }
 
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'visible' && up) void holdScreen();
+  if (document.visibilityState === 'visible') {
+    if (up) void holdScreen();
+    // A tab out of sight is given its messages in bursts, and the sound in
+    // hand grew to bridge them: forgotten, so that the sound comes back to
+    // the picture's time as the picture comes back; and the next second's
+    // gaps are the hidden tab's backlog arriving, which says nothing of the
+    // link either.
+    runGap = 0;
+    soundSettleUntil = performance.now() + 1000;
+  }
+  syncPicture();
 });
+
+// ── the picture only while the tab is in sight ─────────────────────────
+
+/** Whether this page wants the picture now: its tab is in sight. */
+const pictureWanted = () => document.visibilityState !== 'hidden';
+/** What the phone was last told, on this stream. */
+let pictureAsked = true;
+
+/**
+ * A tab out of sight wants no picture: the phone then makes none, and sends
+ * none, until the tab is back. The sound goes on.
+ */
+function syncPicture() {
+  const want = pictureWanted();
+  if (want === pictureAsked || !ws || ws.readyState !== WebSocket.OPEN || !configured) return;
+  pictureAsked = want;
+  send(JSON.stringify({ t: 'picture', on: want }));
+}
 
 // ── the window's size is the desktop's ─────────────────────────────────
 
@@ -1259,12 +2004,17 @@ function askSize() {
 window.addEventListener('resize', () => {
   clearTimeout(settle);
   settle = setTimeout(askSize, 400);
+  applyView();
+  placeKeys();
 });
 
 // ── the connection ─────────────────────────────────────────────────────
 
 let rtt = 0;
 let phoneStats = { kbps: 0, encodeMs: 0, soundKbps: 0, at: 0 };
+/** The phone's last stats as it sent them, for the tests' eyes. */
+let lastStats = null;
+window.lodStats = () => lastStats;
 
 function closeSocket() {
   const s = ws;
@@ -1324,7 +2074,7 @@ function connect(start, comingBack = false) {
     // The token with the request: the phone checks it before it reads a
     // single frame. Over TLS where the page is (plain only where it is),
     // and never in this page's own address.
-    socket = new WebSocket(`${PLAIN ? 'ws' : 'wss'}://${location.host}/stream?t=${encodeURIComponent(token || '')}`);
+    socket = openSocket(`${PLAIN ? 'ws' : 'wss'}://${location.host}/stream?t=${encodeURIComponent(token || '')}`);
   } catch {
     lost();
     return;
@@ -1337,7 +2087,13 @@ function connect(start, comingBack = false) {
     sentBitrate = p.bitrate;
     // Sound only when this page can play it now: asked for later otherwise.
     soundAsked = canPlaySound();
-    socket.send(JSON.stringify({ t: 'hello', v: 1, start, w, h, acks: true, audio: soundAsked, codecs: soundCodecs(), ...p }));
+    pictureAsked = true;
+    socket.send(JSON.stringify({ t: 'hello', v: 1, start, w, h, acks: true, ackAt: ACK_AT, audio: soundAsked, codecs: soundCodecs(), ...p }));
+    // A microphone left on across a reconnect is on for the new stream too.
+    if (micOn) {
+      micReached = null;
+      socket.send(JSON.stringify({ t: 'mic', on: true }));
+    }
   };
   socket.onmessage = (ev) => {
     if (socket !== ws) return;
@@ -1353,9 +2109,10 @@ function connect(start, comingBack = false) {
     }
     const b = new Uint8Array(ev.data);
     if (b[0] === MSG_VIDEO && b.length > 10) {
-      // Acknowledged on arrival, before decoding: it is the link the phone
-      // paces itself to.
-      if (!(b[1] & 2)) socket.send(ACK);
+      // Acknowledged on arrival, before decoding, with the time it came: it
+      // is the link the phone paces itself to and reads. (Once decoded was
+      // measured too, 2026-11-20, and was no sooner on screen.)
+      if (!(b[1] & 2)) socket.send(ackOf(clock()));
       const v = new DataView(b.buffer, b.byteOffset, b.byteLength);
       onVideo(b[1], Number(v.getBigUint64(2)), b.subarray(10));
     } else if (b[0] === MSG_CURSOR && b.length >= 9) {
@@ -1446,6 +2203,7 @@ function onText(m) {
       ch = Number(m.ch);
       encoderName = String(m.encoder || '');
       encoderHw = m.hw !== false;
+      wallClock = m.clock === 'wall';
       needKey = true;
       canvas.classList.toggle('smooth', cw < dw - 1 || ch < dh - 1);
       configured = true;
@@ -1461,6 +2219,9 @@ function onText(m) {
       // the phone's limits) is not asked again until the window changes.
       if (asked === `${dw}x${dh}`) asked = '';
       askSize();
+      // A tab already out of sight wants no picture from this encoder either.
+      syncPicture();
+      applyView();
       break;
     }
     case 'clip':
@@ -1470,6 +2231,7 @@ function onText(m) {
       onSoundFormat(m);
       break;
     case 'stats':
+      lastStats = m;
       phoneStats = {
         kbps: Number(m.kbps) || 0,
         encodeMs: Number(m.encodeMs) || 0,
@@ -1479,6 +2241,18 @@ function onText(m) {
       break;
     case 'pong':
       if (typeof m.n === 'number') rtt = Math.round(performance.now() - m.n);
+      break;
+    case 'mic':
+      // Whether this computer's microphone reaches Linux.
+      if (!micOn) break;
+      micReached = m.state === 'on';
+      paintMic();
+      if (!micReached) toast(TEXT.micUnreached, 5200);
+      break;
+    case 'hb':
+      // The phone, while this tab is out of sight: answered at once, since a
+      // hidden tab's own timers may slow to one a minute.
+      send(JSON.stringify({ t: 'ping', n: performance.now() }));
       break;
     default:
   }
@@ -1526,6 +2300,7 @@ window.addEventListener('beforeunload', (e) => {
 
 window.addEventListener('pagehide', () => {
   quiet = true;
+  stopMic();
   closeSocket();
 });
 
@@ -1602,6 +2377,17 @@ async function boot() {
   sb.setAttribute('aria-pressed', String(soundOn));
   sb.title = soundOn ? TEXT.soundTitleOn : TEXT.soundTitleOff;
   sb.setAttribute('aria-label', sb.title);
+  paintMic();
+  $('kbd').title = TEXT.kbdTitle;
+  $('kbd').setAttribute('aria-label', TEXT.kbdTitle);
+  $('keys-hide').title = TEXT.kbdHide;
+  $('keys-hide').setAttribute('aria-label', TEXT.kbdHide);
+  $('fit').title = TEXT.fitTitle;
+  $('handle').title = TEXT.handleTitle;
+  $('handle').setAttribute('aria-label', TEXT.handleTitle);
+  // A screen that takes touch shows its buttons from the start.
+  if (window.matchMedia && window.matchMedia('(any-pointer: coarse)').matches) sawTouch();
+  else paintTouchMode();
   if (!('VideoDecoder' in window) && !MsePlayer.supported()) {
     unsupported(TEXT.oldTitle, TEXT.oldText);
     return;
@@ -1630,6 +2416,7 @@ async function boot() {
 async function begin() {
   wait(TEXT.connectingTitle, TEXT.connectingText('the phone'));
   soundOpus = await canOpus();
+  await startWorker();
   await learnName();
   // A page loaded again (a reload, a tab the browser brought back) shows the
   // desktop if it is running and asks before starting one: only a person's
@@ -1686,6 +2473,9 @@ function openFiles(path = null, select = null) {
   closeMenu();
   clearTimeout(retryTimer);
   quiet = true;
+  // The person has left the desktop: the microphone stops recording, and
+  // Desktop does not start it again by itself.
+  stopMic();
   closeSocket();
   up = false;
   letScreenGo();

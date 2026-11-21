@@ -22,6 +22,9 @@
 #               tcp 6081 — the raw s16le/48k/stereo tap the APP reads and plays
 #               through AudioTrack. There is no audio device in the guest; see
 #               /etc/pulse/dex.pa, written by linux-setup.sh.
+#               /tmp/.oadx-mic — a pipe the APP writes a browser's microphone
+#               into, read as the source "Browser microphone" (.oadx-desk.pa,
+#               written below).
 #   websockify  tcp 6080 — serves the noVNC web root; the launcher's WebView
 #               loads OUR page from it, staged in there by LinuxService:
 #               http://127.0.0.1:6080/dex.html?password=<vncpass>&v=<rtpid>
@@ -409,6 +412,26 @@ fi
 GPUEOF
 fi
 
+# A browser's microphone, into Linux (LinuxStreamMic.java): the app writes the
+# computer's sound into a pipe in the guest's /tmp, and PulseAudio reads it as
+# a source of its own, the default one, so that whatever records in Linux hears
+# the computer. module-pipe-source makes the pipe itself (the session removes
+# a killed one's first, since the module refuses one already there) and holds
+# it open both ways, so the app can open it without waiting and never sees it
+# end. Beside dex.pa rather than in it: linux-setup.sh writes dex.pa once, and
+# this has to reach guests that already exist, so it is written at every start,
+# into /tmp (the guest's, which is $ROOT/tmp here). .nofail: a daemon that
+# could not make the pipe still has its sound card and its tap, which dex.pa
+# keeps fatal.
+mkdir -p "$ROOT/tmp" 2>/dev/null
+cat > "$ROOT/tmp/.oadx-desk.pa" 2>/dev/null <<'PAEOF'
+# Written by LinuxOnDroid's linux-rt.sh at every start of the desktop.
+.include /etc/pulse/dex.pa
+.nofail
+load-module module-pipe-source source_name=browser_mic file=/tmp/.oadx-mic format=s16le rate=48000 channels=1 source_properties="device.description='Browser microphone'"
+set-default-source browser_mic
+PAEOF
+
 # The guest session, as one string so the quoting stays in one place.
 #
 # A stale X lock from a killed session would stop Xvnc starting again, hence
@@ -499,10 +522,17 @@ DBUS=$!
 # somebody else -- at which point the next daemon refuses to start, saying one
 # is already running. Nothing in that directory is worth keeping: with no unix
 # socket and no cookie in this configuration, it holds only the pid file.
+#
+# Started on /tmp/.oadx-desk.pa where the host wrote it: dex.pa, and the
+# browser microphone beside it (see above, outside this string). The pipe of a
+# killed session goes first, or the module would refuse to make its own.
 PULSE=
 if [ -x /usr/bin/pulseaudio ] && [ -f /etc/pulse/dex.pa ]; then
   rm -rf /tmp/runtime-root/pulse
-  XDG_RUNTIME_DIR=/tmp/runtime-root pulseaudio -n --file=/etc/pulse/dex.pa \
+  rm -f /tmp/.oadx-mic
+  PA=/etc/pulse/dex.pa
+  [ -f /tmp/.oadx-desk.pa ] && PA=/tmp/.oadx-desk.pa
+  XDG_RUNTIME_DIR=/tmp/runtime-root pulseaudio -n --file=$PA \
     --exit-idle-time=-1 --disallow-exit=1 --disable-shm=1 &
   PULSE=$!
 fi

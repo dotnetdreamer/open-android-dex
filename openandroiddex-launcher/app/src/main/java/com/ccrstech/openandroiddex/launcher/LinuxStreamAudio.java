@@ -25,6 +25,11 @@ import java.net.Socket;
  * what is heard. A change of quality changes the sound at the next read, said
  * first ({@link Sink#format}).
  *
+ * <p><b>In 10 ms pieces.</b> Each read takes at most 10 ms of the tap
+ * ({@link #CHUNK}), so PCM goes to the browser 10 ms at a time and the page
+ * can keep that little in hand. Opus stays in 20 ms packets: Android's
+ * encoder makes no other size (C2SoftOpusEnc's frame is fixed at 20 ms).
+ *
  * <p>Silence is not sent: an idle desktop's monitor is a steady 192 kB/s of
  * zeroes, so a run of them longer than {@link #SILENCE_HOLD_MS} stops the
  * sending until sound comes back. Gaps shorter than that inside a sound are
@@ -117,8 +122,8 @@ final class LinuxStreamAudio {
     static final int RATE = 48000;
     /** Bytes in one of the tap's sample frames: two channels of 16 bits. */
     static final int FRAME = 4;
-    /** One read: at most ≈20 ms. The tap hands over what it has, often less. */
-    private static final int CHUNK = RATE / 50 * FRAME;
+    /** One read: at most 10 ms. The tap hands over what it has, often less. */
+    static final int CHUNK = RATE / 100 * FRAME;
     /** Silence longer than this is not sent. */
     static final long SILENCE_HOLD_MS = 500;
     /** As {@link LinuxAudio}'s: the most unplayed backlog kept, ≈250 ms, held against its low point. */

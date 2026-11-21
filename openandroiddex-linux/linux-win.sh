@@ -80,6 +80,24 @@ if [ -n "$SHARED" ]; then
   fi
 fi
 
+# How Chromium draws, the same file linux-rt.sh writes and for the same reasons
+# (see it there): a window of its own may be the only way someone runs Chromium,
+# with no desktop ever started to write it.
+if [ -d "$ROOT/rootfs/etc/chromium.d" ]; then
+  cat > "$ROOT/rootfs/etc/chromium.d/oadx-gpu" 2>/dev/null <<'GPUEOF'
+# Written by LinuxOnDroid each time one of its X displays starts: the desktop's
+# (linux-rt.sh) or the one for apps in windows of their own (linux-win.sh).
+# Read by /usr/bin/chromium on every launch, in that launch's environment.
+# On an Adreno phone whose session found the GPU working, Chromium draws through
+# ANGLE on Vulkan, straight on the phone's driver (Turnip), not GL through Zink:
+# with Zink under its GPU compositing, Chromium leaves full screen the moment it
+# enters it (a video's, F11's). Anywhere else this adds nothing.
+if [ "$OADX_GPU" = turnip ] && [ "$MESA_LOADER_DRIVER_OVERRIDE" = zink ]; then
+  CHROMIUM_FLAGS="$CHROMIUM_FLAGS --use-angle=vulkan --enable-features=Vulkan"
+fi
+GPUEOF
+fi
+
 # The guest side, as one single-quoted string. NO APOSTROPHES ANYWHERE IN IT,
 # prose included — see the same warning in linux-rt.sh.
 #

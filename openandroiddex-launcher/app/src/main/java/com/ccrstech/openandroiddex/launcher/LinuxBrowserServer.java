@@ -66,8 +66,9 @@ import javax.net.ssl.SSLSocket;
  *       points its own name at the phone (DNS rebinding) is answered with
  *       nothing; and every request that changes something must come from this
  *       origin's own page ({@code Origin}).</li>
- *   <li>Every connection has {@link #preAuthMs} to be let in, however slowly
- *       it sends, and one address may hold eight at once.</li>
+ *   <li>Every request has {@link #preAuthMs} to come and be answered,
+ *       however slowly it is sent, until its connection is let in (a stream,
+ *       or Linux's files); and one address may hold sixteen at once.</li>
  * </ul>
  *
  * <p><b>The page.</b> Files from the APK's assets, never from the guest:
@@ -137,9 +138,17 @@ final class LinuxBrowserServer {
 
     private static final int MAX_HEAD = 16 * 1024;
     private static final int MAX_BODY = 4 * 1024;
-    private static final int MAX_HANDLERS = 24;
-    /** A browser opens six at most. */
-    private static final int MAX_PER_PEER = 8;
+    /** Two browsers at their most, and room. */
+    private static final int MAX_HANDLERS = 48;
+    /**
+     * A browser opens six to an address for each scheme (Chromium's limit is
+     * per scheme, host and port), and the page uses both: the plain page and
+     * the secure one it goes to can hold twelve between them for as long as
+     * they are kept alive, and the stream and a transfer of Files' are more;
+     * eight (until 2026-11-20) left no room. A connection past this is closed
+     * unread; one that says nothing still has only its deadline.
+     */
+    private static final int MAX_PER_PEER = 16;
     private static final int FIRST_BYTE_MS = 10_000;
     private static final int IDLE_MS = 15_000;
     /** Wrong codes from one address before it waits. Not final: the test raises it to reach the code's own budget. */
@@ -173,6 +182,9 @@ final class LinuxBrowserServer {
         FILES.put("viewer.js", "text/javascript; charset=utf-8");
         FILES.put("h264.js", "text/javascript; charset=utf-8");
         FILES.put("mse.js", "text/javascript; charset=utf-8");
+        FILES.put("video-worker.js", "text/javascript; charset=utf-8");
+        FILES.put("touch.js", "text/javascript; charset=utf-8");
+        FILES.put("mic-worklet.js", "text/javascript; charset=utf-8");
         FILES.put("keysym.js", "text/javascript; charset=utf-8");
         FILES.put("files.js", "text/javascript; charset=utf-8");
         FILES.put("fileicons.js", "text/javascript; charset=utf-8");
@@ -372,10 +384,9 @@ final class LinuxBrowserServer {
             }
             long now = System.currentTimeMillis();
             for (Map.Entry<Socket, Long> e : deadlines.entrySet()) {
-                if (e.getValue() < now) {
-                    deadlines.remove(e.getKey());
-                    closeQuietly(e.getKey());
-                }
+                Long at = e.getValue();
+                // Only the deadline seen: one renewed meanwhile (a new request) stands.
+                if (at < now && deadlines.remove(e.getKey(), at)) closeQuietly(e.getKey());
             }
             for (Map.Entry<Socket, long[]> e : working.entrySet()) {
                 if (now - e.getValue()[0] > STALL_MS) {
@@ -501,7 +512,14 @@ final class LinuxBrowserServer {
      */
     private boolean serve(InputStream in, Socket io, Socket raw, String peer, boolean secure) throws IOException {
         OutputStream out = new java.io.BufferedOutputStream(io.getOutputStream(), 16 * 1024);
+        boolean first = true;
         while (!stopped) {
+            // The deadline times each request, not the connection's life: a
+            // browser keeps a connection for the page's next file, and one
+            // cut at the deadline set when it came, in the middle of a file,
+            // is that file lost. The time between requests is IDLE_MS's.
+            if (!first) deadlines.computeIfPresent(raw, (k, v) -> System.currentTimeMillis() + preAuthMs);
+            first = false;
             Req r = readHead(in);
             if (r == null || stopped) return false;
             String hostOnly = addressHost(r.headers.getOrDefault("host", ""));

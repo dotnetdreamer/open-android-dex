@@ -292,6 +292,177 @@ body.fullscreen #full .leave { display: inline; }
 .menu button:hover, .menu button:focus-visible { background: rgba(255, 255, 255, 0.07); }
 .menu button[hidden] { display: none; }
 
+/* The microphone: grey while off, red while Linux hears this computer, amber
+   when it is on and the phone says Linux cannot hear it yet. */
+#mic .strike { display: inline; }
+#mic { color: var(--ink-3); }
+#mic[aria-pressed="true"] { color: var(--red); }
+#mic[aria-pressed="true"] .strike { display: none; }
+#mic.warn { color: var(--amber); }
+#mic[aria-pressed="true"]:not(.warn) svg { animation: mic-live 1.6s ease-in-out infinite; }
+@keyframes mic-live { 50% { opacity: 0.55; } }
+
+/* ── touch screens (touch.js) ── */
+
+.touch-only { display: none; }
+body.touch .touch-only { display: grid; }
+#tmode .tm-pad { display: none; }
+body.pad #tmode .tm-touch { display: none; }
+body.pad #tmode .tm-pad { display: inline; }
+#kbd[aria-pressed="true"] { color: var(--amber); }
+
+/* The picture zoomed by a pinch: scaled about its top left, then moved. */
+#screen, #video { transform-origin: 0 0; }
+
+/* The trackpad's pointer: Linux's own shape, and a ring round its hot spot
+   that a finger can find on a busy desktop. */
+.tcur {
+  position: fixed;
+  left: 0;
+  top: 0;
+  z-index: 5;
+  width: 0;
+  height: 0;
+  pointer-events: none;
+  will-change: transform;
+  transition: opacity 0.4s var(--ease);
+}
+.tcur[hidden] { display: none; }
+.tcur img { position: absolute; image-rendering: pixelated; }
+.tcur::after {
+  content: "";
+  position: absolute;
+  left: -13px;
+  top: -13px;
+  width: 26px;
+  height: 26px;
+  border: 2px solid rgba(255, 216, 118, 0.85);
+  border-radius: 50%;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.5), 0 0 12px rgba(255, 193, 49, 0.35);
+}
+.tcur.idle { opacity: 0.35; }
+
+/* A long press deciding between a right-click and a drag. */
+.armed {
+  position: fixed;
+  left: -18px;
+  top: -18px;
+  z-index: 5;
+  width: 36px;
+  height: 36px;
+  border: 2px solid rgba(255, 216, 118, 0.9);
+  border-radius: 50%;
+  background: rgba(255, 193, 49, 0.18);
+  pointer-events: none;
+  animation: armed-in 0.18s var(--ease);
+}
+.armed[hidden] { display: none; }
+@keyframes armed-in { from { opacity: 0; scale: 0.6; } }
+
+/* Back from a pinch to the whole desktop. */
+.fit {
+  position: fixed;
+  left: 50%;
+  bottom: calc(18px + env(safe-area-inset-bottom));
+  z-index: 8;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 38px;
+  padding: 0 16px 0 13px;
+  border: 1px solid var(--edge);
+  border-radius: 999px;
+  background: rgba(15, 21, 33, 0.82);
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 650;
+  transform: translateX(-50%);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45);
+  -webkit-backdrop-filter: blur(16px);
+  backdrop-filter: blur(16px);
+  cursor: pointer;
+}
+.fit[hidden] { display: none; }
+.fit svg { width: 16px; height: 16px; color: var(--amber); }
+body.kbd-on .fit { bottom: calc(70px + env(safe-area-inset-bottom)); }
+
+/* The bar's handle, for a finger: a short line at the top, a large target. */
+.handle {
+  position: fixed;
+  top: 0;
+  left: 50%;
+  z-index: 9;
+  display: none;
+  width: 96px;
+  height: 30px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  transform: translateX(-50%);
+  cursor: pointer;
+}
+.handle span {
+  display: block;
+  width: 44px;
+  height: 5px;
+  margin: 7px auto 0;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.45);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.6);
+}
+body.touch.up:not(.bar-on) .handle { display: block; }
+
+/* The field the screen's keyboard types into: there, focusable, unseen. */
+.kbd-in {
+  position: fixed;
+  left: 0;
+  bottom: 0;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  border: 0;
+  opacity: 0;
+  resize: none;
+  font-size: 16px;
+  caret-color: transparent;
+  pointer-events: none;
+}
+
+/* The keys a screen keyboard lacks, on top of the screen's keyboard. */
+.keys {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 12;
+  display: none;
+  gap: 6px;
+  padding: 7px max(8px, env(safe-area-inset-left)) calc(7px + env(safe-area-inset-bottom)) max(8px, env(safe-area-inset-right));
+  overflow-x: auto;
+  background: rgba(11, 18, 34, 0.94);
+  border-top: 1px solid var(--edge);
+  -webkit-backdrop-filter: blur(16px);
+  backdrop-filter: blur(16px);
+}
+body.kbd-on .keys { display: flex; }
+.keys button {
+  flex: none;
+  min-width: 46px;
+  height: 40px;
+  padding: 0 12px;
+  border: 1px solid var(--edge);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.07);
+  color: var(--ink);
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.keys button:active { background: rgba(255, 255, 255, 0.16); }
+.keys button[aria-pressed="true"] { background: var(--amber); border-color: var(--amber); color: #1a1405; }
+.keys .hide { margin-left: auto; display: grid; place-items: center; }
+.keys .hide svg { width: 20px; height: 20px; }
+
 /* A narrow window: the bar keeps what matters. */
 @media (max-width: 640px) {
   .stats, .sep, .who { display: none; }

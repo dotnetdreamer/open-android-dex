@@ -22,6 +22,9 @@
 #               tcp 6081 — the raw s16le/48k/stereo tap the APP reads and plays
 #               through AudioTrack. There is no audio device in the guest; see
 #               /etc/pulse/dex.pa, written by linux-setup.sh.
+#               /tmp/.oadx-mic — a pipe the APP writes a browser's microphone
+#               into, read as the source "Browser microphone" (.oadx-desk.pa,
+#               written below).
 #   websockify  tcp 6080 — serves the noVNC web root; the launcher's WebView
 #               loads OUR page from it, staged in there by LinuxService:
 #               http://127.0.0.1:6080/dex.html?password=<vncpass>&v=<rtpid>
@@ -381,6 +384,54 @@ def main():
 main()
 PYEOF
 
+# How Chromium draws, written into the guest at every start for the reason the
+# dock's keeper is: a guest built by an older setup gets it with no setup pass.
+# Ubuntu's /usr/bin/chromium empties CHROMIUM_FLAGS and then reads every file in
+# /etc/chromium.d, so a flag for every launch goes there; the session's own
+# environment never reaches it. The file decides at each launch, from that
+# launch's environment: on an Adreno phone whose GPU probe passed (OADX_GPU is
+# turnip and GL points at Zink, below), ANGLE on Vulkan, straight on Turnip;
+# anywhere else, nothing, and dex-chromium's own choice stands. Measured on the
+# S25 against GL through Zink (doc/linux-gpu.md): CSS animations, canvas 2D and
+# scrolling 60 frames a second where Zink held them near 45, a 1080p60 video
+# with no frame dropped where Zink dropped 29 to 30%, and full screen that
+# stays, where Chromium on Zink left it the moment it entered it; WebGL 16%
+# slower. Only where Chromium is installed (the directory is its package's).
+if [ -d "$ROOT/rootfs/etc/chromium.d" ]; then
+  cat > "$ROOT/rootfs/etc/chromium.d/oadx-gpu" 2>/dev/null <<'GPUEOF'
+# Written by LinuxOnDroid each time one of its X displays starts: the desktop's
+# (linux-rt.sh) or the one for apps in windows of their own (linux-win.sh).
+# Read by /usr/bin/chromium on every launch, in that launch's environment.
+# On an Adreno phone whose session found the GPU working, Chromium draws through
+# ANGLE on Vulkan, straight on the phone's driver (Turnip), not GL through Zink:
+# with Zink under its GPU compositing, Chromium leaves full screen the moment it
+# enters it (a video's, F11's). Anywhere else this adds nothing.
+if [ "$OADX_GPU" = turnip ] && [ "$MESA_LOADER_DRIVER_OVERRIDE" = zink ]; then
+  CHROMIUM_FLAGS="$CHROMIUM_FLAGS --use-angle=vulkan --enable-features=Vulkan"
+fi
+GPUEOF
+fi
+
+# A browser's microphone, into Linux (LinuxStreamMic.java): the app writes the
+# computer's sound into a pipe in the guest's /tmp, and PulseAudio reads it as
+# a source of its own, the default one, so that whatever records in Linux hears
+# the computer. module-pipe-source makes the pipe itself (the session removes
+# a killed one's first, since the module refuses one already there) and holds
+# it open both ways, so the app can open it without waiting and never sees it
+# end. Beside dex.pa rather than in it: linux-setup.sh writes dex.pa once, and
+# this has to reach guests that already exist, so it is written at every start,
+# into /tmp (the guest's, which is $ROOT/tmp here). .nofail: a daemon that
+# could not make the pipe still has its sound card and its tap, which dex.pa
+# keeps fatal.
+mkdir -p "$ROOT/tmp" 2>/dev/null
+cat > "$ROOT/tmp/.oadx-desk.pa" 2>/dev/null <<'PAEOF'
+# Written by LinuxOnDroid's linux-rt.sh at every start of the desktop.
+.include /etc/pulse/dex.pa
+.nofail
+load-module module-pipe-source source_name=browser_mic file=/tmp/.oadx-mic format=s16le rate=48000 channels=1 source_properties="device.description='Browser microphone'"
+set-default-source browser_mic
+PAEOF
+
 # The guest session, as one string so the quoting stays in one place.
 #
 # A stale X lock from a killed session would stop Xvnc starting again, hence
@@ -471,10 +522,17 @@ DBUS=$!
 # somebody else -- at which point the next daemon refuses to start, saying one
 # is already running. Nothing in that directory is worth keeping: with no unix
 # socket and no cookie in this configuration, it holds only the pid file.
+#
+# Started on /tmp/.oadx-desk.pa where the host wrote it: dex.pa, and the
+# browser microphone beside it (see above, outside this string). The pipe of a
+# killed session goes first, or the module would refuse to make its own.
 PULSE=
 if [ -x /usr/bin/pulseaudio ] && [ -f /etc/pulse/dex.pa ]; then
   rm -rf /tmp/runtime-root/pulse
-  XDG_RUNTIME_DIR=/tmp/runtime-root pulseaudio -n --file=/etc/pulse/dex.pa \
+  rm -f /tmp/.oadx-mic
+  PA=/etc/pulse/dex.pa
+  [ -f /tmp/.oadx-desk.pa ] && PA=/tmp/.oadx-desk.pa
+  XDG_RUNTIME_DIR=/tmp/runtime-root pulseaudio -n --file=$PA \
     --exit-idle-time=-1 --disallow-exit=1 --disable-shm=1 &
   PULSE=$!
 fi

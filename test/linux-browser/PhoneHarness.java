@@ -25,14 +25,28 @@ import java.util.Base64;
  * {@code EV} lines, and {@code STREAMING true|false}. Takes
  * {@code clip <base64>}, {@code code}, {@code slowhandoff <ms>} (a browser
  * let in waits that long, said with {@code HANDOFF}, before LinuxStream
- * has it: the moment a sign-out or the switch could miss it), and
+ * has it: the moment a sign-out or the switch could miss it),
+ * {@code desktop starting|running} (a Linux still booting, or up), and
  * {@code signout}, {@code off}, {@code on} and {@code alive}, which run on a
  * main thread that, as an app's does, dies on any network use. Exits when
  * stdin closes, or after five minutes with nobody watching.
+ *
+ * <p>A browser's microphone goes where Linux's PulseAudio would read it: a
+ * pipe in the state directory ({@code mic}), made here and read as
+ * module-pipe-source reads it (open both ways, read as it comes), the bytes
+ * and the loudness said once a second as {@code MIC <bytes> <rms>}.
+ * {@code micpipe none} points LinuxStream at a pipe that is not there (a
+ * Linux started by an older app), {@code micpipe fifo} back at this one.
  */
 public final class PhoneHarness {
     /** How long a browser let in waits before LinuxStream has it; 0 for not at all. */
     static volatile long slowHandoffMs;
+    /**
+     * What the desktop is, as LinuxService would say it: "running", or
+     * "starting" ({@code desktop starting}) to hold a session in
+     * LinuxStream's wait for it, as a Linux that takes its time to boot does.
+     */
+    static volatile String desktop = "running";
 
     public static void main(String[] args) throws Exception {
         File dir = new File(args[0]);
@@ -49,7 +63,7 @@ public final class PhoneHarness {
         LinuxStream.start("oadx-browser-test.linux-stream", new LinuxStream.Host() {
             @Override
             public String desktopState() {
-                return "running";
+                return desktop;
             }
 
             @Override
@@ -84,6 +98,59 @@ public final class PhoneHarness {
                 return "Phone harness";
             }
         });
+        // Linux's microphone, as PulseAudio's pipe source holds it.
+        final File micFifo = new File(dir, "mic");
+        dir.mkdirs();
+        micFifo.delete();
+        // The shell may not make a pipe in /data/local/tmp (SELinux, on the
+        // S25: EACCES); then a plain file, read as it grows, stands in for it.
+        boolean fifo;
+        try {
+            android.system.Os.mkfifo(micFifo.getPath(), 0600);
+            fifo = true;
+        } catch (android.system.ErrnoException e) {
+            new java.io.FileOutputStream(micFifo).close();
+            fifo = false;
+            System.out.println("MIC a plain file for the pipe (" + e.getMessage() + ")");
+            System.out.flush();
+        }
+        final boolean isFifo = fifo;
+        LinuxStream.micPipe = micFifo;
+        Thread micReader = new Thread(() -> {
+            try {
+                java.io.FileDescriptor fd = android.system.Os.open(micFifo.getPath(),
+                        isFifo ? android.system.OsConstants.O_RDWR : android.system.OsConstants.O_RDONLY, 0);
+                byte[] buf = new byte[4096];
+                long total = 0;
+                long reported = System.currentTimeMillis();
+                double loud = 0;
+                while (true) {
+                    int n = android.system.Os.read(fd, buf, 0, buf.length);
+                    if (n <= 0) {
+                        Thread.sleep(5);
+                        continue;
+                    }
+                    total += n;
+                    double sum = 0;
+                    for (int k = 0; k + 1 < n; k += 2) {
+                        short v = (short) ((buf[k] & 0xff) | (buf[k + 1] << 8));
+                        sum += (double) v * v;
+                    }
+                    loud = Math.max(loud * 0.9, Math.sqrt(sum / Math.max(1, n / 2)));
+                    long now = System.currentTimeMillis();
+                    if (now - reported >= 1000) {
+                        System.out.println("MIC " + total + " " + Math.round(loud));
+                        System.out.flush();
+                        reported = now;
+                    }
+                }
+            } catch (Exception e) {
+                System.out.println("MIC failed " + e);
+                System.out.flush();
+            }
+        }, "harness-mic");
+        micReader.setDaemon(true);
+        micReader.start();
         LinuxBrowser store = new LinuxBrowser(dir);
         store.setOn(true);
         // The phone's card "showing the code": pairing is open, as it is while the page is in front.
@@ -182,6 +249,14 @@ public final class PhoneHarness {
                         } catch (Exception e) {
                             System.out.println("FAILED on " + e);
                         }
+                        System.out.flush();
+                    } else if (line.startsWith("desktop ")) {
+                        desktop = line.substring(8).trim();
+                        System.out.println("OK desktop " + desktop);
+                        System.out.flush();
+                    } else if (line.startsWith("micpipe ")) {
+                        LinuxStream.micPipe = line.endsWith(" none") ? new File(dir, "no-such-pipe") : micFifo;
+                        System.out.println("OK micpipe " + LinuxStream.micPipe.getName());
                         System.out.flush();
                     } else if (line.equals("alive")) {
                         main.post(() -> {

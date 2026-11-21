@@ -253,7 +253,10 @@ final class LinuxStreamSocket implements Closeable {
         int fragments = 0;
         while (true) {
             int b0 = in.read();
-            if (b0 < 0) return null;
+            if (b0 < 0) {
+                closeHeard = true;
+                return null;
+            }
             int b1 = readByte();
             boolean fin = (b0 & 0x80) != 0;
             int opcode = b0 & 0x0F;
@@ -279,6 +282,7 @@ final class LinuxStreamSocket implements Closeable {
             }
             switch (opcode) {
                 case OP_CLOSE:
+                    closeHeard = true;
                     return null;
                 case OP_PING:
                     writeFrame(OP_PONG, null, payload, payload.length);
@@ -404,26 +408,118 @@ final class LinuxStreamSocket implements Closeable {
     }
 
     /**
+     * The close frame, and the socket left open: for a stream whose own
+     * reader reads on until the other end closes too ({@code
+     * LinuxStream.Session.closeAfterWord}). False when it could not go within
+     * {@code waitMs}, a writer holding the socket (a frame stuck on a link
+     * that has stopped), or the socket gone. Either way the goodbye is this
+     * call's from here: {@link #close} sends none after it, so that a close
+     * never waits on a link this could not say it on.
+     */
+    boolean sayClose(long waitMs) {
+        return sayLast(null, waitMs);
+    }
+
+    /**
+     * {@code text} (a last word; null for none) and the close frame, together
+     * under one hold of the socket's lock, so that nothing can come between
+     * them: false, and nothing said, when the lock is not free within {@code
+     * waitMs} (a writer stuck on a link that has stopped) or the socket goes.
+     * As {@link #sayClose}, the goodbye is this call's from here.
+     */
+    boolean sayLast(String text, long waitMs) {
+        if (closed) return false;
+        closeSaid = true;
+        try {
+            if (!writeLock.tryLock(waitMs, java.util.concurrent.TimeUnit.MILLISECONDS)) return false;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return false;
+        }
+        try {
+            if (closed) return false;
+            if (text != null) {
+                byte[] b = text.getBytes(StandardCharsets.UTF_8);
+                // The lock is held already: writeFrame takes it again (a ReentrantLock).
+                writeFrame(OP_TEXT, null, b, b.length);
+            }
+            out.write(new byte[]{(byte) (0x80 | OP_CLOSE), 0});
+            out.flush();
+            return true;
+        } catch (IOException e) {
+            return false;
+        } finally {
+            writeLock.unlock();
+        }
+    }
+
+    /** The goodbye is {@link #sayClose}'s, said or given up: {@link #close} sends none. */
+    private volatile boolean closeSaid;
+
+    /** The other end's close frame came, or its end of the connection closed: nothing more will. */
+    private volatile boolean closeHeard;
+
+    boolean closeHeard() {
+        return closeHeard;
+    }
+
+    /**
+     * How long {@link #close}'s goodbye may take before the socket goes under
+     * it: a far end that stopped reading leaves the send buffer full, and a
+     * write then waits for as long as the link stays up.
+     */
+    static final long GOODBYE_MS = 500;
+
+    private static final java.util.concurrent.ScheduledExecutorService GUARD =
+            java.util.concurrent.Executors.newSingleThreadScheduledExecutor(r -> {
+                Thread t = new Thread(r, "linux-stream-goodbye-guard");
+                t.setDaemon(true);
+                return t;
+            });
+
+    /**
      * Say goodbye when nothing else is writing, then close the socket — which
      * is also what frees a writer stuck on a dead link. Any thread, any number
-     * of times.
+     * of times, and never held up by the link: a goodbye still unwritten
+     * after {@link #GOODBYE_MS} is given up, the connection reset under it.
      */
     @Override
     public void close() {
         if (closed) return;
-        if (writeLock.tryLock()) {
+        if (!closeSaid && writeLock.tryLock()) {
+            java.util.concurrent.ScheduledFuture<?> guard = null;
             try {
-                if (!closed) {
+                if (!closed && !closeSaid) {
+                    guard = GUARD.schedule(this::abort, GOODBYE_MS, java.util.concurrent.TimeUnit.MILLISECONDS);
                     out.write(new byte[]{(byte) (0x80 | OP_CLOSE), 0});
                     out.flush();
                 }
-            } catch (IOException ignored) {
+            } catch (IOException | java.util.concurrent.RejectedExecutionException ignored) {
                 // already gone
             } finally {
+                if (guard != null) guard.cancel(false);
                 writeLock.unlock();
             }
         }
         closed = true;
+        try {
+            underlying.close();
+        } catch (IOException ignored) {
+        }
+    }
+
+    /**
+     * Closed without the goodbye, at once: a reset (SO_LINGER 0), so that
+     * neither TLS's close nor TCP's waits on the buffer the far end does not
+     * read; that is also what wakes the write it held up.
+     */
+    private void abort() {
+        closed = true;
+        try {
+            if (underlying instanceof java.net.Socket) ((java.net.Socket) underlying).setSoLinger(true, 0);
+        } catch (IOException | RuntimeException ignored) {
+            // closing anyway
+        }
         try {
             underlying.close();
         } catch (IOException ignored) {

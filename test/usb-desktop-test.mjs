@@ -79,6 +79,36 @@ console.log("h264.ts");
   check("a P slice is not key", !p.key && p.sps === null && p.data.length === 7);
 }
 
+console.log("wire.ts");
+{
+  // What the phone reads the link by (LinuxStream.java): the hello says the
+  // acknowledgements carry times, and each is 0x12 then the arrival time in
+  // ms as a big-endian float64, as a browser page's are.
+  const w = await import(pathToFileURL(path.join(USB, "wire.ts")).href);
+  const hello = w.helloOf(true, 1920, 1080, 22_000_000, true);
+  check("the hello: the size, the route's bitrate, acknowledgements, and their times",
+    hello.t === "hello" && hello.v === 1 && hello.start === true && hello.w === 1920 && hello.h === 1080
+      && hello.bitrate === 22_000_000 && hello.fps === 60 && hello.acks === true && hello.ackAt === true, JSON.stringify(hello));
+  // The phone's rule takes a round trip over 400 ms for a queue: read only on the local network.
+  check("times read on the local network only: the cable and Wi-Fi yes, the internet and a relay no",
+    w.localRoute("cable") && w.localRoute("wifi") && !w.localRoute("remote") && !w.localRoute("relay"));
+  check("…off it, the hello says no times", w.helloOf(false, 1280, 720, 6_000_000, w.localRoute("relay")).ackAt === false);
+  // Over wireless debugging the new rule was no better on the S25 (2026-11-21): the old rule there.
+  check("times read on the cable and the tunnel on the same network, not over wireless debugging",
+    w.readsTimes("cable", false) && w.readsTimes("wifi", false) && !w.readsTimes("wifi", true)
+      && !w.readsTimes("remote", false) && !w.readsTimes("relay", false));
+  const moved = w.routeChangedOf(2_700_000, false);
+  check("a route changed under a live stream: its ceiling, and whether its times are read from here on",
+    moved.t === "bitrate" && moved.bitrate === 2_700_000 && moved.ackAt === false, JSON.stringify(moved));
+  check("…and the acknowledgement off it is the one byte an older phone reads", w.PLAIN_ACK.length === 1 && w.PLAIN_ACK[0] === 0x12);
+  const at = 1_795_000_000_123.25;
+  const a = w.ackOf(at);
+  check("an acknowledgement: 0x12, then when the frame arrived (ms, float64, big-endian)",
+    a.length === 9 && a[0] === 0x12 && new DataView(a.buffer, a.byteOffset, a.byteLength).getFloat64(1) === at, Array.from(a).join(","));
+  const now = Date.now();
+  check("…by this computer's clock, in ms since 1970", Math.abs(w.clock() - now) < 1000, `${w.clock()} vs ${now}`);
+}
+
 console.log("keysym.ts");
 {
   const k = await import(pathToFileURL(path.join(USB, "keysym.ts")).href);

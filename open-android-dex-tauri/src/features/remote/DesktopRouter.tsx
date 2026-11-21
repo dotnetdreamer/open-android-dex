@@ -48,7 +48,7 @@ interface UsbLink {
 type Route =
   | { kind: "probing" }
   /** The video, over adb or through the tunnel; `route` is the pill's word for the way. */
-  | { kind: "video"; via: "adb" | "tunnel"; url: string; route: string; tier: Tier; start: boolean; key: number }
+  | { kind: "video"; via: "adb" | "tunnel"; url: string; route: string; tier: Tier; start: boolean; key: number; wirelessAdb: boolean }
   /** The viewer page, through the tunnel. */
   | { kind: "tunnel"; key: number };
 
@@ -138,11 +138,12 @@ export function DesktopRouter({ phoneId }: { phoneId: string }) {
         tier: link.wireless ? "wifi" : "cable",
         start,
         key: ++n,
+        wirelessAdb: link.wireless,
       });
     };
     const toTunnelVideo = (v: TunnelVideo, start: boolean) => {
       videoSince = Date.now();
-      setRoute({ kind: "video", via: "tunnel", url: v.url, route: v.route ?? "Remote", tier: tierOf(v.route), start, key: ++n });
+      setRoute({ kind: "video", via: "tunnel", url: v.url, route: v.route ?? "Remote", tier: tierOf(v.route), start, key: ++n, wirelessAdb: false });
     };
     const toViewer = () => setRoute((r) => (r.kind === "tunnel" ? r : { kind: "tunnel", key: ++n }));
 
@@ -454,6 +455,7 @@ export function DesktopRouter({ phoneId }: { phoneId: string }) {
         url={route.url}
         route={route.route}
         tier={route.tier}
+        wirelessAdb={route.wirelessAdb}
         name={name}
         start={route.start}
         host={host}

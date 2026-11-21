@@ -32,6 +32,36 @@
 
 <div id="hint" class="hint" aria-hidden="true"></div>
 
+<!-- Touch screens (touch.js): the trackpad's pointer, the ring a long press
+     shows while it decides, the way back from a pinch, and a handle for the
+     bar, which a finger cannot bring down by resting at the top. -->
+<div id="tcur" class="tcur" hidden aria-hidden="true"><img id="tcur-img" alt=""></div>
+<div id="armed" class="armed" hidden aria-hidden="true"></div>
+<button type="button" id="fit" class="fit" hidden>
+  <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3.5 7.5v-4h4M12.5 3.5h4v4M16.5 12.5v4h-4M7.5 16.5h-4v-4" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
+  <span>Fit</span>
+</button>
+<button type="button" id="handle" class="handle"><span aria-hidden="true"></span></button>
+
+<!-- The screen's keyboard types into this field, out of sight; the strip of
+     keys a screen keyboard lacks sits on top of the screen's keyboard. -->
+<textarea id="kbd-in" class="kbd-in" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"
+          aria-label="Typing for Linux"></textarea>
+<div id="keys" class="keys" role="toolbar" aria-label="Keys for Linux">
+  <button type="button" data-ks="0xff1b">Esc</button>
+  <button type="button" data-ks="0xff09">Tab</button>
+  <button type="button" data-ks="0xffe3" data-sticky aria-pressed="false">Ctrl</button>
+  <button type="button" data-ks="0xffe9" data-sticky aria-pressed="false">Alt</button>
+  <button type="button" data-ks="0xffeb" title="The Super key, the Windows key on a PC">Super</button>
+  <button type="button" data-ks="0xff51" aria-label="Left">&#8592;</button>
+  <button type="button" data-ks="0xff52" aria-label="Up">&#8593;</button>
+  <button type="button" data-ks="0xff54" aria-label="Down">&#8595;</button>
+  <button type="button" data-ks="0xff53" aria-label="Right">&#8594;</button>
+  <button type="button" id="keys-hide" class="hide" data-hide>
+    <svg viewBox="0 0 20 20" aria-hidden="true"><rect x="2.5" y="4" width="15" height="9" rx="1.8" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M5.5 7h1M8.5 7h1M11.5 7h1M14.5 7h0M6 10h8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><path d="M7.5 15.5l2.5 2 2.5-2" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+  </button>
+</div>
+
 <div id="bar" class="bar" role="toolbar" aria-label="Linux">
   <div class="who"><span id="bar-dot" class="dot"></span><span id="bar-name">Linux</span><span id="bar-plain" class="plain" hidden></span></div>
   <div id="modes" class="seg" role="radiogroup" aria-label="Picture" data-mode="medium">
@@ -58,8 +88,18 @@
   <button type="button" id="sound" class="icon" aria-pressed="true">
     <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3.5 7.5h3l4-3.5v12l-4-3.5h-3z" fill="currentColor"/><path class="waves" d="M13.3 7.2a4 4 0 0 1 0 5.6M15.4 5.1a7 7 0 0 1 0 9.8" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><path class="strike" d="M13 7.5l4.5 5M17.5 7.5l-4.5 5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
   </button>
+  <button type="button" id="mic" class="icon" aria-pressed="false">
+    <svg viewBox="0 0 20 20" aria-hidden="true"><rect x="7.2" y="2.5" width="5.6" height="10" rx="2.8" fill="currentColor"/><path d="M4.8 9.5a5.2 5.2 0 0 0 10.4 0M10 14.7v2.8M7.2 17.5h5.6" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><path class="strike" d="M3.5 3.5l13 13" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+  </button>
   <button type="button" id="clip" class="icon" aria-pressed="true">
     <svg viewBox="0 0 20 20" aria-hidden="true"><rect x="5.5" y="4" width="9" height="13" rx="2" fill="none" stroke="currentColor" stroke-width="1.6"/><rect x="7.5" y="2.5" width="5" height="3" rx="1" fill="currentColor"/><path class="strike" d="M3.5 3.5l13 13" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+  </button>
+  <button type="button" id="tmode" class="icon touch-only" aria-pressed="false">
+    <svg class="tm-touch" viewBox="0 0 20 20" aria-hidden="true"><path d="M8 10.5V4.2a1.4 1.4 0 0 1 2.8 0v5.3l3.6.7a1.8 1.8 0 0 1 1.4 2.1l-.6 3.4a2.2 2.2 0 0 1-2.2 1.8H9.6a2.2 2.2 0 0 1-1.7-.8L5 13.2a1.3 1.3 0 0 1 1.9-1.8z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg>
+    <svg class="tm-pad" viewBox="0 0 20 20" aria-hidden="true"><rect x="2.5" y="3.5" width="15" height="13" rx="2.2" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M8.6 6.6l.1 6.4 1.6-1.5 1.1 2.4 1.2-.5-1.1-2.4 2.1-.2z" fill="currentColor"/></svg>
+  </button>
+  <button type="button" id="kbd" class="icon touch-only" aria-pressed="false">
+    <svg viewBox="0 0 20 20" aria-hidden="true"><rect x="2" y="5" width="16" height="10" rx="1.8" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M5 8.2h1M8 8.2h1M11 8.2h1M14 8.2h1M5.5 11.8h9" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
   </button>
   <button type="button" id="full" class="icon">
     <svg class="enter" viewBox="0 0 20 20" aria-hidden="true"><path d="M3.5 7.5v-4h4M12.5 3.5h4v4M16.5 12.5v4h-4M7.5 16.5h-4v-4" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
