@@ -456,12 +456,27 @@ SESSION='rm -f /tmp/.X1-lock /tmp/.X11-unix/X1 /tmp/.oadx-bus
 mkdir -p /tmp/runtime-root && chmod 700 /tmp/runtime-root
 # The GPU (doc/linux-gpu.md). OADX_GPU names the driver the app copied into
 # this guest: turnip on an Adreno phone, xclipse (RADV) on an Exynos with an
-# Xclipse GPU, nothing anywhere else. Whether it really runs here is the probe
+# Xclipse GPU, virgl on any other 64-bit phone, nothing on a phone whose GPU
+# check said no. Whether it really runs here is the probe
 # to say, which opens the GPU the way an app would, through that driver alone.
 # It runs beside the Xvnc start, so it costs the session next to nothing.
 GPUPROBE=
 GPUDIR=/usr/local/lib/openandroiddex/gpu
-if [ -n "$OADX_GPU" ] && [ -x $GPUDIR/oadx-vkprobe ] && [ -f $GPUDIR/${OADX_GPU}_icd.json ]; then
+# VirGL (OADX_GPU=virgl), on a GPU no driver of ours runs: the app runs a
+# server on the Android side, on the phone own GL driver, at
+# /tmp/.virgl_test, and Mesa in here reaches it as GALLIUM_DRIVER=virpipe.
+# Its probe asks Mesa for a GL context that way and wants a VirGL renderer,
+# through EGL, or through GLX on this display where the guest has no EGL.
+if [ "$OADX_GPU" = virgl ]; then
+  if [ -S /tmp/.virgl_test ] && [ -x $GPUDIR/oadx-glprobe ]; then
+    GALLIUM_DRIVER=virpipe LIBGL_ALWAYS_SOFTWARE=1 DISPLAY=:1 \
+      timeout 15 $GPUDIR/oadx-glprobe >/tmp/.oadx-gpu 2>&1 &
+    GPUPROBE=$!
+  else
+    echo "no VirGL server at /tmp/.virgl_test" >/tmp/.oadx-gpu
+    echo "gpu: not used -- no VirGL server at /tmp/.virgl_test"
+  fi
+elif [ -n "$OADX_GPU" ] && [ -x $GPUDIR/oadx-vkprobe ] && [ -f $GPUDIR/${OADX_GPU}_icd.json ]; then
   VK_ICD_FILENAMES=$GPUDIR/${OADX_GPU}_icd.json \
     timeout 15 $GPUDIR/oadx-vkprobe >/tmp/.oadx-gpu 2>&1 &
   GPUPROBE=$!
@@ -480,7 +495,17 @@ XVNC=$!
 # GALLIUM_DRIVER=zink: that puts Zink under the software GL path, where it
 # renders and never shows a frame -- measured, a black window at 1600 FPS.
 if [ -n "$GPUPROBE" ]; then
-  if wait $GPUPROBE; then
+  wait $GPUPROBE
+  GPURC=$?
+  if [ "$OADX_GPU" = virgl ] && [ $GPURC = 0 ]; then
+    echo "gpu: VirGL, $(head -c 200 /tmp/.oadx-gpu)"
+    export GALLIUM_DRIVER=virpipe
+  elif [ "$OADX_GPU" = virgl ] && [ $GPURC = 2 ]; then
+    # No Mesa in this guest yet, so no GL app either: the server was
+    # checked on the Android side, and an app installed later gets it.
+    echo "gpu: VirGL, not checked in the guest -- $(head -c 200 /tmp/.oadx-gpu)"
+    export GALLIUM_DRIVER=virpipe
+  elif [ $GPURC = 0 ]; then
     echo "gpu: $(head -c 200 /tmp/.oadx-gpu)"
     export MESA_LOADER_DRIVER_OVERRIDE=zink LIBGL_KOPPER_DRI2=1 MESA_VK_WSI_DEBUG=sw
   else

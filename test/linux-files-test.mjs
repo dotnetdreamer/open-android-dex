@@ -716,6 +716,8 @@ async function launchBrowser() {
   const pageErrors = [];
   const downloads = [];
   const netlog = [];
+  /** Requests DevTools holds (Fetch.enable), the newest last. */
+  const held = [];
   sock.onmessage = (ev) => {
     const m = JSON.parse(ev.data);
     if (m.id && pending.has(m.id)) {
@@ -731,6 +733,8 @@ async function launchBrowser() {
         reused: m.params.response ? m.params.response.connectionReused : undefined, err: m.params.errorText });
     } else if (m.method === 'Browser.downloadProgress' || m.method === 'Page.downloadProgress') {
       downloads.push(m.params);
+    } else if (m.method === 'Fetch.requestPaused') {
+      held.push(m.params);
     } else if (m.method === 'Page.javascriptDialogOpening') {
       sock.send(JSON.stringify({ id: ++id, method: 'Page.handleJavaScriptDialog', params: { accept: true } }));
     }
@@ -755,7 +759,7 @@ async function launchBrowser() {
   await cdp('Runtime.enable');
   await cdp('DOM.enable');
   if (process.env.NETLOG) await cdp('Network.enable');
-  return { cdp, js, shot, pageErrors, downloads, kill, netlog };
+  return { cdp, js, shot, pageErrors, downloads, kill, netlog, held };
 }
 
 const B = await launchBrowser();
@@ -893,6 +897,243 @@ console.log('Files in the page');
   const both = await until(() => fs.existsSync(path.join(rootfs, 'root/Documents/report (2).txt')), 8000);
   check('…keep both: "report (2).txt" beside the first, which is as it was', !!both
     && fs.readFileSync(path.join(rootfs, 'root/Documents/report.txt'), 'utf8') === 'from the computer\n');
+
+  // A different 20 MB file with the same name, size and time (two different
+  // files can share both, and the quick check takes one for the other):
+  // Replace sends it, and Linux has its bytes. Then the first one again,
+  // Replace: sent again, whatever the quick check says, and its bytes back.
+  // Until 2026-11-21 Replace kept the file there, without a word, whenever
+  // the size and time matched. (Before that, the same file again ended in
+  // "The phone stopped answering": the phone answered before reading the
+  // body and hung up, and Edge, still sending, saw only the reset.)
+  await js(`window.__puts = 0; (() => { const o = XMLHttpRequest.prototype.open; XMLHttpRequest.prototype.open = function (m, u, ...r) {
+    if (m === 'PUT' && String(u).includes('fs/put')) window.__puts++; return o.call(this, m, u, ...r); }; })()`);
+  const otherFilm = path.join(local, 'other', 'film.bin');
+  fs.mkdirSync(path.dirname(otherFilm), { recursive: true });
+  fs.writeFileSync(otherFilm, crypto.randomBytes(20 * 1024 * 1024));
+  const bigTimes = fs.statSync(sendBig);
+  fs.utimesSync(otherFilm, bigTimes.atime, bigTimes.mtime);
+  const replaceWith = async (file) => {
+    await js('window.__puts = 0');
+    await dropFiles(list.x, list.y + 120, [file]);
+    const asked = await until(() => js(`(() => { const d = document.querySelector('dialog.fx-dialog[open]'); return d ? d.querySelector('h2').textContent : null; })()`), 5000);
+    await js(`[...document.querySelectorAll('dialog.fx-dialog[open] button')].find((b) => b.textContent === 'Replace').click()`);
+    const done = await until(() => js(`(() => { const j = [...document.querySelectorAll('.tray .job')].find((x) => x.querySelector('.job-name').textContent === 'film.bin' && !x.dataset.seenByTest);
+      if (!j || ['running', 'queued', 'preparing'].includes(j.dataset.state)) return null;
+      j.dataset.seenByTest = '1'; return j.dataset.state + ' · ' + j.querySelector('.job-status').textContent; })()`), 20000);
+    return { asked, done, puts: await js('window.__puts') };
+  };
+  const onLinux = () => fs.readFileSync(path.join(rootfs, 'root/Documents/film.bin'));
+  const toOther = await replaceWith(otherFilm);
+  const hasOther = onLinux().equals(fs.readFileSync(otherFilm));
+  check('…a different 20 MB file with the same name, size and time, Replace: sent, and Linux has its bytes',
+    toOther.asked === '“film.bin” is already in Documents' && /^done · /.test(toOther.done || '') && !/already there/.test(toOther.done || '')
+      && toOther.puts === 1 && hasOther, JSON.stringify({ toOther, hasOther, tray: await trayState() }));
+  const back = await replaceWith(sendBig);
+  const hasFirst = onLinux().equals(fs.readFileSync(sendBig));
+  check('…and the first one again, Replace: sent again, its bytes back',
+    /^done · /.test(back.done || '') && back.puts === 1 && hasFirst, JSON.stringify({ back, hasFirst }));
+
+  // Cancel, and Pause, pressed while the page asks the phone about a big file
+  // (the `part` question before its PUT): nothing is sent, and the file there
+  // stays as it was. DevTools holds the question in the browser until the
+  // panel's button has been pressed with the mouse, then lets the phone's
+  // answer through. Until 2026-11-22 the page sent the PUT once that answer
+  // came, whatever had been pressed: a cancelled Replace still replaced the
+  // file, and a paused one went on sending.
+  await cdp('Fetch.enable', { patterns: [{ urlPattern: '*/fs/part*', requestStage: 'Request' }] });
+  /**
+   * A job's button in the panel, where the mouse would press it: the panel
+   * opened first with its own Fold button when it has folded itself away
+   * (it does 6 s after a job finishes while nothing moves, and a paused job
+   * is not moving), as a person would open it. Where the button is once the
+   * panel has stopped moving (it slides open: a press read mid-slide lands
+   * beside the button).
+   */
+  const panelButton = async (label, name = 'film.bin') => {
+    if (await js(`!!document.querySelector('.tray.collapsed')`)) {
+      const f = await center('.tray .tray-fold');
+      if (f) await mouse(f.x, f.y);
+    }
+    const where = () => js(`(() => { const j = [...document.querySelectorAll('.tray .job')].find((x) => x.querySelector('.job-name').textContent === ${JSON.stringify(name)} && !x.dataset.seenByTest);
+      const b = j && j.querySelector('button[aria-label="${label}"]'); if (!b) return null; const r = b.getBoundingClientRect();
+      return r.width > 0 && r.height > 0 ? { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) } : null; })()`);
+    let last = null;
+    return until(async () => {
+      const at = await where();
+      const still = at && last && at.x === last.x && at.y === last.y;
+      last = at;
+      return still ? at : null;
+    }, 3000, 120);
+  };
+  const jobState = (name = 'film.bin') => js(`(() => { const j = [...document.querySelectorAll('.tray .job')].find((x) => x.querySelector('.job-name').textContent === ${JSON.stringify(name)} && !x.dataset.seenByTest);
+    return j ? j.dataset.state + ' · ' + j.querySelector('.job-status').textContent : 'gone'; })()`);
+  /** Replace with {@code file}; once its question is held, {@code label} pressed; then the answer let through. */
+  const pressWhileAsked = async (file, label) => {
+    B.held.length = 0;
+    await js('window.__puts = 0');
+    await dropFiles(list.x, list.y + 120, [file]);
+    await until(() => js(`!!document.querySelector('dialog.fx-dialog[open]')`), 5000);
+    await js(`[...document.querySelectorAll('dialog.fx-dialog[open] button')].find((b) => b.textContent === 'Replace').click()`);
+    const asked = await until(() => B.held.find((p) => p.request.url.includes('/fs/part')), 8000);
+    const at = await panelButton(label);
+    if (at) await mouse(at.x, at.y);
+    const after = await jobState();
+    if (asked) await cdp('Fetch.continueRequest', { requestId: asked.requestId });
+    await sleep(2500);
+    return { asked: !!asked, fresh: !!asked && asked.request.url.includes('fresh=1'), pressed: at, after, puts: await js('window.__puts'), now: await jobState() };
+  };
+  const cancelled = await pressWhileAsked(otherFilm, 'Cancel');
+  const keptOnCancel = onLinux().equals(fs.readFileSync(sendBig));
+  check('Cancel pressed while the phone is asked about a big file: nothing is sent, and the file there stays as it was',
+    cancelled.asked && !!cancelled.pressed && cancelled.puts === 0 && keptOnCancel,
+    JSON.stringify({ cancelled, keptOnCancel }));
+  await until(() => js(`![...document.querySelectorAll('.tray .job')].some((x) => x.querySelector('.job-name').textContent === 'film.bin' && !x.dataset.seenByTest)`), 5000);
+  const paused = await pressWhileAsked(otherFilm, 'Pause');
+  const keptOnPause = onLinux().equals(fs.readFileSync(sendBig));
+  check('…Pause pressed then: nothing is sent while paused, and the file there stays as it was',
+    paused.asked && !!paused.pressed && paused.puts === 0 && /^paused/.test(paused.now) && keptOnPause,
+    JSON.stringify({ paused, keptOnPause }));
+  // Resume: asked again (from what the phone has, not fresh), and then sent.
+  B.held.length = 0;
+  const play = await panelButton('Resume');
+  if (play) await mouse(play.x, play.y);
+  const again = await until(() => B.held.find((p) => p.request.url.includes('/fs/part')), 8000);
+  if (again) await cdp('Fetch.continueRequest', { requestId: again.requestId });
+  const resumed = await until(() => js(`(() => { const j = [...document.querySelectorAll('.tray .job')].find((x) => x.querySelector('.job-name').textContent === 'film.bin' && !x.dataset.seenByTest);
+    if (!j || ['running', 'queued', 'paused'].includes(j.dataset.state)) return null; j.dataset.seenByTest = '1'; return j.dataset.state + ' · ' + j.querySelector('.job-status').textContent; })()`), 20000);
+  const hasResumed = onLinux().equals(fs.readFileSync(otherFilm));
+  check('…Resume: asked again from what the phone has, then sent, and Linux has the new bytes',
+    !!play && !!again && !again.request.url.includes('fresh=1') && /^done · /.test(resumed || '') && (await js('window.__puts')) === 1 && hasResumed,
+    JSON.stringify({ play, again: again && again.request.url.replace(/^.*\?/, ''), resumed, puts: await js('window.__puts'), hasResumed, now: await jobState() }));
+  await cdp('Fetch.disable');
+  // The first film back, for the downloads below.
+  const restored = await replaceWith(sendBig);
+  check('…and the first film put back, Replace', /^done · /.test(restored.done || '') && onLinux().equals(fs.readFileSync(sendBig)), JSON.stringify(restored));
+
+  // Two big files dropped together; one is refused while the other's body is
+  // on its way, which stops that one too (the job failed). Try again sends
+  // both. Until 2026-11-22 Try again sent only the refused one: the other
+  // stayed stopped, and the job never finished. (The refusal is the server's
+  // own: DevTools sends that file's question on to a folder that has gone,
+  // as if the folder were deleted on the phone meanwhile. Not answered by
+  // DevTools itself: Fetch.fulfillRequest makes Edge forget the "proceed"
+  // given for the phone's certificate, and every new connection after it
+  // fails ERR_CERT_AUTHORITY_INVALID, which broke the sign-out checks below.)
+  const twinA = path.join(local, 'twin-a.bin');
+  const twinB = path.join(local, 'twin-b.bin');
+  fs.writeFileSync(twinA, crypto.randomBytes(20 * 1024 * 1024));
+  fs.writeFileSync(twinB, crypto.randomBytes(20 * 1024 * 1024));
+  const onLinuxAt = (name) => path.join(rootfs, 'root/Documents', name);
+  B.held.length = 0;
+  await cdp('Fetch.enable', { patterns: [{ urlPattern: '*/fs/part*', requestStage: 'Request' }, { urlPattern: '*/fs/put*', requestStage: 'Request' }] });
+  await dropFiles(list.x, list.y + 120, [twinA, twinB]);
+  const heldFor = (op, name) => until(() => B.held.find((p) => p.request.url.includes(`/fs/${op}`) && p.request.url.includes(name)), 8000);
+  const askA = await heldFor('part', 'twin-a.bin');
+  const askB = await heldFor('part', 'twin-b.bin');
+  if (askA) await cdp('Fetch.continueRequest', { requestId: askA.requestId });
+  const putA = await heldFor('put', 'twin-a.bin');
+  const goneUrl = askB && askB.request.url.replace('Documents%2Ftwin-b.bin', 'Documents%2Fgone%2Ftwin-b.bin');
+  if (askB) await cdp('Fetch.continueRequest', { requestId: askB.requestId, url: goneUrl });
+  // A drop of two files is the job "2 items" (files.js, sendDrop).
+  const twinJob = () => jobState('2 items');
+  const failedNow = await until(async () => ((await twinJob()).startsWith('failed') ? twinJob() : null), 6000);
+  await cdp('Fetch.disable');
+  const sentBefore = fs.existsSync(onLinuxAt('twin-a.bin')) || fs.existsSync(onLinuxAt('twin-b.bin'));
+  const retryAt = await panelButton('Try again', '2 items');
+  if (retryAt) await mouse(retryAt.x, retryAt.y);
+  const twinsDone = await until(async () => ((await twinJob()).startsWith('done') ? twinJob() : null), 20000);
+  const bothThere = fs.existsSync(onLinuxAt('twin-a.bin')) && fs.readFileSync(onLinuxAt('twin-a.bin')).equals(fs.readFileSync(twinA))
+    && fs.existsSync(onLinuxAt('twin-b.bin')) && fs.readFileSync(onLinuxAt('twin-b.bin')).equals(fs.readFileSync(twinB));
+  check('two big files, one refused while the other was sending: the job fails, and Try again sends both',
+    !!askA && !!askB && goneUrl !== askB.request.url && !!putA && !!failedNow && !sentBefore && !!retryAt && !!twinsDone && bothThere,
+    JSON.stringify({ askA: !!askA, askB: !!askB, redirected: !!askB && goneUrl !== askB.request.url, putA: !!putA, failedNow, sentBefore, retryAt, twinsDone, now: await twinJob(), bothThere }));
+  await js(`[...document.querySelectorAll('.tray .job')].filter((x) => x.querySelector('.job-name').textContent === '2 items').forEach((x) => { x.dataset.seenByTest = '1'; })`);
+
+  // Cancel while a drop is still being made ready (its names asked about with
+  // the phone; a dropped folder read): nothing of the drop is sent. Until
+  // 2026-11-22 the drop went anyway once the phone answered: the job was made
+  // ready again over the Cancel.
+  const prepFile = path.join(local, 'prep-cancel.txt');
+  fs.writeFileSync(prepFile, 'never sent\n');
+  await js(`window.__sends = 0; (() => { const o = XMLHttpRequest.prototype.open; XMLHttpRequest.prototype.open = function (m, u, ...r) {
+    if ((m === 'PUT' && String(u).includes('fs/put')) || (m === 'POST' && String(u).includes('fs/batch'))) window.__sends++; return o.call(this, m, u, ...r); }; })()`);
+  B.held.length = 0;
+  await cdp('Fetch.enable', { patterns: [{ urlPattern: '*/fs/exists*', requestStage: 'Request' }] });
+  await dropFiles(list.x, list.y + 120, [prepFile]);
+  const named = await until(() => B.held.find((p) => p.request.url.includes('/fs/exists')), 8000);
+  // The panel draws a new job on its next frame.
+  const preparing = (await until(async () => { const st = await jobState('prep-cancel.txt'); return /^preparing/.test(st) ? st : null; }, 3000)) || (await jobState('prep-cancel.txt'));
+  const stopPrep = await panelButton('Cancel', 'prep-cancel.txt');
+  if (stopPrep) await mouse(stopPrep.x, stopPrep.y);
+  if (named) await cdp('Fetch.continueRequest', { requestId: named.requestId });
+  await sleep(2500);
+  await cdp('Fetch.disable');
+  const prepSent = fs.existsSync(path.join(rootfs, 'root/Documents/prep-cancel.txt'));
+  check('Cancel while a drop is made ready (its names asked about): nothing of the drop is sent',
+    !!named && /^preparing/.test(preparing) && !!stopPrep && (await js('window.__sends')) === 0 && !prepSent,
+    JSON.stringify({ named: !!named, preparing, stopPrep, sends: await js('window.__sends'), prepSent, now: await jobState('prep-cancel.txt') }));
+
+  // Save into a folder on this computer (Chrome's and Edge's folder picker;
+  // here a folder of the page's own private storage, OPFS, handed over as
+  // if picked: the same File System Access calls). Cancel while the folder
+  // is being read: nothing is downloaded. Cancel while a file comes in: no
+  // empty file is left where it was going. Until 2026-11-22 the first went
+  // on and downloaded everything once the phone answered, and the second
+  // left an empty file (made before the first byte, the bytes going to a
+  // side file that a cancel throws away).
+  await js(`window.__picker = window.showDirectoryPicker; window.showDirectoryPicker = async () => { const r = await navigator.storage.getDirectory();
+    try { await r.removeEntry('picked', { recursive: true }); } catch {} return r.getDirectoryHandle('picked', { create: true }); }`);
+  const inPicked = () => js(`(async () => { const r = await navigator.storage.getDirectory(); const out = [];
+    const walk = async (d, pre) => { for await (const [n, h] of d.entries()) { if (h.kind === 'directory') await walk(h, pre + n + '/'); else out.push(pre + n + ' ' + (await h.getFile()).size); } };
+    try { await walk(await r.getDirectoryHandle('picked'), ''); } catch { return null; } return out; })()`);
+  const gets = () => js(`(window.__f || []).filter((x) => x[0] === 'start' && x[1].includes('fs/get')).length`);
+  await js(`document.querySelectorAll('.tray .job').forEach((x) => { x.dataset.seenByTest = '1'; })`);
+  /** Right-click on {@code name}'s row, then "Save into a folder on this computer…", with the mouse. */
+  const saveIntoFolder = async (name) => {
+    const r = await rowOf(name);
+    if (!r) return 'no row';
+    await mouse(r.x, r.y);
+    await mouse(r.x, r.y, { button: 'right' });
+    const item = await until(() => js(`(() => { const b = [...document.querySelectorAll('.fx-menu [role=menuitem]')].find((x) => x.textContent.includes('Save into a folder on this computer'));
+      if (!b) return null; const q = b.getBoundingClientRect(); return { x: Math.round(q.left + q.width / 2), y: Math.round(q.top + q.height / 2) }; })()`), 3000);
+    if (!item) return 'no menu item';
+    await mouse(item.x, item.y);
+    return 'chosen';
+  };
+  B.held.length = 0;
+  const getsBefore = await gets();
+  await cdp('Fetch.enable', { patterns: [{ urlPattern: '*/fs/list*', requestStage: 'Request' }] });
+  const chose = await saveIntoFolder('Holiday');
+  const reading = await until(() => B.held.find((p) => p.request.url.includes('/fs/list') && p.request.url.includes('Holiday')), 8000);
+  const folderJob = (await until(async () => { const st = await jobState('Holiday'); return /^preparing/.test(st) ? st : null; }, 3000)) || (await jobState('Holiday'));
+  const stopRead = await panelButton('Cancel', 'Holiday');
+  if (stopRead) await mouse(stopRead.x, stopRead.y);
+  // Only that first question held: the rest of the folder is read at once,
+  // well before a cancelled job leaves the panel (1.8 s), as on a quick link.
+  for (const p of B.held) await cdp('Fetch.continueRequest', { requestId: p.requestId });
+  await cdp('Fetch.disable');
+  for (const p of B.held) await cdp('Fetch.continueRequest', { requestId: p.requestId });
+  await sleep(2500);
+  const afterRead = await inPicked();
+  check('Save into a folder, Cancel while the folder is read: nothing is downloaded',
+    chose === 'chosen' && !!reading && /^preparing/.test(folderJob) && !!stopRead && (await gets()) === getsBefore && Array.isArray(afterRead) && afterRead.length === 0,
+    JSON.stringify({ chose, reading: !!reading, folderJob, stopRead, gets: (await gets()) - getsBefore, afterRead, now: await jobState('Holiday') }));
+  // A file coming in slowly (the browser's own throttling), and Cancel.
+  await cdp('Network.enable');
+  await cdp('Network.emulateNetworkConditions', { offline: false, latency: 0, downloadThroughput: 1024 * 1024, uploadThroughput: -1 });
+  const choseFilm = await saveIntoFolder('film.bin');
+  const coming = await until(async () => { const s = await jobState('film.bin'); return /^running · [1-9]/.test(s) ? s : null; }, 10000);
+  const stopFilm = await panelButton('Cancel', 'film.bin');
+  if (stopFilm) await mouse(stopFilm.x, stopFilm.y);
+  await sleep(1500);
+  await cdp('Network.emulateNetworkConditions', { offline: false, latency: 0, downloadThroughput: -1, uploadThroughput: -1 });
+  if (!process.env.NETLOG) await cdp('Network.disable');
+  const afterFilm = await inPicked();
+  check('…Cancel while a file comes in: no file is left where it was going',
+    choseFilm === 'chosen' && !!coming && !!stopFilm && Array.isArray(afterFilm) && afterFilm.length === 0,
+    JSON.stringify({ choseFilm, coming, stopFilm, afterFilm, now: await jobState('film.bin') }));
+  await js(`window.showDirectoryPicker = window.__picker`);
 
   // The file picker, as Upload's menu opens it.
   const picked = path.join(local, 'picked.txt');
@@ -1034,9 +1275,16 @@ console.log('Files in the page');
   check('Enter: into it again', !!(await settled('Documents')));
 
   // A sign-out on the phone, met by the Files: the page asks for the code again.
+  const connsBefore = await command('conns', 'CONNS');
   await command('signout', 'CODE');
   await js(`document.querySelector('#files .fx-btn[aria-label="Up one folder"]').click()`);
-  check('signed out on the phone: the next step in Files asks for the code', !!(await until(() => js(`!document.getElementById('pair').hidden && !document.body.classList.contains('files-on')`), 6000)));
+  const askedAgain = await until(() => js(`!document.getElementById('pair').hidden && !document.body.classList.contains('files-on')`), 6000);
+  check('signed out on the phone: the next step in Files asks for the code', !!askedAgain, JSON.stringify(await js(`({ pair: !document.getElementById('pair').hidden,
+    body: document.body.className, hash: location.hash, status: (document.querySelector('#files .fx-status') || {}).textContent,
+    empty: (document.querySelector('#files .fx-empty:not([hidden]) h3') || {}).textContent, snack: (document.querySelector('.snack.show') || {}).textContent,
+    fetches: (window.__f || []).slice(-8) })`)) + ` ${connsBefore} → ${await command('conns', 'CONNS')}`
+);
+  if (process.env.NETLOG && !askedAgain) console.log(`    net errors: ${JSON.stringify(B.netlog.filter((x) => x.err).slice(-6).map((x) => [x.url, x.err]))}`);
   const code2 = (await command('code', 'CODE')).slice(5);
   await typeInto('#code', code2);
   check('…and the code brings them back to Files', !!(await until(() => js(`!!document.querySelector('#files.on') && document.querySelectorAll('#files .fx-row').length > 0`), 8000)));
@@ -1047,7 +1295,7 @@ console.log('Files in the page');
   await until(() => js(`window.__old === undefined && document.readyState === 'complete'`), 8000);
   const missing = await until(() => js(`(() => { const e = document.querySelector('#files .fx-empty h3'); return e && !document.querySelector('#files .fx-empty').hidden ? e.textContent : null; })()`), 8000);
   check('Linux not installed: Files says so', missing === 'Linux is not installed yet', JSON.stringify({ missing, cls: await js(`document.getElementById('files').className`),
-    crumbs: await js(`[...document.querySelectorAll('#files .crumb')].map((e) => e.textContent)`), hash: await js('location.hash'), state: await command('state?', 'STATE') }));
+    crumbs: await js(`[...document.querySelectorAll('#files .crumb')].map((e) => e.textContent)`), hash: await js('location.hash'), title: await js('document.title'), href: await js('location.href'), state: await command('state?', 'STATE') }));
   await shot('10-missing');
   await command('fsstate ready', 'OK fsstate');
   await js(`[...document.querySelectorAll('#files .fx-empty button')].find((b) => b.textContent === 'Try again').click()`);

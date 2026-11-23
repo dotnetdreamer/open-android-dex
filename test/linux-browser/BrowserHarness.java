@@ -61,6 +61,13 @@ import java.util.regex.Pattern;
  * (two Ogg files, mono 32 kb/s and stereo 96 kb/s), one for each 20 ms of
  * sound it is given, through the relay's own encoder path.
  *
+ * <p>The phone's own screen (Remote desktop's {@code /phone}) is a stand-in
+ * on a loopback port ({@code phone on|off|dead}); the phone's own storage
+ * (Remote desktop's Files, {@code /pfs/}) a folder, given with
+ * {@code phonefs <dir>} (or {@code none}), {@code phonefsstate
+ * ready|noaccess|unavailable} saying what LinuxService's layout would, and
+ * {@code phonefiles?} its transfers open now.
+ *
  * <p>Usage: BrowserHarness &lt;dir&gt; &lt;port&gt; &lt;big.h264&gt; &lt;small.h264&gt; &lt;assets dir&gt;
  * [&lt;mono.opus&gt; &lt;stereo.opus&gt;]
  */
@@ -254,6 +261,134 @@ public final class BrowserHarness {
 
     /** Linux's files (the page's Files), over a folder standing in for the guest's /; null without one. */
     static LinuxFiles files;
+
+    // ── the phone's own screen (Remote desktop), stood in for ──
+
+    /** Remote desktop on ({@code phone on|off}): the door's /phone has a line to give. */
+    static volatile boolean phoneOn = true;
+    /** Linux offered ({@code linux on|off}): off, the door stays up for Remote desktop alone. */
+    static volatile boolean linuxOffered = true;
+    /** PhoneStream's stand-in: a loopback port that takes the door's line, says what it was asked, and holds it. */
+    static java.net.ServerSocket phoneServer;
+    static final java.util.concurrent.atomic.AtomicInteger phoneLines = new java.util.concurrent.atomic.AtomicInteger();
+    /** The stand-in phone's frames: the big desktop stand-in's, as PhoneStream sends its encoder's. */
+    static List<byte[]> phoneFrames;
+    /** Frames the stand-in phone sent, and of them those while its page said it wanted no picture. */
+    static final java.util.concurrent.atomic.AtomicLong phoneFramesSent = new java.util.concurrent.atomic.AtomicLong();
+    static final java.util.concurrent.atomic.AtomicLong phoneFramesWhileOff = new java.util.concurrent.atomic.AtomicLong();
+    /** Keys a page sent to the stand-in phone (0x11 messages): typing that went to the phone. */
+    static final java.util.concurrent.atomic.AtomicLong phoneKeys = new java.util.concurrent.atomic.AtomicLong();
+
+    // ── the phone's own storage (Remote desktop's Files), stood in for ──
+
+    /** The phone's files over a folder ({@code phonefs <dir>}), or null with none given. */
+    static volatile LinuxFiles phoneFiles;
+    /** What the stand-in storage says: "ready", "noaccess" (no All files access) or "unavailable" (a build without it). */
+    static volatile String phoneFsState = "ready";
+
+    /**
+     * Each line the door opens: its request (the browser's upgrade as the door
+     * passed it on) said as {@code EV {"phoneHead":…}}, the upgrade answered as
+     * PhoneStream answers it, a "video" message, frames while the page wants a
+     * picture (said with {@code EV {"phonePicture":…}} as it changes), every
+     * text the page sends said as {@code EV {"phoneMsg":…}}, until the line
+     * closes, said as {@code EV {"phoneClosed":n}}.
+     */
+    static void standInPhone() throws IOException {
+        phoneServer = new java.net.ServerSocket(0, 16, java.net.InetAddress.getLoopbackAddress());
+        final java.net.ServerSocket listening = phoneServer;
+        Thread t = new Thread(() -> {
+            while (true) {
+                final java.net.Socket c;
+                try {
+                    c = listening.accept();
+                } catch (IOException e) {
+                    return;
+                }
+                final int n = phoneLines.incrementAndGet();
+                Thread one = new Thread(() -> {
+                    try {
+                        LinuxStreamSocket conn = new LinuxStreamSocket(c.getInputStream(), c.getOutputStream(), c);
+                        LinuxStreamSocket.Request req = conn.readRequest();
+                        StringBuilder h = new StringBuilder("{");
+                        for (java.util.Map.Entry<String, String> e : req.headers.entrySet()) {
+                            if (h.length() > 1) h.append(',');
+                            h.append(q(e.getKey())).append(':').append(q(e.getValue()));
+                        }
+                        h.append('}');
+                        ev("{\"phoneHead\":{\"n\":" + n + ",\"path\":" + q(req.path) + ",\"headers\":" + h + "}}");
+                        conn.upgrade(req);
+                        conn.sendText("{\"t\":\"video\",\"kind\":\"phone\",\"source\":\"screen\",\"dw\":720,\"dh\":1560,\"cw\":1280,\"ch\":720}");
+                        final boolean[] picture = {true};
+                        final boolean[] done = {false};
+                        final List<byte[]> frames = phoneFrames;
+                        // Frames once a page says hello (phone.js), thirty a second while
+                        // it wants a picture, from the key frame again when it is back. A
+                        // line that says nothing (the door's checks, from Node) gets none.
+                        Runnable startFrames = () -> {
+                            if (frames == null || frames.isEmpty()) return;
+                            Thread pump = new Thread(() -> {
+                                int i = 0;
+                                try {
+                                    while (!done[0]) {
+                                        if (!picture[0]) {
+                                            i = 0;
+                                            Thread.sleep(10);
+                                            continue;
+                                        }
+                                        byte[] au = frames.get(i++ % frames.size());
+                                        ByteBuffer head = ByteBuffer.allocate(10);
+                                        head.put(MSG_VIDEO).put((byte) (hasIdr(au) ? 1 : 0)).putLong(System.nanoTime() / 1000);
+                                        conn.sendBinary(head.array(), au, au.length);
+                                        phoneFramesSent.incrementAndGet();
+                                        if (!picture[0]) phoneFramesWhileOff.incrementAndGet();
+                                        Thread.sleep(33);
+                                    }
+                                } catch (IOException | InterruptedException ignored) {
+                                    // the line went
+                                }
+                            }, "standin-phone-frames-" + n);
+                            pump.setDaemon(true);
+                            pump.start();
+                        };
+                        boolean framing = false;
+                        try {
+                            for (LinuxStreamSocket.Message m; (m = conn.read()) != null; ) {
+                                if (m.opcode == LinuxStreamSocket.OP_TEXT) {
+                                    String said = m.text();
+                                    ev("{\"phoneMsg\":" + said + ",\"n\":" + n + "}");
+                                    if (!framing && said.contains("\"t\":\"hello\"")) {
+                                        framing = true;
+                                        startFrames.run();
+                                    }
+                                    if (said.contains("\"t\":\"picture\"")) {
+                                        picture[0] = !said.matches("(?s).*\"on\"\\s*:\\s*false.*");
+                                        ev("{\"phonePicture\":" + picture[0] + ",\"n\":" + n + ",\"sent\":" + phoneFramesSent.get() + "}");
+                                    }
+                                } else if (m.opcode == LinuxStreamSocket.OP_BINARY && m.data.length >= 6 && m.data[0] == 0x11) {
+                                    phoneKeys.incrementAndGet();
+                                }
+                            }
+                        } finally {
+                            done[0] = true;
+                        }
+                    } catch (IOException ignored) {
+                        // closed under it
+                    } finally {
+                        try {
+                            c.close();
+                        } catch (IOException ignored) {
+                        }
+                        ev("{\"phoneClosed\":" + n + "}");
+                    }
+                }, "standin-phone-" + n);
+                one.setDaemon(true);
+                one.start();
+            }
+        }, "standin-phone");
+        t.setDaemon(true);
+        t.start();
+    }
     /** What the stand-in Linux is: "ready", "missing" or "installing" (`fsstate`). */
     static volatile String fsState = "ready";
 
@@ -271,6 +406,7 @@ public final class BrowserHarness {
         int port = Integer.parseInt(args[1]);
         List<byte[]> big = units(Files.readAllBytes(new File(args[2]).toPath()));
         List<byte[]> small = units(Files.readAllBytes(new File(args[3]).toPath()));
+        phoneFrames = big;
         File assets = new File(args[4]);
         LinuxStreamAudio.port = startTap();
         if (args.length > 6) {
@@ -403,7 +539,42 @@ public final class BrowserHarness {
             public LinuxFiles files() {
                 return files;
             }
+
+            @Override
+            public boolean linuxOn() {
+                return linuxOffered;
+            }
+
+            @Override
+            public LinuxFiles phoneFiles() {
+                // As LinuxService gives them: while Remote desktop is on.
+                return phoneOn ? phoneFiles : null;
+            }
+
+            @Override
+            public LinuxBrowserServer.PhoneLine phoneLine() throws IOException {
+                if (!phoneOn) return null;
+                if (phoneServer == null || phoneServer.isClosed()) throw new IOException("no phone screen");
+                final java.net.Socket s = new java.net.Socket(java.net.InetAddress.getLoopbackAddress(), phoneServer.getLocalPort());
+                return new LinuxBrowserServer.PhoneLine() {
+                    @Override
+                    public java.io.InputStream in() throws IOException {
+                        return s.getInputStream();
+                    }
+
+                    @Override
+                    public java.io.OutputStream out() throws IOException {
+                        return s.getOutputStream();
+                    }
+
+                    @Override
+                    public void close() throws IOException {
+                        s.close();
+                    }
+                };
+            }
         };
+        standInPhone();
         LinuxBrowserServer server = LinuxBrowserServer.start(store, cert, hostImpl, null, port);
         final int boundPort = server.port();
         System.out.println("READY " + server.port() + " " + store.code() + " " + cert.fingerprint);
@@ -522,6 +693,89 @@ public final class BrowserHarness {
                 if (w != null) w.tell("unauthorized");
                 server.dropOpen();
                 System.out.println("CODE " + store.code());
+                System.out.flush();
+            } else if (line.startsWith("phone ")) {
+                // Remote desktop on or off; "dead": on, and its stream not answering
+                String how = line.substring(6).trim();
+                phoneOn = !"off".equals(how);
+                if ("dead".equals(how) && phoneServer != null) phoneServer.close();
+                if ("on".equals(how) && (phoneServer == null || phoneServer.isClosed())) standInPhone();
+                System.out.println("OK phone " + how);
+                System.out.flush();
+            } else if (line.startsWith("linux ")) {
+                // Linux offered or not, the door staying up either way (Remote desktop's)
+                linuxOffered = line.endsWith(" on");
+                System.out.println("OK linux " + linuxOffered);
+                System.out.flush();
+            } else if (line.startsWith("tunnel ")) {
+                // The Cloudflare tunnel's name while it is up (PhoneTunnel), or none
+                String name = line.substring(7).trim();
+                LinuxBrowserServer.tunnelHost = "none".equals(name) ? null : name;
+                System.out.println("OK tunnel " + LinuxBrowserServer.tunnelHost);
+                System.out.flush();
+            } else if (line.equals("phones?")) {
+                System.out.println("PHONES " + server.phoneStreams());
+                System.out.flush();
+            } else if (line.startsWith("phonefs ")) {
+                // The phone's shared storage stood in for by a folder, as LinuxService gives it to the door
+                String where = line.substring(8).trim();
+                if ("none".equals(where)) {
+                    phoneFiles = null;
+                } else {
+                    final File storage = new File(where);
+                    // Links the test wants, made here with the targets given (Node on Windows would rewrite "/Download").
+                    File wanted = new File(storage, ".links");
+                    if (wanted.isFile()) {
+                        for (String l : new String(Files.readAllBytes(wanted.toPath()), StandardCharsets.UTF_8).split("\n")) {
+                            int tab = l.indexOf('\t');
+                            if (tab <= 0) continue;
+                            java.nio.file.Path link = new File(storage, l.substring(0, tab)).toPath();
+                            try {
+                                Files.deleteIfExists(link);
+                                Files.createSymbolicLink(link, java.nio.file.Paths.get(l.substring(tab + 1).trim()));
+                            } catch (IOException | RuntimeException e) {
+                                // Said, not fatal: the checks of links then fail, and say why.
+                                ev("{\"linkFailed\":" + q(l.substring(0, tab)) + ",\"why\":" + q(String.valueOf(e)) + "}");
+                            }
+                        }
+                        wanted.delete();
+                    }
+                    LinuxFiles.Layout layout = new LinuxFiles.Layout() {
+                        @Override
+                        public File rootfs() {
+                            return "ready".equals(phoneFsState) ? storage : null;
+                        }
+
+                        @Override
+                        public String state() {
+                            return phoneFsState;
+                        }
+
+                        @Override
+                        public List<LinuxFiles.Mount> mounts() {
+                            return new ArrayList<>();
+                        }
+                    };
+                    LinuxFiles.Thumbs thumbs = (f, kind, size) -> "image".equals(kind) && f.length() < 512 * 1024
+                            ? Files.readAllBytes(f.toPath()) : null;
+                    phoneFiles = new LinuxFiles(layout, thumbs, on -> ev("{\"phoneBusy\":" + on + "}"), LinuxFiles.Kind.PHONE);
+                }
+                System.out.println("OK phonefs " + where);
+                System.out.flush();
+            } else if (line.equals("droplinux")) {
+                // Linux's switch off with the door kept up, as LinuxService's linuxDoorClosed does it
+                server.dropLinux();
+                System.out.println("OK droplinux");
+                System.out.flush();
+            } else if (line.startsWith("phonefsstate ")) {
+                phoneFsState = line.substring(13).trim();
+                System.out.println("OK phonefsstate " + phoneFsState);
+                System.out.flush();
+            } else if (line.equals("phonefiles?")) {
+                System.out.println("PHONEFILES " + server.phoneTransfers() + " " + (phoneFiles == null ? -1 : phoneFiles.busyCount()));
+                System.out.flush();
+            } else if (line.equals("phoneframes?")) {
+                System.out.println("PHONEFRAMES " + phoneFramesSent.get() + " " + phoneFramesWhileOff.get() + " " + phoneKeys.get());
                 System.out.flush();
             } else if (line.equals("code")) {
                 System.out.println("CODE " + store.code());

@@ -1,0 +1,45 @@
+/* The phone page (phone.html): a file of its own, since the door allows no inline style (its CSP). */
+/* Its rules stay on its own boxes (:where keeps each as specific as before): Files
+   (files.css, phone-files.css) draws over the same page with classes of its own. */
+:root { --bg: #090b10; --bar: #11151d; --edge: #1d2330; --text: #e8ecf3; --faint: #9aa3af; --green: #4ade80; --amber: #ffb547; }
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; overflow: hidden; background: var(--bg); color: var(--text); font: 14px system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+body { display: flex; flex-direction: column; user-select: none; -webkit-user-select: none; overflow: hidden; }
+.bar { display: flex; align-items: center; gap: 6px; padding: 6px 8px; background: var(--bar); border-bottom: 1px solid var(--edge); flex-wrap: wrap; }
+:where(.bar, .status) .gap { flex: 1; }
+:where(.bar, .cover, .status, .panel-note, .protect-note) button { min-width: 36px; height: 32px; padding: 0 10px; border-radius: 9px; border: 1px solid #283041; background: #161b25; color: var(--text); font: inherit; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; gap: 6px; }
+:where(.bar, .cover, .status, .panel-note, .protect-note) button:hover { background: #1c2230; }
+:where(.bar, .cover, .status) button.on { background: var(--green); color: #0b0f17; border-color: var(--green); font-weight: 600; }
+:where(.bar) select { height: 32px; padding: 0 8px; border-radius: 9px; border: 1px solid #283041; background: #161b25; color: var(--text); font: inherit; cursor: pointer; }
+:where(.bar) select:hover { background: #1c2230; }
+:where(.bar, .cover, .status) button svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+.stage { position: relative; flex: 1; min-height: 0; overflow: hidden; }
+:where(.stage) canvas { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; display: block; outline: none; touch-action: none; }
+.cover { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; padding: 24px; text-align: center; background: rgba(9, 11, 16, 0.94); }
+.cover[hidden] { display: none; }
+:where(.cover) .title { font-size: 20px; font-weight: 700; }
+:where(.cover) .words { max-width: 380px; line-height: 1.45; color: #b8c0cc; }
+:where(.cover) .code { font: 600 28px ui-monospace, Menlo, Consolas, monospace; letter-spacing: 0.3em; width: 9em; text-align: center; padding: 8px; border-radius: 12px; border: 1px solid #283041; background: #10141c; color: var(--text); }
+:where(.cover) .error { color: var(--amber); min-height: 1.2em; }
+.status { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 5px 10px; background: var(--bar); border-top: 1px solid var(--edge); color: var(--faint); font-size: 12px; min-height: 30px; }
+/* The lock screen's pad, drawn where the picture is black (Android hides it from screen sharing):
+   the keys, the field and the words at their places on the phone; clicks go through to the picture. */
+.lockpad { position: absolute; pointer-events: none; }
+:where(.lockpad) > div { position: absolute; display: flex; align-items: center; justify-content: center; color: var(--text); font-weight: 600; line-height: 1; text-align: center; }
+:where(.lockpad) .lp-key { border-radius: 50%; background: rgba(255, 255, 255, 0.07); border: 1px solid rgba(255, 255, 255, 0.24); }
+:where(.lockpad) .lp-key.off { opacity: 0.35; }
+:where(.lockpad) .lp-field { border-bottom: 2px solid rgba(255, 255, 255, 0.45); letter-spacing: 0.3em; }
+:where(.lockpad) .lp-words { color: #cfd6e0; font-weight: 500; line-height: 1.2; }
+:where(.lockpad) .lp-dot { border-radius: 50%; background: rgba(255, 255, 255, 0.55); }
+/* Screen off (the phone's own screen dark, the phone running on): waiting for the phone, and
+   without the phone's helper, which the note says how to start. */
+:where(.bar) button.pending { border-color: var(--green); }
+:where(.bar) button.unavailable { color: var(--faint); }
+.panel-note { position: absolute; left: 50%; top: 10px; transform: translateX(-50%); width: min(92%, 540px); padding: 12px 14px; border-radius: 12px; background: rgba(17, 21, 29, 0.97); border: 1px solid #283041; color: var(--text); font-size: 13px; line-height: 1.45; display: flex; flex-direction: column; gap: 10px; z-index: 1; }
+:where(.panel-note) .panel-cmd { display: flex; gap: 8px; align-items: flex-start; }
+:where(.panel-note) code { flex: 1; min-width: 0; font: 12px ui-monospace, Menlo, Consolas, monospace; background: #0c1017; border: 1px solid #222a38; border-radius: 8px; padding: 8px; word-break: break-all; user-select: text; -webkit-user-select: text; color: #d6dde8; }
+:where(.panel-note) > button { align-self: flex-end; }
+/* A press on a screen Android keeps for someone at the phone, without the phone's helper. */
+.protect-note { position: absolute; left: 50%; bottom: 12px; transform: translateX(-50%); width: max-content; max-width: min(92%, 480px); padding: 8px 8px 8px 12px; border-radius: 10px; background: rgba(17, 21, 29, 0.96); border: 1px solid var(--amber); color: var(--text); font-size: 13px; line-height: 1.4; display: flex; align-items: center; gap: 10px; z-index: 1; }
+.lock-note { position: absolute; left: 50%; top: 10px; transform: translateX(-50%); width: max-content; max-width: min(92%, 440px); padding: 8px 12px; border-radius: 10px; background: rgba(17, 21, 29, 0.94); border: 1px solid #283041; color: var(--text); font-size: 13px; line-height: 1.4; text-align: center; pointer-events: none; }
+[hidden] { display: none !important; }

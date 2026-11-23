@@ -1,4 +1,6 @@
-// Files going to Linux and coming back (LinuxFiles.java on the phone).
+// Files going to Linux and coming back (LinuxFiles.java on the phone). The
+// phone's own files too, for Remote desktop's page (phone-files.js): the same
+// code through the door's /pfs/, with the phone's words.
 //
 // Up: a big file is one PUT, resumable: a cut connection, a pause or a
 // sleeping laptop carries on from what the phone says arrived. Small files
@@ -47,11 +49,12 @@ export class ApiError extends Error {
   }
 }
 
-/** The phone's /fs/, with this browser's token. */
+/** The phone's /fs/ (Linux's files), or {@code base} ('pfs/': the phone's own), with this browser's token. */
 export class Api {
-  constructor(token, onUnauthorized) {
+  constructor(token, onUnauthorized, base = 'fs/') {
     this.token = token;
     this.onUnauthorized = onUnauthorized;
+    this.base = base;
   }
 
   url(op, query = {}) {
@@ -61,7 +64,7 @@ export class Api {
       for (const x of [].concat(v)) p.append(k, String(x));
     }
     const s = p.toString();
-    return `fs/${op}${s ? `?${s}` : ''}`;
+    return `${this.base}${op}${s ? `?${s}` : ''}`;
   }
 
   auth() {
@@ -139,9 +142,10 @@ export class Api {
   }
 }
 
-/** The words for what went wrong, from the phone's own. */
-export function why(e) {
+/** The words for what went wrong, from the phone's own; {@code words}: another page's for some of them (the phone's files'). */
+export function why(e, words = null) {
   const code = e && e.code;
+  if (words && code && Object.prototype.hasOwnProperty.call(words, code)) return words[code];
   switch (code) {
     case 'full': return 'The phone is out of space.';
     case 'offline': return 'The phone stopped answering.';
@@ -162,15 +166,21 @@ let nextId = 1;
 
 /**
  * Every transfer of this page: the queue, the requests, the retries, and the
- * panel that shows them. {@code ask} is the page's own question box (files.js).
+ * panel that shows them. {@code ask} is the page's own question box (files.js);
+ * {@code words} where the files are, as the panel says it ({@code on}: "Linux",
+ * or "the phone" for the phone's own), the folder picker's id, and {@link why}'s
+ * words of that page's. {@code putMax}: the most one PUT carries of a big file
+ * (0: the whole rest at once), for a page a proxy may stand in front of.
  */
 export class Transfers {
-  constructor({ api, ask, snack, onDone, nameOf }) {
+  constructor({ api, ask, snack, onDone, nameOf, words = {}, putMax = 0 }) {
     this.api = api;
     this.ask = ask;
     this.snack = snack;
     this.onDone = onDone;
     this.nameOf = nameOf;
+    this.words = { on: 'Linux', picker: 'linux-files', why: null, ...words };
+    this.putMax = putMax;
     this.jobs = [];
     this.running = 0;
     this.speed = 0;
@@ -209,7 +219,7 @@ export class Transfers {
   newJob(dir, label, dest) {
     return {
       id: nextId++, dir, label, dest, files: 0, bytes: 0, tasks: [], state: 'queued', error: '', startedAt: performance.now(),
-      finishedAt: 0, results: { renamed: [], failed: [], same: 0, skipped: 0, paths: [] }, speed: 0, lastBytes: 0, policy: 'replace',
+      finishedAt: 0, results: { renamed: [], failed: [], same: 0, skipped: 0, unsent: 0, paths: [] }, speed: 0, lastBytes: 0, policy: 'replace',
       tops: [],
     };
   }
@@ -221,10 +231,16 @@ export class Transfers {
    */
   async upload(dest, files, dirs = [], label = '', prep = null) {
     const job = prep ? prep.job : this.newJob('up', label, dest);
+    // Cancelled while its folder was read (files.js): nothing of it goes.
+    if (job.state === 'cancelled') return null;
     if (!prep) this.jobs.push(job);
     job.state = 'preparing';
     this.tray.show();
     this.changed(job);
+    // Cancel reaches the questions asked while the job is made ready (cancel),
+    // and the job is not made ready again over it: until 2026-11-22 a drop
+    // cancelled then went anyway once the phone answered.
+    job.asking = new AbortController();
     const tooLong = files.filter((f) => te.encode(f.rel).length > 4000);
     files = files.filter((f) => !tooLong.includes(f));
     const tops = [...new Set([...files.map((f) => f.rel.split('/')[0]), ...dirs.map((d) => d.split('/')[0])])];
@@ -232,14 +248,19 @@ export class Transfers {
     job.topIsDir = tops.length === 1 && (dirs.includes(tops[0]) || files.some((f) => f.rel.startsWith(`${tops[0]}/`)));
     let taken = {};
     try {
-      taken = tops.length ? (await this.api.json('exists', { form: { dir: dest, n: tops } })).exists || {} : {};
+      taken = tops.length ? (await this.api.json('exists', { form: { dir: dest, n: tops }, signal: job.asking.signal })).exists || {} : {};
     } catch (e) {
+      if (job.state === 'cancelled') return null;
       return this.fail(job, e);
     }
+    if (job.state === 'cancelled') return null;
     const clash = tops.filter((t) => taken[t]);
     if (clash.length) {
-      // The same files again (a second drop of the same things) are found
-      // by the phone and not sent; only a real clash is a question.
+      // A second drop of the same things asks too. Replace then sends and
+      // writes every file (force): the same size and time is only a quick
+      // check, and two different files can share both. Without Replace
+      // chosen (a retry after a cut, a drop where nothing clashed), a file
+      // already there the same is left as it is, and a big one not sent.
       const choice = await this.ask({
         title: clash.length === 1 ? `“${clash[0]}” is already in ${this.nameOf(dest)}` : `${clash.length} items are already in ${this.nameOf(dest)}`,
         text: clash.length === 1
@@ -253,12 +274,14 @@ export class Transfers {
           { label: 'Replace', value: 'replace', primary: true },
         ],
       });
+      if (job.state === 'cancelled') return null;
       if (!choice) {
         this.jobs = this.jobs.filter((j) => j !== job);
         this.changed(job);
         return null;
       }
       job.policy = choice;
+      job.force = choice === 'replace';
       if (choice === 'skip') {
         const keep = (rel) => !taken[rel.split('/')[0]];
         job.results.skipped = files.filter((f) => !keep(f.rel)).length;
@@ -269,11 +292,13 @@ export class Transfers {
         // them; nothing under them can clash after that.
         let names = new Set();
         try {
-          const l = await this.api.json('list', { query: { path: dest } });
+          const l = await this.api.json('list', { query: { path: dest }, signal: job.asking.signal });
           names = new Set((l.entries || []).map((e) => e.n));
         } catch (e) {
+          if (job.state === 'cancelled') return null;
           return this.fail(job, e);
         }
+        if (job.state === 'cancelled') return null;
         const map = {};
         for (const t of clash) {
           map[t] = freeName(names, t, taken[t] === 'd' || dirs.includes(t) || files.some((f) => f.rel.startsWith(`${t}/`)));
@@ -414,22 +439,46 @@ export class Transfers {
   async runPut(t) {
     const job = t.job;
     const f = t.items[0];
-    const q = { path: this.target(job, f.rel), size: f.file.size, mtime: f.file.lastModified || 0, on: job.policy === 'rename' ? 'rename' : 'replace' };
-    let off = 0;
-    if (t.resume) off = (await this.api.json('part', { query: q })).have || 0;
-    for (let i = 0; i < 4; i++) {
+    const q = { path: this.target(job, f.rel), size: f.file.size, mtime: f.file.lastModified || 0, on: job.policy === 'rename' ? 'rename' : 'replace',
+      ...(job.force ? { force: 1 } : {}) };
+    // Asked first, every time: a file already there (the same size and time)
+    // is not sent again, unless Replace was chosen (force), and what the
+    // phone would refuse at once (no room, apps' folders) is said now. Once the body is on its way that answer is
+    // lost: the phone hangs up on a body it will not take, and a browser,
+    // still sending, gets the reset and not the answer.
+    // Pause and Cancel reach the question too, and nothing is sent after
+    // either, even when the answer comes anyway: until 2026-11-22 the PUT
+    // went once the answer came, and a cancelled Replace still replaced.
+    t.handle = { abort: new AbortController() };
+    const ask = await this.api.json('part', { query: t.resume ? q : { ...q, fresh: 1 }, signal: t.handle.abort.signal });
+    if (t.state === 'stopped') throw new ApiError(0, 'aborted');
+    if (ask.same) {
+      job.results.paths.push(q.path);
+      job.results.same++;
+      job.results.unsent += f.file.size;
+      return;
+    }
+    let off = t.resume ? ask.have || 0 : 0;
+    // Four tries that bring nothing new, as ever. With putMax, the rest goes a
+    // piece at a time (the phone adds each to the part file and says what it
+    // has), and a piece that arrived is progress, never a try used up.
+    for (let i = 0; i < 4;) {
+      if (t.state === 'stopped') throw new ApiError(0, 'aborted');
       if (off > f.file.size) off = 0;
+      const from = off;
+      const end = this.putMax > 0 ? Math.min(f.file.size, off + this.putMax) : f.file.size;
       t.base = off;
       t.sent = 0;
       t.handle = {};
       let r;
       try {
-        r = await this.api.send('PUT', 'put', { ...q, off }, f.file.slice(off), (loaded) => {
+        r = await this.api.send('PUT', 'put', { ...q, off }, f.file.slice(off, end), (loaded) => {
           t.sent = loaded;
         }, t.handle);
       } catch (e) {
         if (e.status === 409 && e.code === 'offset') {
           off = e.have || 0;
+          i++;
           continue;
         }
         throw e;
@@ -441,6 +490,7 @@ export class Transfers {
         return;
       }
       off = r.have || 0;
+      if (off <= from) i++;
     }
     throw new ApiError(0, 'offline');
   }
@@ -457,7 +507,7 @@ export class Transfers {
     const blob = new Blob(parts);
     t.handle = {};
     t.sent = 0;
-    const r = await this.api.send('POST', 'batch', { dir: job.dest, on: job.policy === 'rename' ? 'rename' : 'replace', total: t.bytes },
+    const r = await this.api.send('POST', 'batch', { dir: job.dest, on: job.policy === 'rename' ? 'rename' : 'replace', total: t.bytes, ...(job.force ? { force: 1 } : {}) },
       blob, (loaded, total) => {
         t.sent = Math.min(t.bytes, (loaded / (total || blob.size)) * t.bytes);
       }, t.handle);
@@ -467,14 +517,17 @@ export class Transfers {
   }
 
   fail(job, e) {
+    // The job's other uploads stop with it, a body on its way or a question
+    // to the phone before one; Try again sends them (resume).
     for (const t of job.tasks) {
-      if (t.state === 'running' && t.handle && t.handle.xhr) {
+      if (t.state === 'running' && t.handle && (t.handle.xhr || (t.kind === 'put' && t.handle.abort))) {
         t.state = 'stopped';
-        t.handle.xhr.abort();
+        if (t.handle.xhr) t.handle.xhr.abort();
+        if (t.handle.abort) t.handle.abort.abort();
       }
     }
     job.state = 'failed';
-    job.error = e && e.status === 0 && e.code === 'offline' ? 'The phone stopped answering. Check that the phone is still on the same Wi-Fi.' : why(e);
+    job.error = e && e.status === 0 && e.code === 'offline' ? 'The phone stopped answering. Check that the phone is still on the same Wi-Fi.' : why(e, this.words.why);
     job.finishedAt = performance.now();
     this.changed(job);
     return null;
@@ -509,7 +562,9 @@ export class Transfers {
     if (job.state !== 'paused' && job.state !== 'failed') return;
     job.error = '';
     for (const t of job.tasks) {
-      if (t.state === 'failed') {
+      // Failed, or stopped when another of the job's failed (fail): until
+      // 2026-11-22 those were left stopped, and the job never finished.
+      if (t.state === 'failed' || t.state === 'stopped') {
         t.state = 'queued';
         t.resume = true;
         t.tries = 0;
@@ -532,6 +587,7 @@ export class Transfers {
     }
     job.state = 'cancelled';
     job.finishedAt = performance.now();
+    if (job.asking) job.asking.abort();
     // What was half sent does not stay on the phone.
     for (const t of wasPut) {
       const f = t.items[0];
@@ -609,7 +665,7 @@ export class Transfers {
   async saveToFolder(items, label) {
     let root;
     try {
-      root = await window.showDirectoryPicker({ id: 'linux-files', mode: 'readwrite', startIn: 'downloads' });
+      root = await window.showDirectoryPicker({ id: this.words.picker, mode: 'readwrite', startIn: 'downloads' });
     } catch {
       return null; // they chose nothing
     }
@@ -622,9 +678,11 @@ export class Transfers {
     this.changed(job);
     const files = [];
     const dirs = [];
+    job.asking = new AbortController();
     try {
       const walk = async (path, rel, depth) => {
-        const l = await this.api.json('list', { query: { path } });
+        if (job.state === 'cancelled') return;
+        const l = await this.api.json('list', { query: { path }, signal: job.asking.signal });
         dirs.push(rel);
         for (const e of l.entries || []) {
           const p = `${path === '/' ? '' : path}/${e.n}`;
@@ -642,8 +700,10 @@ export class Transfers {
         else files.push({ path: it.path, rel: it.name, size: it.size || 0, mtime: it.mtime });
       }
     } catch (e) {
+      if (job.state === 'cancelled') return null;
       return this.fail(job, e);
     }
+    if (job.state === 'cancelled') return null;
     const clash = [];
     for (const it of items) {
       try {
@@ -654,17 +714,19 @@ export class Transfers {
         // not there: no question
       }
     }
+    if (job.state === 'cancelled') return null;
     let replace = true;
     if (clash.length) {
       const choice = await this.ask({
         title: clash.length === 1 ? `“${clash[0]}” is already in ${root.name}` : `${clash.length} items are already in ${root.name}`,
         text: clash.length === 1
-          ? `Replace “${clash[0]}” in ${root.name} with the copy from Linux, or skip “${clash[0]}”?`
-          : `Replace the ${clash.length} items in ${root.name} with the copies from Linux, or skip the ${clash.length} items?`,
+          ? `Replace “${clash[0]}” in ${root.name} with the copy from ${this.words.on}, or skip “${clash[0]}”?`
+          : `Replace the ${clash.length} items in ${root.name} with the copies from ${this.words.on}, or skip the ${clash.length} items?`,
         list: clash.slice(0, 6).map((n) => ({ name: n, dir: items.find((i) => i.name === n).dir })),
         more: Math.max(0, clash.length - 6),
         buttons: [{ label: 'Skip', value: 'skip' }, { label: 'Replace', value: 'replace', primary: true }],
       });
+      if (job.state === 'cancelled') return null;
       if (!choice) {
         this.dismiss(job);
         return null;
@@ -718,6 +780,11 @@ export class Transfers {
     if (job.state === 'queued') job.state = 'running';
     this.changed(job);
     let writable = null;
+    // The file this download made, while it is not whole: the bytes go to a
+    // side file until the end, and a cancel throws that away, so a file made
+    // here would stay empty (until 2026-11-22 it did). One already there
+    // (Replace) is kept as it was.
+    let made = null;
     try {
       t.handle = { abort: new AbortController() };
       t.sent = 0;
@@ -728,7 +795,15 @@ export class Transfers {
       }
       if (!r.ok) throw new ApiError(r.status, ((await r.json().catch(() => ({}))) || {}).error);
       const dir = await this.dirOf(job, f.rel);
-      const fh = await dir.getFileHandle(f.rel.slice(f.rel.lastIndexOf('/') + 1), { create: true });
+      const name = f.rel.slice(f.rel.lastIndexOf('/') + 1);
+      let had = true;
+      try {
+        await dir.getFileHandle(name);
+      } catch {
+        had = false;
+      }
+      const fh = await dir.getFileHandle(name, { create: true });
+      if (!had) made = { dir, name };
       writable = await fh.createWritable();
       const reader = r.body.getReader();
       for (;;) {
@@ -739,11 +814,13 @@ export class Transfers {
       }
       await writable.close();
       writable = null;
+      made = null;
       t.state = 'done';
       t.base = t.bytes;
       t.sent = 0;
     } catch (e) {
       if (writable) await writable.abort().catch(() => {});
+      if (made) await made.dir.removeEntry(made.name).catch(() => {});
       if (t.state === 'stopped') {
         if (job.state === 'paused') t.state = 'queued';
       } else if ((e.status === 0 || e.name === 'TypeError') && t.tries < TRIES) {
@@ -929,7 +1006,7 @@ class Tray {
     this.closeBtn.hidden = live.length > 0;
     if (live.length) {
       const n = live.reduce((k, j) => k + j.files, 0);
-      this.title.textContent = ups.length && downs.length ? `Moving ${files(n)}` : ups.length ? `Sending ${files(n)} to Linux` : `Saving ${files(n)} to this computer`;
+      this.title.textContent = ups.length && downs.length ? `Moving ${files(n)}` : ups.length ? `Sending ${files(n)} to ${this.t.words.on}` : `Saving ${files(n)} to this computer`;
       const left = live.reduce((k, j) => k + Math.max(0, j.bytes - this.t.moved(j)), 0);
       const sp = this.t.speed;
       const parts = [];
@@ -1003,12 +1080,12 @@ class Tray {
     const frac = j.bytes ? moved / j.bytes : j.state === 'done' ? 1 : 0;
     row.li.dataset.state = j.state;
     row.name.textContent = j.label || (j.files === 1 ? '1 file' : `${j.files.toLocaleString()} files`);
-    row.where.textContent = j.dir === 'up' ? `to ${this.t.nameOf(j.dest)} on Linux` : `to ${j.dest} on this computer`;
+    row.where.textContent = j.dir === 'up' ? `to ${this.t.nameOf(j.dest)} on ${this.t.words.on}` : `to ${j.dest} on this computer`;
     row.fill.style.transform = `scaleX(${Math.min(1, frac)})`;
     let s;
     switch (j.state) {
       case 'preparing':
-        s = j.files ? `Reading… ${j.files.toLocaleString()} files` : 'Getting ready';
+        s = j.files ? `Reading… ${j.files === 1 ? '1 file' : `${j.files.toLocaleString()} files`}` : 'Getting ready';
         break;
       case 'queued':
         s = 'Waiting';
@@ -1031,7 +1108,11 @@ class Tray {
         if (j.results.same) extra.push(`${j.results.same} already there`);
         if (j.results.skipped) extra.push(`${j.results.skipped} left out`);
         if (j.results.failed.length) extra.push(`${j.results.failed.length} could not be sent`);
-        s = `${fmtSize(j.bytes)} in ${secs < 10 ? secs.toFixed(1) : Math.round(secs)} s${j.bytes > 2e6 ? ` · ${fmtSpeed(j.bytes / secs)}` : ''}${extra.length ? ` · ${extra.join(', ')}` : ''}`;
+        // A speed only for what went: a big file already there was not sent.
+        const sent = j.bytes - (j.results.unsent || 0);
+        s = sent > 0
+          ? `${fmtSize(j.bytes)} in ${secs < 10 ? secs.toFixed(1) : Math.round(secs)} s${sent > 2e6 ? ` · ${fmtSpeed(sent / secs)}` : ''}${extra.length ? ` · ${extra.join(', ')}` : ''}`
+          : `${fmtSize(j.bytes)}${extra.length ? ` · ${extra.join(', ')}` : ''}`;
       }
     }
     row.status.textContent = s;

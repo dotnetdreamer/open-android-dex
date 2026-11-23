@@ -179,6 +179,7 @@ const EMBLEM = {
   videos: 'M21.5 22.8v11.4L31 28.5z',
   shared: 'M20.5 21.5h7a1.5 1.5 0 0 1 1.5 1.5v11a1.5 1.5 0 0 1-1.5 1.5h-7A1.5 1.5 0 0 1 19 34V23a1.5 1.5 0 0 1 1.5-1.5zM23 33h2',
   trash: 'M19 24h10M22 24v-1.5h4V24M20.3 24l.9 10.5h5.6l.9-10.5',
+  camera: 'M18.5 25h2.6l1.2-1.8h3.4l1.2 1.8h2.6v8.5h-11zM24 31.3a2.1 2.1 0 1 0 0-4.2 2.1 2.1 0 0 0 0 4.2z',
 };
 
 /**
@@ -237,6 +238,9 @@ const PLACE = {
   root: 'M3.5 4.5h13v4h-13zM3.5 11.5h13v4h-13zM6 6.5h.01M6 13.5h.01',
   trash: 'M4 5.5h12M8 5.5V4h4v1.5M5.4 5.5l.9 11h7.4l.9-11M8.4 8.5v5M11.6 8.5v5',
   search: 'M8.6 3.5a5.1 5.1 0 1 1 0 10.2 5.1 5.1 0 0 1 0-10.2zM12.4 12.4l4.1 4.1',
+  // The phone's own (Remote desktop's Files): the phone's storage, and its camera's folder.
+  phone: 'M6.8 2.5h6.4A1.3 1.3 0 0 1 14.5 3.8v12.4a1.3 1.3 0 0 1-1.3 1.3H6.8a1.3 1.3 0 0 1-1.3-1.3V3.8a1.3 1.3 0 0 1 1.3-1.3zM9 15h2',
+  camera: 'M3 6.5h3l1.3-2h5.4L14 6.5h3v9.5H3zM10 13.6a2.6 2.6 0 1 0 0-5.2 2.6 2.6 0 0 0 0 5.2z',
 };
 
 export function placeIcon(id) {

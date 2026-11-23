@@ -85,9 +85,16 @@ public class LinuxSettingsActivity extends Activity {
         @Override
         public void run() {
             drawBrowser(false);
+            drawPhone(false);
+            if (email != null) email.tick(false);
             ticks.postDelayed(this, 1000);
         }
     };
+    /** Remote desktop's card: this phone's own screen on a computer. */
+    private LinearLayout phoneCard;
+    private String phoneDrawn = "";
+    /** "Email me when an address changes" (EmailNotice): its own card, below. */
+    private EmailCard email;
     /** A light theme: a white thumb would vanish on its white card. */
     private boolean lightSwitches;
     private int thumbOff;
@@ -101,6 +108,9 @@ public class LinuxSettingsActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        // Made again while Android's battery question was up (the phone
+        // turned, the theme changed): screen sharing's question still follows.
+        if (savedInstanceState != null) consentAfterBattery = savedInstanceState.getBoolean(KEY_CONSENT_AFTER_BATTERY);
         theme = DexTheme.of(this);
         homeLook = Linux.hasHomeScreen(this);
         palette();
@@ -191,13 +201,15 @@ public class LinuxSettingsActivity extends Activity {
         fill();
         // The address can change under the page (another Wi-Fi), and the card
         // says who is watching: looked at once a second while it is in front.
-        if (browserCard != null) ticks.postDelayed(browserTick, 1000);
+        if (browserCard != null || phoneCard != null) ticks.postDelayed(browserTick, 1000);
     }
 
     @Override
     protected void onPause() {
         super.onPause();
         ticks.removeCallbacks(browserTick);
+        // What was typed into the email card is kept, the password sealed.
+        if (email != null) email.save();
     }
 
     @Override
@@ -252,6 +264,7 @@ public class LinuxSettingsActivity extends Activity {
     private void fill() {
         content.removeAllViews();
         browserCard = null;
+        phoneCard = null;
 
         // LinuxOnDroid's alone: a desktop on a computer already has the
         // desktop app, which shows Linux there over the cable or the tunnel.
@@ -261,6 +274,26 @@ public class LinuxSettingsActivity extends Activity {
             content.addView(browserCard, new LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
             drawBrowser(true);
+        }
+
+        // Remote desktop: this phone itself, not Linux, on a computer. Where
+        // the APK has it (PhoneRemote.offered): LinuxOnDroid.
+        if (homeLook && PhoneRemote.offered(this)) {
+            header(getString(R.string.pr_set_header));
+            phoneCard = card();
+            content.addView(phoneCard, new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+            drawPhone(true);
+        }
+
+        // Email me when an address changes (EmailNotice): LinuxOnDroid's,
+        // right after the two doors whose addresses it emails.
+        email = null;
+        if (homeLook && EmailNotice.offered(this)) {
+            header(getString(R.string.em_set_header));
+            email = new EmailCard();
+            content.addView(email.card, new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         }
 
         header(getString(R.string.hm_set_startup));
@@ -305,12 +338,20 @@ public class LinuxSettingsActivity extends Activity {
         content.addView(boot, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
+        // The graphics chip for Linux apps, and every state says so: Remote
+        // desktop uses the chip whatever this says. On a phone where Linux
+        // cannot run, or where neither our drivers nor VirGL work, the switch
+        // stays grey and the line under it says why.
         header(getString(R.string.hm_set_graphics));
-        boolean gpu = LinuxGpu.available();
+        LinuxGpu.Offer offer = LinuxGpu.offer(this);
+        boolean gpu = offer == LinuxGpu.Offer.DRIVER || offer == LinuxGpu.Offer.VIRGL;
+        int sub = offer == LinuxGpu.Offer.DRIVER ? R.string.hm_gpu_sub
+                : offer == LinuxGpu.Offer.VIRGL ? R.string.hm_gpu_sub_virgl
+                : offer == LinuxGpu.Offer.NOT_64_BIT ? R.string.hm_set_gpu_32bit
+                : R.string.hm_set_gpu_none;
         LinearLayout graphics = card();
         graphics.addView(switchRow(R.drawable.hm_ic_gpu, violet, getString(R.string.ln_gpu_menu),
-                getString(gpu ? R.string.hm_gpu_sub : R.string.hm_set_gpu_none),
-                gpu && LinuxGpu.enabled(this), gpu, this::toggleGpu));
+                getString(sub), gpu && LinuxGpu.enabled(this), gpu, this::toggleGpu));
         content.addView(graphics, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
@@ -332,6 +373,747 @@ public class LinuxSettingsActivity extends Activity {
         Toast.makeText(this, getString(on ? R.string.ln_gpu_on : R.string.ln_gpu_off),
                 Toast.LENGTH_LONG).show();
         return on;
+    }
+
+    // ── Remote desktop ──
+
+    /**
+     * On: listening at once, then Android's battery question (unless the app
+     * is already left out of battery optimisation) and, for a share kept
+     * ready, Android's own question about screen sharing after it, so the
+     * switch is all it takes. Without "Keep full speed ready" nothing is
+     * shared until a computer opens the phone, whose arrival asks then. Off:
+     * whatever a computer has open ends, and screen sharing stops.
+     */
+    private boolean togglePhone() {
+        boolean on = !PhoneRemote.isEnabled(this);
+        PhoneRemote.setEnabled(this, on);
+        if (on) {
+            PhoneStream.switchedOn(this);
+            // Android's battery question first, where the app is not left out
+            // of battery optimisation yet: two buttons, and Allow is all it
+            // takes. Screen sharing's own question follows its answer.
+            if (!PhoneRemote.batteryExempt(this)) {
+                askBattery(shareToKeep());
+            } else if (shareToKeep()) {
+                openConsent();
+            }
+        } else {
+            PhoneStream.switchedOff();
+            stopService(new Intent(this, PhoneRemoteService.class));
+            stopService(new Intent(this, PhoneListenService.class));
+        }
+        // The tunnel computers come through goes up and down with it.
+        LinuxService.phoneRemoteChanged(this);
+        ticks.post(() -> drawPhone(true));
+        return on;
+    }
+
+    private void openConsent() {
+        try {
+            startActivity(new Intent(this, PhoneConsentActivity.class));
+        } catch (Exception e) {
+            DexLog.warn("phone", "cannot ask for screen sharing", e);
+        }
+    }
+
+    /** Android's accessibility settings, where control is turned off and on again to connect it. */
+    private void openAccessibilitySettings() {
+        try {
+            startActivity(new Intent(android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS));
+        } catch (Exception e) {
+            DexLog.warn("phone", "cannot open the accessibility settings", e);
+        }
+    }
+
+    /**
+     * A share to ask for now, with someone at the phone: one kept ready
+     * ("Keep full speed ready") where the next one would need someone here,
+     * and not held yet. Any other share starts when a computer opens the phone.
+     */
+    private boolean shareToKeep() {
+        return PhoneRemote.keepsReady(this) && !PhoneRemote.unattended(this) && !PhoneRemoteService.sharing();
+    }
+
+    /** @return the setting's new value */
+    private boolean toggleReady() {
+        boolean on = !PhoneRemote.keepsReady(this);
+        PhoneRemote.setKeepsReady(this, on);
+        // On: the share to hold is asked for now, while someone is at the
+        // phone. Off: a share nobody watches ends a little later.
+        if (on && shareToKeep()) openConsent();
+        PhoneRemoteService.readyChanged();
+        ticks.post(() -> drawPhone(true));
+        return on;
+    }
+
+    private static final int REQ_BATTERY = 0x7B;
+    private static final String KEY_CONSENT_AFTER_BATTERY = "consentAfterBattery";
+    /** Screen sharing's question waits for the battery question's answer. */
+    private boolean consentAfterBattery;
+
+    @Override
+    protected void onSaveInstanceState(Bundle out) {
+        super.onSaveInstanceState(out);
+        out.putBoolean(KEY_CONSENT_AFTER_BATTERY, consentAfterBattery);
+    }
+
+    /**
+     * Android's own question, "let LinuxOnDroid always run in the
+     * background?", with two buttons: Allow takes the app out of battery
+     * optimisation (Doze) at once, nothing more to do. Without it an idle
+     * phone's Doze holds Remote desktop's network and timers back, and some
+     * phones stop the app after a few days. Where a phone has no such
+     * question, its list of apps, and screen sharing's question waits for
+     * the person to come back from it, as it waits for the answer.
+     */
+    private void askBattery(boolean thenConsent) {
+        consentAfterBattery = thenConsent;
+        try {
+            startActivityForResult(new Intent(android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                    android.net.Uri.parse("package:" + getPackageName())), REQ_BATTERY);
+            return;
+        } catch (Exception e) {
+            DexLog.warn("phone", "no battery question on this phone", e);
+        }
+        try {
+            // For a result too: back from the list is the answer.
+            startActivityForResult(new Intent(android.provider.Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS),
+                    REQ_BATTERY);
+            return;
+        } catch (Exception ignored) {
+            // nowhere to send the person: the card keeps saying so
+        }
+        if (thenConsent && !PhoneRemoteService.sharing()) openConsent();
+        consentAfterBattery = false;
+    }
+
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode != REQ_BATTERY) return;
+        DexLog.step("phone", PhoneRemote.batteryExempt(this)
+                ? "left out of battery optimisation" : "battery optimisation stays on");
+        if (consentAfterBattery && PhoneRemote.isEnabled(this) && !PhoneRemoteService.sharing()) openConsent();
+        consentAfterBattery = false;
+        ticks.post(() -> drawPhone(true));
+    }
+
+    /** @return the setting's new value */
+    private boolean toggleAnywhere() {
+        boolean on = !PhoneTunnel.switchedOn(this);
+        PhoneTunnel.setSwitchedOn(this, on);
+        // The service runs the tunnel beside the door: told to look again.
+        LinuxService.phoneRemoteChanged(this);
+        ticks.post(() -> drawPhone(true));
+        return on;
+    }
+
+    /** @return the setting's new value */
+    private boolean togglePhoneBoot() {
+        boolean on = !PhoneRemote.startsWithPhone(this);
+        PhoneRemote.setStartsWithPhone(this, on);
+        return on;
+    }
+
+    /**
+     * The card: the switch, and with it on, three things a person needs to
+     * know (is the screen shared, can the computer control the phone, which
+     * computers may come in) and the two choices (the picture, and starting
+     * with the phone). Drawn again only when one of those changed.
+     */
+    private void drawPhone(boolean force) {
+        if (phoneCard == null) return;
+        boolean on = PhoneRemote.isEnabled(this);
+        PhoneRemote.Status st = PhoneRemote.status(this);
+        boolean control = PhoneRemote.controlEnabled(this);
+        boolean controlLost = !control && PhoneRemote.controlLost(this);
+        boolean boot = PhoneRemote.startsWithPhone(this);
+        boolean tunnel = LinuxRemote.available(this);
+        int computers = tunnel ? LinuxRemote.peers(this).size() : 0;
+        // A browser on the same Wi-Fi, with nothing installed: the door
+        // "Open in a browser" uses, up for Remote desktop too. With Linux's
+        // switch off, the door's own page is the phone's, so the two steps
+        // here are the address and the code, as on Linux's card.
+        LinuxBrowser door = LinuxService.browser(this);
+        boolean doorForPhone = on && !door.isOn();
+        String doorState = doorForPhone ? door.state() : "";
+        java.util.List<LinuxBrowser.Address> where = doorForPhone ? LinuxBrowser.addresses()
+                : java.util.Collections.<LinuxBrowser.Address>emptyList();
+        String code = doorForPhone ? door.code() : "";
+        boolean usedUp = doorForPhone && door.codeUsedUp();
+        int remembered = doorForPhone ? door.tokenCount() : 0;
+        if (doorForPhone && !usedUp && !where.isEmpty() && !doorState.startsWith("failed")) {
+            long now = System.currentTimeMillis();
+            if (force || now - pairingOpenedAt > 30_000) {
+                door.openPairing(now);
+                pairingOpenedAt = now;
+            }
+        }
+        String drawn = on + "|" + st.state + "|" + st.who + "|" + control + "|" + controlLost + "|" + boot
+                + "|" + computers + "|" + tunnel + "|" + door.isOn() + "|" + doorState + "|" + where + "|" + code
+                + "|" + usedUp + "|" + remembered + "|" + PhoneTunnel.switchedOn(this) + "|" + PhoneTunnel.address(this)
+                + "|" + phoneFilesOffered() + "|" + WebFiles.phoneFilesAllowed(this) + "|" + PhoneSound.allowed(this)
+                + "|" + PhoneRemote.batteryExempt(this) + "|" + PhoneRemote.xiaomiAutostart(this)
+                + "|" + PhoneRemote.keepsReady(this) + "|" + PhoneRemote.unattended(this)
+                + "|" + PhoneRemote.controlUnbound(this)
+                + "|" + PhoneHelperStart.state(this) + "|" + PhoneHelperStart.why();
+        refreshHelperSetup();
+        if (!force && drawn.equals(phoneDrawn)) return;
+        phoneDrawn = drawn;
+
+        phoneCard.removeAllViews();
+        phoneCard.addView(switchRow(R.drawable.hm_ic_remote, green, getString(R.string.pr_set_title),
+                getString(R.string.pr_set_sub), on, true, this::togglePhone));
+        if (on) {
+            View rule = new View(this);
+            rule.setBackgroundColor(ruleColor);
+            LinearLayout.LayoutParams ruleLp = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, Math.max(1, dp(1)));
+            ruleLp.setMarginStart(dp(56));
+            phoneCard.addView(rule, ruleLp);
+            phoneCard.addView(phonePanel(st, control, computers, tunnel), new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+            View ruleB = new View(this);
+            ruleB.setBackgroundColor(ruleColor);
+            phoneCard.addView(ruleB, ruleLp);
+            LinearLayout inBrowser = new LinearLayout(this);
+            inBrowser.setOrientation(LinearLayout.VERTICAL);
+            inBrowser.setPaddingRelative(dp(56), dp(14), 0, 0);
+            inBrowser.addView(text(getString(R.string.pr_set_browser), 14, theme.text, 600));
+            phoneCard.addView(inBrowser);
+            if (doorForPhone) {
+                phoneCard.addView(browserSteps(doorState, where, code, usedUp, remembered), new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+            } else {
+                LinearLayout too = new LinearLayout(this);
+                too.setOrientation(LinearLayout.VERTICAL);
+                too.setPaddingRelative(dp(56), dp(8), 0, dp(14));
+                too.addView(statusLine(sky, getString(R.string.pr_set_browser_too)));
+                phoneCard.addView(too);
+            }
+            // From anywhere: the same door, through a Cloudflare tunnel (PhoneTunnel).
+            if (PhoneTunnel.available(this)) {
+                View ruleA = new View(this);
+                ruleA.setBackgroundColor(ruleColor);
+                phoneCard.addView(ruleA, ruleLp);
+                boolean anywhere = PhoneTunnel.switchedOn(this);
+                phoneCard.addView(switchRow(R.drawable.hm_ic_browser, sky, getString(R.string.pr_set_anywhere),
+                        getString(R.string.pr_set_anywhere_sub), anywhere, true, this::toggleAnywhere));
+                if (anywhere) {
+                    LinearLayout far = new LinearLayout(this);
+                    far.setOrientation(LinearLayout.VERTICAL);
+                    far.setPaddingRelative(dp(56), 0, 0, dp(14));
+                    String url = PhoneTunnel.address(this);
+                    if (url.isEmpty()) {
+                        far.addView(statusLine(AMBER, getString(R.string.pr_set_anywhere_wait)));
+                    } else {
+                        far.addView(text(getString(R.string.pr_set_anywhere_open), 13.5f, theme.text, 500));
+                        far.addView(addressBox(url.substring("https://".length()), url + "/phone.html"), boxParams(dp(8)));
+                    }
+                    TextView note = text(getString(R.string.pr_set_anywhere_note), 12.5f, theme.textFaint, 400);
+                    note.setLineSpacing(0, 1.15f);
+                    far.addView(note, boxParams(dp(10)));
+                    phoneCard.addView(far);
+                }
+            }
+            // A share held while no computer watches: only where the next
+            // one would need someone at the phone (with unattended access it
+            // starts by itself), and asked for again after a restart only
+            // when held (PhoneRemote.asksAfterRestart).
+            if (!PhoneRemote.unattended(this)) {
+                boolean ready = PhoneRemote.keepsReady(this);
+                View ruleR = new View(this);
+                ruleR.setBackgroundColor(ruleColor);
+                phoneCard.addView(ruleR, ruleLp);
+                phoneCard.addView(switchRow(R.drawable.hm_ic_remote, green, getString(R.string.pr_set_ready),
+                        getString(R.string.pr_set_ready_sub), ready, true, this::toggleReady));
+                if (ready) {
+                    View rule2 = new View(this);
+                    rule2.setBackgroundColor(ruleColor);
+                    phoneCard.addView(rule2, ruleLp);
+                    phoneCard.addView(switchRow(R.drawable.hm_ic_power, green, getString(R.string.pr_set_boot),
+                            getString(R.string.pr_set_boot_sub), boot, true, this::togglePhoneBoot));
+                }
+            }
+        }
+        DexFonts.applyTo(this, phoneCard);
+        DexCursors.decorate(phoneCard);
+    }
+
+    /**
+     * What is happening and what is missing. No picture quality here: the
+     * person at the computer sees the picture and the link, so the window
+     * there chooses Low, Medium or High (PhoneView), and the phone follows.
+     */
+    private View phonePanel(PhoneRemote.Status st, boolean control, int computers, boolean tunnel) {
+        LinearLayout panel = new LinearLayout(this);
+        panel.setOrientation(LinearLayout.VERTICAL);
+        panel.setPaddingRelative(dp(56), dp(14), 0, dp(14));
+
+        // The screen.
+        if ("live".equals(st.state)) {
+            panel.addView(statusLine(green, getString(R.string.pr_set_live)));
+        } else if ("ready".equals(st.state)) {
+            panel.addView(statusLine(green, getString(R.string.pr_set_sharing_on)));
+        } else if (!PhoneRemote.unattended(this)) {
+            if (PhoneRemote.keepsReady(this)) {
+                // A share is wanted and none is held: someone here gives it.
+                panel.addView(statusLine(AMBER, getString(control ? R.string.pr_set_sharing_slow : R.string.pr_set_sharing_off)));
+                panel.addView(link(getString(R.string.pr_set_share), this::openConsent), linkParams());
+            } else {
+                // Nothing shared with no computer watching is how it should
+                // be: the next computer's arrival asks.
+                panel.addView(statusLine(sky, getString(control ? R.string.pr_set_sharing_asks : R.string.pr_set_sharing_asks_off)));
+            }
+        }
+        // With unattended access the screen is shared only while a computer
+        // has it open, and that share starts by itself
+        // (PhoneRemoteService.idleCheck): none now is nothing to ask for, and
+        // the line below says how it works.
+        if (PhoneRemote.unattended(this)) {
+            panel.addView(statusLine(green, getString(R.string.pr_set_unattended_on)), boxParams(dp(12)));
+        }
+
+        // The control. On in Android's settings is not yet connected: after an
+        // update Android 10 has left it so until it was turned off and on.
+        if (control && PhoneRemote.controlUnbound(this)) {
+            panel.addView(statusLine(AMBER, getString(R.string.pr_set_control_unbound)), boxParams(dp(12)));
+            panel.addView(link(getString(R.string.pr_set_control_reconnect), this::openAccessibilitySettings), linkParams());
+        } else if (control) {
+            panel.addView(statusLine(green, getString(R.string.pr_set_control_on)), boxParams(dp(12)));
+        } else {
+            panel.addView(statusLine(AMBER, getString(PhoneRemote.controlLost(this)
+                    ? R.string.pr_set_control_lost : R.string.pr_set_control_off)), boxParams(dp(12)));
+            panel.addView(link(getString(R.string.pr_set_control_turn_on), this::confirmControl), linkParams());
+        }
+        // Screen off, and the buttons Android keeps for someone at the phone:
+        // the phone's helper, which the app starts itself once set up
+        // (PhoneHelperStart). Nothing else on this card needs it.
+        helperLines(panel);
+        // Running in the background: Android's battery optimisation (Doze)
+        // may stop an idle phone's Remote desktop. Android's own question,
+        // two buttons, takes the app out of it.
+        if (PhoneRemote.batteryExempt(this)) {
+            panel.addView(statusLine(green, getString(R.string.pr_set_bg_on)), boxParams(dp(12)));
+        } else {
+            panel.addView(statusLine(AMBER, getString(R.string.pr_set_bg_off)), boxParams(dp(12)));
+            panel.addView(link(getString(R.string.pr_set_bg_allow), () -> askBattery(false)), linkParams());
+        }
+        // A Xiaomi phone's Clear all in Recent apps kills this app, and with
+        // MIUI's Autostart off, MIUI refuses every restart after: Remote
+        // desktop stays gone. MIUI has no question of its own for it, only
+        // its Autostart switch, which the link opens. Said only when MIUI
+        // says Autostart is off; a phone whose switch cannot be read gets
+        // the tip below alone.
+        if (PhoneRemote.xiaomi()) {
+            if (Boolean.FALSE.equals(PhoneRemote.xiaomiAutostart(this))) {
+                panel.addView(statusLine(AMBER, getString(R.string.pr_set_autostart_off)), boxParams(dp(12)));
+                panel.addView(link(getString(R.string.pr_set_autostart_allow), () -> {
+                    if (!PhoneRemote.openXiaomiAutostart(this)) {
+                        Toast.makeText(this, getString(R.string.ln_cannot_open), Toast.LENGTH_SHORT).show();
+                    }
+                }), linkParams());
+            }
+            TextView tip = text(getString(R.string.pr_set_xiaomi_tip), 12.5f, theme.textFaint, 400);
+            tip.setLineSpacing(0, 1.15f);
+            panel.addView(tip, boxParams(dp(12)));
+        }
+
+        // The phone's sound, for the computer that chooses Sound there
+        // (PhoneSound): Android 10 and newer, once Android's permission is given.
+        if (PhoneSound.supported()) {
+            if (PhoneSound.allowed(this)) {
+                panel.addView(statusLine(green, getString(R.string.pr_set_sound_on)), boxParams(dp(12)));
+            } else {
+                panel.addView(statusLine(AMBER, getString(R.string.pr_set_sound_off)), boxParams(dp(12)));
+                panel.addView(link(getString(R.string.pr_set_sound_allow), this::confirmSound), linkParams());
+            }
+        }
+
+        // The phone's files, for a browser's Files (LinuxService's phoneFiles):
+        // only in a build that can have All files access.
+        if (phoneFilesOffered()) {
+            if (WebFiles.phoneFilesAllowed(this)) {
+                panel.addView(statusLine(green, getString(R.string.pr_set_files_on)), boxParams(dp(12)));
+            } else {
+                panel.addView(statusLine(AMBER, getString(R.string.pr_set_files_off)), boxParams(dp(12)));
+                // Android 10 with the permission already given and the storage
+                // still kept from the app: asking again changes nothing.
+                if (Build.VERSION.SDK_INT >= 30 || !WebFiles.storagePermitted(this)) {
+                    panel.addView(link(getString(R.string.pr_set_files_allow),
+                            () -> WebFiles.requestAllFiles(this, null, R.string.pr_set_files_grant_body)), linkParams());
+                }
+            }
+        }
+
+        // The computers, through remote access's pairing.
+        if (tunnel) {
+            panel.addView(statusLine(computers > 0 ? green : AMBER,
+                    computers > 0 ? getResources().getQuantityString(R.plurals.pr_set_computers, computers, computers)
+                            : getString(R.string.pr_set_no_computers)), boxParams(dp(12)));
+            panel.addView(link(getString(R.string.pr_set_add_computer), () -> {
+                try {
+                    startActivity(new Intent(this, LinuxRemoteActivity.class));
+                } catch (Exception e) {
+                    Toast.makeText(this, getString(R.string.ln_cannot_open), Toast.LENGTH_SHORT).show();
+                }
+            }), linkParams());
+        } else {
+            panel.addView(statusLine(AMBER, getString(R.string.pr_set_no_tunnel)), boxParams(dp(12)));
+        }
+        return panel;
+    }
+
+    /**
+     * A browser's Files can show this phone's own storage: Android 10 and
+     * newer, in a build that asks for All files access (not Google Play's).
+     * The door says the same to the page (LinuxService's phoneFiles).
+     */
+    private boolean phoneFilesOffered() {
+        return WebFiles.phoneFilesOffered(this);
+    }
+
+    private TextView link(String words, Runnable onTap) {
+        TextView t = text(words, 14, linkColor, 600);
+        t.setGravity(Gravity.CENTER_VERTICAL);
+        t.setMinHeight(dp(44));
+        t.setPadding(dp(10), 0, dp(10), 0);
+        t.setBackground(pressable(0x00000000, dp(12), 0));
+        asButton(t, words);
+        t.setOnClickListener(v -> onTap.run());
+        return t;
+    }
+
+    private LinearLayout.LayoutParams linkParams() {
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        lp.setMarginStart(dp(8));
+        return lp;
+    }
+
+    // ── Screen off: the phone's helper, started by the app (PhoneHelperStart) ──
+
+    /** The setup's steps while its dialog is up: drawn again each tick and on coming back from Android's settings. */
+    private android.app.Dialog helperDialog;
+    private LinearLayout helperSteps;
+    private String helperStepsDrawn = "";
+    private static final int ASK_NOTIFICATIONS = 0x48;
+
+    /** What the card says about Screen off: ready, set up, or what is missing, with the one link that helps. */
+    private void helperLines(LinearLayout panel) {
+        String s = PhoneHelperStart.state(this);
+        switch (s) {
+            case PhoneHelperStart.READY:
+                panel.addView(statusLine(green, getString(R.string.ph_set_ready)), boxParams(dp(12)));
+                break;
+            case PhoneHelperStart.WAITING:
+                panel.addView(statusLine(green, getString(R.string.ph_set_waiting)), boxParams(dp(12)));
+                break;
+            case PhoneHelperStart.STARTING:
+                panel.addView(statusLine(sky, getString(R.string.ph_set_starting)), boxParams(dp(12)));
+                break;
+            case PhoneHelperStart.PC:
+                panel.addView(statusLine(sky, getString(R.string.ph_set_pc)), boxParams(dp(12)));
+                break;
+            case PhoneHelperStart.UNPAIRED:
+                panel.addView(statusLine(AMBER, getString(R.string.ph_set_unpaired)), boxParams(dp(12)));
+                panel.addView(link(getString(R.string.ph_set_setup), this::showHelperSetup), linkParams());
+                break;
+            case PhoneHelperStart.DEV_OFF:
+                panel.addView(statusLine(AMBER, getString(R.string.ph_set_devoff)), boxParams(dp(12)));
+                panel.addView(link(getString(R.string.ph_setup_open_about), this::openAboutPhone), linkParams());
+                break;
+            case PhoneHelperStart.WIRELESS_OFF:
+                panel.addView(statusLine(AMBER, getString(R.string.ph_set_wireless)), boxParams(dp(12)));
+                panel.addView(link(getString(R.string.ph_set_open_dev), this::openDeveloperOptions), linkParams());
+                break;
+            case PhoneHelperStart.WIFI:
+                panel.addView(statusLine(AMBER, getString(R.string.ph_set_wifi)), boxParams(dp(12)));
+                break;
+            case PhoneHelperStart.ASK:
+                panel.addView(statusLine(AMBER, getString(R.string.ph_set_ask)), boxParams(dp(12)));
+                panel.addView(link(getString(R.string.ph_set_try), () -> PhoneHelperStart.ensure(this, true)), linkParams());
+                break;
+            case PhoneHelperStart.FAILED: {
+                String why = PhoneHelperStart.why();
+                if (why.length() > 140) why = why.substring(0, 140) + "…";
+                panel.addView(statusLine(AMBER, getString(R.string.ph_set_failed, why)), boxParams(dp(12)));
+                panel.addView(link(getString(R.string.ph_set_try), () -> PhoneHelperStart.ensure(this, true)), linkParams());
+                break;
+            }
+            default: // SETUP
+                panel.addView(statusLine(sky, getString(R.string.ph_set_setup_line)), boxParams(dp(12)));
+                panel.addView(link(getString(R.string.ph_set_setup), this::showHelperSetup), linkParams());
+                break;
+        }
+    }
+
+    /**
+     * Screen off's setup: what it gives, then three steps (Developer
+     * options, Wireless debugging, the pairing code), each ticked off as the
+     * phone shows it done. The code goes into a notification, so the person
+     * stays in Wireless debugging's pairing dialog (leaving it closes it).
+     */
+    private void showHelperSetup() {
+        if (isFinishing()) return;
+        final android.app.Dialog d = new android.app.Dialog(this);
+        d.requestWindowFeature(android.view.Window.FEATURE_NO_TITLE);
+        if (d.getWindow() != null) d.getWindow().setBackgroundDrawable(new ColorDrawable(0));
+        LinearLayout panel = new LinearLayout(this);
+        panel.setOrientation(LinearLayout.VERTICAL);
+        panel.setPadding(dp(24), dp(22), dp(20), dp(16));
+        panel.setBackground(fill(homeLook ? 0xFF161D2A : theme.cardSolid, dp(26), cardEdge));
+        panel.addView(text(getString(R.string.ph_setup_title), 19, title, 700));
+        TextView body = text(getString(R.string.ph_setup_body), 14.5f, theme.textFaint, 400);
+        body.setLineSpacing(0, 1.2f);
+        panel.addView(body, boxParams(dp(10)));
+        helperSteps = new LinearLayout(this);
+        helperSteps.setOrientation(LinearLayout.VERTICAL);
+        panel.addView(helperSteps, boxParams(dp(8)));
+        LinearLayout buttons = new LinearLayout(this);
+        buttons.setOrientation(LinearLayout.HORIZONTAL);
+        buttons.setGravity(Gravity.END | Gravity.CENTER_VERTICAL);
+        buttons.addView(dialogButton(getString(R.string.ph_setup_close), 0x00000000, theme.text, d::dismiss));
+        panel.addView(buttons, boxParams(dp(18)));
+        ScrollView scroll = new ScrollView(this);
+        scroll.addView(panel);
+        d.setContentView(scroll);
+        d.setOnDismissListener(x -> {
+            helperDialog = null;
+            helperSteps = null;
+            helperStepsDrawn = "";
+        });
+        codeAsked = false;
+        helperDialog = d;
+        helperStepsDrawn = "";
+        refreshHelperSetup();
+        d.show();
+        if (d.getWindow() != null) {
+            int screen = getResources().getDisplayMetrics().widthPixels;
+            d.getWindow().setLayout(Math.min(screen - dp(32), dp(460)), ViewGroup.LayoutParams.WRAP_CONTENT);
+        }
+    }
+
+    /** The steps as the phone has them now; the pairing notification offered once both switches are on. */
+    private void refreshHelperSetup() {
+        if (helperDialog == null || helperSteps == null) return;
+        boolean dev = PhoneHelperStart.devOptionsOn(this);
+        boolean wireless = Boolean.TRUE.equals(PhoneHelperStart.wirelessOn(this));
+        boolean wifi = PhoneHelperStart.wifiNetwork(this) >= 0;
+        boolean paired = PhoneHelperStart.paired(this) && !PhoneHelperStart.UNPAIRED.equals(PhoneHelperStart.state(this));
+        String pairing = PhoneHelperStart.pairing();
+        boolean notifications = notificationsAllowed();
+        String drawn = dev + "|" + wireless + "|" + wifi + "|" + paired + "|" + pairing + "|" + notifications;
+        if (drawn.equals(helperStepsDrawn)) return;
+        helperStepsDrawn = drawn;
+        helperSteps.removeAllViews();
+        // 1. Developer options.
+        helperSteps.addView(statusLine(dev ? green : AMBER, getString(dev ? R.string.ph_setup_dev_done : R.string.ph_setup_dev)),
+                boxParams(dp(10)));
+        if (!dev) helperSteps.addView(link(getString(R.string.ph_setup_open_about), this::openAboutPhone), linkParams());
+        // 2. Wireless debugging, which needs Wi-Fi.
+        if (!wifi && !wireless) {
+            helperSteps.addView(statusLine(AMBER, getString(R.string.ph_setup_wifi)), boxParams(dp(10)));
+        } else {
+            helperSteps.addView(statusLine(wireless ? green : AMBER,
+                    getString(wireless ? R.string.ph_setup_wireless_done : R.string.ph_setup_wireless)), boxParams(dp(10)));
+            if (dev && !wireless) {
+                helperSteps.addView(link(getString(R.string.ph_set_open_dev), this::openDeveloperOptions), linkParams());
+            }
+        }
+        // 3. The pairing code, typed into the notification.
+        if (paired) {
+            helperSteps.addView(statusLine(green, getString(R.string.ph_setup_pair_done)), boxParams(dp(10)));
+        } else if ("working".equals(pairing)) {
+            helperSteps.addView(statusLine(sky, getString(R.string.ph_setup_pair_working)), boxParams(dp(10)));
+        } else {
+            helperSteps.addView(statusLine(dev && wireless ? AMBER : theme.textFaint, getString(R.string.ph_setup_pair)),
+                    boxParams(dp(10)));
+            if (!notifications) {
+                helperSteps.addView(statusLine(AMBER, getString(R.string.ph_setup_notifs)), boxParams(dp(8)));
+                helperSteps.addView(link(getString(R.string.ph_setup_notifs_allow), this::askNotifications), linkParams());
+            } else if (dev && wireless) {
+                // Posted once, as soon as it can be used (both switches on and
+                // notifications allowed); again on request (swiped away).
+                if (!codeAsked) {
+                    codeAsked = true;
+                    PhoneHelperStart.askCode(this, getString(R.string.ph_pair_text));
+                }
+                helperSteps.addView(link(getString(R.string.ph_setup_pair_go),
+                        () -> PhoneHelperStart.askCode(this, getString(R.string.ph_pair_text))), linkParams());
+            }
+        }
+        DexFonts.applyTo(this, helperSteps);
+        DexCursors.decorate(helperSteps);
+    }
+
+    /** The pairing notification went up for this showing of the setup. */
+    private boolean codeAsked;
+
+    private boolean notificationsAllowed() {
+        if (Build.VERSION.SDK_INT >= 33
+                && checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            return false;
+        }
+        android.app.NotificationManager nm = getSystemService(android.app.NotificationManager.class);
+        return nm == null || nm.areNotificationsEnabled();
+    }
+
+    /** Android's own question for notifications (Android 13), or the app's notification settings once it said no. */
+    private void askNotifications() {
+        if (Build.VERSION.SDK_INT >= 33 && !askedNotifications
+                && checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            askedNotifications = true;
+            requestPermissions(new String[]{android.Manifest.permission.POST_NOTIFICATIONS}, ASK_NOTIFICATIONS);
+            return;
+        }
+        try {
+            startActivity(new Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
+                    .putExtra(Settings.EXTRA_APP_PACKAGE, getPackageName()));
+        } catch (Exception e) {
+            Toast.makeText(this, getString(R.string.ln_cannot_open), Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    private boolean askedNotifications;
+
+    @Override
+    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode == ASK_NOTIFICATIONS) ticks.post(this::refreshHelperSetup);
+    }
+
+    /** About phone, where Build number turns Developer options on. */
+    private void openAboutPhone() {
+        try {
+            startActivity(new Intent(Settings.ACTION_DEVICE_INFO_SETTINGS));
+        } catch (Exception e) {
+            Toast.makeText(this, getString(R.string.ln_cannot_open), Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    /** Developer options, at Wireless debugging where the phone's Settings marks it. */
+    private void openDeveloperOptions() {
+        try {
+            startActivity(new Intent(Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS)
+                    .putExtra(":settings:fragment_args_key", "toggle_adb_wireless"));
+        } catch (Exception e) {
+            Toast.makeText(this, getString(R.string.ln_cannot_open), Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    /**
+     * Before Android's accessibility settings, what the control service does
+     * and does not do, and a choice: Google Play's rule for an app that is not
+     * an accessibility tool, and the honest thing anyway.
+     */
+    private void confirmControl() {
+        if (isFinishing()) return;
+        final android.app.Dialog d = new android.app.Dialog(this);
+        d.requestWindowFeature(android.view.Window.FEATURE_NO_TITLE);
+        if (d.getWindow() != null) d.getWindow().setBackgroundDrawable(new ColorDrawable(0));
+        LinearLayout panel = new LinearLayout(this);
+        panel.setOrientation(LinearLayout.VERTICAL);
+        panel.setPadding(dp(24), dp(22), dp(20), dp(16));
+        panel.setBackground(fill(homeLook ? 0xFF161D2A : theme.cardSolid, dp(26), cardEdge));
+        panel.addView(text(getString(R.string.pr_disclose_title), 19, title, 700));
+        // The Cloudflare link's sentence only where the link exists: the Play
+        // build has no cloudflared (linuxapp/build.gradle), so nothing there
+        // passes through Cloudflare.
+        String said = getString(R.string.pr_disclose_body);
+        if (PhoneTunnel.available(this)) {
+            said += (said.endsWith("。") ? "" : " ") + getString(R.string.pr_disclose_cloudflare);
+        }
+        TextView body = text(said, 14.5f, theme.textFaint, 400);
+        body.setLineSpacing(0, 1.2f);
+        panel.addView(body, boxParams(dp(10)));
+        TextView next = text(getString(R.string.pr_disclose_next), 14.5f, theme.text, 500);
+        next.setLineSpacing(0, 1.2f);
+        panel.addView(next, boxParams(dp(12)));
+        LinearLayout buttons = new LinearLayout(this);
+        buttons.setOrientation(LinearLayout.HORIZONTAL);
+        buttons.setGravity(Gravity.END | Gravity.CENTER_VERTICAL);
+        buttons.addView(dialogButton(getString(R.string.pr_disclose_no), 0x00000000, theme.text, d::dismiss));
+        TextView yes = dialogButton(getString(R.string.pr_disclose_yes), green, 0xFF0B0F17, () -> {
+            d.dismiss();
+            openAccessibility();
+        });
+        LinearLayout.LayoutParams yesLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        yesLp.setMarginStart(dp(8));
+        buttons.addView(yes, yesLp);
+        panel.addView(buttons, boxParams(dp(22)));
+        DexFonts.applyTo(this, panel);
+        DexCursors.decorate(panel);
+        d.setContentView(panel);
+        d.show();
+        if (d.getWindow() != null) {
+            int screen = getResources().getDisplayMetrics().widthPixels;
+            d.getWindow().setLayout(Math.min(screen - dp(32), dp(440)), ViewGroup.LayoutParams.WRAP_CONTENT);
+        }
+    }
+
+    /**
+     * Before Android's question for the sound ("record audio"), what it is
+     * for and what it is not: the sound apps play, never the microphone.
+     */
+    private void confirmSound() {
+        if (isFinishing()) return;
+        final android.app.Dialog d = new android.app.Dialog(this);
+        d.requestWindowFeature(android.view.Window.FEATURE_NO_TITLE);
+        if (d.getWindow() != null) d.getWindow().setBackgroundDrawable(new ColorDrawable(0));
+        LinearLayout panel = new LinearLayout(this);
+        panel.setOrientation(LinearLayout.VERTICAL);
+        panel.setPadding(dp(24), dp(22), dp(20), dp(16));
+        panel.setBackground(fill(homeLook ? 0xFF161D2A : theme.cardSolid, dp(26), cardEdge));
+        panel.addView(text(getString(R.string.pr_sound_disclose_title), 19, title, 700));
+        TextView body = text(getString(R.string.pr_sound_disclose_body), 14.5f, theme.textFaint, 400);
+        body.setLineSpacing(0, 1.2f);
+        panel.addView(body, boxParams(dp(10)));
+        LinearLayout buttons = new LinearLayout(this);
+        buttons.setOrientation(LinearLayout.HORIZONTAL);
+        buttons.setGravity(Gravity.END | Gravity.CENTER_VERTICAL);
+        buttons.addView(dialogButton(getString(R.string.pr_disclose_no), 0x00000000, theme.text, d::dismiss));
+        TextView yes = dialogButton(getString(R.string.pr_disclose_yes), green, 0xFF0B0F17, () -> {
+            d.dismiss();
+            try {
+                startActivity(new Intent(this, PhoneSoundActivity.class));
+            } catch (Exception e) {
+                Toast.makeText(this, getString(R.string.ln_cannot_open), Toast.LENGTH_SHORT).show();
+            }
+        });
+        LinearLayout.LayoutParams yesLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        yesLp.setMarginStart(dp(8));
+        buttons.addView(yes, yesLp);
+        panel.addView(buttons, boxParams(dp(22)));
+        DexFonts.applyTo(this, panel);
+        DexCursors.decorate(panel);
+        d.setContentView(panel);
+        d.show();
+        if (d.getWindow() != null) {
+            int screen = getResources().getDisplayMetrics().widthPixels;
+            d.getWindow().setLayout(Math.min(screen - dp(32), dp(440)), ViewGroup.LayoutParams.WRAP_CONTENT);
+        }
+    }
+
+    /** Android's page for this service where it has one (Android 13), its accessibility list otherwise. */
+    private void openAccessibility() {
+        if (Build.VERSION.SDK_INT >= 33) {
+            try {
+                startActivity(new Intent("android.settings.ACCESSIBILITY_DETAILS_SETTINGS")
+                        .putExtra(Intent.EXTRA_COMPONENT_NAME, PhoneRemote.controlComponent(this).flattenToString()));
+                return;
+            } catch (Exception ignored) {
+                // not on this phone: the list
+            }
+        }
+        try {
+            startActivity(new Intent(android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS));
+        } catch (Exception e) {
+            Toast.makeText(this, getString(R.string.ln_cannot_open), Toast.LENGTH_SHORT).show();
+        }
     }
 
     // ── Open in a browser ──
@@ -659,7 +1441,12 @@ public class LinuxSettingsActivity extends Activity {
         panel.setPadding(dp(24), dp(22), dp(20), dp(16));
         panel.setBackground(fill(homeLook ? 0xFF161D2A : theme.cardSolid, dp(26), cardEdge));
         panel.addView(text(getString(R.string.bw_set_sign_out_title), 19, title, 700));
-        TextView body = text(getString(R.string.bw_set_sign_out_body), 14.5f, theme.textFaint, 400);
+        // The same browsers open the phone's own screen while Remote desktop
+        // is on, and lose that too: said, with or without Linux's switch.
+        boolean phoneToo = PhoneRemote.offered(this) && PhoneRemote.isEnabled(this);
+        int what = !phoneToo ? R.string.bw_set_sign_out_body
+                : LinuxService.browser(this).isOn() ? R.string.pr_sign_out_both : R.string.pr_sign_out_phone;
+        TextView body = text(getString(what), 14.5f, theme.textFaint, 400);
         body.setLineSpacing(0, 1.2f);
         panel.addView(body, boxParams(dp(10)));
         LinearLayout buttons = new LinearLayout(this);
@@ -711,6 +1498,443 @@ public class LinuxSettingsActivity extends Activity {
                 startActivity(new Intent(Settings.ACTION_SETTINGS));
             } catch (Exception ignored) {
                 Toast.makeText(this, getString(R.string.ln_cannot_open), Toast.LENGTH_SHORT).show();
+            }
+        }
+    }
+
+    // ── Email me when an address changes ──
+
+    /**
+     * The card for {@link EmailNotice}: the switch, and with it on, the email
+     * service (four with their servers filled in, or another), the address
+     * to send to, the account to send from and its app password, the sign-in
+     * links' switch, a test, and what the emails are doing. The form is built
+     * when the page fills and kept while the page is in front: drawn again
+     * while someone types, it would take the cursor away. Only the lines under
+     * it follow the job, once a second. What is typed is kept when the page
+     * goes, and before a test; the password sealed (EmailSecret), and never
+     * shown again.
+     */
+    private final class EmailCard {
+        final LinearLayout card = card();
+        private android.widget.EditText to;
+        private android.widget.EditText user;
+        private android.widget.EditText password;
+        private android.widget.EditText host;
+        private android.widget.EditText port;
+        private String provider = "gmail";
+        private EmailSmtp.Security security = EmailSmtp.Security.SSL;
+        private LinearLayout status;
+        private LinearLayout testLine;
+        private TextView testButton;
+        private String statusDrawn = "";
+        private boolean testing;
+
+        EmailCard() {
+            draw();
+        }
+
+        private Context ctx() {
+            return LinuxSettingsActivity.this;
+        }
+
+        void draw() {
+            card.removeAllViews();
+            to = user = password = host = port = null;
+            status = testLine = null;
+            testButton = null;
+            statusDrawn = "";
+            EmailNotice.Prefs s = EmailNotice.Prefs.load(ctx());
+            provider = s.provider;
+            security = s.security;
+            card.addView(switchRow(R.drawable.hm_ic_mail, AMBER, getString(R.string.em_set_title),
+                    getString(R.string.em_set_sub), s.on, true, this::toggle));
+            if (s.on) {
+                LinearLayout.LayoutParams ruleLp = new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT, Math.max(1, dp(1)));
+                ruleLp.setMarginStart(dp(56));
+                card.addView(rule(), ruleLp);
+                card.addView(form(s), new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+                card.addView(rule(), ruleLp);
+                card.addView(switchRow(R.drawable.hm_ic_shield, green, getString(R.string.em_set_links),
+                        getString(R.string.em_set_links_sub), s.links, true, this::toggleLinks));
+                card.addView(rule(), ruleLp);
+                card.addView(actions(), new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+            }
+            DexFonts.applyTo(LinuxSettingsActivity.this, card);
+            DexCursors.decorate(card);
+            tick(true);
+        }
+
+        private View rule() {
+            View line = new View(ctx());
+            line.setBackgroundColor(ruleColor);
+            return line;
+        }
+
+        /** The service, the addresses, the password, and the server for another service. */
+        private View form(EmailNotice.Prefs s) {
+            LinearLayout f = new LinearLayout(ctx());
+            f.setOrientation(LinearLayout.VERTICAL);
+            f.setPaddingRelative(dp(56), dp(12), 0, dp(14));
+            f.addView(text(getString(R.string.em_set_service), 13, theme.textFaint, 600));
+            f.addView(providers(), boxParams(dp(8)));
+            EmailNotice.Provider p = EmailNotice.provider(provider);
+            TextView note = text(getString(p.note), 12.5f, theme.textFaint, 400);
+            note.setLineSpacing(0, 1.15f);
+            f.addView(note, boxParams(dp(8)));
+            to = field(f, R.string.em_set_to, s.to, R.string.em_set_to_hint,
+                    android.text.InputType.TYPE_CLASS_TEXT | android.text.InputType.TYPE_TEXT_VARIATION_EMAIL_ADDRESS);
+            user = field(f, R.string.em_set_user, s.user, R.string.em_set_user_hint,
+                    android.text.InputType.TYPE_CLASS_TEXT | android.text.InputType.TYPE_TEXT_VARIATION_EMAIL_ADDRESS);
+            boolean saved = EmailNotice.hasPassword(ctx());
+            password = field(f, R.string.em_set_password, "", 0,
+                    android.text.InputType.TYPE_CLASS_TEXT | android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD);
+            // A saved password shows as dots that are not it, in the page's own
+            // font (Android gives a password field a typewriter's); what that
+            // means is said under the field, where it has room.
+            password.setTypeface(weight(400));
+            if (saved) {
+                password.setHint("••••••••••••");
+                TextView keep = text(getString(R.string.em_set_password_saved), 12.5f, theme.textFaint, 400);
+                keep.setLineSpacing(0, 1.12f);
+                f.addView(keep, boxParams(dp(6)));
+            }
+            // Typed, the password stays in this field only: not in the page's saved state.
+            password.setSaveEnabled(false);
+            if ("other".equals(provider)) {
+                host = field(f, R.string.em_set_server, s.host, R.string.em_set_server_hint,
+                        android.text.InputType.TYPE_CLASS_TEXT | android.text.InputType.TYPE_TEXT_VARIATION_URI);
+                port = field(f, R.string.em_set_port, s.port > 0 ? String.valueOf(s.port) : "", 0,
+                        android.text.InputType.TYPE_CLASS_NUMBER);
+                f.addView(text(getString(R.string.em_set_security), 13, theme.textFaint, 600), boxParams(dp(14)));
+                f.addView(securities(), boxParams(dp(8)));
+            } else {
+                TextView server = text(getString(R.string.em_set_server_line, p.host, p.port, securityName(p.security)),
+                        12.5f, theme.textFaint, 500);
+                f.addView(server, boxParams(dp(14)));
+            }
+            return f;
+        }
+
+        private String securityName(EmailSmtp.Security sec) {
+            return getString(sec == EmailSmtp.Security.STARTTLS ? R.string.em_sec_starttls : R.string.em_sec_ssl);
+        }
+
+        /** A label, and a field under it, one line, as the page's own boxes look. */
+        private android.widget.EditText field(LinearLayout into, int label, String value, int hint, int type) {
+            TextView l = text(getString(label), 13, theme.textFaint, 600);
+            into.addView(l, boxParams(dp(14)));
+            android.widget.EditText e = new android.widget.EditText(ctx());
+            e.setId(View.generateViewId());
+            l.setLabelFor(e.getId());
+            e.setText(value);
+            if (hint != 0) e.setHint(getString(hint));
+            e.setInputType(type);
+            e.setSingleLine(true);
+            e.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15);
+            e.setTextColor(theme.text);
+            e.setHintTextColor(homeLook || theme.dark ? 0x80C9D1DC : 0x80000000);
+            // An address, a server and a password read left to right in every language.
+            e.setTextDirection(View.TEXT_DIRECTION_LTR);
+            e.setPadding(dp(12), dp(10), dp(12), dp(10));
+            e.setBackground(fill(homeLook || theme.dark ? 0x12FFFFFF : 0x0D000000, dp(12), cardEdge));
+            e.setContentDescription(getString(label));
+            into.addView(e, boxParams(dp(6)));
+            return e;
+        }
+
+        private View providers() {
+            Flow row = new Flow();
+            for (EmailNotice.Provider p : EmailNotice.PROVIDERS) {
+                row.addView(chip(getString(p.name), p.id.equals(provider), () -> {
+                    save();
+                    EmailNotice.Prefs s = EmailNotice.Prefs.load(ctx());
+                    s.provider = p.id;
+                    if (!"other".equals(p.id)) {
+                        s.host = p.host;
+                        s.port = p.port;
+                        s.security = p.security;
+                    }
+                    s.save(ctx());
+                    EmailNotice.settingsChanged(ctx());
+                    ticks.post(this::draw);
+                }));
+            }
+            return row;
+        }
+
+        private View securities() {
+            Flow row = new Flow();
+            for (EmailSmtp.Security sec : EmailSmtp.Security.values()) {
+                row.addView(chip(securityName(sec), sec == security, () -> {
+                    security = sec;
+                    // The usual port for each, when the port is one of the two.
+                    if (port != null) {
+                        String typed = port.getText().toString().trim();
+                        if (typed.isEmpty() || typed.equals("465") || typed.equals("587")) {
+                            port.setText(sec == EmailSmtp.Security.SSL ? "465" : "587");
+                        }
+                    }
+                    save();
+                    ticks.post(this::draw);
+                }));
+            }
+            return row;
+        }
+
+        /**
+         * Chips side by side, onto the next line where a line is full, so
+         * every choice and the one chosen are in sight at any width and in
+         * any language; laid from the right in a right-to-left language.
+         */
+        private final class Flow extends ViewGroup {
+            private final int gap = dp(8);
+
+            Flow() {
+                super(LinuxSettingsActivity.this);
+            }
+
+            @Override
+            protected void onMeasure(int widthSpec, int heightSpec) {
+                int max = MeasureSpec.getSize(widthSpec);
+                boolean bounded = MeasureSpec.getMode(widthSpec) != MeasureSpec.UNSPECIFIED;
+                int x = 0;
+                int y = 0;
+                int line = 0;
+                int widest = 0;
+                for (int i = 0; i < getChildCount(); i++) {
+                    View c = getChildAt(i);
+                    c.measure(MeasureSpec.makeMeasureSpec(max, bounded ? MeasureSpec.AT_MOST : MeasureSpec.UNSPECIFIED),
+                            MeasureSpec.makeMeasureSpec(0, MeasureSpec.UNSPECIFIED));
+                    if (bounded && x > 0 && x + c.getMeasuredWidth() > max) {
+                        x = 0;
+                        y += line + gap;
+                        line = 0;
+                    }
+                    x += c.getMeasuredWidth() + gap;
+                    line = Math.max(line, c.getMeasuredHeight());
+                    widest = Math.max(widest, x - gap);
+                }
+                setMeasuredDimension(bounded ? max : widest, y + line);
+            }
+
+            @Override
+            protected void onLayout(boolean changed, int l, int t, int r, int b) {
+                int width = r - l;
+                boolean rtl = getLayoutDirection() == View.LAYOUT_DIRECTION_RTL;
+                int x = 0;
+                int y = 0;
+                int line = 0;
+                for (int i = 0; i < getChildCount(); i++) {
+                    View c = getChildAt(i);
+                    int w = c.getMeasuredWidth();
+                    int h = c.getMeasuredHeight();
+                    if (x > 0 && x + w > width) {
+                        x = 0;
+                        y += line + gap;
+                        line = 0;
+                    }
+                    int left = rtl ? width - x - w : x;
+                    c.layout(left, y, left + w, y + h);
+                    x += w + gap;
+                    line = Math.max(line, h);
+                }
+            }
+        }
+
+        private TextView chip(String label, boolean chosen, Runnable onTap) {
+            TextView c = text(label, 14, chosen ? 0xFF0B0F17 : theme.text, 600);
+            c.setGravity(Gravity.CENTER);
+            c.setMinHeight(dp(40));
+            c.setPadding(dp(14), 0, dp(14), 0);
+            c.setBackground(pressable(chosen ? sky : 0x00000000, dp(20), chosen ? 0 : cardEdge));
+            asButton(c, label);
+            c.setSelected(chosen);
+            c.setOnClickListener(v -> onTap.run());
+            return c;
+        }
+
+        /** The test, its answer, what the emails are doing, and the way to forget it all. */
+        private View actions() {
+            LinearLayout a = new LinearLayout(ctx());
+            a.setOrientation(LinearLayout.VERTICAL);
+            a.setPaddingRelative(dp(56), dp(14), 0, dp(10));
+            testButton = dialogButton(getString(R.string.em_set_test), green, 0xFF0B0F17, this::test);
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            a.addView(testButton, lp);
+            testLine = new LinearLayout(ctx());
+            testLine.setOrientation(LinearLayout.VERTICAL);
+            a.addView(testLine, boxParams(0));
+            status = new LinearLayout(ctx());
+            status.setOrientation(LinearLayout.VERTICAL);
+            a.addView(status, boxParams(dp(12)));
+            TextView forget = link(getString(R.string.em_set_forget), () -> {
+                EmailNotice.forget(ctx());
+                Toast.makeText(ctx(), getString(R.string.em_set_forgotten), Toast.LENGTH_SHORT).show();
+                ticks.post(this::draw);
+            });
+            LinearLayout.LayoutParams fLp = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            fLp.setMarginStart(-dp(10));
+            fLp.topMargin = dp(8);
+            a.addView(forget, fLp);
+            return a;
+        }
+
+        /** The switch. Off: what was typed is kept for next time, and no link or email is left going. */
+        private boolean toggle() {
+            boolean on = !EmailNotice.Prefs.load(ctx()).on;
+            if (!on) save();
+            EmailNotice.setOn(ctx(), on);
+            ticks.post(this::draw);
+            return on;
+        }
+
+        private boolean toggleLinks() {
+            save();
+            EmailNotice.Prefs s = EmailNotice.Prefs.load(ctx());
+            s.links = !s.links;
+            s.save(ctx());
+            // Off: the links of the last email stop working at once.
+            if (!s.links) LinuxService.browser(ctx()).dropLinks("off");
+            return s.links;
+        }
+
+        /**
+         * What is typed, kept: the password sealed, the rest in the settings.
+         * A field left empty keeps what was there (the password most of all).
+         *
+         * @return false when the phone could not keep the password safe
+         */
+        boolean save() {
+            if (to == null) return true;
+            EmailNotice.Prefs s = EmailNotice.Prefs.load(ctx());
+            String before = s.fingerprint(ctx());
+            s.provider = provider;
+            s.to = to.getText().toString().trim();
+            s.user = user.getText().toString().trim();
+            if ("other".equals(provider) && host != null && port != null) {
+                s.host = host.getText().toString().trim();
+                try {
+                    s.port = Integer.parseInt(port.getText().toString().trim());
+                } catch (NumberFormatException e) {
+                    s.port = 0;
+                }
+                s.security = security;
+            } else {
+                EmailNotice.Provider p = EmailNotice.provider(provider);
+                s.host = p.host;
+                s.port = p.port;
+                s.security = p.security;
+            }
+            s.save(ctx());
+            String typed = password.getText().toString();
+            boolean kept = EmailNotice.savePassword(ctx(), typed);
+            if (!typed.isEmpty() && kept) {
+                password.setText("");
+                password.setHint("••••••••••••");
+            }
+            if (!EmailNotice.Prefs.load(ctx()).fingerprint(ctx()).equals(before)) EmailNotice.settingsChanged(ctx());
+            return kept;
+        }
+
+        private void test() {
+            if (testing || testLine == null) return;
+            testLine.removeAllViews();
+            if (!save()) {
+                testLine.addView(statusLine(AMBER, getString(R.string.em_set_password_error)), boxParams(dp(12)));
+                return;
+            }
+            int missing = EmailNotice.Prefs.load(ctx()).missing(ctx());
+            if (missing != 0) {
+                testLine.addView(statusLine(AMBER, getString(missing)), boxParams(dp(12)));
+                return;
+            }
+            testing = true;
+            testButton.setEnabled(false);
+            testButton.setAlpha(0.6f);
+            testLine.addView(statusLine(theme.textFaint, getString(R.string.em_set_testing)), boxParams(dp(12)));
+            final Context app = getApplicationContext();
+            final String sentTo = EmailNotice.Prefs.load(ctx()).to.trim();
+            new Thread(() -> {
+                EmailNotice.Outcome out;
+                try {
+                    out = EmailNotice.sendTest(app);
+                } catch (RuntimeException e) {
+                    DexLog.warn("email", "the test email: " + e);
+                    out = new EmailNotice.Outcome(false, EmailSmtp.Fault.PROTOCOL, null, "", 0);
+                }
+                final EmailNotice.Outcome done = out;
+                ticks.post(() -> tested(done, sentTo));
+            }, "email-test").start();
+        }
+
+        private void tested(EmailNotice.Outcome out, String sentTo) {
+            testing = false;
+            if (testButton == null || testLine == null || isDestroyed()) return;
+            testButton.setEnabled(true);
+            testButton.setAlpha(1f);
+            testLine.removeAllViews();
+            if (out.ok) {
+                testLine.addView(statusLine(green, getString(R.string.em_set_test_ok, sentTo)), boxParams(dp(12)));
+            } else {
+                int words = "MISSING".equals(out.local) ? EmailNotice.Prefs.load(ctx()).missing(ctx())
+                        : EmailNotice.faultWords(out.local != null ? out.local : out.fault.name());
+                if (words == 0) words = R.string.em_fault_protocol;
+                testLine.addView(statusLine(AMBER, getString(R.string.em_set_not_sent, getString(words))), boxParams(dp(12)));
+                if (!out.said.isEmpty()) testLine.addView(said(out.said), boxParams(dp(6)));
+            }
+            tick(true);
+        }
+
+        private TextView said(String what) {
+            TextView t = text(getString(R.string.em_set_said, what), 12, theme.textFaint, 400);
+            t.setPaddingRelative(dp(18), 0, 0, 0);
+            return t;
+        }
+
+        /** The lines under the form, from the job's state: drawn again only when they change. */
+        void tick(boolean force) {
+            if (status == null) return;
+            EmailNotice.Prefs s = EmailNotice.Prefs.load(ctx());
+            EmailNotice.State st = EmailNotice.state(ctx());
+            int missing = s.missing(ctx());
+            boolean tested = s.tested(ctx());
+            String drawn = missing + "|" + tested + "|" + st.sentAt + "|" + st.sentHead + "|" + st.fault + "|" + st.blocked
+                    + "|" + st.retryAt + "|" + st.changeAt + "|" + st.said + "|" + s.to;
+            if (!force && drawn.equals(statusDrawn)) return;
+            statusDrawn = drawn;
+            status.removeAllViews();
+            if (missing != 0) {
+                status.addView(statusLine(AMBER, getString(missing)));
+                return;
+            }
+            if (!tested) {
+                status.addView(statusLine(AMBER, getString(R.string.em_state_need_test)));
+                return;
+            }
+            long now = EmailNotice.clock.getAsLong();
+            if (!st.fault.isEmpty() && (st.blocked || st.retryAt > now)) {
+                String why = getString(EmailNotice.faultWords(st.fault));
+                status.addView(statusLine(AMBER, st.blocked ? getString(R.string.em_set_not_sent, why)
+                        : getString(R.string.em_state_retry, why, android.text.format.DateUtils.formatDateTime(
+                        ctx(), st.retryAt, android.text.format.DateUtils.FORMAT_SHOW_TIME))));
+                if (!st.said.isEmpty()) status.addView(said(st.said), boxParams(dp(6)));
+            } else if (st.changeAt > 0) {
+                status.addView(statusLine(sky, getString(R.string.em_state_pending)));
+            } else {
+                status.addView(statusLine(green, getString(R.string.em_state_on, s.to.trim())));
+            }
+            if (st.sentAt > 0) {
+                TextView last = text(getString(R.string.em_state_last, android.text.format.DateUtils.formatDateTime(ctx(),
+                        st.sentAt, android.text.format.DateUtils.FORMAT_SHOW_DATE | android.text.format.DateUtils.FORMAT_SHOW_TIME
+                                | android.text.format.DateUtils.FORMAT_ABBREV_MONTH), st.sentHead), 12.5f, theme.textFaint, 400);
+                last.setPaddingRelative(dp(18), 0, 0, 0);
+                status.addView(last, boxParams(dp(6)));
             }
         }
     }

@@ -148,6 +148,13 @@ android {
                 if (project.hasProperty('browserShots')) {
                     systemProperty 'browser.shots', project.property('browserShots')
                 }
+                // Conscrypt on the computer's Java reads a peer's address by reflection
+                // (AdbWireTest's TLS 1.3 servers): test JVMs only.
+                jvmArgs '--add-opens=java.base/java.net=ALL-UNNAMED'
+                // AdbWireTest pairs the computer's own adb with the app's pairing: -PadbPairCheck=<adb>.
+                if (project.hasProperty('adbPairCheck')) {
+                    systemProperty 'adb.pair.check', project.property('adbPairCheck')
+                }
             }
         }
     }
@@ -181,6 +188,12 @@ dependencies {
 androidComponents {
     onVariants(selector().withBuildType('release')) { variant ->
         variant.applicationId.set('com.dotnetdreamer.linuxondroid')
+        // The Play build keeps the Cloudflare link (From anywhere, in a
+        // browser) like the GitHub APK: the user wants the same features in
+        // both (2026-11-22; 0.3.40 alone left it out). Through Cloudflare's
+        // tunnel the screen and sound reach the computer readable at
+        // Cloudflare; every other route is end-to-end encrypted between the
+        // user's own devices (doc/phone-remote.md, Google Play).
     }
 }
 

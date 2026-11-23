@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Config for PhoneControlService, Remote desktop's control.
+
+     As little as control needs, and nothing that reads the screen for its
+     own sake:
+     - canPerformGestures: a computer's mouse becomes a touch (PhoneInput).
+     - flagInputMethodEditor (Android 13): the service is an input method of
+       its own, so typed text goes in at the cursor of the focused field and
+       Backspace, the arrows and Ctrl shortcuts are key events there, with the
+       phone's own keyboard left as it is.
+     - canRetrieveWindowContent: before Android 13 the only way to type is to
+       set the focused field's text through its node; nothing else reads it.
+     - canTakeScreenshot (Android 11): the slow view (PhoneShots), about three
+       pictures a second, for a computer that opens the phone while nothing is
+       shared: screen sharing ends whenever the phone locks (Android 15 QPR1
+       on) and needs someone at the phone to start again. Taken only while a
+       computer the user paired with has the phone open.
+     - flagRetrieveInteractiveWindows: which app's window is under a computer's
+       press, read only at the press, so the computer can be told when it is
+       one Android keeps for a person at the phone (a permission question, the
+       installer: PhoneInput#protectedAt).
+     No event types are listened to. -->
+
+<accessibility-service
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    android:accessibilityEventTypes="typeAnnouncement"
+    android:accessibilityFeedbackType="feedbackGeneric"
+    android:accessibilityFlags="flagDefault|flagInputMethodEditor|flagRetrieveInteractiveWindows"
+    android:canRetrieveWindowContent="true"
+    android:canPerformGestures="true"
+    android:canTakeScreenshot="true"
+    android:isAccessibilityTool="false"
+    android:notificationTimeout="1000"
+    android:description="@string/pr_control_description"
+    android:summary="@string/pr_control_summary" />

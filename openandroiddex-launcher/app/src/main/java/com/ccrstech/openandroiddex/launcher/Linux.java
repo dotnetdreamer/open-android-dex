@@ -818,6 +818,12 @@ final class Linux {
         String nd = nativeDir(ctx);
         Map<String, String> env = new HashMap<>();
         env.put("LINUX_ROOT", root(ctx).getAbsolutePath());
+        // Where the phone's own shell keeps a here-document while it runs. With
+        // none set, Android 10's mksh writes to /data/local, which an app may
+        // not: on a Redmi Note 7 setup stopped at once ("can't create temporary
+        // file /data/local/shm….tmp", FAILED: configure, 2026-11-22). The
+        // guest never sees it: proot starts the guest with env -i.
+        env.put("TMPDIR", ctx.getCacheDir().getAbsolutePath());
         env.put("LINUX_PROOT", nd + "/libproot.so");
         env.put("PROOT_LOADER", nd + "/libloader.so");
         env.put("PROOT_LOADER_32", nd + "/libloader32.so");

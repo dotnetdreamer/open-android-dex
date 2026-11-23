@@ -15,7 +15,16 @@
   and two installed apps declaring the same authority is
   INSTALL_FAILED_CONFLICTING_PROVIDER — the second install simply fails.
 -->
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!-- Remote desktop's phone helper started with no computer
+         (PhoneHelperStart): the helper's first run, as the shell, grants
+         this so the app can switch the phone's Wireless debugging on by
+         itself when a computer needs the helper, and off again after. Never
+         granted without that pairing; nothing else writes secure settings. -->
+    <uses-permission android:name="android.permission.WRITE_SECURE_SETTINGS"
+        tools:ignore="ProtectedPermissions" />
 
     <!-- Downloading the Ubuntu rootfs, apt inside the guest, and the loopback
          socket the noVNC page is served over. Without it an app cannot create
@@ -29,6 +38,24 @@
          is none of the predefined FGS types. -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <!-- Remote desktop: this phone's screen, shared with a computer while the
+         user allows it (PhoneRemoteService). Android asks each time, and shows
+         that the screen is being shared for as long as it is. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+    <!-- Remote desktop's sound: what apps play on the phone, for the computer
+         that has it open, only while the person there chooses sound
+         (PhoneSound). Android's playback capture needs the microphone's
+         permission, asked at runtime with the app's own words first; the
+         microphone is never opened. MODIFY_AUDIO_SETTINGS: the phone's own
+         media sound muted while the computer asks for it there alone. -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+    <!-- RECORD_AUDIO makes Google Play treat a microphone as required, and it
+         left out the phones and tablets without one (6 devices for 0.3.38).
+         The microphone is never used: not required. -->
+    <uses-feature
+        android:name="android.hardware.microphone"
+        android:required="false" />
 
     <!-- Asked for at runtime, once, by LinuxActivity — the only permission
          dialog this app raises. The service runs either way; without the grant
@@ -55,6 +82,18 @@
          (Linux.sharedFolderOffered). Debug builds, the GitHub APK among them,
          keep both. -->
     <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
+    <!-- Android 10 has no "All files access": there the phone's own files
+         (Remote desktop's Files in a browser) and the shared folder come
+         through the older storage permission, Android's own two-button
+         question, with legacy storage on (requestLegacyExternalStorage
+         below, which Android 10 honours and Android 11 ignores). Never
+         asked on Android 11 and newer. -->
+    <uses-permission
+        android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="29" />
+    <uses-permission
+        android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="29" />
 
     <!-- Remote access: SSH into this Linux from a computer anywhere. The same
          four the desktop build declares, for the same reasons (see its
@@ -110,6 +149,7 @@
         android:supportsRtl="true"
         android:enableOnBackInvokedCallback="false"
         android:networkSecurityConfig="@xml/network_security_config"
+        android:requestLegacyExternalStorage="true"
         android:theme="@style/Theme.LinuxOnDroid">
 
         <!-- The launcher entry: the home screen, where Linux is started from
@@ -250,5 +290,98 @@
             android:name=".LinuxAppsService"
             android:exported="false"
             android:process=":linuxapps" />
+        <!-- Remote desktop: this phone's own screen, seen and used from a
+             computer the user paired with (doc/phone-remote.md). Three pieces,
+             all in the app's own process, so a pointer move never crosses a
+             process on its way to the screen.
+
+             The screen sharing: Android's consent (PhoneConsentActivity, the
+             system's dialog and nothing of ours), then the projection held in
+             a mediaProjection foreground service, with its notification. -->
+        <service
+            android:name=".PhoneRemoteService"
+            android:exported="false"
+            android:foregroundServiceType="mediaProjection" />
+
+        <!-- The stream listening while Remote desktop is on with neither
+             control nor screen sharing there to hold it (after the app was
+             stopped): a computer then finds a stream that asks the phone. -->
+        <service
+            android:name=".PhoneListenService"
+            android:exported="false" />
+
+        <!-- "Email me when an address changes" (EmailNotice,
+             doc/address-email.md): the job that waits for a change to
+             settle, sends one email with the new addresses, and tries again
+             when there is no network; and the look every quarter of an hour
+             that needs no callback from Android. Persisted (which is why
+             RECEIVE_BOOT_COMPLETED above matters here too), so a restart or
+             an update loses neither. -->
+        <service
+            android:name=".EmailNoticeJob"
+            android:exported="false"
+            android:permission="android.permission.BIND_JOB_SERVICE" />
+
+        <activity
+            android:name=".PhoneConsentActivity"
+            android:exported="false"
+            android:theme="@style/Theme.OpenAndroidDeX.Detour"
+            android:taskAffinity="${applicationId}.phone"
+            android:excludeFromRecents="true"
+            android:launchMode="singleTask" />
+
+        <!-- Android's question for Remote desktop's sound (PhoneSound), and
+             nothing of its own. -->
+        <activity
+            android:name=".PhoneSoundActivity"
+            android:exported="false"
+            android:theme="@style/Theme.OpenAndroidDeX.Detour"
+            android:taskAffinity="${applicationId}.phone"
+            android:excludeFromRecents="true"
+            android:launchMode="singleTask" />
+
+        <!-- The control: a computer's mouse and keyboard, as touches and
+             typing (PhoneInput). Switched on by the user in Android's
+             accessibility settings, after this app's own words on what it does
+             (the Settings page), never by the app. -->
+        <service
+            android:name=".PhoneControlService"
+            android:exported="false"
+            android:label="@string/pr_control_label"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/phone_control" />
+        </service>
+
+        <!-- Turns the screen on for a computer that opened a sleeping phone,
+             over the lock screen, and goes at once. -->
+        <activity
+            android:name=".PhoneWakeActivity"
+            android:exported="false"
+            android:theme="@style/Theme.OpenAndroidDeX.Detour"
+            android:taskAffinity="${applicationId}.wake"
+            android:excludeFromRecents="true"
+            android:showWhenLocked="true"
+            android:turnScreenOn="true"
+            android:noHistory="true" />
+
+        <!-- Where a helper the app started itself (PhoneHelper's register mode)
+             hands over its port and key, with the shell's `content call`.
+             DUMP guards it (the shell holds it, no app is given it), and
+             PhoneHelperDoor believes the shell's and root's uid only. -->
+        <provider
+            android:name=".PhoneHelperDoor"
+            android:authorities="${applicationId}.helper"
+            android:exported="true"
+            android:permission="android.permission.DUMP" />
+
+        <!-- The pairing code typed into the pairing notification's box. -->
+        <receiver
+            android:name=".PhoneHelperStart$CodeReceiver"
+            android:exported="false" />
     </application>
 </manifest>

@@ -1,0 +1,38 @@
+--- a/src/vrend/vrend_winsys.c
++++ b/src/vrend/vrend_winsys.c
+@@ -76,6 +76,18 @@
+       }
+ 
+       use_context = CONTEXT_EGL;
++#elif defined(HAVE_EPOXY_EGL_H)
++      /* No GBM (Android): EGL on the platform's default display, with
++       * surfaceless contexts. virgl_egl_init() falls back to
++       * eglGetDisplay(EGL_DEFAULT_DISPLAY) when the Mesa-only surfaceless
++       * platform is not offered, which is what Android's libEGL does. */
++      (void)preferred_fd;
++      egl = virgl_egl_init(EGL_DEFAULT_DISPLAY, flags & VIRGL_RENDERER_USE_SURFACELESS,
++                           flags & VIRGL_RENDERER_USE_GLES);
++      if (!egl)
++         return -1;
++
++      use_context = CONTEXT_EGL;
+ #else
+       (void)preferred_fd;
+       virgl_error("EGL is not supported on this platform\n");
+@@ -110,6 +122,16 @@
+    } else if (use_context == CONTEXT_EGL_EXTERNAL) {
+       free(egl);
+       egl = NULL;
++      use_context = CONTEXT_NONE;
++   }
++#elif defined(HAVE_EPOXY_EGL_H)
++   if (use_context == CONTEXT_EGL) {
++      virgl_egl_destroy(egl);
++      egl = NULL;
++      use_context = CONTEXT_NONE;
++   } else if (use_context == CONTEXT_EGL_EXTERNAL) {
++      free(egl);
++      egl = NULL;
+       use_context = CONTEXT_NONE;
+    }
+ #endif

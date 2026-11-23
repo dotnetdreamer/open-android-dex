@@ -15,7 +15,7 @@ does. Linux's sound comes down the same connection and plays in the browser.
 
 What a person does:
 
-1. **Phone:** LinuxOnDroid → ⋮ → Settings → On a computer → *Open in a
+1. **Phone:** LinuxOnDroid → ⋮ → Settings → Linux on a computer → *Open in a
    browser*. The card shows two numbered steps: the address
    (`192.168.1.20:7443`) and a six-digit code.
 2. **Computer:** type the address. The page offers the secure connection
@@ -222,7 +222,7 @@ full https link.
   guest's web root, and the page holds the token. It is served with a policy
   that lets it load nothing but its own files (`script-src 'self'`, no inline
   anything, `frame-ancestors 'none'`).
-- **Out again:** *Forget this browser* in the page's menu. *Sign them out* on
+- **Out again:** *Forget this browser* in the page's menu. *Sign out every browser* on
   the card makes a new code, ends a browser watching now, and closes every
   connection not yet a stream. Turning the switch off closes everything, then
   tells a browser watching. Uninstalling Linux turns it off; the browsers let
@@ -242,6 +242,11 @@ full https link.
   up at once, and a sign-out that met a request's read left the browser in:
   one round in 72 of the race below). Android renames over a file whoever is
   reading it.
+- **Or a link from an email.** With *Email me when an address changes* on
+  (`address-email.md`), each email carries a sign-in link for each address,
+  worth one code and needing no card open: once, at its own address, for a
+  day, replaced by the next email's, ended by *Sign out every browser*. Its
+  secret is after the `#`, so it is in no request's address and no log.
 
 ## Low, Medium and High
 
@@ -609,10 +614,29 @@ themselves, which refers to them rather than reading them, so a folder of a
 thousand photos is a few requests rather than a thousand round trips. A file
 already there with the same size and time (to the two seconds a FAT folder
 keeps) is not written again: sending something twice is cheap, and a retry
-after a cut never makes copies. Three requests run at a time. A name already
+after a cut never makes copies. Replace, chosen when a name is taken, is
+the exception: every file of that drop is sent and written (`force`), since
+two different files can share a size and a time (until 2026-11-21 Replace
+kept the old one then, without a word). Without Replace, a big file already
+there is not even sent: the page asks first (`part`, with `fresh`), which
+also says at once what would be refused
+(no room, a folder that went). Asked after the body started, the answer was
+lost: the phone answered without taking the body and hung up on the rest, and
+a browser, still sending, saw only the reset, so Replace on a big file
+already there sent the whole file again at every try, eight tries before "The
+phone stopped answering" (until 2026-11-21). A body that comes anyway is read
+to its end, so that its answer arrives. Three requests run at a time. A name already
 taken in the folder is asked about once, for all of them: Replace (folders
 merge), Keep both ("photo (2).jpg", picked as the phone would), or Skip. A
-file keeps its time. The phone stays awake while anything moves (the same
+file keeps its time. Pause and Cancel reach that first question too, and
+nothing is sent after either, even when its answer comes anyway (until
+2026-11-22 the `PUT` went once the answer came: a cancelled Replace still
+replaced the file, and a paused one went on sending). When one file of a drop
+fails, the others still moving stop too, and *Try again* sends every file
+of the drop (until 2026-11-22 only the one that failed: the others stayed
+stopped, and the drop never finished). Cancel also stops a drop still being
+made ready (its names asked about, a dropped folder read): until 2026-11-22
+the drop was made ready again over the Cancel and sent. The phone stays awake while anything moves (the same
 wake lock as a stream).
 
 **Bringing back.** One file is the browser's own download, with `Range`, so a
@@ -623,7 +647,11 @@ out just before it is sent, so the ZIP's length is known before its first
 byte and the browser shows the time left; ZIP64 where a size or an offset
 needs it. Chrome and Edge can also save into a folder of the computer's
 (`showDirectoryPicker`), folders and all, each file streamed to the disk with
-its progress in the page.
+its progress in the page. Cancel while the folders are read downloads
+nothing, and a file cancelled while it comes in leaves nothing where it was
+going (until 2026-11-22 the cancelled folder went on downloading, all of it,
+and a cancelled file stayed behind empty: the browser makes the file before
+its first byte, and the bytes go to a side file that a cancel throws away).
 
 **Deleting** moves to Linux's own Trash, laid out as freedesktop.org's spec
 says (`~/.local/share/Trash/files`, and an `info/*.trashinfo` with where from
@@ -637,6 +665,13 @@ first 512 kB of text or code with line numbers. A picture the browser cannot
 draw (a HEIC from a phone's camera) is shown through the phone's decoder
 instead. The grid's small pictures come from the phone too
 (`LinuxFilesThumbs`), two at a time, about the size they are shown.
+
+**The phone's own files too.** Remote desktop's page (`phone.html`) has the same
+Files for the phone's shared storage, through `/pfs/` rather than `/fs/`:
+`LinuxFiles` of the phone's kind on the server, and on the page this very
+`files.js`, given the phone's route, places and words by `phone-files.js`
+(`createFiles(app, PHONE)`; Linux's are `LINUX`, the default). What differs, and
+why, is in `phone-remote.md`, "Files". Linux's Files are as described here.
 
 ## Verified, and not yet
 

@@ -463,6 +463,33 @@ The MIT licence, as these protocol files state it:
     ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF
     THIS SOFTWARE.
 
+### virglrenderer 1.3.0 and libepoxy 1.5.10: the VirGL server
+
+virglrenderer: Copyright © the virglrenderer contributors (Red Hat, Collabora,
+Google and others; each source file names its own copyright holders), much of
+it derived from Mesa. Licensed under the **MIT licence** (the text in the Mesa
+section above). Source:
+https://gitlab.freedesktop.org/virgl/virglrenderer/-/archive/1.3.0/virglrenderer-1.3.0.tar.gz
+Its Venus part, whose Vulkan headers are Apache-2.0, and its DRM part are not
+built.
+
+libepoxy: Copyright © 2013-2014 Intel Corporation. Licensed under the **MIT
+licence** (the text in the Mesa section above). Its generated code is derived
+from Khronos's XML registry: Copyright © 2013 The Khronos Group Inc., under
+the same permission notice as the MIT licence, with "Materials" for
+"Software". Source:
+https://github.com/anholt/libepoxy/archive/refs/tags/1.5.10.tar.gz
+
+Files: `lib/arm64-v8a/libvirglserver.so` and `lib/x86_64/libvirglserver.so`,
+virglrenderer's vtest server with both linked in statically, built with the
+Android NDK by the recipe in `openandroiddex-linux/virgl/` (the sources'
+checksums are in `build-virgl.sh`), with five patches by this project (MIT)
+in `patches/`. On a 64-bit phone whose GPU has no Mesa driver above, the app
+runs it so Linux apps can draw on the phone's own graphics driver.
+
+`assets/linux/gpu/oadx-glprobe` is not virglrenderer: it is this project's
+own program (GPL-3.0-or-later), from `openandroiddex-linux/gpu-probe/oadx-glprobe.c`.
+
 ---
 
 ## Downloaded at runtime, not bundled

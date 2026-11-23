@@ -296,8 +296,206 @@ final class LinuxBrowser {
         locked(() -> {
             write(new File(dir, "tokens"), "");
             freshCode();
+            // The emails' sign-in links too (EmailNotice): after a sign-out
+            // the only way in is the code, shown on the phone.
+            retireLinks("out", System.currentTimeMillis());
             return null;
         });
+    }
+
+    // ── sign-in links, from "Email me when an address changes" (doc/address-email.md) ──
+
+    /**
+     * How long a link from an email works: a night and a day, because the
+     * email that matters is the one a restart sends at three in the morning,
+     * read at breakfast. A link also ends when it is used once, when the next
+     * email's links replace it, when every browser is signed out, and when
+     * the emails or their links are switched off.
+     */
+    static final long LINK_LIFE_MS = 24 * 3600_000L;
+
+    /** Links that no longer work, remembered so a page can say why. */
+    private static final int DEAD_KEPT = 64;
+
+    /** What a try of a sign-in link got. */
+    enum Link { OK, WRONG, USED, OLD, REPLACED, OFF, ELSEWHERE }
+
+    /** What a try of a link got; when it worked, the browser it let in. */
+    static final class LinkTried {
+        final Link link;
+        final String token;
+        final String label;
+
+        LinkTried(Link link, String token, String label) {
+            this.link = link;
+            this.token = token;
+            this.label = label;
+        }
+    }
+
+    /**
+     * New links for an email about to go, one for each of {@code hosts} (the
+     * tunnel's name, a Wi-Fi address): each a secret of 256 bits that only
+     * the email carries. Here only its SHA-256 is kept, with the address it
+     * works at and until when. The last email's links work on until this
+     * email has gone ({@link #confirmLinks}) or never will ({@link #dropLinks(List, String)}):
+     * an email that fails must not take the last one's way in with it.
+     *
+     * @return the secrets, in the order of {@code hosts}
+     */
+    List<String> newLinks(List<String> hosts, long now) {
+        return locked(() -> {
+            SecureRandom random = new SecureRandom();
+            StringBuilder live = new StringBuilder(read(new File(dir, "links")));
+            List<String> secrets = new ArrayList<>();
+            for (String host : hosts) {
+                byte[] raw = new byte[32];
+                random.nextBytes(raw);
+                String secret = Base64.getUrlEncoder().withoutPadding().encodeToString(raw);
+                live.append(hash(secret)).append('\t').append(host.trim().toLowerCase(Locale.ROOT)).append('\t')
+                        .append(now + LINK_LIFE_MS).append('\n');
+                secrets.add(secret);
+            }
+            write(new File(dir, "links"), live.toString());
+            return secrets;
+        });
+    }
+
+    /** The email with {@code secrets} went: every other link is replaced by them, so only the newest email's work. */
+    void confirmLinks(List<String> secrets) {
+        retireLinksBut(secrets, true, "replaced");
+    }
+
+    /** The email with {@code secrets} did not go: those links stop, and the last email's work on. */
+    void dropLinks(List<String> secrets, String why) {
+        retireLinksBut(secrets, false, why);
+    }
+
+    /** Under one lock: the live links in {@code secrets} ({@code keep}) or not in them retired as {@code why}. */
+    private void retireLinksBut(List<String> secrets, boolean keep, String why) {
+        java.util.Set<String> hashes = new java.util.HashSet<>();
+        for (String s : secrets) hashes.add(hash(s));
+        long now = System.currentTimeMillis();
+        locked(() -> {
+            StringBuilder stay = new StringBuilder();
+            for (String line : read(new File(dir, "links")).split("\n")) {
+                int tab = line.indexOf('\t');
+                if (tab <= 0) continue;
+                boolean listed = hashes.contains(line.substring(0, tab));
+                if (listed == keep) {
+                    stay.append(line).append('\n');
+                } else {
+                    buryLink(line.substring(0, tab), why, now);
+                }
+            }
+            write(new File(dir, "links"), stay.toString());
+            return null;
+        });
+    }
+
+    /** Every link stops working: {@code why} is "off" (the emails or their links switched off) or "out" (a sign-out). */
+    void dropLinks(String why) {
+        locked(() -> {
+            retireLinks(why, System.currentTimeMillis());
+            return null;
+        });
+    }
+
+    /** Links that still work, for the Settings page. */
+    int linkCount(long now) {
+        int n = 0;
+        for (String line : read(new File(dir, "links")).split("\n")) {
+            String[] p = line.split("\t");
+            if (p.length >= 3 && number(p[2]) > now) n++;
+        }
+        return n;
+    }
+
+    /**
+     * One try of a link's {@code secret} at {@code host}, the address the
+     * browser asked for. Compared by hash, against every link, each in
+     * constant time. A right one, at its own address and within its day,
+     * lets this browser in (as {@code label}) and is used up, in one step
+     * under the lock, as a code is ({@link #tryCode}): a sign-out is wholly
+     * before it or wholly after.
+     *
+     * <p>No budget of wrong tries, unlike the code's: 256 bits cannot be
+     * guessed, and a budget would only let a stranger who knows the address
+     * use up the owner's way back in. The door's lockout by address still
+     * slows anyone who tries (LinuxBrowserServer).
+     */
+    LinkTried tryLink(String secret, String host, long now, String label) {
+        if (secret == null || !secret.matches("[A-Za-z0-9_-]{40,64}")) return new LinkTried(Link.WRONG, null, null);
+        byte[] want = hash(secret).getBytes(StandardCharsets.US_ASCII);
+        String at = host == null ? "" : host.trim().toLowerCase(Locale.ROOT);
+        return locked(() -> {
+            String[] live = read(new File(dir, "links")).split("\n");
+            int hit = -1;
+            for (int i = 0; i < live.length; i++) {
+                int tab = live[i].indexOf('\t');
+                if (tab <= 0) continue;
+                // Every line compared, the same way, whatever the first ones said.
+                if (MessageDigest.isEqual(want, live[i].substring(0, tab).getBytes(StandardCharsets.US_ASCII))) hit = i;
+            }
+            if (hit >= 0) {
+                String[] p = live[hit].split("\t");
+                boolean inTime = p.length >= 3 && number(p[2]) > now;
+                if (inTime && !p[1].equals(at)) return new LinkTried(Link.ELSEWHERE, null, null);
+                StringBuilder keep = new StringBuilder();
+                for (int i = 0; i < live.length; i++) {
+                    if (i != hit && live[i].indexOf('\t') > 0) keep.append(live[i]).append('\n');
+                }
+                write(new File(dir, "links"), keep.toString());
+                buryLink(p[0], inTime ? "used" : "old", now);
+                if (!inTime) return new LinkTried(Link.OLD, null, null);
+                String clean = cleanLabel(label);
+                return new LinkTried(Link.OK, letIn(clean), clean);
+            }
+            String why = null;
+            for (String line : read(new File(dir, "links-dead")).split("\n")) {
+                String[] p = line.split("\t");
+                if (p.length < 2) continue;
+                if (MessageDigest.isEqual(want, p[0].getBytes(StandardCharsets.US_ASCII))) why = p[1];
+            }
+            if (why == null) return new LinkTried(Link.WRONG, null, null);
+            switch (why) {
+                case "used": return new LinkTried(Link.USED, null, null);
+                case "old": return new LinkTried(Link.OLD, null, null);
+                case "replaced": return new LinkTried(Link.REPLACED, null, null);
+                default: return new LinkTried(Link.OFF, null, null);
+            }
+        });
+    }
+
+    /** Under the lock: every live link into the list of dead ones, as {@code why}. */
+    private void retireLinks(String why, long now) {
+        String live = read(new File(dir, "links"));
+        if (live.trim().isEmpty()) return;
+        for (String line : live.split("\n")) {
+            int tab = line.indexOf('\t');
+            if (tab > 0) buryLink(line.substring(0, tab), why, now);
+        }
+        write(new File(dir, "links"), "");
+    }
+
+    /** Under the lock: one link's hash among the dead ones, the list kept to its newest {@link #DEAD_KEPT}. */
+    private void buryLink(String hash, String why, long now) {
+        List<String> dead = new ArrayList<>();
+        for (String line : read(new File(dir, "links-dead")).split("\n")) {
+            if (line.indexOf('\t') > 0) dead.add(line);
+        }
+        dead.add(hash + "\t" + why + "\t" + now);
+        StringBuilder out = new StringBuilder();
+        for (int i = Math.max(0, dead.size() - DEAD_KEPT); i < dead.size(); i++) out.append(dead.get(i)).append('\n');
+        write(new File(dir, "links-dead"), out.toString());
+    }
+
+    private static long number(String s) {
+        try {
+            return Long.parseLong(s.trim());
+        } catch (NumberFormatException e) {
+            return 0;
+        }
     }
 
     // ── what the server says it is doing ──

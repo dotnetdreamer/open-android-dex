@@ -406,13 +406,27 @@ public class LinuxService extends Service {
      *         the user to tap something, which is always allowed to.
      */
     static boolean remoteResume(Context ctx) {
-        if (!LinuxRemote.isEnabled(ctx) || !LinuxRemote.available(ctx)) return true;
+        if (!LinuxRemote.tunnelOn(ctx) || !LinuxRemote.available(ctx)) return true;
         return send(ctx, ACTION_REMOTE_RESUME, 0, 0);
     }
 
-    /** Open "Add a computer" for {@code code}; turns remote access on if it was off. */
+    /**
+     * Remote desktop was switched on or off: the tunnel it reaches computers
+     * through comes up with it, and goes with it unless Linux's remote access
+     * still wants it.
+     */
+    static void phoneRemoteChanged(Context ctx) {
+        if (!LinuxRemote.available(ctx)) return;
+        send(ctx, LinuxRemote.tunnelOn(ctx) ? ACTION_REMOTE_RESUME : ACTION_REMOTE_OFF, 0, 0);
+    }
+
+    /**
+     * Open "Add a computer" for {@code code}; turns remote access on if it was
+     * off. Not with Remote desktop on: the tunnel is up for it already, and a
+     * computer added for the phone's screen must not open Linux's SSH too.
+     */
     static void remotePair(Context ctx, String code) {
-        LinuxRemote.setEnabled(ctx, true);
+        if (!PhoneRemote.isEnabled(ctx)) LinuxRemote.setEnabled(ctx, true);
         Intent i = new Intent(ctx, LinuxService.class).setAction(ACTION_REMOTE_PAIR)
                 .putExtra(EXTRA_CODE, code);
         start(ctx, i);
@@ -500,7 +514,7 @@ public class LinuxService extends Service {
                     // The host stops itself when it finds remote access switched
                     // off behind its back; with it gone this service may have
                     // nothing left to be foreground for.
-                    if (!remote.running() && !LinuxRemote.isEnabled(LinuxService.this)) {
+                    if (!remote.running() && !LinuxRemote.tunnelOn(LinuxService.this)) {
                         SamsungSlowdown.sync(LinuxService.this, false);
                         idleStopQueued();
                     }
@@ -629,7 +643,7 @@ public class LinuxService extends Service {
         // can be that start. So every start that is not the one switching
         // remote access off brings it up when it is on. start() is a no-op
         // while it is running.
-        boolean remoteWanted = LinuxRemote.isEnabled(this) && LinuxRemote.available(this);
+        boolean remoteWanted = LinuxRemote.tunnelOn(this) && LinuxRemote.available(this);
         // Ahead of remote.start(), so the sshd it starts is born on the big
         // cores too. Every switch of remote access comes through here.
         SamsungSlowdown.sync(this, remoteWanted);
@@ -650,13 +664,34 @@ public class LinuxService extends Service {
         if (ACTION_BROWSER_OFF.equals(action) && intent.getBooleanExtra(EXTRA_FROM_NOTIFICATION, false)) {
             browser(this).setOn(false);
         }
-        boolean browserWanted = browser(this).isOn() && !Linux.isRemoving(this)
-                && !ACTION_UNINSTALL.equals(action);
+        // The door also lets a browser see the phone's own screen (Remote
+        // desktop): up for either switch. With only Remote desktop on, it
+        // offers nothing of Linux's (LinuxBrowserServer.Host#linuxOn), and
+        // Linux being removed leaves it up for the phone's screen alone.
+        boolean linuxDoor = linuxDoorWanted() && !ACTION_UNINSTALL.equals(action);
+        boolean browserWanted = linuxDoor || PhoneRemote.isEnabled(this);
         if (browserWanted) {
             startBrowserServer();
+            // Linux's switch went off (or Linux is going) with the door kept
+            // up for Remote desktop: Linux's picture and files end as they do
+            // when the door stops.
+            if (!linuxDoor) linuxDoorClosed();
         } else {
             stopBrowserServer();
         }
+        // And from anywhere: Remote desktop's Cloudflare tunnel to the same
+        // door, while its switch is on (PhoneTunnel).
+        PhoneTunnel.of(this).want(browserWanted && PhoneRemote.isEnabled(this) && PhoneTunnel.switchedOn(this)
+                && PhoneTunnel.available(this), LinuxBrowser.PORT);
+        // And Remote desktop's stream, listening in the app's own process
+        // whenever the switch is on, so that a computer let in finds it even
+        // with neither control nor screen sharing there to hold it: after
+        // the app was stopped, as a Xiaomi phone's Clear all does.
+        if (PhoneRemote.isEnabled(this)) PhoneListenService.ensure(this);
+        // "Email me when an address changes" (EmailNotice): every switch comes
+        // through here, and every start of this process. Off this thread, and
+        // never at Linux's expense.
+        EmailNotice.fromService(this, intent == null, browserWanted);
         if (ACTION_BROWSER_ON.equals(action) && browserWanted) {
             if (!provisioning.get()) goForeground(getString(R.string.ln_label));
             // Switched on just now, in Settings: the desktop starts at once,
@@ -712,7 +747,13 @@ public class LinuxService extends Service {
             }
             // Again, now that the notification's Off has landed — unless an On
             // overtook it.
-            SamsungSlowdown.sync(this, LinuxRemote.isEnabled(this) && LinuxRemote.available(this));
+            SamsungSlowdown.sync(this, LinuxRemote.tunnelOn(this) && LinuxRemote.available(this));
+            if (LinuxRemote.tunnelOn(this)) {
+                // Remote desktop still needs the tunnel: only Linux's part
+                // goes (sshd, the desktop), at the host's next tick.
+                remote.start();
+                return stickiness();
+            }
             remote.stop();
             // stop() is asynchronous; idle once it has had its moment.
             mainHandler.postDelayed(this::idleStopQueued, 5000);
@@ -856,7 +897,7 @@ public class LinuxService extends Service {
      * anywhere" would quietly stop being true the first time memory ran low.
      */
     private int stickiness() {
-        return LinuxRemote.isEnabled(this) || browser(this).isOn() ? START_STICKY : START_NOT_STICKY;
+        return LinuxRemote.tunnelOn(this) || browser(this).isOn() ? START_STICKY : START_NOT_STICKY;
     }
 
     // ── "Open in a browser" ──
@@ -914,6 +955,59 @@ public class LinuxService extends Service {
         }
     }, new LinuxFilesThumbs(), on -> streamAwake(on));
 
+    /**
+     * The phone's own files, for Remote desktop's Files in a browser (the
+     * door's /pfs/): its shared storage, read and written by this process
+     * with "All files access", the way LinuxFiles reads Linux's. A build
+     * without that permission (Google Play's), or Android 10 and older, where
+     * the app has no way to it, has none to give ("unavailable": the page
+     * shows no Files); one where it is not allowed yet says so ("noaccess"),
+     * and Remote desktop's card in Settings has the way to allow it.
+     */
+    private final LinuxFiles phoneFiles = new LinuxFiles(new LinuxFiles.Layout() {
+        @Override
+        public File rootfs() {
+            return "ready".equals(state()) ? android.os.Environment.getExternalStorageDirectory() : null;
+        }
+
+        @Override
+        public String state() {
+            if (!WebFiles.phoneFilesOffered(LinuxService.this)) return "unavailable";
+            if (!WebFiles.phoneFilesAllowed(LinuxService.this)) return "noaccess";
+            File storage = android.os.Environment.getExternalStorageDirectory();
+            return storage != null && storage.isDirectory() && storage.canRead() ? "ready" : "noaccess";
+        }
+
+        @Override
+        public java.util.List<LinuxFiles.Mount> mounts() {
+            return java.util.Collections.emptyList();
+        }
+    }, new LinuxFilesThumbs(LinuxService.this), on -> streamAwake(on), LinuxFiles.Kind.PHONE);
+
+    /** Remote desktop's stream on its socket, or null when nothing listens there. */
+    private static android.net.LocalSocket connectPhone(Context c) {
+        android.net.LocalSocket s = new android.net.LocalSocket();
+        try {
+            s.connect(new android.net.LocalSocketAddress(PhoneRemote.socketName(c)));
+            return s;
+        } catch (java.io.IOException e) {
+            try {
+                s.close();
+            } catch (java.io.IOException ignored) {
+            }
+            return null;
+        }
+    }
+
+    /** Whether this APK has Remote desktop (PhoneRemote.offered); the manifest does not change under a running process. */
+    private volatile Boolean phoneOffered;
+
+    private boolean phoneOffered() {
+        Boolean known = phoneOffered;
+        if (known == null) phoneOffered = known = PhoneRemote.offered(this);
+        return known;
+    }
+
     private final LinuxBrowserServer.Host browserHost = new LinuxBrowserServer.Host() {
         @Override
         public boolean stream(LinuxStreamSocket ws, String hello, java.io.Closeable sock, String who,
@@ -928,6 +1022,54 @@ public class LinuxService extends Service {
         @Override
         public String phoneName() {
             return LinuxRemote.phoneName(LinuxService.this);
+        }
+
+        @Override
+        public boolean linuxOn() {
+            return linuxDoorWanted();
+        }
+
+        @Override
+        public LinuxBrowserServer.PhoneLine phoneLine() throws java.io.IOException {
+            Context c = LinuxService.this;
+            if (!PhoneRemote.offered(c) || !PhoneRemote.isEnabled(c)) return null;
+            android.net.LocalSocket line = connectPhone(c);
+            if (line == null) {
+                // Nothing listening (the app's process was stopped since this
+                // service last asked): asked for once more, given two seconds.
+                PhoneListenService.ensure(c);
+                for (int i = 0; i < 20 && line == null; i++) {
+                    android.os.SystemClock.sleep(100);
+                    line = connectPhone(c);
+                }
+                if (line == null) throw new java.io.IOException("nothing listens on @" + PhoneRemote.socketName(c));
+            }
+            final android.net.LocalSocket s = line;
+            return new LinuxBrowserServer.PhoneLine() {
+                @Override
+                public InputStream in() throws java.io.IOException {
+                    return s.getInputStream();
+                }
+
+                @Override
+                public java.io.OutputStream out() throws java.io.IOException {
+                    return s.getOutputStream();
+                }
+
+                @Override
+                public void close() throws java.io.IOException {
+                    // Both ways shut first: a thread blocked reading wakes now.
+                    try {
+                        s.shutdownInput();
+                    } catch (java.io.IOException ignored) {
+                    }
+                    try {
+                        s.shutdownOutput();
+                    } catch (java.io.IOException ignored) {
+                    }
+                    s.close();
+                }
+            };
         }
 
         @Override
@@ -954,6 +1096,13 @@ public class LinuxService extends Service {
         @Override
         public LinuxFiles files() {
             return browserFiles;
+        }
+
+        @Override
+        public LinuxFiles phoneFiles() {
+            // As the phone's screen: only while Remote desktop is on, in the APK that has it.
+            // Asked at every request, and by the door's reaper while a transfer runs.
+            return phoneOffered() && PhoneRemote.isEnabled(LinuxService.this) ? phoneFiles : null;
         }
     };
 
@@ -984,8 +1133,11 @@ public class LinuxService extends Service {
             boolean keep;
             synchronized (browserLock) {
                 browserStarting = false;
-                // The switch went off, or the service away, while this started.
-                keep = s != null && store.isOn() && !destroyed;
+                // Both switches went off, or the service away, while this
+                // started. Either switch keeps it: the door is Remote
+                // desktop's too (for the phone's own screen), and with only
+                // that one on it gives nothing of Linux's.
+                keep = s != null && (store.isOn() || PhoneRemote.isEnabled(this)) && !destroyed;
                 if (keep) browserServer = s;
             }
             if (s != null && !keep) s.stop();
@@ -1005,6 +1157,26 @@ public class LinuxService extends Service {
         } catch (RuntimeException e) {
             DexLog.warn("browser", "ending the browser's session (" + why + "): " + e);
         }
+    }
+
+    /** Linux is offered in a browser: its switch is on, and Linux is not being removed. */
+    private boolean linuxDoorWanted() {
+        return browser(this).isOn() && !Linux.isRemoving(this);
+    }
+
+    /**
+     * Linux's part of the door ends while the door stays up for Remote
+     * desktop: a browser's picture of Linux, told the switch went off, and
+     * Linux's file transfers. What a browser asks of Linux after this is
+     * refused (Host#linuxOn).
+     */
+    private void linuxDoorClosed() {
+        LinuxBrowserServer s;
+        synchronized (browserLock) {
+            s = browserServer;
+        }
+        endBrowserSafely("off");
+        if (s != null) s.dropLinux();
     }
 
     /** Stop listening, and end a browser's picture if one is watching: the switch is off. */
@@ -1067,6 +1239,18 @@ public class LinuxService extends Service {
         LinuxAudio.stopAll();
         // Unbound, the apps process's service goes, and every app it runs.
         appsProcess.release();
+        LinuxGpu.stopVirgl(this);
+    }
+
+    /**
+     * Neither Linux session is running any more: the VirGL server, if one was
+     * started for them (LinuxGpu.startVirgl), goes too, so it is not a child
+     * process held for nothing. Any thread.
+     */
+    private void virglIfIdle() {
+        Process rt = liveRuntime;
+        Process win = liveWin;
+        if ((rt == null || !rt.isAlive()) && (win == null || !win.isAlive())) LinuxGpu.stopVirgl(this);
     }
 
     // ── provisioning ──
@@ -1234,13 +1418,24 @@ public class LinuxService extends Service {
         // (files/linux-remote is outside the container): reinstalling and
         // switching remote access back on brings every one of them back.
         LinuxRemote.setEnabled(this, false);
-        SamsungSlowdown.sync(this, false);
-        remote.stop();
+        // Remote desktop (the phone's own screen) is not in the container:
+        // its tunnel stays up, and from now on offers nothing of Linux's
+        // (RemoteHost#evaluate stops sshd and says "off").
+        boolean tunnel = LinuxRemote.tunnelOn(this) && LinuxRemote.available(this);
+        SamsungSlowdown.sync(this, tunnel);
+        if (!tunnel) remote.stop();
         // "Open in a browser" likewise: a page answering "not installed" to
         // the network for ever is no use to anyone. The browsers let in stay
         // (files/browser is outside the container), as computers do above.
+        // The door itself stays for Remote desktop, Linux's part of it closed.
         browser(this).setOn(false);
-        mainHandler.post(this::stopBrowserServer);
+        mainHandler.post(() -> {
+            if (PhoneRemote.isEnabled(this)) {
+                linuxDoorClosed();
+            } else {
+                stopBrowserServer();
+            }
+        });
         TreeDelete.Result left = wipe(true);
         // Uninstalled whether or not every file went: what is left is not a
         // container any more, and nothing is ever built on it (wipe()).
@@ -1875,6 +2070,7 @@ public class LinuxService extends Service {
         appsProcess.stopDisplay(LinuxAppsLink.DESKTOP);
         appsIdle();
         DexLog.step("linux", "runtime stopped");
+        virglIfIdle();
     }
 
     /** Neither a desktop nor a window session left: the apps process can go. */
@@ -1966,6 +2162,7 @@ public class LinuxService extends Service {
                 + (verdict.isEmpty() ? "none" : verdict)
                 + (scriptKilled ? ", script killed before it could clean up" : "")
                 + (killed ? " (SIGKILL: Android's child-process limit is " + limit + ")" : ""));
+        virglIfIdle();
         idleStop();
     }
 
@@ -2182,6 +2379,7 @@ public class LinuxService extends Service {
         appsProcess.stopDisplay(LinuxAppsLink.WINDOWS);
         appsIdle();
         DexLog.step("linux", "window session stopped");
+        virglIfIdle();
     }
 
     private void closeWinInput() {
@@ -2472,7 +2670,7 @@ public class LinuxService extends Service {
         // is even sent, so a provisioning run finishing in the instant before
         // the host's thread gets going cannot idle the service out from under it.
         if (remote != null && remote.running()) return;
-        if (LinuxRemote.isEnabled(this) && LinuxRemote.available(this)) return;
+        if (LinuxRemote.tunnelOn(this) && LinuxRemote.available(this)) return;
         // A computer on the cable is watching the desktop, or about to.
         if (LinuxStream.active()) return;
         // "Open in a browser" is on: listening is the reason to be up, as with

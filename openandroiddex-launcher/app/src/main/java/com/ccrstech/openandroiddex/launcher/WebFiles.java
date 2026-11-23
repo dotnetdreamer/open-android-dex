@@ -76,6 +76,18 @@ final class WebFiles {
      *             own default — only the desktop can shape a freeform rect.
      */
     static void requestAllFiles(android.app.Activity act, android.os.Bundle opts) {
+        // What switching it off again takes down: the desktop, which restarts,
+        // or in LinuxOnDroid (no desktop) the app, and Linux with it.
+        requestAllFiles(act, opts, Linux.hasHomeScreen(act)
+                ? R.string.ln_shared_grant_body_app : R.string.ln_shared_grant_body);
+    }
+
+    /**
+     * The same, {@code body} saying what the grant is for where it is asked:
+     * Remote desktop's card asks it for a browser's Files (the phone's own
+     * storage, LinuxService's phoneFiles), not for the shared folder.
+     */
+    static void requestAllFiles(android.app.Activity act, android.os.Bundle opts, int body) {
         // The one way to the grant, so the one place it is refused: a build
         // that does not declare the permission (LinuxOnDroid's Play build)
         // never sends anyone to a Settings screen that cannot grant it, from
@@ -84,16 +96,57 @@ final class WebFiles {
             DexLog.warn("web", "All files access asked for in a build without it; not asking");
             return;
         }
-        // What switching it off again takes down: the desktop, which restarts,
-        // or in LinuxOnDroid (no desktop) the app, and Linux with it.
         new android.app.AlertDialog.Builder(act)
                 .setTitle(act.getString(R.string.ln_shared_grant_title))
-                .setMessage(act.getString(Linux.hasHomeScreen(act)
-                        ? R.string.ln_shared_grant_body_app : R.string.ln_shared_grant_body))
+                .setMessage(act.getString(body))
                 .setNegativeButton(act.getString(R.string.st_cancel), null)
-                .setPositiveButton(act.getString(R.string.ln_shared_grant_go),
-                        (d, w) -> openAllFilesScreen(act, opts))
+                // Android 10 asks its own question next, not a Settings screen.
+                .setPositiveButton(act.getString(Build.VERSION.SDK_INT < 30
+                        ? R.string.pr_disclose_yes : R.string.ln_shared_grant_go), (d, w) -> {
+                    // Android 10 has no All files access screen: its own
+                    // storage question there, two buttons, Allow is all.
+                    if (Build.VERSION.SDK_INT < 30) {
+                        act.requestPermissions(new String[]{android.Manifest.permission.WRITE_EXTERNAL_STORAGE,
+                                android.Manifest.permission.READ_EXTERNAL_STORAGE}, REQ_STORAGE);
+                    } else {
+                        openAllFilesScreen(act, opts);
+                    }
+                })
                 .show();
+    }
+
+    /** The request code of Android 10's storage question; nobody needs its answer but the next look. */
+    static final int REQ_STORAGE = 0x5F1;
+
+    /**
+     * The phone's own files for a browser's Files (Remote desktop): Android 11
+     * and newer through All files access, Android 10 through the older storage
+     * permission with legacy storage on (the manifest's
+     * {@code requestLegacyExternalStorage}, which Android 10 honours). Only in
+     * a build that may have them (not Google Play's), and not before Android 10.
+     */
+    static boolean phoneFilesOffered(Context ctx) {
+        return Build.VERSION.SDK_INT >= 29 && Linux.sharedFolderOffered(ctx);
+    }
+
+    /**
+     * {@link #phoneFilesOffered} and usable: All files access, or on Android
+     * 10 the storage permission with legacy storage really on. Android 10 can
+     * grant the permission and still keep the app to its own corner of the
+     * storage (legacy storage refused, as for an installer that did not exempt
+     * the permission), and only {@code isExternalStorageLegacy} says which: the
+     * card and the door ({@code noaccess}) go by the same answer.
+     */
+    static boolean phoneFilesAllowed(Context ctx) {
+        if (!phoneFilesOffered(ctx)) return false;
+        if (Build.VERSION.SDK_INT >= 30) return Linux.hasAllFiles();
+        return storagePermitted(ctx) && android.os.Environment.isExternalStorageLegacy();
+    }
+
+    /** Android 10's storage permission is granted (it can be without the storage being usable). */
+    static boolean storagePermitted(Context ctx) {
+        return ctx.checkSelfPermission(android.Manifest.permission.WRITE_EXTERNAL_STORAGE)
+                == android.content.pm.PackageManager.PERMISSION_GRANTED;
     }
 
     private static void openAllFilesScreen(android.app.Activity act, android.os.Bundle opts) {

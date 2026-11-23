@@ -70,7 +70,7 @@ Remote desktop lets computers you allow see and use this phone: its screen, its 
 
 - **Internet and network state.** To download Linux and your apps, and for remote access
 - **Foreground service and notifications.** To keep Linux running while you use other apps, with a notification so you always know it's running and can get back to it
-- **Run at startup.** Only for things you switch on: to start Linux when your phone starts, if you turn on Start Linux with the phone in Settings, and to turn remote access back on after a restart if you had it on
+- **Run at startup.** Only for things you switch on: to start Linux when your phone starts, if you turn on Start Linux after a restart in Settings, and to turn remote access back on after a restart if you had it on
 - **Stay awake.** While Linux is being installed, so the download and setup can finish with the screen off, and while a computer is connected, to keep its session alive
 - **Battery optimization.** When you turn on Remote desktop or Remote access, the app can ask Android not to pause it, so your computers can still reach the phone when its screen is off. You decide
 - **Screen capture.** For Remote desktop's screen sharing, only after Android asks you, with a notification while it lasts

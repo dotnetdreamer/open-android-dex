@@ -9,6 +9,11 @@
 // folders from the computer onto it, or onto the desktop's picture, and they
 // are copied to Linux; bring anything back as a download, or a folder of
 // this computer's. Deleting goes to Linux's own Trash, with Undo.
+//
+// Remote desktop's page (phone.html) has the same Files for the phone's own
+// storage: phone-files.js gives createFiles the phone's route (/pfs/), places
+// and words in place of LINUX's, and the phone has no Trash, so there
+// deleting asks first and is for good.
 
 import { byName, entryIcon, fileIcon, fmtDate, fmtDateLong, fmtSize, folderIcon, kindLabel, kindOf, linkBadge, placeIcon } from './fileicons.js';
 import { Peek } from './peek.js';
@@ -49,6 +54,7 @@ const I = {
   hidden: 'M3 3l14 14M8.3 5.3A7.7 7.7 0 0 1 10 5c4.5 0 7.2 5 7.2 5a12.6 12.6 0 0 1-2 2.6M12.3 14.6A7.6 7.6 0 0 1 10 15c-4.5 0-7.2-5-7.2-5a12.7 12.7 0 0 1 2.8-3.2',
   computer: 'M3.5 4.5h13v8.5h-13zM2.5 15.5h15',
   play: 'M7 4.5v11L15.5 10z',
+  phone: 'M6.8 2.5h6.4A1.3 1.3 0 0 1 14.5 3.8v12.4a1.3 1.3 0 0 1-1.3 1.3H6.8a1.3 1.3 0 0 1-1.3-1.3V3.8a1.3 1.3 0 0 1 1.3-1.3zM9 15h2',
 };
 
 function ico(name, cls = '') {
@@ -106,6 +112,58 @@ const PLACE_NAMES = {
   music: 'Music', videos: 'Videos', shared: 'Phone’s folder', root: 'Linux', trash: 'Trash',
 };
 
+/**
+ * Linux's Files (index.html, viewer.js): the door's route for them, the
+ * places down the side, and every word that names Linux. Remote desktop's
+ * Files (phone-files.js) gives createFiles the phone's own in their place;
+ * the rest of this file is the same for both.
+ */
+export const LINUX = {
+  /** The door's route for these files. */
+  base: 'fs/',
+  /** The panel, to a screen reader. */
+  label: 'Linux’s files',
+  home: '/root',
+  /** / in the path: its name, and the place whose icon it wears. */
+  rootLabel: 'Linux',
+  rootPlace: 'root',
+  /** The places down the side, in this order; '-' a gap. */
+  order: ['home', 'desktop', 'documents', 'downloads', 'pictures', 'music', 'videos', '-', 'shared', 'root', 'trash'],
+  names: PLACE_NAMES,
+  placeTitle: (id, path) => (id === 'root' ? 'All of Linux: /' : id === 'shared' ? 'The phone’s shared folder. Linux’s desktop shows the same folder' : path),
+  /** Where a drop goes with Files closed (onto the picture): a place's id. */
+  dropPlace: 'desktop',
+  /** Deleting moves to a Trash, with Undo. Without one, the page asks, then deletes for good. */
+  trash: true,
+  /** The button back to the picture. */
+  desk: { icon: 'desktop', label: 'Show Linux’s desktop', text: 'Desktop' },
+  /** Where the files are, as the transfers' panel says it ("to Documents on Linux"). */
+  on: 'Linux',
+  picker: 'linux-files',
+  /** A big file's rest in one PUT (transfer.js): Linux's page is only ever on the phone's own network. */
+  putMax: 0,
+  /** transfer.js's why() words of this page's own, where they differ. */
+  why: null,
+  privateTitle: (here) => `Linux keeps “${here}” private`,
+  privateText: (here) => `Only the owner of “${here}” in Linux can look inside “${here}”.`,
+  gone: (here) => `“${here}” was moved or deleted in Linux.`,
+  noEntry: (here) => `Linux does not let files into ${here}.`,
+  nowhere: (n) => `The link “${n}” leads nowhere in Linux.`,
+  slash: 'A name in Linux cannot contain a slash (/).',
+  runs: 'A program or script Linux can run',
+  dropDesk: 'Drop to put the files on Linux’s desktop',
+  deskTarget: 'Linux’s desktop',
+  dropSub: (phone) => `Linux on ${phone || 'the phone'}. A dropped folder arrives with every file and folder inside.`,
+  onDesk: (what) => `${what} on Linux’s desktop now`,
+  /** What Files says when there are no files to show: by the phone's word for why. */
+  states: {
+    installing: ['Linux is still being set up', 'LinuxOnDroid is installing Linux on the phone. Linux’s files show here once the install is done.'],
+    missing: ['Linux is not installed yet', 'Open LinuxOnDroid on the phone to install Linux.'],
+    offline: ['The phone did not answer', 'Check that the phone is on the same Wi-Fi as this computer.'],
+  },
+  stateElse: ['Linux’s files are not here', 'Something went wrong on the phone.'],
+};
+
 const ROW_H = 40;
 const TILE_W = 132;
 const TILE_H = 156;
@@ -120,14 +178,17 @@ const isDir = (e) => e.t === 'd' || e.lt === 'd';
 
 /**
  * Files, built on first use. {@code app} is the viewer's: the token, the
- * phone's name, a sign-out, and the way back to the desktop.
+ * phone's name, a sign-out, and the way back to the desktop. {@code kind}:
+ * whose files, LINUX's by default (phone-files.js gives the phone's own).
  */
-export function createFiles(app) {
-  const api = new Api(app.token, () => app.unauthorized());
+export function createFiles(app, kind = LINUX) {
+  const K = { ...LINUX, ...kind };
+  const api = new Api(app.token, () => app.unauthorized(), K.base);
+  const whyHere = (e) => why(e, K.why);
   const S = {
     open: false,
     path: '',
-    home: '/root',
+    home: K.home,
     places: [],
     free: 0,
     total: 0,
@@ -310,6 +371,8 @@ export function createFiles(app) {
     ask,
     snack,
     nameOf: (p) => labelOf(p),
+    words: { on: K.on, picker: K.picker, why: K.why },
+    putMax: K.putMax,
     onDone: (job) => {
       if (job.dir === 'up') {
         if (S.open && (job.dest === S.path || job.dest.startsWith(`${S.path}/`) || S.path.startsWith(`${job.dest}/`))) {
@@ -318,7 +381,7 @@ export function createFiles(app) {
         const n = job.files;
         if (!S.open || job.dest !== S.path) {
           const what = job.tops.length === 1 ? `“${job.tops[0]}” is` : `${n.toLocaleString()} files are`;
-          snack(job.dest === desktopPath() && !S.open ? `${what} on Linux’s desktop now` : `${what} in ${labelOf(job.dest)} now`, 'Show', () => showJob(job));
+          snack(job.dest === desktopPath() && !S.open ? K.onDesk(what) : `${what} in ${labelOf(job.dest)} now`, 'Show', () => showJob(job));
         }
         infoAt = 0;
       } else {
@@ -347,13 +410,14 @@ export function createFiles(app) {
 
   function labelOf(path) {
     const p = placeOf(path);
-    if (p) return PLACE_NAMES[p.id] || baseName(path);
-    if (path === '/') return 'Linux';
+    if (p) return K.names[p.id] || baseName(path);
+    if (path === '/') return K.rootLabel;
     return baseName(path) || path;
   }
 
+  /** Where a drop with Files closed goes: Linux's desktop, or the phone's Downloads. */
   function desktopPath() {
-    const d = S.places.find((p) => p.id === 'desktop');
+    const d = S.places.find((p) => p.id === K.dropPlace);
     return d ? d.path : S.home;
   }
 
@@ -361,7 +425,7 @@ export function createFiles(app) {
     if (!force && Date.now() - infoAt < 30000 && S.places.length) return true;
     try {
       const j = await api.json('info');
-      S.home = j.home || '/root';
+      S.home = j.home || K.home;
       S.places = j.places || [];
       S.free = j.free || 0;
       S.total = j.total || 0;
@@ -370,10 +434,15 @@ export function createFiles(app) {
       if (D) renderSide();
       return true;
     } catch (e) {
-      if (e.status === 503) S.state = e.code || 'missing';
+      if (e.status === 503 || turnedAway(e)) S.state = e.code || 'missing';
       else if (e.status === 0) S.state = 'offline';
       return false;
     }
+  }
+
+  /** The door turned these files away as a whole (the phone's, with Remote desktop switched off). */
+  function turnedAway(e) {
+    return e.status === 403 && e.code === 'off';
   }
 
   // ── building it ──
@@ -412,7 +481,7 @@ export function createFiles(app) {
     const gridBtn = button('grid', 'Grid', { cls: 'seg-btn', onclick: () => setMode('grid') });
     const newBtn = button('newdir', 'New folder', { kbd: `${MOD}Shift+N`, onclick: () => void newFolder() });
     const upload = button('upload', 'Upload', { cls: 'fx-primary', text: 'Upload', onclick: (e) => uploadMenu(e.currentTarget) });
-    const desk = button('desktop', 'Show Linux’s desktop', { cls: 'fx-ghost fx-desk', text: 'Desktop', onclick: () => app.toDesktop() });
+    const desk = button(K.desk.icon, K.desk.label, { cls: 'fx-ghost fx-desk', text: K.desk.text, onclick: () => app.toDesktop() });
     const more = button('more', 'More', { onclick: (e) => moreMenu(e.currentTarget) });
     const emptyTrash = button('trash', 'Empty the Trash', { cls: 'fx-ghost fx-empty-trash', text: 'Empty Trash', onclick: () => void emptyTheTrash() });
     emptyTrash.hidden = true;
@@ -422,7 +491,7 @@ export function createFiles(app) {
       button('download', 'Download', { cls: 'fx-ghost sel-dl', text: 'Download', onclick: () => void download(selected()) }),
       button('restore', 'Put back', { cls: 'fx-ghost sel-restore', text: 'Put back', onclick: () => void restore(selected()) }),
       button('rename', 'Rename', { cls: 'fx-btn sel-rename', kbd: 'F2', onclick: () => renameFocused() }),
-      button('trash', 'Move to the Trash', { cls: 'fx-btn sel-trash', kbd: 'Del', onclick: () => void remove(selected(), false) }),
+      button('trash', K.trash ? 'Move to the Trash' : 'Delete', { cls: 'fx-btn sel-trash', kbd: 'Del', onclick: () => void remove(selected(), false) }),
       button('more', 'More', { cls: 'fx-btn', onclick: (e) => itemMenu(e.currentTarget.getBoundingClientRect().left, e.currentTarget.getBoundingClientRect().bottom + 6, e.currentTarget) }));
     const top = h('header', { class: 'fx-top' },
       h('div', { class: 'fx-nav' }, menuBtn, backBtn, fwdBtn, upBtn),
@@ -454,7 +523,7 @@ export function createFiles(app) {
     const pickDir = h('input', { type: 'file', multiple: true, hidden: true, onchange: () => fromPicker(pickDir) });
     pickDir.webkitdirectory = true;
     const scrim = h('div', { class: 'fx-scrim', onclick: () => D.root.classList.remove('side-open') });
-    const root = h('section', { id: 'files', class: `fx mode-${S.mode}`, 'aria-label': 'Linux’s files', hidden: true },
+    const root = h('section', { id: 'files', class: `fx mode-${S.mode}`, 'aria-label': K.label, hidden: true },
       top, h('div', { class: 'fx-body' }, side, scrim, main), pickFiles, pickDir);
     document.body.append(root);
     D = {
@@ -534,7 +603,7 @@ export function createFiles(app) {
     if (S.trash) {
       parts.push({ path: S.path, label: 'Trash', id: 'trash' });
     } else if (place) {
-      parts.push({ path: place.path, label: PLACE_NAMES[place.id], id: place.id });
+      parts.push({ path: place.path, label: K.names[place.id], id: place.id });
       const rest = S.path.slice(place.path.length).split('/').filter(Boolean);
       let p = place.path;
       for (const r of rest) {
@@ -542,7 +611,7 @@ export function createFiles(app) {
         parts.push({ path: p, label: r });
       }
     } else {
-      parts.push({ path: '/', label: 'Linux', id: 'root' });
+      parts.push({ path: '/', label: K.rootLabel, id: K.rootPlace });
       let p = '/';
       for (const r of S.path.split('/').filter(Boolean)) {
         p = child(p, r);
@@ -599,8 +668,7 @@ export function createFiles(app) {
   function renderSide() {
     if (!D) return;
     D.places.textContent = '';
-    const order = ['home', 'desktop', 'documents', 'downloads', 'pictures', 'music', 'videos', '-', 'shared', 'root', 'trash'];
-    for (const id of order) {
+    for (const id of K.order) {
       if (id === '-') {
         D.places.append(h('li', { class: 'gap', role: 'presentation' }));
         continue;
@@ -610,12 +678,12 @@ export function createFiles(app) {
       const here = S.path === p.path || (id === 'trash' && S.trash);
       const b = h('button', {
         type: 'button', class: `place${here ? ' here' : ''}`, 'data-path': p.path, 'aria-current': here ? 'page' : null,
-        title: id === 'root' ? 'All of Linux: /' : id === 'shared' ? 'The phone’s shared folder. Linux’s desktop shows the same folder' : p.path,
+        title: K.placeTitle(id, p.path),
         onclick: () => {
           D.root.classList.remove('side-open');
           void go(p.path);
         },
-      }, placeIcon(id), h('span', { text: PLACE_NAMES[id] }));
+      }, placeIcon(id), h('span', { text: K.names[id] }));
       D.places.append(h('li', {}, b));
     }
     if (S.total > 0) {
@@ -635,7 +703,7 @@ export function createFiles(app) {
     D.selbar.querySelector('.sel-rename').hidden = n !== 1 || S.trash;
     D.selbar.querySelector('.sel-dl').hidden = S.trash;
     D.selbar.querySelector('.sel-restore').hidden = !S.trash;
-    D.selbar.querySelector('.sel-trash').title = S.trash ? 'Delete for good' : `Move to the Trash (Del)`;
+    D.selbar.querySelector('.sel-trash').title = S.trash ? 'Delete for good' : K.trash ? `Move to the Trash (Del)` : 'Delete (Del)';
   }
 
   function renderStatus() {
@@ -785,11 +853,11 @@ export function createFiles(app) {
     if (e) {
       const here = labelOf(S.path);
       if (e.status === 403) {
-        title = `Linux keeps “${here}” private`;
-        text = `Only the owner of “${here}” in Linux can look inside “${here}”.`;
+        title = K.privateTitle(here);
+        text = K.privateText(here);
       } else if (e.status === 404 || e.code === 'missing') {
         title = 'Folder not found';
-        text = `“${here}” was moved or deleted in Linux.`;
+        text = K.gone(here);
         act = h('button', { type: 'button', class: 'fx-primary', text: 'Go home', onclick: () => void go(S.home) });
       } else if (e.status === 0) {
         title = 'The phone did not answer';
@@ -797,7 +865,7 @@ export function createFiles(app) {
         act = h('button', { type: 'button', class: 'fx-primary', text: 'Try again', onclick: () => void go(S.path, { push: false }) });
       } else {
         title = `“${here}” could not be opened`;
-        text = why(e);
+        text = whyHere(e);
       }
     } else if (S.search) {
       title = 'Nothing found';
@@ -810,7 +878,7 @@ export function createFiles(app) {
       text = 'Deleted files and folders wait in the Trash until the Trash is emptied. Put back returns an item to the folder the item came from.';
     } else {
       title = `${labelOf(S.path)} is empty`;
-      text = S.writable ? 'Drop files or folders from this computer onto the page, or choose Upload.' : `Linux does not let files into ${labelOf(S.path)}.`;
+      text = S.writable ? 'Drop files or folders from this computer onto the page, or choose Upload.' : K.noEntry(labelOf(S.path));
       if (S.writable) act = h('button', { type: 'button', class: 'fx-primary', onclick: (ev) => uploadMenu(ev.currentTarget) }, ico('upload'), h('span', { text: 'Upload' }));
     }
     const art = h('div', { class: `art${e ? ' bad' : ''}` }, S.trash && !e ? placeIcon('trash') : folderIcon(null, 96));
@@ -910,7 +978,7 @@ export function createFiles(app) {
       j = S.trash ? await api.json('trashlist') : await api.json('list', { query: { path } });
     } catch (e) {
       if (seq !== loadSeq) return;
-      if (e.status === 503) {
+      if (e.status === 503 || turnedAway(e)) {
         S.state = e.code || 'missing';
         renderState();
         return;
@@ -1014,7 +1082,7 @@ export function createFiles(app) {
       S.search = { q, path: j.path || from, results: j.results || [], more: !!j.more };
     } catch (e) {
       S.search = { q, path: from, results: [], more: false };
-      snack(why(e));
+      snack(whyHere(e));
     }
     S.loading = false;
     S.filter = '';
@@ -1044,11 +1112,7 @@ export function createFiles(app) {
     D.empty.hidden = false;
     D.skel.hidden = true;
     D.empty.textContent = '';
-    const words = {
-      installing: ['Linux is still being set up', 'LinuxOnDroid is installing Linux on the phone. Linux’s files show here once the install is done.'],
-      missing: ['Linux is not installed yet', 'Open LinuxOnDroid on the phone to install Linux.'],
-      offline: ['The phone did not answer', 'Check that the phone is on the same Wi-Fi as this computer.'],
-    }[S.state] || ['Linux’s files are not here', 'Something went wrong on the phone.'];
+    const words = Object.prototype.hasOwnProperty.call(K.states, S.state) ? K.states[S.state] : K.stateElse;
     D.empty.append(h('div', { class: 'art bad' }, folderIcon(null, 96)), h('h3', { text: words[0] }), h('p', { text: words[1] }),
       h('button', {
         type: 'button', class: 'fx-primary', text: 'Try again',
@@ -1126,12 +1190,12 @@ export function createFiles(app) {
     }
     if (isDir(e)) {
       if (e.lt === 'x') {
-        snack(`The link “${e.n}” leads nowhere in Linux.`);
+        snack(K.nowhere(e.n));
         return;
       }
       void go(pathOf(e));
     } else if (e.lt === 'x') {
-      snack(`The link “${e.n}” leads nowhere in Linux.`);
+      snack(K.nowhere(e.n));
     } else {
       peek.show(S.view.filter((x) => !isDir(x) && x.lt !== 'x'), e, pathOf);
     }
@@ -1159,7 +1223,7 @@ export function createFiles(app) {
         snack(`Packing ${list.length === 1 ? `“${list[0].n}”` : `${list.length} items`} into “${name}”. The browser starts saving “${name}” in a moment.`);
       }
     } catch (e) {
-      snack(why(e));
+      snack(whyHere(e));
     }
   }
 
@@ -1186,7 +1250,7 @@ export function createFiles(app) {
         renameAt(i);
       }
     } catch (e) {
-      snack(why(e));
+      snack(whyHere(e));
     }
   }
 
@@ -1225,7 +1289,7 @@ export function createFiles(app) {
         return;
       }
       if (name.includes('/')) {
-        snack('A name in Linux cannot contain a slash (/).');
+        snack(K.slash);
         focusList();
         return;
       }
@@ -1236,7 +1300,7 @@ export function createFiles(app) {
         const k = S.view.findIndex((x) => x.n === name);
         if (k >= 0) setFocus(k);
       } catch (err) {
-        snack(err.code === 'exists' ? `“${name}” is already in ${labelOf(parentOf(pathOf(e)))}.` : why(err));
+        snack(err.code === 'exists' ? `“${name}” is already in ${labelOf(parentOf(pathOf(e)))}.` : whyHere(err));
       }
       focusList();
     };
@@ -1250,24 +1314,32 @@ export function createFiles(app) {
     field.addEventListener('dblclick', (ev) => ev.stopPropagation());
   }
 
-  /** To the Trash, with Undo; for good when asked, or where there is no Trash (the phone's folder). */
+  /**
+   * To the Trash, with Undo; for good when asked, or where there is no Trash
+   * (the phone's shared folder; the phone's own files, which have none).
+   */
   async function remove(list, forGood) {
     if (!list.length) return;
     const paths = list.map(pathOf);
-    if (S.trash) forGood = true;
+    if (S.trash || !K.trash) forGood = true;
     if (forGood) {
       const one = list.length === 1;
-      const ok = await ask({
+      const ok = await ask(K.trash ? {
         title: one ? `Delete “${list[0].n}” for good?` : `Delete ${list.length} items for good?`,
         text: one ? `“${list[0].n}” skips the Trash and cannot be brought back.` : `The ${list.length} items skip the Trash and cannot be brought back.`,
+        buttons: [{ label: 'Delete', value: 'yes', danger: true }],
+      } : {
+        ...K.deleteAsk(list),
+        list: list.slice(0, 6).map((e) => ({ name: e.n, dir: isDir(e) })),
+        more: Math.max(0, list.length - 6),
         buttons: [{ label: 'Delete', value: 'yes', danger: true }],
       });
       if (!ok) return;
       try {
         const r = await api.json('delete', { form: { p: paths } });
-        if (r.failed.length) snack(`${r.failed.length} could not be deleted: ${why({ code: r.failed[0][1] })}`);
+        if (r.failed.length) snack(`${r.failed.length} could not be deleted: ${whyHere({ code: r.failed[0][1] })}`);
       } catch (e) {
-        snack(why(e));
+        snack(whyHere(e));
       }
       await refresh();
       return;
@@ -1282,7 +1354,7 @@ export function createFiles(app) {
             const u = await api.json('untrash', { form: { id: ids } });
             await refresh(u.restored.map(baseName));
           } catch (e) {
-            snack(why(e));
+            snack(whyHere(e));
           }
         }, 8000);
       }
@@ -1297,13 +1369,13 @@ export function createFiles(app) {
           buttons: [{ label: 'Delete for good', value: 'yes', danger: true }],
         });
         if (ok) {
-          await api.json('delete', { form: { p: r.cannot } }).catch((e) => snack(why(e)));
+          await api.json('delete', { form: { p: r.cannot } }).catch((e) => snack(whyHere(e)));
           await refresh();
         }
       }
-      if (r.failed.length) snack(`${r.failed.length} could not go to the Trash: ${why({ code: r.failed[0][1] })}`);
+      if (r.failed.length) snack(`${r.failed.length} could not go to the Trash: ${whyHere({ code: r.failed[0][1] })}`);
     } catch (e) {
-      snack(why(e));
+      snack(whyHere(e));
     }
   }
 
@@ -1318,7 +1390,7 @@ export function createFiles(app) {
       }
       if (r.failed.length) snack(`${r.failed.length} could not be put back`);
     } catch (e) {
-      snack(why(e));
+      snack(whyHere(e));
     }
   }
 
@@ -1332,7 +1404,7 @@ export function createFiles(app) {
     try {
       await api.json('emptytrash', { form: {} });
     } catch (e) {
-      snack(why(e));
+      snack(whyHere(e));
     }
     await refresh();
   }
@@ -1341,14 +1413,14 @@ export function createFiles(app) {
     if (!paths.length) return;
     try {
       const r = await api.json('move', { form: { p: paths, dir, copy: copy ? 1 : 0, on: 'rename' } });
-      if (r.failed.length) snack(`${r.failed.length} could not be ${copy ? 'copied' : 'moved'}: ${why({ code: r.failed[0][1] })}`);
+      if (r.failed.length) snack(`${r.failed.length} could not be ${copy ? 'copied' : 'moved'}: ${whyHere({ code: r.failed[0][1] })}`);
       else if (r.moved.length) {
         snack(`${r.moved.length === 1 ? `“${baseName(r.moved[0][0])}”` : `${r.moved.length} items`} ${copy ? 'copied' : 'moved'} to ${labelOf(dir)}`,
           dir !== S.path ? 'Show' : null, () => void go(dir, { select: r.moved.map((m) => baseName(m[1])) }));
       }
       await refresh(dir === S.path ? r.moved.map((m) => baseName(m[1])) : []);
     } catch (e) {
-      snack(why(e));
+      snack(whyHere(e));
     }
   }
 
@@ -1371,7 +1443,7 @@ export function createFiles(app) {
       [isDir(e) ? 'Holds' : 'Size', isDir(e) ? 'Counting…' : `${fmtSize(e.s)} (${(e.s || 0).toLocaleString()} bytes)`],
       ['Modified', fmtDateLong(e.m)],
     ];
-    if (e.x) lines.push(['Runs', 'A program or script Linux can run']);
+    if (e.x && K.runs) lines.push(['Runs', K.runs]);
     const dlg = h('dialog', { class: 'fx-dialog props' });
     const dl = h('dl');
     const cells = [];
@@ -1449,8 +1521,9 @@ export function createFiles(app) {
       { label: sel.length === 1 ? 'Copy the path' : 'Copy the paths', icon: 'link', run: () => copyPaths(sel) },
       one && { label: 'Properties', icon: 'info', kbd: 'Alt+Enter', run: () => void properties(one) },
       '-',
-      { label: 'Move to the Trash', icon: 'trash', kbd: 'Del', run: () => void remove(sel, false) },
-      { label: 'Delete for good', icon: 'trash', danger: true, kbd: 'Shift+Del', run: () => void remove(sel, true) },
+      // No Trash (the phone's own files): one Delete, which asks first.
+      K.trash && { label: 'Move to the Trash', icon: 'trash', kbd: 'Del', run: () => void remove(sel, false) },
+      { label: K.trash ? 'Delete for good' : 'Delete', icon: 'trash', danger: true, kbd: K.trash ? 'Shift+Del' : 'Del', run: () => void remove(sel, true) },
     ].filter((x) => x !== null && x !== false && x !== undefined), x, y, from);
   }
 
@@ -1617,7 +1690,7 @@ export function createFiles(app) {
   let internalDrag = null;
 
   function targetAt(x, y) {
-    if (!S.open || !D) return { path: desktopPath(), label: 'Linux’s desktop', desk: true };
+    if (!S.open || !D) return { path: desktopPath(), label: K.deskTarget, desk: true };
     if (S.trash) return { path: null, label: 'the Trash', bad: 'Files cannot be dropped into the Trash' };
     const el = document.elementFromPoint(x, y);
     const rowEl = el && el.closest && el.closest('.fx-row, .fx-tile');
@@ -1629,7 +1702,8 @@ export function createFiles(app) {
     if (crumb && crumb.dataset.path !== S.places.find((p) => p.id === 'trash')?.path) {
       return { path: crumb.dataset.path, label: labelOf(crumb.dataset.path), row: crumb };
     }
-    if (!S.writable) return { path: null, label: labelOf(S.path), bad: `Linux does not let files into ${labelOf(S.path)}` };
+    // The empty folder's sentence, without its full stop: a title.
+    if (!S.writable) return { path: null, label: labelOf(S.path), bad: K.noEntry(labelOf(S.path)).replace(/\.$/, '') };
     return { path: S.path, label: labelOf(S.path) };
   }
 
@@ -1638,8 +1712,8 @@ export function createFiles(app) {
     overlay.classList.toggle('bad', !!t.bad);
     overlay.classList.toggle('desk', !!t.desk);
     overlay.classList.toggle('on-row', !!t.row);
-    overlay.querySelector('.drop-title').textContent = t.bad || (t.desk ? 'Drop to put the files on Linux’s desktop' : `Drop to copy into ${t.label}`);
-    overlay.querySelector('.drop-sub').textContent = t.bad ? '' : `Linux on ${app.phoneName() || 'the phone'}. A dropped folder arrives with every file and folder inside.`;
+    overlay.querySelector('.drop-title').textContent = t.bad || (t.desk ? K.dropDesk : `Drop to copy into ${t.label}`);
+    overlay.querySelector('.drop-sub').textContent = t.bad ? '' : K.dropSub(app.phoneName());
     dropWanted = true;
     requestAnimationFrame(() => {
       if (dropWanted) overlay.classList.add('on');

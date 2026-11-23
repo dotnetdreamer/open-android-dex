@@ -6,15 +6,19 @@ phone, each with a Mesa Vulkan driver that runs the GPU directly, through the
 same kernel device the phone's own driver uses, and Zink putting OpenGL 4.6 on
 top of it:
 
-- **Adreno (Snapdragon)**: Mesa's Turnip.
+- **Adreno (Snapdragon), 600 series and later**: Mesa's Turnip.
 - **Xclipse (Samsung's Exynos 2200 and later)**: Mesa's RADV, as the
   radv-xclipse project ported it to Samsung's kernel driver.
 
-Everywhere else nothing changes.
+On every other 64-bit phone (a Mali, a PowerVR, an Adreno older than the 600
+series) the guest's GL goes to the phone's own GLES driver instead, through
+VirGL ("VirGL: any other GPU"). A 32-bit phone runs no Linux at all, and its
+settings say so.
 
 Status: **running on a Galaxy S25 Ultra (Adreno 830, Android 17) and a Galaxy
-S24 (Exynos 2400, Xclipse 940, Android 15)**, in the app's own sessions; see
-"Measured" and "What is unproven".
+S24 (Exynos 2400, Xclipse 940, Android 15)**, in the app's own sessions, and
+**VirGL on a Redmi Note 7 (Adreno 512, Android 10)**; see "Measured" and "What
+is unproven".
 
 ---
 
@@ -24,13 +28,15 @@ S24 (Exynos 2400, Xclipse 940, Android 15)**, in the app's own sessions; see
 | --- | --- | --- |
 | The Adreno driver | `openandroiddex-linux/turnip/` → `assets/linux/gpu/` | Turnip from upstream Mesa, built for KGSL |
 | The Xclipse driver | `openandroiddex-linux/radv-xclipse/` → `assets/linux/gpu/` | radv-xclipse's RADV, built for the Linux guest |
-| The probe | `openandroiddex-linux/gpu-probe/` → `assets/linux/gpu/` | `oadx-vkprobe`, the same for both |
-| Into the guest | `LinuxGpu.stage` (from `LinuxService.startRuntime` / `startWin`) | copying this phone's driver in once per `DRIVER_VERSION` |
-| Whether to try | `LinuxGpu.env` | which GPU (`LinuxGpu.driver`), switch on, staged → `LINUX_GPU=turnip` or `xclipse` |
+| The VirGL server | `openandroiddex-linux/virgl/` → `jniLibs/<abi>/libvirglserver.so` | virglrenderer's vtest server, built with the NDK, on the phone's GLES |
+| The probes | `openandroiddex-linux/gpu-probe/` → `assets/linux/gpu/` | `oadx-vkprobe` for both Vulkan drivers, `oadx-glprobe` for VirGL |
+| Into the guest | `LinuxGpu.stage` (from `LinuxService.startRuntime` / `startWin`) | copying this phone's driver (or VirGL's probe) in once per `DRIVER_VERSION` |
+| Whether to try | `LinuxGpu.env` | which GPU (`LinuxGpu.driver`), switch on, staged → `LINUX_GPU=turnip`, `xclipse` or `virgl`; for VirGL, its check on this phone (`virglCheck`) and the server up (`startVirgl`) |
 | Whether it works | `linux-rt.sh`, `linux-win.sh` | the probe, and only on its yes, the GL environment |
+| The server's life | `LinuxGpu.startVirgl` / `stopVirgl`, from `LinuxService` | up before a session that will use it, down when neither session is left |
 | How Chromium draws | `linux-rt.sh`, `linux-win.sh` → the guest's `/etc/chromium.d/oadx-gpu` | on an Adreno whose probe said yes, ANGLE on Vulkan straight on Turnip ("Chromium", under "Measured") |
 | What it said | `LinuxGpu.reportVerdict` | the session's `gpu:` line, copied into the app's log |
-| The switch | `LinuxSettingsActivity` | "Use the GPU" on the Linux settings page: the desktop's Linux tile menu opens it, and so does LinuxOnDroid's home screen menu; `filesDir/linux-gpu` |
+| The switch | `LinuxSettingsActivity` | "Use the graphics chip" under "Graphics for Linux apps" on the Linux settings page: the desktop's Linux tile menu opens it, and so does LinuxOnDroid's home screen menu; `filesDir/linux-gpu`. The line under it says which way the phone takes (`LinuxGpu.offer`) |
 
 ```
 Linux app ──GL──▶ Ubuntu's Mesa: Zink ──Vulkan──▶ Turnip (ours) ──ioctl──▶ /dev/kgsl-3d0 ──▶ Adreno
@@ -57,8 +63,10 @@ GPU itself. What it cannot do is run on anything but an Adreno, which is why
 `LinuxGpu.available()` asks for `/dev/kgsl-3d0` before anything else.
 
 A VirGL server for the other GPUs was built as far as a first compile and set
-aside: a second process, a socket and an NDK build, for less speed. Xclipse
-phones turned out not to need it (below); Mali and PowerVR phones still would.
+aside on 2026-11-10: a second process, a socket and an NDK build, for less
+speed. Xclipse phones turned out not to need it (below). Mali and PowerVR
+phones, and Adreno phones older than Turnip's, did: on 2026-11-22 the user
+asked for the GPU on those too, and it was finished ("VirGL: any other GPU").
 
 ## Why ours, and only Turnip
 
@@ -113,6 +121,111 @@ the Adreno one, unchanged.
 `/dev/dri/renderD128` and either sysfs names its kernel driver `sgpu` or
 `/vendor/lib64/libdrm_sgpu.so` exists; a Mali Exynos has neither. The probe has
 the last word, as for Turnip.
+
+## VirGL: any other GPU
+
+A Mali (most MediaTek phones, some Exynos and Tensor ones), a PowerVR (many
+budget MediaTek and Unisoc phones) and an Adreno older than the 600 series
+have no Mesa driver of ours. For them the guest's GL goes to the phone's own
+GLES driver through VirGL, the way Termux setups do it, all of it ours:
+
+```
+Linux app ──GLX──▶ Ubuntu's Mesa: virpipe (GALLIUM_DRIVER) ──vtest, /tmp/.virgl_test──▶
+   libvirglserver.so (an Android process of this app) ──GLES──▶ the phone's own driver ──▶ GPU
+   each finished frame read back over the socket ──XPutImage──▶ Xvnc ──▶ viewer
+```
+
+- **The server** (`openandroiddex-linux/virgl/`, a Docker build like the
+  others): virglrenderer 1.3.0's vtest server and libepoxy 1.5.10, both MIT,
+  linked static with NDK r30 for API 26, every load segment 16 KB aligned, and
+  needing nothing on the phone but bionic: epoxy opens the platform's libEGL
+  and libGLESv2 at run time. A jniLib, `libvirglserver.so`, because the
+  native-library directory is the one place an app may exec from. Five
+  patches:
+  - 0001, 0002: Android has EGL but no GBM, so EGL on the default display;
+  - 0003: `--probe`, the renderer brought up once and its name printed, for
+    the app's check;
+  - 0004: the bundled Mesa util's Android branch wants AOSP's `<log/log.h>`
+    and `<cutils/properties.h>`, which the NDK has not: bionic's own property
+    call, and messages to stderr, which the app keeps as the server's log;
+  - 0005: a shader that writes `gl_FragColor` writes every colour buffer, and
+    for a GLES host virglrenderer declared an output for each of
+    `max_draw_buffers`; an Adreno 512's compiler refused every such shader
+    ("Output fsout_c1 location or component exceeds max allowed", so glmark2's
+    first scene killed the connection). Now only the buffers bound, at least
+    one.
+- **Which phones** (`LinuxGpu.driver`, `offer`): an Adreno of the 600 series
+  or later keeps Turnip, an Xclipse keeps RADV, every other 64-bit phone gets
+  VirGL. The Adreno's series is read from KGSL's `gpu_model` where an app may
+  read it, else from Android's GL renderer string (`LinuxGpu.glRenderer`, a
+  1x1 pbuffer context, once per process).
+- **The app's check** (`LinuxGpu.virglCheck`): the server's `--probe` in the
+  app's own process, once per phone build and server (`linux-gpu-virgl`,
+  keyed by `DRIVER_VERSION` and `Build.FINGERPRINT`). A no is remembered, and
+  the settings then say the chip does not work with Linux.
+- **The server's life** (`startVirgl`, `stopVirgl`): one process for the
+  desktop and the session for apps in windows, `--no-fork --multi-clients`,
+  because a process per GL app would count against Android's limit on an
+  app's child processes, which closes Linux when it is reached
+  (`ChildProcessLimit`). Its GL context exists only while
+  a guest app is connected. It goes when neither session is left, with the
+  service, or with the app's process.
+- **The guest's probe** (`oadx-glprobe`, `openandroiddex-linux/gpu-probe/`):
+  a GL context through GLX on the session's own display, which is what its
+  apps will use, and a yes only for a VirGL renderer (llvmpipe would mean the
+  variable was not honoured); EGL's surfaceless platform only with no display
+  or no libGL (through VirGL it offered no config at all). A guest with no
+  Mesa yet (no GL app installed) is "not checked" and still gets the variable:
+  the server was checked on the Android side, and an app installed later
+  draws through it. The session's `gpu:` line names the renderer and the way
+  it was asked.
+- **The environment**: `GALLIUM_DRIVER=virpipe` alone, exported after the
+  probe's yes. Xvnc has no DRI3, so Mesa's GLX takes its software path,
+  `virpipe` is that path's driver, and the software path is the one that
+  hands each frame to the window, unlike Zink under it (the trap above).
+  Chromium's wrapper keeps `--disable-gpu` under VirGL: it only lets the GPU
+  in for Zink.
+
+### Measured: Redmi Note 7
+
+Snapdragon 660, Adreno 512, Android 10 (MIUI 12.5), 2026-11-22, glmark2
+2023.01 at 800x600, the guest's proot, on USB power, thermal status 0 before
+and after (battery 34-35 °C). A private Xvnc with no viewer, the processor
+first, then through VirGL with the server as the app starts it:
+
+| | llvmpipe | VirGL | |
+| --- | ---: | ---: | ---: |
+| terrain | 3 FPS | 22 FPS | 7.3x |
+| refract | 7 FPS | 36 FPS | 5.1x |
+| desktop blur | 22 FPS | 57 FPS | 2.6x |
+| jellyfish | 53 FPS | 71 FPS | 1.3x |
+| phong shading | 66 FPS | 73 FPS | 1.1x |
+| texture, mipmap | 136 FPS | 93 FPS | 0.68x |
+| build, VBO | 113 FPS | 86 FPS | 0.76x |
+| the seven scenes' score | 56 | 61 | |
+| glmark2's default run, score | 74 | 71 | |
+
+The heavy scenes, where the processor is no use at all (3 and 7 frames a
+second), become usable; the light ones stop near 90 frames a second, the cost
+of reading each frame back over the socket and copying it into Xvnc, where
+this phone's eight cores draw them faster themselves. Both stay above a
+screen's 60. GL is 2.1 in the compatibility context glmark2 asks for; a core
+context's version was not measured.
+
+On the real desktop, with the app's viewer on the phone's screen: jellyfish
+33 FPS on the processor, 47 through VirGL. Through the whole chain as a user
+gets it (Start Linux on the home screen): the app's check said yes on the
+Adreno (TM) 512, the server listened before the session started, the
+session's probe said `gpu: VirGL, virgl (Adreno (TM) 512), GL 2.1 Mesa 25.2.8
+(GLX)`, the session's own environment carried `GALLIUM_DRIVER=virpipe`, and
+glmark2 started with exactly that environment drew through VirGL at 46 FPS.
+Screenshots of the phone's screen showed the jellyfish drawn right, and
+moving. Shut down from the home screen, the server went with the session.
+
+Found on the way, on the same phone: Linux setup itself stopped at once on
+Android 10 ("can't create temporary file /data/local/shm….tmp", FAILED:
+configure), the phone's shell keeping here-documents in a folder an app may
+not write. The scripts now get `TMPDIR`, the app's cache (`Linux.scriptEnv`).
 
 ## The environment, and the trap beside it
 
@@ -333,6 +446,12 @@ Turnip 15 MB (3.5 MB compressed), RADV 20 MB (6.0 MB compressed). A phone gets
 only its own copied into the guest, once per `DRIVER_VERSION`. The probe is one
 short process per session start.
 
+VirGL adds 0.92 MB to the APK, compressed: the server for arm64 (1.66 MB,
+0.47 MB compressed) and x86_64 (1.33 MB, 0.44 MB), and the GL probe (67 KB,
+5 KB). A Play install of an arm64 phone gets the arm64 server alone. Running,
+it is one more child process of the app while a Linux session is up, with a
+GL context only while a guest app draws.
+
 ## What is unproven
 
 - **Adreno 6xx and 7xx phones**, and Samsung's Snapdragon tablets. Turnip
@@ -346,6 +465,16 @@ short process per session start.
   tile's menu is the way out for an app that draws wrongly.
 - **Linux apps shown on the computer.** Those run in the same window session
   and get the same variables; GL in one was only run on the phone's desktop.
+- **VirGL on a Mali or a PowerVR.** None was at hand: VirGL ran on an Adreno
+  512 (the Redmi Note 7, the whole chain) and, its check alone from adb's
+  shell, on the S25's Adreno 830. Vendor GLES drivers differ, and the Adreno
+  512's refused a shader until patch 0005: on any other GPU the app's check
+  and the guest's probe are what stand between a refusing driver and the
+  user's apps, and a shader refused after both have said yes ends that app's
+  GL connection, not the session.
+- **VirGL in the session for apps in windows (`:2`), Chromium on VirGL, a
+  core context's GL version, and long sessions.** Only the desktop's session
+  was run; Chromium keeps `--disable-gpu` there.
 
 ## What is next
 

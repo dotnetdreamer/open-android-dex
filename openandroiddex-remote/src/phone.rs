@@ -84,6 +84,9 @@ pub struct Config {
     /// Where the desktop's video is served (LinuxStream); none, and the
     /// phone offers no video.
     pub stream_socket: Option<StreamSocket>,
+    /// Where the phone's own screen is served (Remote desktop's PhoneStream);
+    /// none, and the phone does not offer it.
+    pub phone_socket: Option<StreamSocket>,
 }
 
 /// Where the launcher's LinuxStream listens: an abstract socket on Android,
@@ -320,14 +323,23 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 
 // ── the paired computers ──────────────────────────────────────────────────
 
-/// One entry of `peers.json`, as LinuxRemote.java writes it. Only `id` is
-/// load-bearing; the name is carried for the status file.
+/// One entry of `peers.json`, as LinuxRemote.java writes it. `id` decides who
+/// gets in and `scope` what to; the name is carried for the status file.
 #[derive(Debug, Clone, Deserialize)]
 struct PeerEntry {
     id: String,
     #[serde(default)]
     name: String,
+    /// `"phone"`: the phone's own screen and nothing of Linux's — a browser
+    /// (the Remote desktop page on the web), whose key lives in a web page's
+    /// storage. Absent or anything else: a computer, with everything the
+    /// phone's switches offer.
+    #[serde(default)]
+    scope: String,
 }
+
+/// What a `scope` of `"phone"` is in `peers.json`.
+const SCOPE_PHONE: &str = "phone";
 
 #[derive(Debug, Default, Deserialize)]
 struct PeersFile {
@@ -340,6 +352,8 @@ struct PeersFile {
 struct Peers {
     stamp: Option<(SystemTime, u64, u64)>,
     names: HashMap<EndpointId, String>,
+    /// Those let in to the phone's own screen alone (scope `"phone"`).
+    phone_only: std::collections::HashSet<EndpointId>,
 }
 
 /// mtime, length and inode. The app replaces the file by rename, so the inode
@@ -374,18 +388,20 @@ impl Peers {
             }),
             Err(_) => PeersFile::default(),
         };
-        self.names = parsed
-            .peers
-            .into_iter()
-            .filter_map(|p| match p.id.parse::<EndpointId>() {
-                Ok(id) => Some((id, p.name)),
-                Err(_) => {
-                    warn!("peers.json: skipping an entry whose id is not a key");
-                    None
+        self.names.clear();
+        self.phone_only.clear();
+        for p in parsed.peers {
+            match p.id.parse::<EndpointId>() {
+                Ok(id) => {
+                    if p.scope == SCOPE_PHONE {
+                        self.phone_only.insert(id);
+                    }
+                    self.names.insert(id, p.name);
                 }
-            })
-            .collect();
-        info!("{} paired computer(s)", self.names.len());
+                Err(_) => warn!("peers.json: skipping an entry whose id is not a key"),
+            }
+        }
+        info!("{} paired computer(s), {} of them for the phone's screen only", self.names.len(), self.phone_only.len());
         true
     }
 }
@@ -405,6 +421,8 @@ pub enum SshState {
     Missing,
     /// Linux is being installed or updated; sshd is not in it yet.
     Installing,
+    /// Linux's remote access is off: the tunnel is up for Remote desktop alone.
+    Off,
 }
 
 impl SshState {
@@ -416,6 +434,7 @@ impl SshState {
             "failed" => SshState::Failed,
             "missing" => SshState::Missing,
             "installing" => SshState::Installing,
+            "off" => SshState::Off,
             _ => return None,
         })
     }
@@ -428,6 +447,7 @@ impl SshState {
             SshState::Failed => "failed",
             SshState::Missing => "missing",
             SshState::Installing => "installing",
+            SshState::Off => "off",
         }
     }
 }
@@ -451,6 +471,8 @@ pub enum DesktopState {
     Running,
     /// The start a computer asked for ended by itself.
     Failed,
+    /// Linux's remote access is off: the tunnel is up for Remote desktop alone.
+    Off,
 }
 
 impl DesktopState {
@@ -463,6 +485,7 @@ impl DesktopState {
             "starting" => DesktopState::Starting,
             "running" => DesktopState::Running,
             "failed" => DesktopState::Failed,
+            "off" => DesktopState::Off,
             _ => return None,
         })
     }
@@ -477,6 +500,7 @@ impl DesktopState {
             DesktopState::Starting => "starting",
             DesktopState::Running => "running",
             DesktopState::Failed => "failed",
+            DesktopState::Off => "off",
         }
     }
 }
@@ -531,6 +555,7 @@ struct Shared {
     desktop_port: u16,
     desktop: watch::Sender<Desktop>,
     stream_socket: Option<StreamSocket>,
+    phone_socket: Option<StreamSocket>,
     name: String,
     host_key_line: String,
     dns: DnsServers,
@@ -559,6 +584,19 @@ impl Shared {
         let mut peers = self.peers.lock().unwrap();
         peers.refresh(&self.peers_path());
         peers.names.contains_key(id)
+    }
+
+    /// A computer let in to the phone's own screen and nothing else (a
+    /// browser): no SSH, no Linux desktop, whatever Linux's switch says.
+    fn phone_only(&self, id: &EndpointId) -> bool {
+        let mut peers = self.peers.lock().unwrap();
+        peers.refresh(&self.peers_path());
+        peers.phone_only.contains(id)
+    }
+
+    /// The name the phone knows a computer by, for its own log.
+    fn peer_name(&self, id: &EndpointId) -> String {
+        self.peers.lock().unwrap().names.get(id).cloned().unwrap_or_default()
     }
 
     /// The paired computer a stream is from, or `None` to turn it away.
@@ -783,6 +821,7 @@ pub async fn serve(cfg: Config) -> Result<()> {
         desktop_port: cfg.desktop_port,
         desktop,
         stream_socket: cfg.stream_socket,
+        phone_socket: cfg.phone_socket,
         name: cfg.name,
         host_key_line,
         dns,
@@ -1080,7 +1119,10 @@ async fn ssh_stream(shared: Arc<Shared>, conn: Connection, mut send: SendStream,
         return;
     };
     info!("{} connected", peer.fmt_short());
-    let tcp = match connect_sshd(&shared).await {
+    // A browser was let in for the phone's screen alone: its key is in a web
+    // page's storage, and is no way into Linux as root.
+    let ready = if shared.phone_only(&peer) { Err(Refusal::LinuxOff) } else { connect_sshd(&shared).await };
+    let tcp = match ready {
         Ok(tcp) => tcp,
         Err(refusal) => {
             info!("{}: refused, {refusal:?}", peer.fmt_short());
@@ -1125,6 +1167,7 @@ async fn connect_sshd(shared: &Shared) -> Result<TcpStream, Refusal> {
         match state {
             SshState::Missing => return Err(Refusal::LinuxMissing),
             SshState::Installing => return Err(Refusal::LinuxInstalling),
+            SshState::Off => return Err(Refusal::LinuxOff),
             SshState::Starting => {}
             // Down, Failed, or Up-but-refusing (it died): all of them want a
             // start, and asking twice is harmless. A Failed that is still
@@ -1154,20 +1197,35 @@ async fn ctl_stream(shared: Arc<Shared>, conn: Connection, mut send: SendStream,
         Ok(Ok(request)) => request,
         _ => return,
     };
-    if admit(&shared, &conn, request.auth.as_ref(), &authorised).is_none() {
+    let Some(peer) = admit(&shared, &conn, request.auth.as_ref(), &authorised) else {
         return;
+    };
+    // The phone's screen alone: told nothing of Linux's.
+    let phone_only = shared.phone_only(&peer);
+    let mut features = Vec::new();
+    if !phone_only {
+        features.push(proto::FEATURE_DESKTOP.to_string());
+        if shared.stream_socket.is_some() {
+            features.push(proto::FEATURE_DESKTOP_STREAM.to_string());
+        }
     }
-    let mut features = vec![proto::FEATURE_DESKTOP.to_string()];
-    if shared.stream_socket.is_some() {
-        features.push(proto::FEATURE_DESKTOP_STREAM.to_string());
+    if shared.phone_socket.is_some() {
+        features.push(proto::FEATURE_PHONE.to_string());
+        if cfg!(all(feature = "rtc", unix)) {
+            features.push(proto::FEATURE_PHONE_RTC.to_string());
+        }
     }
     let status = CtlStatus {
         name: shared.name.clone(),
-        ssh: shared.ssh.borrow().as_str().to_string(),
+        ssh: if phone_only { SshState::Off.as_str().to_string() } else { shared.ssh.borrow().as_str().to_string() },
         sessions: shared.sessions.lock().unwrap().len() as u32,
         version: env!("CARGO_PKG_VERSION").to_string(),
         features,
-        desktop: shared.desktop.borrow().state.as_str().to_string(),
+        desktop: if phone_only {
+            DesktopState::Off.as_str().to_string()
+        } else {
+            shared.desktop.borrow().state.as_str().to_string()
+        },
     };
     let _ = proto::write_frame(&mut send, &status).await;
     let _ = send.finish();
@@ -1204,6 +1262,15 @@ async fn desktop_stream(
         return;
     };
     link.join(&shared, peer, &conn);
+    // A browser let in for the phone's screen alone asks nothing of Linux's.
+    let linux_op = matches!(hello.op, DesktopOp::Open | DesktopOp::Web | DesktopOp::Stream);
+    if linux_op && shared.phone_only(&peer) {
+        info!("{}: Linux's desktop refused, it was added for the phone's screen only", peer.fmt_short());
+        let _ = proto::write_frame(&mut send, &DesktopReply::refused(Refusal::LinuxOff)).await;
+        let _ = send.finish();
+        let _ = tokio::time::timeout(Duration::from_secs(5), send.stopped()).await;
+        return;
+    }
     match hello.op {
         DesktopOp::Open => {
             let reply = match open_desktop(&shared, hello.start, &mut send).await {
@@ -1224,6 +1291,48 @@ async fn desktop_stream(
             let pong = DesktopReply { ok: true, stream: shared.stream_socket.is_some(), ..Default::default() };
             let _ = proto::write_frame(&mut send, &pong).await;
             let _ = send.finish();
+        }
+        DesktopOp::Phone => {
+            let socket = match shared.phone_socket.as_ref() {
+                Some(socket) => socket.connect().await.map_err(|e| info!("{}: no phone screen: {e}", peer.fmt_short())).ok(),
+                None => None,
+            };
+            let Some(socket) = socket else {
+                let _ = proto::write_frame(&mut send, &DesktopReply::refused(Refusal::PhoneUnavailable)).await;
+                let _ = send.finish();
+                let _ = tokio::time::timeout(Duration::from_secs(5), send.stopped()).await;
+                return;
+            };
+            if proto::write_frame(&mut send, &DesktopReply { ok: true, ..Default::default() }).await.is_err() {
+                return;
+            }
+            info!("{}: the phone's screen", peer.fmt_short());
+            let (r, mut w) = socket.into_split();
+            // The upgrade first, with who it is, then the bytes untouched.
+            if let Err(e) = forward_phone_head(&mut recv, &mut w, &shared.peer_name(&peer)).await {
+                debug!("{}: the phone's screen: {e}", peer.fmt_short());
+                return;
+            }
+            // PhoneStream ends a session by closing its socket, as LinuxStream does.
+            if let Err(e) = splice(r, w, send, recv, &link.traffic, Some(Duration::from_secs(2))).await {
+                debug!("{}: the phone's screen ended with {e}", peer.fmt_short());
+            }
+        }
+        DesktopOp::PhoneRtc => {
+            #[cfg(all(feature = "rtc", unix))]
+            phone_rtc(&shared, peer, send, recv, &link).await;
+            #[cfg(not(all(feature = "rtc", unix)))]
+            {
+                let _ = recv;
+                let _ = proto::write_frame(&mut send, &DesktopReply::refused(Refusal::PhoneUnavailable)).await;
+                let _ = send.finish();
+                let _ = tokio::time::timeout(Duration::from_secs(5), send.stopped()).await;
+            }
+        }
+        DesktopOp::Stream if shared.desktop.borrow().state == DesktopState::Off => {
+            let _ = proto::write_frame(&mut send, &DesktopReply::refused(Refusal::LinuxOff)).await;
+            let _ = send.finish();
+            let _ = tokio::time::timeout(Duration::from_secs(5), send.stopped()).await;
         }
         DesktopOp::Stream => {
             let socket = match shared.stream_socket.as_ref() {
@@ -1269,6 +1378,169 @@ async fn desktop_stream(
     }
 }
 
+// ── the phone's own screen ────────────────────────────────────────────────
+
+/// A computer's WebSocket upgrade to the phone's screen, with who it is said
+/// by this daemon, not by the computer: `x-dex-via: remote` and the name the
+/// phone knows it by. Whatever `x-dex-*` the computer sent itself is dropped.
+/// PhoneStream names the session by these, in its log and on the Settings
+/// page; the browser door on the phone says the same of its own browsers.
+pub struct PhoneHead {
+    name: String,
+    buf: Vec<u8>,
+    done: bool,
+}
+
+/// No upgrade is anywhere near this.
+const MAX_PHONE_HEAD: usize = 16 * 1024;
+
+impl PhoneHead {
+    pub fn new(name: &str) -> Self {
+        PhoneHead { name: clean_name(name), buf: Vec::new(), done: false }
+    }
+
+    /// Bytes as they come; what to pass on once the request's head is whole,
+    /// with whatever came after it (None while it is not).
+    pub fn feed(&mut self, data: &[u8]) -> std::result::Result<Option<Vec<u8>>, String> {
+        if self.done {
+            return Ok(Some(data.to_vec()));
+        }
+        self.buf.extend_from_slice(data);
+        let Some(end) = self.buf.windows(4).position(|w| w == b"\r\n\r\n") else {
+            if self.buf.len() > MAX_PHONE_HEAD {
+                return Err("the request's head is too long".into());
+            }
+            return Ok(None);
+        };
+        self.done = true;
+        let head = String::from_utf8_lossy(&self.buf[..end]).to_string();
+        let mut out = String::with_capacity(head.len() + 96);
+        for (i, line) in head.split("\r\n").enumerate() {
+            if i > 0 && line.to_ascii_lowercase().starts_with("x-dex-") {
+                continue;
+            }
+            out.push_str(line);
+            out.push_str("\r\n");
+        }
+        out.push_str("x-dex-via: remote\r\n");
+        if !self.name.is_empty() {
+            out.push_str("x-dex-peer: ");
+            out.push_str(&self.name);
+            out.push_str("\r\n");
+        }
+        out.push_str("\r\n");
+        let mut bytes = out.into_bytes();
+        bytes.extend_from_slice(&self.buf[end + 4..]);
+        self.buf = Vec::new();
+        Ok(Some(bytes))
+    }
+}
+
+/// The computer's upgrade, read off its stream and passed on rewritten
+/// ([`PhoneHead`]), with whatever followed it in the same read.
+async fn forward_phone_head<W: tokio::io::AsyncWrite + Unpin>(recv: &mut RecvStream, w: &mut W, name: &str) -> Result<()> {
+    let mut head = PhoneHead::new(name);
+    let mut buf = vec![0u8; 4096];
+    loop {
+        let n = tokio::time::timeout(Duration::from_secs(15), recv.read(&mut buf))
+            .await
+            .context("no request in time")?
+            .context("the stream")?;
+        let Some(n) = n else { anyhow::bail!("the computer closed it before its request") };
+        if let Some(bytes) = head.feed(&buf[..n]).map_err(|e| anyhow::anyhow!(e))? {
+            w.write_all(&bytes).await?;
+            return Ok(());
+        }
+    }
+}
+
+/// [`DesktopOp::PhoneRtc`]: the phone's screen straight to a browser. The
+/// offer is answered here, the session is [`crate::rtc`]'s, and this stream
+/// carries the two ends' later candidates until the browser lets it go.
+#[cfg(all(feature = "rtc", unix))]
+async fn phone_rtc(shared: &Arc<Shared>, peer: EndpointId, mut send: SendStream, mut recv: RecvStream, link: &DesktopLink) {
+    use crate::proto::RtcSignal;
+    use crate::rtc;
+    let Some(socket) = shared.phone_socket.clone() else {
+        let _ = proto::write_frame(&mut send, &DesktopReply::refused(Refusal::PhoneUnavailable)).await;
+        let _ = send.finish();
+        let _ = tokio::time::timeout(Duration::from_secs(5), send.stopped()).await;
+        return;
+    };
+    if proto::write_frame(&mut send, &DesktopReply { ok: true, ..Default::default() }).await.is_err() {
+        return;
+    }
+    let offer = match tokio::time::timeout(Duration::from_secs(15), proto::read_frame::<_, RtcSignal>(&mut recv)).await {
+        Ok(Ok(RtcSignal { offer: Some(offer), .. })) if offer.len() <= rtc::MAX_OFFER => offer,
+        _ => return debug!("{}: no WebRTC offer", peer.fmt_short()),
+    };
+    let answered = match rtc::answer(&offer) {
+        Ok(a) => a,
+        Err(e) => {
+            info!("{}: no WebRTC, {e}", peer.fmt_short());
+            let _ = proto::write_frame(&mut send, &RtcSignal { error: Some(e), ..Default::default() }).await;
+            let _ = send.finish();
+            let _ = tokio::time::timeout(Duration::from_secs(5), send.stopped()).await;
+            return;
+        }
+    };
+    if proto::write_frame(&mut send, &RtcSignal { answer: Some(answered.answer.clone()), ..Default::default() })
+        .await
+        .is_err()
+    {
+        return;
+    }
+    // The stream's two ways, each on a task of its own: the session's loop
+    // never waits on the relay.
+    let (out_tx, mut out_rx) = mpsc::unbounded_channel::<RtcSignal>();
+    let writer = tokio::spawn(async move {
+        while let Some(m) = out_rx.recv().await {
+            if proto::write_frame(&mut send, &m).await.is_err() {
+                return;
+            }
+        }
+        let _ = send.finish();
+        let _ = tokio::time::timeout(Duration::from_secs(3), send.stopped()).await;
+    });
+    let (in_tx, in_rx) = mpsc::unbounded_channel::<RtcSignal>();
+    let reader = tokio::spawn(async move {
+        while let Ok(m) = proto::read_frame::<_, RtcSignal>(&mut recv).await {
+            if in_tx.send(m).is_err() {
+                return;
+            }
+        }
+    });
+    // The STUN servers, looked up beside the session rather than before it.
+    let (stx, srx) = oneshot::channel::<Vec<SocketAddr>>();
+    let resolver = shared.ep.dns_resolver().ok().cloned();
+    tokio::spawn(async move {
+        let mut found = Vec::new();
+        if let Some(resolver) = resolver {
+            for (host, port) in rtc::STUN_SERVERS {
+                if let Ok(ips) = resolver.lookup_ipv4(host.to_string(), Duration::from_secs(3)).await {
+                    found.extend(ips.map(|ip| SocketAddr::new(ip, *port)).take(2));
+                }
+            }
+        }
+        let _ = stx.send(found);
+    });
+    let paired = shared.clone();
+    let around = rtc::Around {
+        out: out_tx,
+        inp: in_rx,
+        stun: srx,
+        open_phone: Box::new(move || Box::pin(async move { socket.connect().await })),
+        head: PhoneHead::new(&shared.peer_name(&peer)),
+        allowed: Box::new(move || paired.is_paired(&peer)),
+        traffic: link.traffic.clone(),
+    };
+    info!("{}: the phone's screen by WebRTC, offered", peer.fmt_short());
+    let why = answered.run(around).await;
+    debug!("{}: WebRTC over: {why}", peer.fmt_short());
+    reader.abort();
+    let _ = tokio::time::timeout(Duration::from_secs(4), writer).await;
+}
+
 /// The desktop, up and answering — asking the app to start it first when the
 /// computer said to.
 ///
@@ -1298,6 +1570,7 @@ async fn open_desktop(shared: &Shared, start: Option<DesktopSize>, send: &mut Se
             DesktopState::Missing => return Err(Refusal::LinuxMissing),
             DesktopState::Installing => return Err(Refusal::LinuxInstalling),
             DesktopState::Unfinished => return Err(Refusal::LinuxUnfinished),
+            DesktopState::Off => return Err(Refusal::LinuxOff),
             // The app answers a start with `starting` straight away, so a
             // Failed still there seconds after asking is the answer to this
             // request rather than what was said before it.
@@ -1351,6 +1624,7 @@ async fn connect_desktop(shared: &Shared) -> Result<TcpStream, Refusal> {
         match shared.desktop.borrow().state {
             DesktopState::Missing => return Err(Refusal::LinuxMissing),
             DesktopState::Installing => return Err(Refusal::LinuxInstalling),
+            DesktopState::Off => return Err(Refusal::LinuxOff),
             DesktopState::Running | DesktopState::Starting | DesktopState::Unknown if Instant::now() < deadline => {}
             _ => return Err(Refusal::DesktopStopped),
         }
@@ -1680,8 +1954,11 @@ async fn pair_one(shared: &Shared, keys: &PairKeys, conn: Connection, until: u64
         return Ok(None);
     }
     let name = clean_name(&req.name);
+    // "browser" is kept as it is: the app lets a browser in to the phone's
+    // own screen alone (scope "phone" in peers.json), and gives its key no
+    // place in Linux's authorized_keys.
     let os = match req.os.as_str() {
-        "windows" | "macos" | "linux" => req.os.as_str(),
+        "windows" | "macos" | "linux" | "browser" => req.os.as_str(),
         _ => "other",
     };
     if name.is_empty() || sshkey::parse_public_line(&req.ssh_key).is_none() {
@@ -1808,6 +2085,46 @@ mod tests {
     fn names_are_one_printable_line() {
         assert_eq!(clean_name("  DESKTOP-1\n\r\t "), "DESKTOP-1");
         assert_eq!(clean_name(&"x".repeat(200)).len(), 64);
+    }
+
+    #[test]
+    fn a_browser_is_let_in_to_the_phones_screen_alone() {
+        let dir = std::env::temp_dir().join(format!("dexremote-scope-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("peers.json");
+        let pc = SecretKey::from_bytes(&[1u8; 32]).public();
+        let browser = SecretKey::from_bytes(&[2u8; 32]).public();
+        std::fs::write(
+            &path,
+            format!(
+                r#"{{"v":1,"peers":[{{"id":"{pc}","name":"PC"}},{{"id":"{browser}","name":"Browser on Win32","scope":"phone"}}]}}"#
+            ),
+        )
+        .unwrap();
+        let mut peers = Peers::default();
+        assert!(peers.refresh(&path));
+        assert_eq!(peers.names.len(), 2, "both are paired");
+        assert!(peers.phone_only.contains(&browser), "the browser, for the phone's screen alone");
+        assert!(!peers.phone_only.contains(&pc), "a computer, for whatever the switches offer");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_phones_screen_is_told_who_it_is_and_not_by_the_computer() {
+        let mut head = PhoneHead::new("Browser on\r\nWin32");
+        let req = b"GET /phone HTTP/1.1\r\nHost: 127.0.0.1\r\nX-Dex-Via: wifi\r\nx-dex-peer: someone else\r\nUpgrade: websocket\r\n\r\n\x81\x05hello";
+        // In two pieces, the break inside the head: nothing passes until it is whole.
+        assert_eq!(head.feed(&req[..30]).unwrap(), None);
+        let out = head.feed(&req[30..]).unwrap().unwrap();
+        let text = String::from_utf8_lossy(&out);
+        assert!(text.starts_with("GET /phone HTTP/1.1\r\nHost: 127.0.0.1\r\nUpgrade: websocket\r\n"), "{text}");
+        assert!(!text.to_ascii_lowercase().contains("wifi") && !text.contains("someone else"), "{text}");
+        assert!(text.contains("x-dex-via: remote\r\nx-dex-peer: Browser onWin32\r\n\r\n"), "{text}");
+        assert!(out.ends_with(b"\x81\x05hello"), "what came after the head goes on as it came");
+        assert_eq!(head.feed(b"more").unwrap(), Some(b"more".to_vec()), "and so does the rest");
+        let mut long = PhoneHead::new("PC");
+        assert!(long.feed(&vec![b'a'; MAX_PHONE_HEAD + 1]).is_err(), "a head that never ends is refused");
     }
 
     #[test]

@@ -20,6 +20,8 @@ CID=$(docker create "$IMAGE")
 trap 'docker rm -f "$CID" >/dev/null 2>&1 || true' EXIT
 
 mkdir -p "$DEST"
-docker cp "$CID:/build/out/oadx-vkprobe" "$DEST/oadx-vkprobe"
-echo "  -> $DEST/oadx-vkprobe"
+for P in oadx-vkprobe oadx-glprobe; do
+  docker cp "$CID:/build/out/$P" "$DEST/$P"
+  echo "  -> $DEST/$P"
+done
 echo "done — bump LinuxGpu.DRIVER_VERSION if the probe changed"

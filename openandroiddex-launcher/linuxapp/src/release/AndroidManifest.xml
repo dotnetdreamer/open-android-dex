@@ -13,6 +13,11 @@
   Debug builds keep the permission and the folder. They are the LinuxOnDroid
   APK on the GitHub releases (desktop.yml builds :linuxapp:assembleDebug) and
   what the desktop app pushes, neither of which goes near Play.
+
+  The Android 10 storage permission and legacy storage go too: they stand in
+  for All files access on Android 10 (the shared folder, Remote desktop's
+  Files), which this build does not offer, so it would declare a storage
+  permission it never asks for.
 -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
@@ -20,5 +25,13 @@
     <uses-permission
         android:name="android.permission.MANAGE_EXTERNAL_STORAGE"
         tools:node="remove" />
+    <uses-permission
+        android:name="android.permission.READ_EXTERNAL_STORAGE"
+        tools:node="remove" />
+    <uses-permission
+        android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        tools:node="remove" />
+
+    <application tools:remove="android:requestLegacyExternalStorage" />
 
 </manifest>

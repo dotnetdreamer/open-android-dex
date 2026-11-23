@@ -100,6 +100,12 @@ impl std::fmt::Display for DialError {
                 "The phone could not start its desktop. Open Linux on the phone to see what went wrong."
             }
             DialError::Refused(Refusal::StreamUnavailable) => "The phone's desktop video did not answer.",
+            DialError::Refused(Refusal::LinuxOff) => {
+                "Linux's remote access is off on the phone. Turn it on in Linux → Remote access on the phone."
+            }
+            DialError::Refused(Refusal::PhoneUnavailable) => {
+                "Remote desktop is off on the phone. Turn it on in LinuxOnDroid → Settings → Remote desktop."
+            }
             DialError::Other(detail) => return write!(f, "The connection to the phone failed: {detail}"),
         })
     }
@@ -739,11 +745,17 @@ impl Desktop {
         let Some(received) = read_request_head(&mut tcp).await else {
             return;
         };
-        let video = request_path(&received).is_some_and(|p| p.starts_with("/stream/"));
-        let checked = if video {
+        // The desktop's video at /stream/<token>, the phone's own screen
+        // (Remote desktop) at /phone/<token>: the same rules for both.
+        let kind = match request_path(&received) {
+            Some(p) if p.starts_with("/stream/") => Some("/stream"),
+            Some(p) if p.starts_with("/phone/") => Some("/phone"),
+            _ => None,
+        };
+        let checked = if let Some(kind) = kind {
             let access = self.stream.lock().unwrap().as_ref().map(|a| (a.token.clone(), a.origins.clone()));
             match access {
-                Some((token, origins)) => check_stream_request(&received, port, &token, &origins),
+                Some((token, origins)) => check_stream_request(&received, port, kind, &token, &origins),
                 None => Err("no video here"),
             }
         } else {
@@ -756,7 +768,11 @@ impl Desktop {
                 .await;
             return;
         }
-        let op = if video { DesktopOp::Stream } else { DesktopOp::Web };
+        let op = match kind {
+            Some("/phone") => DesktopOp::Phone,
+            Some(_) => DesktopOp::Stream,
+            None => DesktopOp::Web,
+        };
         let (send, recv) = match self.open_stream(op).await {
             Ok(stream) => stream,
             Err(e) => {
@@ -777,7 +793,10 @@ impl Desktop {
         // Everything read so far goes first: the request head, and whatever
         // the browser had already sent behind it. The token stays here: the
         // phone serves its video at /stream.
-        let received = if video { with_path(&received, "/stream") } else { received };
+        let received = match kind {
+            Some(path) => with_path(&received, path),
+            None => received,
+        };
         if send.write_all(&received).await.is_err() {
             return;
         }
@@ -866,7 +885,13 @@ fn with_path(received: &[u8], path: &str) -> Vec<u8> {
 /// another site names itself in `Origin`, a DNS-rebinding one carries its own
 /// name in `Host`, the viewer's frame has this port's origin, and none of
 /// them has the token, which only the app's page is given.
-fn check_stream_request(received: &[u8], port: u16, token: &str, origins: &[String]) -> Result<(), &'static str> {
+fn check_stream_request(
+    received: &[u8],
+    port: u16,
+    kind: &str,
+    token: &str,
+    origins: &[String],
+) -> Result<(), &'static str> {
     let end = head_end(received).ok_or("no request")?;
     let head = std::str::from_utf8(&received[..end]).map_err(|_| "not text")?;
     let mut lines = head.split("\r\n");
@@ -875,7 +900,7 @@ fn check_stream_request(received: &[u8], port: u16, token: &str, origins: &[Stri
     if method != Some("GET") || !version.is_some_and(|v| v.starts_with("HTTP/1.")) {
         return Err("not a GET");
     }
-    if path != Some(&format!("/stream/{token}")) {
+    if path != Some(&format!("{kind}/{token}")) {
         return Err("not the window's path");
     }
     let ours = [format!("127.0.0.1:{port}"), format!("localhost:{port}")];
@@ -1012,8 +1037,19 @@ mod tests {
     #[test]
     fn only_the_apps_own_page_opens_the_video() {
         let app = vec!["tauri://localhost".to_string(), "http://tauri.localhost".to_string()];
-        let go = |lines: &[&str]| check_stream_request(&request(lines), 7000, "abc", &app);
+        let go = |lines: &[&str]| check_stream_request(&request(lines), 7000, "/stream", "abc", &app);
         let ok = ["GET /stream/abc HTTP/1.1", "Host: 127.0.0.1:7000", "Upgrade: websocket", "Origin: tauri://localhost"];
+        // The phone's own screen (Remote desktop) under the same rules, at its own path.
+        let phone = ["GET /phone/abc HTTP/1.1", "Host: 127.0.0.1:7000", "Upgrade: websocket", "Origin: tauri://localhost"];
+        assert_eq!(check_stream_request(&request(&phone), 7000, "/phone", "abc", &app), Ok(()));
+        assert!(check_stream_request(&request(&phone), 7000, "/phone", "xyz", &app).is_err(), "another token");
+        assert!(go(&phone).is_err(), "the screen's path is not the desktop's");
+        assert!(
+            check_stream_request(&request(&["GET /phone/abc HTTP/1.1", "Host: 127.0.0.1:7000", "Upgrade: websocket", "Origin: https://example.com"]), 7000, "/phone", "abc", &app).is_err(),
+            "another site"
+        );
+        let screen = String::from_utf8(with_path(&request(&phone), "/phone")).unwrap();
+        assert!(screen.starts_with("GET /phone HTTP/1.1\r\n") && !screen.contains("abc"), "the token stays here");
         assert_eq!(go(&ok), Ok(()));
         assert_eq!(go(&["GET /stream/abc HTTP/1.1", "Host: localhost:7000", "Upgrade: websocket", "Origin: http://tauri.localhost"]), Ok(()));
         assert!(go(&["GET /stream/xyz HTTP/1.1", "Host: 127.0.0.1:7000", "Upgrade: websocket", "Origin: tauri://localhost"]).is_err(), "another token");

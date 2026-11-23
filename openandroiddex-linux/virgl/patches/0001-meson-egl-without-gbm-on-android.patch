@@ -1,0 +1,22 @@
+--- a/meson.build
++++ b/meson.build
+@@ -81,6 +81,10 @@
+ 
+ with_host_windows = host_machine.system() == 'windows'
+ with_host_darwin = host_machine.system() == 'darwin'
++# Android has EGL (the vendor's, through libEGL) but no GBM and no DRM render
++# node an app may open, so it takes the same no-GBM EGL branch as Windows and
++# macOS below. vrend_winsys.c then opens EGL_DEFAULT_DISPLAY itself.
++with_host_android = host_machine.system() == 'android'
+ 
+ not_found = dependency('', required: false)
+ gbm_dep = not_found
+@@ -295,7 +299,7 @@
+ 
+ if with_egl
+    if cc.has_header('epoxy/egl.h', dependencies: epoxy_dep) and epoxy_dep.get_variable(pkgconfig: 'epoxy_has_egl') == '1'
+-      if with_host_windows or with_host_darwin
++      if with_host_windows or with_host_darwin or with_host_android
+          have_egl = true
+       else
+          if libdrm_dep.found()
