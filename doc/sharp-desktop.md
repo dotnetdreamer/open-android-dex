@@ -316,6 +316,34 @@ decodes; one smaller than the display is remembered per phone and codec
 (`video-caps.json`), and later desktops render no larger. The S25 Ultra's
 encoder takes 8192x8192, so it has never needed this.
 
+A desktop that follows its window used to skip the cap: only the fit above read
+it, so a Redmi 9A (Android 11, an `OMX.MTK.VIDEO.ENCODER.AVC` that stops at
+1920x1080) was asked for 2464x1296 at every start, on this computer's
+2560x1440 screen. Upstream's flex display then constrains the CAPTURE to the
+encoder (1920x1080, each side clamped on its own) and leaves the display at
+2464x1296, and that Android's SurfaceFlinger scales the display into the
+smaller video but leaves out any layer lying wholly outside 1920x1080 in the
+display's own coordinates. The desktop's taskbar, an overlay window along the
+bottom edge (y 1244 to 1296), was never in the stream, although the window
+manager had it shown and above the desktop. Found on 2026-11-16 with the
+bundled scrcpy on a display of the app's own flags, no window, recorded to a
+file: the bar was missing with `--flex-display` and present without it, and
+present with it at 1920x1008.
+
+So now:
+
+- `display::cap_flex` starts such a desktop within the cap, in the window's
+  shape, at the same density (a smaller desktop, not smaller type), and the
+  cap goes to scrcpy as `--max-size`, so the sizes the window asks for later
+  are held to it too.
+- `openandroiddex-scrcpy/flex-encoder-limit.patch` makes the server resize the
+  display itself to the size its capture was constrained to, keeping its
+  shape, and say so ("Display resized: WxH/dpi (id=N), to the encoder's
+  limits"). That covers a phone's first desktop, before any cap is learned,
+  and a window resized past what the encoder takes. Checked on the Redmi 9A at
+  2464x1296 with the app's flags: the display became 1920x1008 and the bar
+  was in the stream.
+
 ## What a denser desktop changed elsewhere
 
 **Title bars.** `CaptionService` was written when the desktop ran at 160 dpi,

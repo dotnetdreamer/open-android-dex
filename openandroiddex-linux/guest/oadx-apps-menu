@@ -1,0 +1,324 @@
+#!/bin/sh
+# oadx-apps-menu -- send the desktop's app launches through oadx-run, so each
+# app runs in Android's ":linuxapps" process and not in the desktop's own (see
+# oadx-run for why that keeps the desktop alive).
+#
+# Where launches come from, and what this does to each:
+#  1. The Applications menu, Thunar's Open With, xdg-open and every other GLib
+#     or garcon lookup: they find an app's desktop file by its name along
+#     XDG_DATA_DIRS, and linux-rt.sh puts /usr/local/share/oadx-apps first on
+#     it. This writes a copy of each app's desktop file there with its Exec
+#     lines behind oadx-run. The packages' own files are not touched.
+#  2. The user's own entries in ~/.local/share/applications, which come before
+#     every copy: routed in place.
+#  3. "The web browser", "the terminal", "the file manager", "the mail
+#     reader" -- exo-open --launch, which is also how XFCE's menus start an
+#     entry with Terminal=true (exo-open --launch TerminalEmulator, in
+#     libxfce4ui and the whisker menu). XFCE finds those helpers by name along
+#     XDG_DATA_DIRS too (xfce4/helpers/NAME.desktop, read by xfce4-mime-helper),
+#     so they get copies the same way, each of their commands behind oadx-run,
+#     and the user's own (~/.local/share/xfce4/helpers) are routed in place.
+#     A browser another app asks for runs in a proot of its own then, rather
+#     than inside that app's, and goes when Android closes that app.
+#  4. The dock: xfce4-panel keeps a copy of each launcher in a folder of its
+#     own (~/.config/xfce4/panel/launcher-N), so that copy gets the prefix in
+#     place. Only while no panel runs, because the panel writes its launchers
+#     back out when it exits; linux-rt.sh runs this before XFCE starts.
+#  5. The icons on the desktop (~/Desktop/*.desktop): the same, in place, their
+#     file mode kept (xfdesktop runs only an executable one).
+#
+# Left alone: an entry that runs in a terminal (Terminal=true: the terminal is
+# opened from here, and an app moved out of it would have no terminal -- 3.
+# routes the terminal it opens instead), one that is not an application, a
+# hidden one, one with no Exec, and one that says X-OADX-Route=false. A line
+# that already starts with oadx-run is left as it is, so this can run any
+# number of times, and a copy whose package went away goes with it. A file
+# that is a link is never written through: what it points at may be a
+# package's.
+#
+# Run by linux-rt.sh before the desktop starts, and by apt after every install
+# or removal (/etc/apt/apt.conf.d/99oadx-apps), so a new app joins at once.
+# Written by the app into the guest at every start.
+#
+# --launchers-only / --menu-only do just the one half, for the apt hook (the
+# panel is running then, and its launcher copies are not ours to touch).
+
+OUT=/usr/local/share/oadx-apps/applications
+HOUT=/usr/local/share/oadx-apps/xfce4/helpers
+MENU=1
+LAUNCHERS=1
+case "$1" in
+  --menu-only) LAUNCHERS= ;;
+  --launchers-only) MENU= ;;
+esac
+
+# One desktop file's worth of rules, shared by both halves. Reads every file
+# named on the command line; for each one worth routing, builds its routed
+# text, and hands it to emit(name, path, text). NO APOSTROPHES in this string.
+RULES='
+function base(p) { sub(/.*\//, "", p); return p }
+function routed(v) {
+  return v == "oadx-run" || v ~ /^oadx-run[ \t]/ ||
+    v == "/usr/local/bin/oadx-run" || v ~ /^\/usr\/local\/bin\/oadx-run[ \t]/
+}
+function finish(   i, line, grp, v, body) {
+  if (cur == "") return
+  if (!skip && routable && hasExec) {
+    body = ""
+    grp = ""
+    for (i = 1; i <= n; i++) {
+      line = L[i]
+      if (line ~ /^[ \t]*\[/) {
+        grp = line
+        sub(/[ \t]+$/, "", grp)
+      } else if (line ~ /^Exec[ \t]*=/ && (grp == "[Desktop Entry]" || grp ~ /^\[Desktop Action /)) {
+        v = line
+        sub(/^Exec[ \t]*=[ \t]*/, "", v)
+        if (!routed(v)) line = "Exec=oadx-run " v
+      } else if (grp == "[Desktop Entry]" && line ~ /^DBusActivatable[ \t]*=/) {
+        # D-Bus activation would start the app from the bus, in the desktop.
+        line = "DBusActivatable=false"
+      }
+      body = body line "\n"
+    }
+    emit(cur, path, body)
+  }
+  cur = ""
+}
+FNR == 1 {
+  finish()
+  path = FILENAME
+  cur = base(FILENAME)
+  n = 0
+  routable = 1
+  hasExec = 0
+  g = ""
+  # The menu half: of two files with one name, only the first is the app.
+  skip = (byname && (cur in seen))
+  seen[cur] = 1
+}
+{
+  sub(/\r$/, "")
+  L[++n] = $0
+  if ($0 ~ /^[ \t]*\[/) {
+    g = $0
+    sub(/[ \t]+$/, "", g)
+  } else if (g == "[Desktop Entry]") {
+    if ($0 ~ /^Terminal[ \t]*=[ \t]*(true|1)[ \t]*$/) routable = 0
+    else if ($0 ~ /^Type[ \t]*=/ && $0 !~ /^Type[ \t]*=[ \t]*Application[ \t]*$/) routable = 0
+    else if ($0 ~ /^Hidden[ \t]*=[ \t]*(true|1)[ \t]*$/) routable = 0
+    else if ($0 ~ /^X-OADX-Route[ \t]*=[ \t]*(false|0)[ \t]*$/) routable = 0
+    else if ($0 ~ /^Exec[ \t]*=[ \t]*[^ \t]/) hasExec = 1
+  }
+}
+END { finish() }
+'
+
+# The helpers XFCE launches "the web browser", "the terminal" and the rest
+# through: each command of X-XFCE-Commands and X-XFCE-CommandsWithParameter
+# (a list, one command per semicolon) behind oadx-run. Read and handed to
+# emit() as RULES does. NO APOSTROPHES in this string.
+#
+# Only a command whose program is there: XFCE tries the next one in the list
+# when one will not start, and oadx-run always starts. %B, the program XFCE
+# found itself, always is.
+HELPER_RULES='
+function base(p) { sub(/.*\//, "", p); return p }
+function routed(v) {
+  sub(/^[ \t]+/, "", v)
+  return v == "oadx-run" || v ~ /^oadx-run[ \t]/ ||
+    v == "/usr/local/bin/oadx-run" || v ~ /^\/usr\/local\/bin\/oadx-run[ \t]/
+}
+function openable(f,   l, r) {
+  r = (getline l < f)
+  close(f)
+  return r >= 0
+}
+function there(cmd,   w, n, i, d) {
+  w = cmd
+  sub(/^[ \t]+/, "", w)
+  sub(/[ \t].*/, "", w)
+  if (w ~ /%/) return 1
+  if (w ~ /^\//) return openable(w)
+  n = split("/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", d, ":")
+  for (i = 1; i <= n; i++) if (openable(d[i] "/" w)) return 1
+  return 0
+}
+function each(v,   n, i, p, out) {
+  n = split(v, p, ";")
+  out = ""
+  for (i = 1; i <= n; i++) {
+    if (p[i] ~ /[^ \t]/ && !routed(p[i]) && there(p[i])) {
+      sub(/^[ \t]+/, "", p[i])
+      p[i] = "oadx-run " p[i]
+    }
+    out = out (i > 1 ? ";" : "") p[i]
+  }
+  return out
+}
+function finish(   i, line, grp, k, v, body) {
+  if (cur == "") return
+  if (!skip && helper && hasCmd) {
+    body = ""
+    grp = ""
+    for (i = 1; i <= n; i++) {
+      line = L[i]
+      if (line ~ /^[ \t]*\[/) {
+        grp = line
+        sub(/[ \t]+$/, "", grp)
+      } else if (grp == "[Desktop Entry]" && line ~ /^X-XFCE-Commands(WithParameter)?[ \t]*=/) {
+        k = line
+        sub(/[ \t]*=.*/, "", k)
+        v = line
+        sub(/^[^=]*=[ \t]*/, "", v)
+        line = k "=" each(v)
+      }
+      body = body line "\n"
+    }
+    emit(cur, path, body)
+  }
+  cur = ""
+}
+FNR == 1 {
+  finish()
+  path = FILENAME
+  cur = base(FILENAME)
+  n = 0
+  helper = 0
+  hasCmd = 0
+  g = ""
+  skip = (byname && (cur in seen))
+  seen[cur] = 1
+}
+{
+  sub(/\r$/, "")
+  L[++n] = $0
+  if ($0 ~ /^[ \t]*\[/) {
+    g = $0
+    sub(/[ \t]+$/, "", g)
+  } else if (g == "[Desktop Entry]") {
+    if ($0 ~ /^Type[ \t]*=[ \t]*X-XFCE-Helper[ \t]*$/) helper = 1
+    else if ($0 ~ /^X-OADX-Route[ \t]*=[ \t]*(false|0)[ \t]*$/) skip = 1
+    else if ($0 ~ /^X-XFCE-Commands(WithParameter)?[ \t]*=[ \t]*[^ \t]/) hasCmd = 1
+  }
+}
+END { finish() }
+'
+
+# What is on disk under a path, as one string, or "" -- awk reads it itself so
+# that an unchanged copy is never rewritten (garcon reloads on every write).
+READ='
+function slurp(f,   s, l) {
+  s = ""
+  while ((getline l < f) > 0) s = s l "\n"
+  close(f)
+  return s
+}
+'
+
+# copies OUT PROGRAM DIR... -- in OUT, a routed copy of each desktop file in
+# the DIRs (where two have one name, the first: the DIRs go in XDG_DATA_DIRS
+# order, so that one is the one XFCE uses), by PROGRAM (RULES or HELPER_RULES).
+# A copy no longer wanted -- its package gone, or no longer routed -- goes.
+copies() {
+  c_out=$1
+  c_prog=$2
+  shift 2
+  mkdir -p "$c_out" || return 1
+  c_dirs=$*
+  set --
+  for d in $c_dirs; do
+    for f in "$d"/*.desktop; do
+      [ -f "$f" ] && set -- "$@" "$f"
+    done
+  done
+  # The names this run keeps, in a file of its own: the session's run and
+  # apt's can overlap.
+  c_keep=$c_out/.keep.$$
+  : > "$c_keep" || return 1
+  if [ $# -gt 0 ]; then
+    if ! awk -v out="$c_out" -v keepf="$c_keep" -v byname=1 "$READ"'
+      function emit(name, p, body,   f) {
+        f = out "/" name
+        keep[name] = 1
+        if (slurp(f) != body) { printf "%s", body > f; close(f) }
+      }
+    '"$c_prog"'
+      END {
+        for (k in keep) print k > keepf
+        close(keepf)
+      }' "$@"; then
+      # Stopped short (mawk quits without its END when a file it was given
+      # has gone meanwhile): the list is not whole, so nothing is removed.
+      rm -f "$c_keep"
+      return 0
+    fi
+  fi
+  # One awk, one rm.
+  ls -1 "$c_out" 2>/dev/null | awk -v keep="$c_keep" '
+    BEGIN { while ((getline k < keep) > 0) ok[k] = 1 }
+    /\.desktop$/ && !($0 in ok) { print }' | while IFS= read -r gone; do
+    rm -f -- "$c_out/$gone"
+  done
+  rm -f "$c_keep"
+}
+
+# in_place PROGRAM FILE... -- each file routed where it is, only when its text
+# changes, written through the file itself (not a new one moved over it) so
+# its mode and owner stay.
+in_place() {
+  i_prog=$1
+  shift
+  [ $# -gt 0 ] || return 0
+  awk "$READ"'
+    function emit(name, p, body) {
+      if (slurp(p) != body) { printf "%s", body > p; close(p) }
+    }
+  '"$i_prog" "$@"
+}
+
+# The desktop icons only where xfdesktop trusts a launcher by its executable
+# bit, which a rewrite keeps: with no GVfs metadata at all, and with it in
+# every xfdesktop before 4.19 -- the guest's, Ubuntu 24.04's 4.18, among them:
+# neither it nor its libxfce4ui 4.18 has a launcher checksum. From 4.19 on,
+# with GVfs metadata, it also checks a checksum of the file, and a rewritten
+# icon would ask to be trusted again: there they are left alone.
+icons_routable() {
+  [ -e /usr/libexec/gvfsd-metadata ] || return 0
+  i_v=$(dpkg-query -W -f='${Version}' xfdesktop4 2>/dev/null)
+  case $i_v in
+    ''|[0-3].*|4.[0-9].*|4.[0-9]-*|4.1[0-8].*|4.1[0-8]-*) return 0 ;;
+  esac
+  return 1
+}
+
+if [ -n "$MENU" ]; then
+  # /usr/local/share first: it comes first on XDG_DATA_DIRS too.
+  copies "$OUT" "$RULES" /usr/local/share/applications /usr/share/applications || exit 1
+  copies "$HOUT" "$HELPER_RULES" /usr/local/share/xfce4/helpers /usr/share/xfce4/helpers
+  # The user's own, which come before every copy, routed where they are.
+  set --
+  for f in /root/.local/share/applications/*.desktop; do
+    [ -f "$f" ] && [ ! -L "$f" ] && set -- "$@" "$f"
+  done
+  in_place "$RULES" "$@"
+  set --
+  for f in /root/.local/share/xfce4/helpers/*.desktop; do
+    [ -f "$f" ] && [ ! -L "$f" ] && set -- "$@" "$f"
+  done
+  in_place "$HELPER_RULES" "$@"
+fi
+
+if [ -n "$LAUNCHERS" ]; then
+  set --
+  for f in /root/.config/xfce4/panel/launcher-*/*.desktop; do
+    [ -f "$f" ] && [ ! -L "$f" ] && set -- "$@" "$f"
+  done
+  if icons_routable; then
+    for f in /root/Desktop/*.desktop; do
+      [ -f "$f" ] && [ ! -L "$f" ] && set -- "$@" "$f"
+    done
+  fi
+  in_place "$RULES" "$@"
+fi
+exit 0

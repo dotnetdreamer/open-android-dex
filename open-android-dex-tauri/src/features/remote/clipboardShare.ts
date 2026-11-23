@@ -22,6 +22,10 @@
  *   until the window is back, and is dropped if the computer's clipboard
  *   changed in the meantime: the newer copy wins.
  *
+ * A postmarketOS phone's desktop window (pmos/PmosDesktop.tsx) shares its
+ * phone's own clipboard by the same rules: there the guest is the phone, which
+ * takes up to 1 MB at once (GuestClipboard).
+ *
  * Pure logic, so the browser check runs this very file against the real page.
  */
 
@@ -58,6 +62,21 @@ export function guestSize(text: string) {
   return new TextEncoder().encode(lf(text).replace(/\n/g, "\r\n")).length + 1;
 }
 
+/** Whose clipboard the other end is, for what the window says, and the most it takes at once. */
+export interface GuestClipboard {
+  /** "Linux"; a postmarketOS phone's window says "the phone". */
+  name: string;
+  /** Counted as guestSize counts. */
+  max: number;
+}
+
+const LINUX: GuestClipboard = { name: "Linux", max: GUEST_MAX };
+
+/** 262144 as "256 KB", 1048576 as "1 MB". */
+function sizeWords(bytes: number) {
+  return bytes >= 1024 * 1024 ? `${Math.round(bytes / (1024 * 1024))} MB` : `${Math.round(bytes / 1024)} KB`;
+}
+
 export class ClipboardShare {
   private on: boolean;
   /** What both sides last agreed the clipboard says, with LF line ends. */
@@ -78,6 +97,7 @@ export class ClipboardShare {
   constructor(
     private readonly host: ClipboardHost,
     on: boolean,
+    private readonly guest: GuestClipboard = LINUX,
   ) {
     this.on = on;
   }
@@ -101,17 +121,23 @@ export class ClipboardShare {
   /** The window came to the front. */
   async focus() {
     if (!this.on) return;
+    const agreed = this.synced;
     const now = await this.host.read().catch(() => null);
-    if (!this.on) return;
+    // While the read was out, the switch went off, the window went to the
+    // back again (what waits keeps waiting, for the next time it comes), or
+    // a copy of the guest's landed here: then what was read is an older
+    // clipboard than the one there is now, and is not to be given anywhere.
+    if (!this.on || !this.host.focused() || this.synced !== agreed) return;
     const text = now === null ? null : lf(now);
     if (text !== null && text !== this.synced) {
       // Copied on this computer while the window was elsewhere: newer than
-      // anything the guest said in the meantime.
+      // anything the guest said in the meantime, waiting or still on its way.
       this.pending = null;
-      if (guestSize(text) > GUEST_MAX) {
+      this.dropInFlight();
+      if (guestSize(text) > this.guest.max) {
         if (this.refused !== text) {
           this.refused = text;
-          this.host.say("The clipboard is too large to share with Linux (over 256 KB).");
+          this.host.say(`The clipboard is too large to share with ${this.guest.name} (over ${sizeWords(this.guest.max)}).`);
         }
         return;
       }
@@ -132,6 +158,9 @@ export class ClipboardShare {
     if (!this.on || raw.length > COMPUTER_MAX) return;
     const text = lf(raw);
     if (!this.host.focused()) {
+      // Newer than a copy still on its way from while the window was in
+      // front: that one must not come after it and take its place.
+      this.dropInFlight();
       this.pending = text;
       return;
     }
@@ -143,7 +172,15 @@ export class ClipboardShare {
       this.timer = null;
       const last = this.latest;
       this.latest = null;
-      if (last !== null && this.on) void this.commit(last);
+      if (last === null || !this.on) return;
+      // The window went to the back in those 150 ms: what the guest copied
+      // waits for it to come back, as anything copied while it was elsewhere
+      // does, rather than landing on top of whatever is in front now.
+      if (!this.host.focused()) {
+        this.pending = last;
+        return;
+      }
+      void this.commit(last);
     }, 150);
   }
 
@@ -153,22 +190,26 @@ export class ClipboardShare {
     this.host.save(this.on);
     this.host.post({ share: this.on });
     if (this.on) {
-      this.host.say("Clipboard shared with Linux: what you copy here can be pasted there, and the other way.");
+      this.host.say(`Clipboard shared with ${this.guest.name}: what you copy here can be pasted there, and the other way.`);
       // The page took back what it had been given when this went off.
       this.synced = null;
       if (this.host.focused()) void this.focus();
     } else {
-      this.host.say("Clipboard not shared with Linux.");
+      this.host.say(`Clipboard not shared with ${this.guest.name}.`);
       this.pending = null;
-      this.latest = null;
-      if (this.timer !== null) clearTimeout(this.timer);
-      this.timer = null;
+      this.dropInFlight();
     }
   }
 
   dispose() {
+    this.dropInFlight();
+  }
+
+  /** The guest's copy waiting out its 150 ms, if there is one: let go of, a newer one being there. */
+  private dropInFlight() {
     if (this.timer !== null) clearTimeout(this.timer);
     this.timer = null;
+    this.latest = null;
   }
 
   private async commit(text: string) {

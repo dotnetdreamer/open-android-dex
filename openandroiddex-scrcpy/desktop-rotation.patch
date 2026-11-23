@@ -1,0 +1,176 @@
+diff --git a/server/src/main/java/com/genymobile/scrcpy/video/NewDisplayCapture.java b/server/src/main/java/com/genymobile/scrcpy/video/NewDisplayCapture.java
+index 765cc01..f758aa8 100644
+--- a/server/src/main/java/com/genymobile/scrcpy/video/NewDisplayCapture.java
++++ b/server/src/main/java/com/genymobile/scrcpy/video/NewDisplayCapture.java
+@@ -23,6 +23,7 @@ import com.genymobile.scrcpy.wrappers.WindowManager;
+ import android.graphics.Rect;
+ import android.hardware.display.VirtualDisplay;
+ import android.os.Build;
++import android.os.SystemClock;
+ import android.view.Surface;
+ 
+ import java.io.IOException;
+@@ -267,7 +268,9 @@ public class NewDisplayCapture extends SurfaceCapture {
+             setCurrentVirtualDisplay(vd); // used for client resize
+             int virtualDisplayId = vd.getDisplay().getDisplayId();
+             // Before the line below: the computer starts using the display when it reads it
++            awaitWindowManager(virtualDisplayId);
+             clearForcedDensity(virtualDisplayId, "left by an earlier display");
++            releaseRotationHold(virtualDisplayId, "left by an earlier display");
+             Ln.i("New display: " + displaySize.getWidth() + "x" + displaySize.getHeight() + "/" + dpi + " (id=" + virtualDisplayId + ")");
+ 
+             if (displayImePolicy != -1) {
+@@ -367,7 +370,9 @@ public class NewDisplayCapture extends SurfaceCapture {
+         if (virtualDisplay != null) {
+             // synchronized with triggerResize()
+             synchronized (this) {
+-                clearForcedDensity(virtualDisplay.getDisplay().getDisplayId(), "on this display");
++                int displayId = virtualDisplay.getDisplay().getDisplayId();
++                clearForcedDensity(displayId, "on this display");
++                releaseRotationHold(displayId, "on this display");
+                 virtualDisplay.release();
+                 setCurrentVirtualDisplay(null);
+             }
+@@ -394,6 +399,109 @@ public class NewDisplayCapture extends SurfaceCapture {
+         }
+     }
+ 
++    /**
++     * Open Android DeX: the rotation an Android 10 or 11 desktop is held at, taken off. There the
++     * computer holds a desktop at its own rotation (`wm set-user-rotation lock` and
++     * `wm set-fix-to-user-rotation enabled`), or a portrait app that stays full screen turns the whole
++     * desktop, and Android keeps both under the display's identity, as it keeps a forced density, for
++     * the next display that gets it, which no app could turn: anyone's own scrcpy display (the next
++     * desktop is held again anyway). So the hold comes off before the display goes, however the
++     * session ends, the desktop's window closed on the computer included; and a hold an earlier display
++     * left, its server killed before it got here, comes off each display made here. On Android 11 fixed
++     * to the user's rotation goes back to the display's default whatever it was: Android keeps
++     * "disabled" as it keeps "enabled". Android 10 cannot be given the default (see below).
++     *
++     * The frozen rotation comes off last, and only once the fixed half is off or refused by the shell,
++     * which no later try would change. Fixed alone still holds the display at its rotation
++     * (DisplayRotation.rotationForOrientation returns the user's rotation before anything else), and
++     * on Android 10 the freeze is all the next display made here can look for: thawed with the fixed
++     * half still on, the display would be held with nothing left to show it.
++     */
++    private static void releaseRotationHold(int displayId, String what) {
++        if (Build.VERSION.SDK_INT < AndroidVersions.API_29_ANDROID_10 || Build.VERSION.SDK_INT > AndroidVersions.API_30_ANDROID_11) {
++            return;
++        }
++        WindowManager wm = ServiceManager.getWindowManager();
++        boolean held = wm.isRotationFrozen(displayId);
++        boolean unfixed;
++        if (Build.VERSION.SDK_INT >= AndroidVersions.API_30_ANDROID_11) {
++            unfixed = wm.setFixedToUserRotationDefault(displayId) || setFixedToUserRotationByShell(displayId, "default");
++        } else {
++            unfixed = !held || setFixedToUserRotationByShell(displayId, "disabled");
++        }
++        if (!held) {
++            return;
++        }
++        if (!unfixed) {
++            Ln.w("Rotation hold " + what + " left on, for the next display made here to take off (display " + displayId + ")");
++            return;
++        }
++        wm.thawRotation(displayId);
++        Ln.i("Rotation hold " + what + " taken off (display " + displayId + ")");
++    }
++
++    /**
++     * Open Android DeX: `cmd window set-fix-to-user-rotation -d <id> <value>`, what the computer's `wm`
++     * runs. Android 10's window manager takes fixed to the user's rotation from that command only (no
++     * call outside its own process), and the command takes "default" as "disabled": as near to nothing
++     * kept as Android 10 comes. Nothing there reads the setting back, so there it only runs on a display
++     * found frozen, as the computer's hold always is (any freeze counts): run on every display, it
++     * would leave each one a setting of its own. On Android 11 it stands in for the window manager's
++     * call should that be missing. False only when the command did not get through to the window
++     * manager, as a later try may: `cmd` could not be run or was cut short, or could not reach the
++     * window manager (`cmd` then exits 20, or with a binder error). Exit code 255 is the window
++     * manager's own refusal (its shell command returned -1, or threw), the same at every try; on
++     * Android 10 the computer's own `enabled`, sent the same way, was then refused too, leaving only
++     * the freeze.
++     */
++    private static boolean setFixedToUserRotationByShell(int displayId, String value) {
++        String[] cmd = {"cmd", "window", "set-fix-to-user-rotation", "-d", String.valueOf(displayId), value};
++        try {
++            int exitCode = Runtime.getRuntime().exec(cmd).waitFor();
++            if (exitCode == 0) {
++                return true;
++            }
++            if (exitCode == 255) {
++                Ln.w("The window manager refused to take display " + displayId + " off the fixed rotation");
++                return true;
++            }
++            Ln.w("Could not take display " + displayId + " off the fixed rotation (exit code " + exitCode + ")");
++            return false;
++        } catch (IOException e) {
++            Ln.w("Could not take display " + displayId + " off the fixed rotation", e);
++            return false;
++        } catch (InterruptedException e) {
++            Thread.currentThread().interrupt();
++            Ln.w("Could not take display " + displayId + " off the fixed rotation", e);
++            return false;
++        }
++    }
++
++    /**
++     * Open Android DeX: on Android 10 and 11 the window manager learns of a display a moment after it
++     * is made, applying then what it keeps under the display's identity, and until then answers as if
++     * there were no such display: a clear made before that would change nothing.
++     */
++    private static void awaitWindowManager(int displayId) {
++        if (Build.VERSION.SDK_INT > AndroidVersions.API_30_ANDROID_11) {
++            return;
++        }
++        WindowManager wm = ServiceManager.getWindowManager();
++        long start = SystemClock.uptimeMillis();
++        boolean slept = false;
++        while (wm.getInitialDisplayDensity(displayId) <= 0) {
++            if (SystemClock.uptimeMillis() - start >= 1000) {
++                Ln.w("Display " + displayId + " still unknown to the window manager after 1 s");
++                return;
++            }
++            SystemClock.sleep(5);
++            slept = true;
++        }
++        if (slept) {
++            Ln.i("Display " + displayId + " known to the window manager " + (SystemClock.uptimeMillis() - start) + " ms after it was made");
++        }
++    }
++
+     @Override
+     public Size getSize() {
+         return videoSize;
+diff --git a/server/src/main/java/com/genymobile/scrcpy/wrappers/WindowManager.java b/server/src/main/java/com/genymobile/scrcpy/wrappers/WindowManager.java
+index 08f5908..5e5abfa 100644
+--- a/server/src/main/java/com/genymobile/scrcpy/wrappers/WindowManager.java
++++ b/server/src/main/java/com/genymobile/scrcpy/wrappers/WindowManager.java
+@@ -311,4 +311,28 @@ public final class WindowManager {
+             Ln.e("Could not invoke method", e);
+         }
+     }
++
++    // Open Android DeX: an Android 10 or 11 desktop's rotation hold (`wm set-fix-to-user-rotation`), see NewDisplayCapture
++
++    private static final int FIXED_TO_USER_ROTATION_DEFAULT = 0; // android.view.IWindowManager.FIXED_TO_USER_ROTATION_DEFAULT
++
++    private Method setFixedToUserRotationMethod;
++
++    /**
++     * What `wm set-fix-to-user-rotation -d <id> default` does on Android 11: the display's own policy on apps' orientation
++     * again. False when the call could not be made. Android 10 has no such call outside the window manager's process (see
++     * NewDisplayCapture).
++     */
++    public boolean setFixedToUserRotationDefault(int displayId) {
++        try {
++            if (setFixedToUserRotationMethod == null) {
++                setFixedToUserRotationMethod = manager.getClass().getMethod("setFixedToUserRotation", int.class, int.class);
++            }
++            setFixedToUserRotationMethod.invoke(manager, displayId, FIXED_TO_USER_ROTATION_DEFAULT);
++            return true;
++        } catch (ReflectiveOperationException e) {
++            Ln.e("Could not invoke method", e);
++            return false;
++        }
++    }
+ }

@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<meta name="referrer" content="no-referrer">
+<meta name="robots" content="noindex, nofollow">
+<title>Sign in, LinuxOnDroid</title>
+<link rel="icon" href="icon.svg">
+<link rel="stylesheet" href="signin.css">
+<script type="module" src="signin.js"></script>
+</head>
+<body>
+  <main class="card">
+    <img class="logo" src="icon.svg" alt="">
+    <h1 id="title">Signing in</h1>
+    <p id="words" class="words">One moment</p>
+    <button id="go" type="button" hidden>Sign in</button>
+    <p id="error" class="error" role="alert"></p>
+    <a id="code" class="code" href="phone.html" hidden>Sign in with the code instead</a>
+    <p id="small" class="small" hidden>Each sign-in link from LinuxOnDroid works once, for 24 hours, and only on this phone's address</p>
+    <noscript><p class="error">This page needs JavaScript to sign in.</p></noscript>
+  </main>
+</body>
+</html>

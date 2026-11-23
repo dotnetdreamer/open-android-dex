@@ -241,6 +241,40 @@ Two more that were visual rather than silent:
   latch the height at whatever we last drew. That is how a 34 px bar survived under a 40 px
   platform caption, leaving the 6 px sliver visible in `coveredRegion`. `Math.max(h,
   CAPTION_PX)` makes the height monotone; being a few px too tall costs nothing.
+- **Our own windows get no platform caption (One UI on Android 17, S25 Ultra, 2026-11-19).**
+  A third-party freeform task has a "Caption of Task" window to host our bar, and the app
+  is laid out below it. The launcher's own tasks (Settings, Linux, Docker, Task Manager,
+  File transfer, Remote access, Linux settings, the Web viewer, a Linux app's window) have
+  none, so the bar is hosted on the app window, whose frame is the whole task.
+  - STRIP reserves app bounds only (appBounds top 122 against bounds 82), with no captionBar
+    inset, so nothing tells the window. Our windows draw edge to edge (targetSdk 35).
+  - So each lost its first 40 px under the bar: the Settings window's "DeX Settings" was
+    cut in half.
+  - `ensureCaption` records how far the bar reaches over its host (`height + dy`, 0 on a
+    caption window). After each pass `reportOwnBars` hands our tasks' values to
+    `OwnWindows.barsOver`.
+  - The windows pad `android.R.id.content` by that, minus any captionBar inset they get:
+    `OwnWindows.opened` does it for every window on the taskbar, and `LinuxWindowActivity`
+    calls `keepClearOfBar` itself.
+  - The Web viewer was on neither list: `isDesktopTask` took it for the desktop, so on One
+    UI 17 it had no bar at all, and no taskbar tile or Task Manager row either. It is on all
+    of them now.
+  - A Task Manager row for one of our windows used to bring it back only when it was
+    minimised: CaptionService's restore receiver looked among the windows it had hidden and
+    nowhere else. Now a window open behind others is raised (`FRONT`), one hidden by an
+    earlier run of the service is un-hidden (`SHOW`), and where the daemon will not raise it
+    (`FRONT` answers ERR) a window of ours is started again, which brings its task forward.
+    Checked on the S25 Ultra on 2026-11-19: the Web viewer fully under the Task Manager came
+    to the front from its row, and came back from minimised the same way.
+  - A `SHOW` is read back. The daemon answers OK whether or not the window manager carried it
+    out, so 600 ms later the task is listed again: still hidden, it gets one more `SHOW` (read
+    back after 2 s); shown but left behind (Android 12 ignores the reorder across a fullscreen
+    app), it is raised as above; gone, it is left alone. Starting the activity again is no
+    remedy for a task that stays hidden: it does not clear the hidden flag. Such a task stays
+    minimised, its pin still offers it, and `caption.log` says so.
+  - Tests: `app/src/test` (`DesktopWindowsTest`, `DesktopBarRoomTest`, `DesktopRaiseTest`).
+  - Reported once a pass has settled, because a theme or density rebuild drops every bar
+    between passes.
 
 ### 0.2.4 Host selection must be stable, not merely correct
 
@@ -300,6 +334,70 @@ half-covered one, which is a real limitation, not a bug to fix from inside the s
     single-streamed-display equivalent is either a platform launch transition via
     `ActivityOptions.makeCustomAnimation` at launch, or a fade-out veil overlay — both want
     on-device iteration).
+  - **Back, More and Sound (2026-11-17).** The bar now opens with ← Back and ☰ More and the
+    app's icon, and has the sound button before ◧, as the computer's own window for an app
+    does (`apps/win/frame.rs`): a tester put the two windows side by side and asked for the
+    same controls in both. The three are drawn marks (`CaptionGlyph`), not text: ☰ and a
+    speaker are not in every phone's fonts.
+    - **Back is aimed, not broadcast.** There each app has a display of its own, so a key
+      tap can only reach it. Here every window shares one display and a key goes to whichever
+      window has the keyboard, and a click on our bar never moves it: the bar is a
+      `FLAG_NOT_FOCUSABLE` embedded window whose host token is our own 1×1 overlay, so the
+      press is not a tap on the app. A display-wide Back (the taskbar's ◁, `input -d`) would
+      go to the window that was in front, and close something nobody asked to close. The
+      daemon's **`TASKKEY <d> <task> <code> [meta]`** gives the window the keyboard first —
+      `setFocusedTask`, the call a tap on a window ends in, which also raises it — waits for
+      `getFocusedRootTaskInfo` to name it (up to 400 ms), then 50 ms for the input side to
+      follow (the focus rides the next SurfaceFlinger transaction to InputDispatcher), and only
+      then injects. A window that never gets the keyboard gets no key: `ERR not focused`.
+      Nothing falls back to an unaimed key. Where `setFocusedTask` cannot bring the keyboard
+      over from another display (Android 12 does not raise the display), a press on the
+      window taken back at once does (`doc/desktop-window-buttons.md`). The task must be a visible window on that
+      display, so the launcher's uid (shared with the Linux guest) cannot use it to bring an
+      app forward on the phone's own screen. It runs on the bar's own daemon connection,
+      because its wait must not hold up the reconcile's and the drag's.
+    - **More** has Copy and Paste (Ctrl+C, Ctrl+V through `TASKKEY`; a Linux window gets
+      KEYCODE_COPY/PASTE, which `LinuxWinView` turns into Ctrl+Shift+C in a terminal), Phone
+      size and Tablet size (`apps/shape.rs`'s 412×915 and 1280×800 dp, fitted the same way,
+      the window kept where its top-left is; a tablet's size under 600 dp maximises instead),
+      and the phone as this desktop's touchpad where quick settings offers it. Not the
+      computer window's Full screen or game controls: here the desktop is one picture, and
+      game controls are the computer's keys on an app's own window.
+    - **Sound** offers the taskbar's Media output flyout rows (`mediaOutputItems`), so the
+      two can never offer different choices.
+    - **A narrow window keeps ✕.** Eight buttons and the icon are ~320 px at 1x, and
+      Android lets a freeform window be narrower than that; fixed-width views past the bar's
+      end are cut off, and ✕ is the last. `fitBar` (rule in `CaptionMath.shown`) lets the
+      least needed go first — the icon, ◨, ◧, the speaker, —, ☰, ▢ — until the rest fits
+      with 48 px left to drag the window by, and brings them back as it widens. Back and ✕
+      never go. The sizing, the menu placement and this rule are checked on a JVM by
+      `test/caption-bar-test.mjs`.
+    - **The menus are windows of their own** (`CaptionMenu`): `TYPE_ACCESSIBILITY_OVERLAY`
+      on the desktop display, as the Linux apps' menus are, positioned under the button, not
+      popups from the bar (it has no window of ours to hang one from, and anything drawn in
+      it is cropped to the app's window). They close on a pick, on a press outside them
+      (`FLAG_WATCH_OUTSIDE_TOUCH`), and when their window moves, resizes or closes. A press on
+      the button whose menu is open closes it: that press reaches the menu as an outside press
+      before the button hears it, so a menu closed that way within 400 ms is not reopened.
+    - **The bar follows a screen the app opens over itself** (`followAppWindow`). My Files
+      opens Samsung's Storage Share settings in its own task, over its main screen, and Android
+      throws away the main screen's surface, our bar with it; when it came back it had a new
+      surface under the same window id, so the bar was never put back. Now, while the window
+      under the bar is out of view, the bar moves to another window the task shows (only one
+      whose content belongs to the app the task is showing now). A window that comes back
+      after two passes or more away gets the bar put on afresh: its surface is new, though its
+      id is not. One pass away could be a blink.
+    - **Run on a Galaxy S25 Ultra (Android 17, over Wi-Fi), 2026-11-17:** ← on Play Store
+      behind My Files went to Play Store (`key 4 for task 1567: OK 56`), My Files untouched;
+      ☰ opened under its button with the current size ticked; Phone size made the window
+      412 × 915 dp under a 40 px bar, Tablet size 1280 × 800 dp, top-left kept; 🔊 offered
+      Computer only, Computer and phone, Phone speaker and All outputs on phone, and a second
+      press on it closed it; at 230 px wide the bar kept ←, ☰, the title, —, ▢ and ✕; Storage
+      Share from My Files took the bar with it (`its window 1858 has gone from view — the bar
+      moves to window 1882`) and ← brought it back (`key 4 for task 1488: OK 0`, then back on
+      window 1858). Not run: Copy and Paste (one try, on My Files with nothing selected so as
+      not to replace the phone owner's clipboard, was cut short when another desktop's close
+      request force-stopped My Files), and the touchpad item.
 - Apps using activity embedding (two-pane Settings) get a bar clipped to the pane that hosts
   it, because a surface parented under a window is cropped to that window. Inherent to
   per-window hosting; the display overlay avoided it but cost far more elsewhere.

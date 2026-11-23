@@ -123,7 +123,8 @@ public class LinuxRemoteActivity extends Activity {
         scroller.setFillViewport(true);
         column = new LinearLayout(this);
         column.setOrientation(LinearLayout.VERTICAL);
-        column.setPadding(dp(22), dp(20), dp(22), dp(24));
+        // The top bar's own height is the space above the page, as on Settings.
+        column.setPadding(dp(22), dp(6), dp(22), dp(24));
         scroller.addView(column, new ViewGroup.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         setContentView(scroller);
@@ -194,12 +195,16 @@ public class LinuxRemoteActivity extends Activity {
         s.enabled = LinuxRemote.isEnabled(this);
         s.status = LinuxRemote.readStatus(this);
         s.pairing = LinuxRemote.readPairing(this);
-        // A code means nothing with remote access off — nothing is listening
+        // A code means nothing with the tunnel down — nothing is listening
         // for it — and one can be left behind by a process that died with it
         // on screen. The host clears the file at its next stop; until then it
-        // is simply not shown.
+        // is simply not shown. The tunnel runs for Linux's remote access or
+        // for Remote desktop (LinuxRemote.tunnelOn): Remote desktop's card
+        // sends a person here to add a computer, and pairing then leaves
+        // Linux's remote access off (LinuxService.remotePair), so the switch
+        // on this page alone cannot say whether a code is listened for.
         boolean pairingOpen = "open".equals(s.pairing.state) || "starting".equals(s.pairing.state);
-        if (!s.enabled && pairingOpen) s.pairing = new LinuxRemote.Pairing();
+        if (!LinuxRemote.tunnelOn(this) && pairingOpen) s.pairing = new LinuxRemote.Pairing();
         s.peers = LinuxRemote.peers(this);
         s.linuxInstalled = Linux.isInstalled(this);
         Linux.Status st = Linux.readStatus(this);
@@ -249,13 +254,15 @@ public class LinuxRemoteActivity extends Activity {
         DexCursors.decorate(column);
     }
 
+    /**
+     * Back and the page's name, the Settings page's own top bar
+     * ({@link LinuxHomeViews#pageBar}): opened from LinuxOnDroid's home screen,
+     * this page had no way back but the phone's. Then one line on what it is for.
+     */
     private void header() {
-        TextView title = new TextView(this);
-        title.setText(s(R.string.rm_label));
-        title.setTextColor(theme.text);
-        title.setTextSize(TypedValue.COMPLEX_UNIT_PX, sp(21));
-        title.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
-        column.addView(title);
+        column.addView(LinuxHomeViews.pageBar(this, s(R.string.rm_label), theme.text, theme.dark),
+                new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
         TextView sub = new TextView(this);
         sub.setText(s(R.string.rm_subtitle));
@@ -263,7 +270,7 @@ public class LinuxRemoteActivity extends Activity {
         sub.setTextSize(TypedValue.COMPLEX_UNIT_PX, sp(12.5f));
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        lp.topMargin = dp(4);
+        lp.topMargin = dp(2);
         lp.bottomMargin = dp(16);
         column.addView(sub, lp);
     }
@@ -307,6 +314,11 @@ public class LinuxRemoteActivity extends Activity {
         if (detail.getText().length() > 0) labels.addView(detail);
         row.addView(labels, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
 
+        // A gap: a long status line ("1 Computer hinzugefügt, gerade nicht
+        // verbunden") otherwise runs into the button.
+        LinearLayout.LayoutParams powerLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        powerLp.setMarginStart(dp(12));
         row.addView(button(s(snap.enabled ? R.string.rm_turn_off : R.string.rm_turn_on),
                 snap.enabled ? theme.danger : theme.accent, 0xFFFFFFFF, () -> {
                     if (LinuxRemote.isEnabled(this)) {
@@ -318,7 +330,7 @@ public class LinuxRemoteActivity extends Activity {
                     }
                     shownSignature = "";
                     pollHandler.postDelayed(poll, 300);
-                }));
+                }), powerLp);
         card.addView(row);
 
         if (snap.enabled) {
@@ -339,7 +351,8 @@ public class LinuxRemoteActivity extends Activity {
             } else if (!usable) {
                 card.addView(note(s(R.string.rm_linux_installing), theme.textDim));
             } else if ("failed".equals(snap.status.ssh)) {
-                card.addView(note(s(R.string.rm_ssh_failed), theme.danger));
+                card.addView(note(s(Linux.sharedFolderOffered(this) ? R.string.rm_ssh_failed
+                        : R.string.rm_ssh_failed_noshare), theme.danger));
             } else if ("starting".equals(snap.status.ssh) || "down".equals(snap.status.ssh)) {
                 card.addView(note(s(R.string.rm_ssh_starting), theme.textFaint));
             }
@@ -361,7 +374,8 @@ public class LinuxRemoteActivity extends Activity {
         int n = snap.status.sessions.size();
         if (n > 0) return getResources().getQuantityString(R.plurals.rm_sessions, n, n);
         int paired = snap.peers.size();
-        return paired == 0 ? s(R.string.rm_no_computers)
+        // None: the Computers card right under this says so already.
+        return paired == 0 ? ""
                 : getResources().getQuantityString(R.plurals.rm_paired_count, paired, paired);
     }
 
@@ -380,7 +394,7 @@ public class LinuxRemoteActivity extends Activity {
             card.addView(codePanel(snap.pairing));
         } else if ("paired".equals(state)) {
             card.addView(resultPanel(true, getString(R.string.rm_paired_ok, snap.pairing.name),
-                    getString(R.string.rm_paired_how, LinuxRemote.sshAlias(this))));
+                    "ssh " + LinuxRemote.sshAlias(this)));
         } else if ("failed".equals(state)) {
             int why = "bad-code".equals(snap.pairing.reason) ? R.string.rm_pair_failed_bad_code
                     : "expired".equals(snap.pairing.reason) ? R.string.rm_pair_failed_expired
@@ -413,9 +427,13 @@ public class LinuxRemoteActivity extends Activity {
 
         LinearLayout text = new LinearLayout(this);
         text.setOrientation(LinearLayout.VERTICAL);
-        text.setPadding(dp(12), 0, dp(8), 0);
+        // Relative: LinuxOnDroid lays out right to left in Arabic.
+        text.setPaddingRelative(dp(12), 0, dp(8), 0);
         TextView name = new TextView(this);
         name.setText(p.name.isEmpty() ? LinuxRemote.shortId(p.id) : p.name);
+        // On the language's side: a computer called "Laptop" in an Arabic list
+        // sits on the right with the rest, not on the left by its own letters.
+        DexLocale.followLayout(name);
         name.setTextColor(theme.text);
         name.setTextSize(TypedValue.COMPLEX_UNIT_PX, sp(14));
         text.addView(name);
@@ -442,6 +460,7 @@ public class LinuxRemoteActivity extends Activity {
             sub.setTextColor(theme.textFaint);
         }
         sub.setTextSize(TypedValue.COMPLEX_UNIT_PX, sp(11.5f));
+        DexLocale.followLayout(sub);
         text.addView(sub);
         row.addView(text, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
 
@@ -461,7 +480,7 @@ public class LinuxRemoteActivity extends Activity {
         String name = p.name.isEmpty() ? LinuxRemote.shortId(p.id) : p.name;
         new AlertDialog.Builder(this)
                 .setTitle(getString(R.string.rm_remove_title, name))
-                .setMessage(s(R.string.rm_remove_body))
+                .setMessage(getString(R.string.rm_remove_body, name))
                 .setNegativeButton(s(R.string.rm_cancel), null)
                 .setPositiveButton(s(R.string.rm_remove), (d, w) -> pollHandler.post(() -> {
                     LinuxRemote.removePeer(this, p.id);
@@ -525,7 +544,8 @@ public class LinuxRemoteActivity extends Activity {
         return panel;
     }
 
-    private View resultPanel(boolean ok, String headline, String how) {
+    /** How it went, and for a computer just added, the command that connects it. */
+    private View resultPanel(boolean ok, String headline, String command) {
         LinearLayout panel = new LinearLayout(this);
         panel.setOrientation(LinearLayout.VERTICAL);
         panel.setBackground(plainFill(theme.field, 12));
@@ -540,13 +560,18 @@ public class LinuxRemoteActivity extends Activity {
         head.setTextColor(ok ? theme.positive : theme.danger);
         head.setTextSize(TypedValue.COMPLEX_UNIT_PX, sp(13.5f));
         panel.addView(head);
-        if (how != null) {
+        if (command != null) {
+            // The words in the page's type, the command alone in a typewriter's:
+            // a sentence set in monospace reads as more code to type.
+            panel.addView(note(s(R.string.rm_paired_how), theme.textDim));
             TextView cmd = new TextView(this);
-            cmd.setText(how);
+            cmd.setText(command);
+            DexLocale.followLayout(cmd);
             cmd.setTextColor(theme.text);
             cmd.setTypeface(Typeface.MONOSPACE);
             cmd.setTextSize(TypedValue.COMPLEX_UNIT_PX, sp(13));
-            cmd.setPadding(0, dp(6), 0, 0);
+            cmd.setTextIsSelectable(true);
+            cmd.setPadding(0, dp(4), 0, 0);
             panel.addView(cmd);
         }
         LinearLayout buttons = new LinearLayout(this);
@@ -554,7 +579,7 @@ public class LinuxRemoteActivity extends Activity {
         LinearLayout.LayoutParams blp = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         blp.topMargin = dp(12);
-        blp.rightMargin = dp(8);
+        blp.setMarginEnd(dp(8));
         buttons.addView(button(s(R.string.rm_done), theme.hover, theme.text, () -> {
             shownSignature = "";
             pollHandler.post(() -> {
@@ -606,12 +631,16 @@ public class LinuxRemoteActivity extends Activity {
         text.setOrientation(LinearLayout.VERTICAL);
         TextView v = new TextView(this);
         v.setText(value);
+        // On the language's side, as its caption is: in Arabic a Latin command
+        // otherwise sits at the far left, against Copy.
+        DexLocale.followLayout(v);
         v.setTextColor(theme.text);
         v.setTextSize(TypedValue.COMPLEX_UNIT_PX, sp(14));
         v.setTypeface(Typeface.MONOSPACE);
         text.addView(v);
         TextView c = new TextView(this);
         c.setText(caption);
+        DexLocale.followLayout(c);
         c.setTextColor(theme.textFaint);
         c.setTextSize(TypedValue.COMPLEX_UNIT_PX, sp(11.5f));
         text.addView(c);
@@ -621,7 +650,10 @@ public class LinuxRemoteActivity extends Activity {
         copy.setText(s(R.string.rm_copy));
         copy.setTextColor(theme.accent);
         copy.setTextSize(TypedValue.COMPLEX_UNIT_PX, sp(12.5f));
-        row.addView(copy);
+        LinearLayout.LayoutParams copyLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        copyLp.setMarginStart(dp(12));
+        row.addView(copy, copyLp);
         row.setOnClickListener(x -> {
             DexClipboard.set(this, value);
             Toast.makeText(this, s(R.string.rm_copied), Toast.LENGTH_SHORT).show();

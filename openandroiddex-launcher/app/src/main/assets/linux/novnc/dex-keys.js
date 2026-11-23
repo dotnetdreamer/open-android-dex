@@ -37,22 +37,22 @@ const XK = {
 const MODS = ['Control_L', 'Alt_L', 'Super_L', 'Shift_L'];
 
 const ROW = [
-  { kind: 'key', name: 'Escape', label: 'Esc', code: 'Escape' },
-  { kind: 'key', name: 'Tab', label: 'Tab', code: 'Tab' },
-  { kind: 'mod', name: 'Control_L', label: 'Ctrl' },
-  { kind: 'mod', name: 'Alt_L', label: 'Alt' },
-  { kind: 'mod', name: 'Super_L', label: 'Super' },
-  { kind: 'mod', name: 'Shift_L', label: 'Shift' },
-  { kind: 'rep', name: 'Left', label: '←', code: 'ArrowLeft' },
-  { kind: 'rep', name: 'Up', label: '↑', code: 'ArrowUp' },
-  { kind: 'rep', name: 'Down', label: '↓', code: 'ArrowDown' },
-  { kind: 'rep', name: 'Right', label: '→', code: 'ArrowRight' },
-  { kind: 'key', name: 'Home', label: 'Home', code: 'Home' },
-  { kind: 'key', name: 'End', label: 'End', code: 'End' },
-  { kind: 'key', name: 'Page_Up', label: 'PgUp', code: 'PageUp' },
-  { kind: 'key', name: 'Page_Down', label: 'PgDn', code: 'PageDown' },
-  { kind: 'key', name: 'Delete', label: 'Del', code: 'Delete' },
-  { kind: 'cad', label: 'Ctrl+Alt+Del' },
+  { kind: 'key', name: 'Escape', label: 'Esc', code: 'Escape', say: 'keyEsc' },
+  { kind: 'key', name: 'Tab', label: 'Tab', code: 'Tab', say: 'keyTab' },
+  { kind: 'mod', name: 'Control_L', label: 'Ctrl', say: 'keyCtrl' },
+  { kind: 'mod', name: 'Alt_L', label: 'Alt', say: 'keyAlt' },
+  { kind: 'mod', name: 'Super_L', label: 'Super', say: 'keySuper' },
+  { kind: 'mod', name: 'Shift_L', label: 'Shift', say: 'keyShift' },
+  { kind: 'rep', name: 'Left', label: '←', code: 'ArrowLeft', say: 'keyLeft' },
+  { kind: 'rep', name: 'Up', label: '↑', code: 'ArrowUp', say: 'keyUp' },
+  { kind: 'rep', name: 'Down', label: '↓', code: 'ArrowDown', say: 'keyDown' },
+  { kind: 'rep', name: 'Right', label: '→', code: 'ArrowRight', say: 'keyRight' },
+  { kind: 'key', name: 'Home', label: 'Home', code: 'Home', say: 'keyHome' },
+  { kind: 'key', name: 'End', label: 'End', code: 'End', say: 'keyEnd' },
+  { kind: 'key', name: 'Page_Up', label: 'PgUp', code: 'PageUp', say: 'keyPgUp' },
+  { kind: 'key', name: 'Page_Down', label: 'PgDn', code: 'PageDown', say: 'keyPgDn' },
+  { kind: 'key', name: 'Delete', label: 'Del', code: 'Delete', say: 'keyDel' },
+  { kind: 'cad', label: 'Ctrl+Alt+Del', say: 'keyCad' },
 ];
 
 export function initKeys(api) {
@@ -272,7 +272,11 @@ export function initKeys(api) {
     b.tabIndex = -1;
     b.textContent = spec.label;
     if (spec.kind === 'mod') b.dataset.mod = spec.name;
-    if (spec.name) b.setAttribute('aria-label', spec.name.replace(/_L$/, ''));
+    /* The keycap stays as keyboards print it (Esc, Ctrl, PgUp); what a screen
+       reader says is the key's name in the window's language (TEXT, from the
+       words dex.js loaded, and again if they come late: relabel). */
+    b.dataset.say = spec.say;
+    b.setAttribute('aria-label', (api.TEXT && api.TEXT[spec.say]) || spec.label);
 
     /* Never take focus: the sink would lose it and the IME would close on the
        first modifier the user pressed. */

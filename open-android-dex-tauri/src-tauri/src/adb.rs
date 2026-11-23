@@ -533,6 +533,89 @@ fn split_device_line(line: &str) -> (&str, &str) {
     (serial, line[serial.len()..].trim_start())
 }
 
+// ── The phones this run may use ───────────────────────────────────────────
+
+/// `OADX_ONLY_PHONES`: the phones a test run may use, and no others.
+///
+/// Starting this app does things to every phone adb has. It switches the
+/// child-process limit off, pushes the apps' helper and starts its server,
+/// listens for notifications, can open a desktop on the first ready phone, and
+/// calls remembered Wi-Fi phones back. On a computer where other people's test
+/// phones are plugged in too, a test of one phone did all of that to theirs
+/// (2026-11-19).
+///
+/// With this set, every other phone is left out of the device list, where all
+/// of that starts, and is not called back over Wi-Fi. A postmarketOS phone is
+/// left alone unless `pmos` is in the list. Each entry is a phone as
+/// `adb devices` names it (a USB serial, an `address:port`) or its
+/// `ro.serialno`, which is also how its wireless debugging name begins
+/// (`adb-<ro.serialno>-…`). Commas or spaces between them. Unset or blank,
+/// every phone is used, as always.
+fn only_phones() -> Option<&'static [String]> {
+    static ONLY: std::sync::OnceLock<Option<Vec<String>>> = std::sync::OnceLock::new();
+    ONLY.get_or_init(|| {
+        let list = parse_only_phones(&std::env::var("OADX_ONLY_PHONES").unwrap_or_default());
+        if !list.is_empty() {
+            log::info!("phones: only {} this run (OADX_ONLY_PHONES), every other phone is left alone", list.join(", "));
+        }
+        (!list.is_empty()).then_some(list)
+    })
+    .as_deref()
+}
+
+fn parse_only_phones(value: &str) -> Vec<String> {
+    value
+        .split(|c: char| c == ',' || c.is_whitespace())
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// Whether the phone adb lists as `serial` is one of `only`: named as adb
+/// names it, or by the `ro.serialno` its wireless debugging name starts with
+/// (`adb-<ro.serialno>-<suffix>._adb-tls-connect._tcp`, " (2)" and all).
+fn serial_listed(only: &[String], serial: &str) -> bool {
+    only.iter().any(|p| {
+        serial == p
+            || serial
+                .strip_prefix("adb-")
+                .and_then(|rest| rest.strip_prefix(p.as_str()))
+                .is_some_and(|rest| rest.starts_with('-'))
+    })
+}
+
+/// Whether a remembered Wi-Fi phone is one of `only`: by its `ro.serialno`, or
+/// by the address it was saved under.
+fn remembered_listed(only: &[String], hardware_serial: Option<&str>, address: &str) -> bool {
+    only.iter().any(|p| hardware_serial == Some(p.as_str()) || p == address)
+}
+
+/// Whether this run may use the phone adb lists as `serial` ([`only_phones`]).
+pub fn phone_allowed(serial: &str) -> bool {
+    only_phones().is_none_or(|only| serial_listed(only, serial))
+}
+
+/// Whether this run may call a remembered Wi-Fi phone back ([`only_phones`]).
+pub fn remembered_phone_allowed(hardware_serial: Option<&str>, address: &str) -> bool {
+    only_phones().is_none_or(|only| remembered_listed(only, hardware_serial, address))
+}
+
+/// Whether this run may look for a postmarketOS phone ([`only_phones`]).
+pub fn pmos_allowed() -> bool {
+    only_phones().is_none_or(|only| only.iter().any(|p| p.eq_ignore_ascii_case("pmos")))
+}
+
+/// `devices` down to the phones in `only`; the serials of the rest.
+fn leave_out_unlisted(devices: &mut Vec<DeviceInfo>, only: &[String]) -> Vec<String> {
+    let left = devices.iter().filter(|d| !serial_listed(only, &d.serial)).map(|d| d.serial.clone()).collect();
+    devices.retain(|d| serial_listed(only, &d.serial));
+    left
+}
+
+/// The phones the last poll left out, so the log says so when that changes
+/// and not every 2.5 s.
+static LEFT_ALONE: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
 /// Parse `adb devices -l` into structured entries, enriched with
 /// brand / Android version for devices that are actually online.
 #[tauri::command(async)]
@@ -595,6 +678,19 @@ pub fn adb_list_devices(app: tauri::AppHandle) -> Result<Vec<DeviceInfo>, String
             hardware_serial: None,
             name: None,
         });
+    }
+
+    // A test run's phones only (OADX_ONLY_PHONES): the rest are never asked
+    // anything, here or by anything that reads this list.
+    if let Some(only) = only_phones() {
+        let left = leave_out_unlisted(&mut devices, only);
+        let mut last = LEFT_ALONE.lock().unwrap();
+        if *last != left {
+            if !left.is_empty() {
+                log::info!("phones: leaving {} alone (not in OADX_ONLY_PHONES)", left.join(", "));
+            }
+            *last = left;
+        }
     }
 
     // What each phone says about itself, every phone at once: one that is slow
@@ -1717,7 +1813,7 @@ pub fn restore_phone(app: &tauri::AppHandle, serial: &str) {
     //    ART does not run shutdown hooks on SIGTERM — once that process is gone nothing on
     //    the device can undo it, and the user is left pressing power twice at a phone that
     //    looks broken.
-    let wm = crate::wm::WmClient::new();
+    let wm = crate::wm::WmClient::for_serial(serial);
     if wm.restore_screen() {
         log::info!("{serial}: the phone's own screen was off — turned back on");
     }
@@ -1941,7 +2037,7 @@ pub fn restore_phone(app: &tauri::AppHandle, serial: &str) {
         }
     }
 
-    let forward = format!("tcp:{}", crate::wm::HOST_PORT);
+    let forward = format!("tcp:{}", crate::wm::host_port(serial));
     let _ = run_adb_timeout(
         app,
         &["-s", serial, "forward", "--remove", &forward],
@@ -3233,12 +3329,17 @@ fn power_exemption_is_ours(app: &tauri::AppHandle, serial: &str) -> bool {
 /// armed over, which would otherwise stay silent and have the daemon conclude
 /// the PC had gone for good.
 ///
-/// Idempotent: adb replaces an existing forward for the same local port.
+/// Idempotent: adb replaces an existing forward for the same local port. Each phone
+/// has a computer port of its own (`wm::host_port`): with one for all, the phone
+/// forwarded last took it from the others.
 pub fn forward_wm_port(app: &tauri::AppHandle, serial: &str) -> bool {
-    let host = format!("tcp:{}", crate::wm::HOST_PORT);
+    let host = format!("tcp:{}", crate::wm::host_port(serial));
     let device = format!("tcp:{}", crate::wm::DEVICE_PORT);
     match run_adb_quiet(app, &["-s", serial, "forward", &host, &device]) {
-        Ok(_) => true,
+        Ok(_) => {
+            crate::wm::note_forwarded(serial);
+            true
+        }
         Err(e) => {
             log::warn!("adb forward for wmd failed: {e} — host-side window control unavailable");
             false
@@ -3362,7 +3463,7 @@ fn fresh_wmd_answers(app: &tauri::AppHandle, serial: &str, at: Instant) -> bool 
     if !forward_wm_port(app, serial) {
         return false;
     }
-    let wm = crate::wm::WmClient::new();
+    let wm = crate::wm::WmClient::for_serial(serial);
     loop {
         if wm.ping() {
             return true;
@@ -3407,6 +3508,62 @@ pub fn adb_launch_on_display(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_phones_names_a_phone_every_way_adb_lists_it() {
+        let only = parse_only_phones(" RFCY10FRKBK, 192.168.1.20:5555  pmos ");
+        assert_eq!(only, ["RFCY10FRKBK", "192.168.1.20:5555", "pmos"]);
+        // On the cable, and on wireless debugging under its mDNS name, " (2)" and all.
+        assert!(serial_listed(&only, "RFCY10FRKBK"));
+        assert!(serial_listed(&only, "adb-RFCY10FRKBK-Xq7Lp2._adb-tls-connect._tcp"));
+        assert!(serial_listed(&only, "adb-RFCY10FRKBK-Xq7Lp2 (2)._adb-tls-connect._tcp"));
+        assert!(serial_listed(&only, "192.168.1.20:5555"));
+        // Every other phone, one whose serial only starts the same way among them.
+        assert!(!serial_listed(&only, "R58T51N3G2X"));
+        assert!(!serial_listed(&only, "adb-YPKRA6VS754L6XTO-g2Hl70._adb-tls-connect._tcp"));
+        assert!(!serial_listed(&only, "RFCY10FRKBKX"));
+        assert!(!serial_listed(&only, "adb-RFCY10FRKBKX-abc._adb-tls-connect._tcp"));
+        assert!(!serial_listed(&only, "192.168.1.20:5556"));
+        // Blank: no list, so every phone, as without it.
+        assert!(parse_only_phones("").is_empty());
+        assert!(parse_only_phones(" , ").is_empty());
+    }
+
+    #[test]
+    fn only_phones_leaves_every_other_phone_out_of_the_list() {
+        let phone = |serial: &str, connection: &str| DeviceInfo {
+            serial: serial.to_string(),
+            state: "device".to_string(),
+            model: String::new(),
+            product: String::new(),
+            connection: connection.to_string(),
+            brand: None,
+            android_version: None,
+            hardware_serial: None,
+            name: None,
+        };
+        // As adb listed them on 2026-11-19 at 22:16: another session's two
+        // phones on the cable and Wi-Fi, and the S25 under test on Wi-Fi.
+        let mut devices = vec![
+            phone("R58T51N3G2X", "usb"),
+            phone("YPKRA6VS754L6XTO", "usb"),
+            phone("adb-RFCY10FRKBK-Xq7Lp2._adb-tls-connect._tcp", "wifi"),
+            phone("adb-YPKRA6VS754L6XTO-g2Hl70._adb-tls-connect._tcp", "wifi"),
+        ];
+        let left = leave_out_unlisted(&mut devices, &parse_only_phones("RFCY10FRKBK"));
+        let kept: Vec<&str> = devices.iter().map(|d| d.serial.as_str()).collect();
+        assert_eq!(kept, ["adb-RFCY10FRKBK-Xq7Lp2._adb-tls-connect._tcp"]);
+        assert_eq!(left, ["R58T51N3G2X", "YPKRA6VS754L6XTO", "adb-YPKRA6VS754L6XTO-g2Hl70._adb-tls-connect._tcp"]);
+    }
+
+    #[test]
+    fn only_phones_calls_back_only_the_listed_remembered_phones() {
+        let only = parse_only_phones("RFCY10FRKBK,192.168.1.20:5555");
+        assert!(remembered_listed(&only, Some("RFCY10FRKBK"), "192.168.1.7:41235"));
+        assert!(remembered_listed(&only, None, "192.168.1.20:5555"));
+        assert!(!remembered_listed(&only, Some("YPKRA6VS754L6XTO"), "192.168.1.9:37159"));
+        assert!(!remembered_listed(&only, None, "192.168.1.9:37159"));
+    }
 
     #[test]
     fn the_launcher_keeps_its_settings_permission_while_it_needs_it() {

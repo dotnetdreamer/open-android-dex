@@ -528,6 +528,15 @@
     <string name="lx_call_answer">Answer</string>
     <string name="lx_call_decline">Decline</string>
     <string name="lx_call_gone">The call has already ended</string>
+    <!-- A window's title bar on the desktop: its More menu and its sound button, the
+         two the computer's own window for an app has too -->
+    <string name="cap_more">More</string>
+    <string name="cap_sound">Sound output</string>
+    <string name="cap_copy">Copy</string>
+    <string name="cap_paste">Paste</string>
+    <string name="cap_phone_size">Phone size</string>
+    <string name="cap_tablet_size">Tablet size</string>
+    <string name="cap_touchpad">Use phone as touchpad</string>
     <string name="lx_maximize_restore">Maximize / restore</string>
     <string name="lx_close_app">Close app</string>
     <string name="lx_app_info">App info</string>
@@ -570,7 +579,7 @@
          name, so every locale repeats it verbatim — like Docker. The prose
          around it still says "Linux" where it means the operating system or the
          session rather than this app. -->
-    <string name="ln_label">LinuxOnDroid</string>
+    <string name="ln_label" translatable="false">LinuxOnDroid</string>
     <!-- Linux: what goes into the container, asked before the download starts -->
     <string name="ln_apps_title">Choose what to install</string>
     <string name="ln_apps_body">Ubuntu and the XFCE desktop always go in. Untick anything you do not want and it will not be downloaded.</string>
@@ -593,7 +602,7 @@
     <string name="ln_apps_go_none">Install Ubuntu only</string>
     <string name="ln_apps_menu">Choose Linux apps…</string>
     <string name="ln_installing">Installing Ubuntu…</string>
-    <string name="ln_waiting">Waiting for the desktop app to start the install…</string>
+    <string name="ln_waiting">Waiting for the install to start…</string>
     <!-- The install screen's controls for the step it is on, and the error screen's Skip
          (LinuxActivity.updateStepRow). %1$s is the app's name as the chooser shows it. -->
     <string name="ln_step_skip">Skip %1$s</string>
@@ -621,6 +630,7 @@
     <string name="ln_reinstall_started">Reinstalling Linux. Open the Linux window to watch it.</string>
     <string name="ln_uninstall">Uninstall Linux…</string>
     <string name="ln_uninstall_body">This deletes the Ubuntu container and frees the storage it was using — every app you installed and every file inside it. Linux will not reinstall itself; opening Linux again downloads it fresh. Your shared folder is kept, and nothing outside Linux is affected.</string>
+    <string name="ln_uninstall_body_noshare">This deletes the Ubuntu container and frees the storage it was using — every app you installed and every file inside it. Linux will not reinstall itself; opening Linux again downloads it fresh. Nothing outside Linux is affected.</string>
     <string name="ln_uninstall_go">Uninstall</string>
     <string name="ln_uninstall_done">Linux uninstalled. The storage it was using is free.</string>
     <string name="ln_session_failed">The Linux session ended unexpectedly</string>
@@ -978,46 +988,47 @@ If you switch this off again later, Android force-closes Linux and the desktop r
 
     <!-- ── Remote access ── -->
     <string name="rm_label">Remote access</string>
-    <string name="rm_subtitle">Log in to this Linux from your computer with ssh, on any network. Nothing to set up on a router, and no account.</string>
+    <string name="rm_subtitle">Use this phone\'s Linux from your computer, from anywhere. No account needed.</string>
 
     <!-- The status card -->
     <string name="rm_state_off">Off</string>
-    <string name="rm_state_off_sub">Turn it on, and the computers you pair can reach Ubuntu on this phone from anywhere: home, work, or with the phone on mobile data.</string>
+    <string name="rm_state_off_sub">When remote access is on, the computers you add below can connect to this phone\'s Linux.</string>
     <string name="rm_state_starting">Starting…</string>
-    <string name="rm_state_online">Reachable from anywhere</string>
-    <string name="rm_state_offline">On, waiting for a network</string>
+    <string name="rm_state_online">On</string>
+    <string name="rm_state_offline">On, waiting for internet</string>
     <string name="rm_turn_on">Turn on</string>
     <string name="rm_turn_off">Turn off</string>
-    <string name="rm_linux_missing">Linux is not installed yet. Open Linux once to install it, and computers can connect as soon as it is ready.</string>
+    <string name="rm_linux_missing">Linux isn\'t installed on this phone yet. Use the Open Linux button below to install Linux. Your computers can connect when the install is finished.</string>
     <string name="rm_open_linux">Open Linux</string>
-    <string name="rm_linux_installing">Linux is still being set up. Computers can connect when it finishes.</string>
-    <string name="rm_linux_error">Linux did not finish setting up. Open Linux to try again, and computers can connect once it is done.</string>
-    <string name="rm_ssh_install_failed">The SSH server could not be installed in Linux. Check the phone\'s connection, then turn remote access off and on to try again.</string>
-    <string name="rm_ssh_starting">Starting the SSH server inside Linux…</string>
-    <string name="rm_ssh_failed">The SSH server inside Linux would not start. Reinstalling Linux usually fixes this; your files in the shared folder are kept.</string>
-    <string name="rm_battery">Android can pause remote access when the screen is off. Let it keep running in the background so computers can always reach the phone.</string>
+    <string name="rm_linux_installing">Linux is still being installed on this phone. Your computers can connect when the install is finished.</string>
+    <string name="rm_linux_error">Linux didn\'t finish installing. Use the Open Linux button below to try the install again.</string>
+    <string name="rm_ssh_install_failed">Remote access couldn\'t be set up inside Linux. Make sure this phone is connected to the internet, then turn remote access off and on again.</string>
+    <string name="rm_ssh_starting">Getting Linux ready for your computers…</string>
+    <string name="rm_ssh_failed">Remote access couldn\'t start inside Linux. Reinstalling Linux usually fixes the problem, and the files in your shared folder are kept.</string>
+    <string name="rm_ssh_failed_noshare">Remote access couldn\'t start inside Linux. Reinstalling Linux usually fixes the problem.</string>
+    <string name="rm_battery">Android may pause remote access while the screen is off. Let this app keep running in the background so your computers can always connect.</string>
     <string name="rm_battery_allow">Allow</string>
     <string name="rm_battery_desktop">On the phone, open Settings → Apps → %1$s → Battery and choose Unrestricted.</string>
-    <string name="rm_unavailable">Remote access needs a 64-bit phone, like Linux itself.</string>
+    <string name="rm_unavailable">Remote access doesn\'t work on this phone. Remote access needs a 64-bit phone, the same as Linux.</string>
     <plurals name="rm_sessions">
-        <item quantity="one">%d computer connected now</item>
-        <item quantity="other">%d computers connected now</item>
+        <item quantity="one">%d computer is connected</item>
+        <item quantity="other">%d computers are connected</item>
     </plurals>
     <plurals name="rm_paired_count">
-        <item quantity="one">%d computer paired · none connected</item>
-        <item quantity="other">%d computers paired · none connected</item>
+        <item quantity="one">%d computer added, not connected right now</item>
+        <item quantity="other">%d computers added, none connected right now</item>
     </plurals>
 
     <!-- The computers -->
-    <string name="rm_computers">Computers</string>
-    <string name="rm_no_computers">No computers yet. Add one and only that computer can get in.</string>
+    <string name="rm_computers">Your computers</string>
+    <string name="rm_no_computers">No computers added yet.</string>
     <string name="rm_add">Add a computer</string>
     <string name="rm_remove">Remove</string>
     <string name="rm_remove_title">Remove %1$s?</string>
-    <string name="rm_remove_body">It is disconnected straight away, and can only get back in by pairing again.</string>
-    <string name="rm_connected_direct">Connected now · direct · %1$d ms</string>
-    <string name="rm_connected_relay">Connected now · through a relay · %1$d ms</string>
-    <string name="rm_paired_when">Paired %1$s</string>
+    <string name="rm_remove_body">%1$s is disconnected right away and can no longer connect to this phone\'s Linux. You can add the computer again later.</string>
+    <string name="rm_connected_direct">Connected directly · %1$d ms</string>
+    <string name="rm_connected_relay">Connected through a relay server · %1$d ms</string>
+    <string name="rm_paired_when">Added %1$s</string>
     <string name="rm_os_windows" translatable="false">Windows</string>
     <string name="rm_os_macos" translatable="false">macOS</string>
     <string name="rm_os_linux" translatable="false">Linux</string>
@@ -1027,26 +1038,26 @@ If you switch this off again later, Android force-closes Linux and the desktop r
     <string name="rm_code_title">Type this code on your computer</string>
     <string name="rm_code_preparing">Getting a code ready…</string>
     <string name="rm_code_expires">Expires in %1$s</string>
-    <string name="rm_code_how_app">In Open Android DeX on the computer, click Phone Linux and type it there.</string>
-    <string name="rm_code_how_cli">No app on that computer? Run: dexremote pair %1$s</string>
+    <string name="rm_code_how_app">On your computer, open the Open Android DeX app, go to the Linux tab and type the code shown above.</string>
+    <string name="rm_code_how_cli">No Open Android DeX app on your computer? Type this command in a terminal on your computer instead: dexremote pair %1$s</string>
     <string name="rm_cancel">Cancel</string>
-    <string name="rm_paired_ok">%1$s can now reach this Linux.</string>
-    <string name="rm_paired_how">On it, run: ssh %1$s</string>
+    <string name="rm_paired_ok">%1$s is added and can now connect to this phone\'s Linux.</string>
+    <string name="rm_paired_how">To connect, open a terminal on the computer you just added and type:</string>
     <string name="rm_done">Done</string>
-    <string name="rm_pair_failed_bad_code">The computer typed a different code, so nothing was saved.</string>
-    <string name="rm_pair_failed_expired">The code expired before a computer used it.</string>
-    <string name="rm_pair_failed_other">Pairing did not finish.</string>
+    <string name="rm_pair_failed_bad_code">A wrong code was typed on the computer too many times, so the computer wasn\'t added.</string>
+    <string name="rm_pair_failed_expired">The code expired without being used.</string>
+    <string name="rm_pair_failed_other">The computer couldn\'t be added. Check that your computer and this phone are both connected to the internet, then get a new code.</string>
     <string name="rm_try_again">New code</string>
 
     <!-- Connecting -->
-    <string name="rm_connect">From a paired computer</string>
-    <string name="rm_connect_terminal">In any terminal</string>
-    <string name="rm_connect_vscode">In VS Code: Remote-SSH, then %1$s</string>
+    <string name="rm_connect">Connect from your computer</string>
+    <string name="rm_connect_terminal">Type this command in a terminal on your computer</string>
+    <string name="rm_connect_vscode">In VS Code, choose Remote-SSH, then %1$s.</string>
     <string name="rm_copy">Copy</string>
     <string name="rm_copied">Copied</string>
-    <string name="rm_host_key">User root · host key %1$s</string>
+    <string name="rm_host_key">Technical details: user root, host key %1$s</string>
     <string name="rm_phone_id">Phone ID %1$s</string>
-    <string name="rm_security_note">Only computers you pair can connect. Each one proves its own key before anything reaches Linux, and SSH checks a second key after that. Connections go straight between the two devices whenever the networks allow it, and otherwise through a public relay that passes them on without being able to read them.</string>
+    <string name="rm_security_note">Only the computers you add on this page can connect to this phone\'s Linux. Everything sent between your computer and this phone is encrypted, so only your computer and this phone can read the data.\n\nMost of the time, your computer connects straight to this phone. When a network doesn\'t allow a direct connection, the data goes through a public relay server on the internet instead. The relay server only passes the encrypted data along and can\'t read your commands, files or passwords.</string>
 
     <!-- The ongoing notification -->
     <string name="rm_note_on">Remote access on · reachable from anywhere</string>
@@ -1061,9 +1072,11 @@ If you switch this off again later, Android force-closes Linux and the desktop r
 
     <!-- The Linux tile's menu -->
     <string name="ln_remote_menu">Remote access…</string>
-    <string name="ln_gpu_menu">Use the GPU</string>
-    <string name="ln_gpu_on">Linux apps will use the GPU from the next time Linux starts.</string>
-    <string name="ln_gpu_off">Linux apps will use the CPU from the next time Linux starts.</string>
+    <string name="ln_gpu_menu">Use the graphics chip</string>
+    <string name="ln_settings_menu">Linux settings…</string>
+    <string name="ln_settings_title">Linux settings</string>
+    <string name="ln_gpu_on">Linux apps will use the graphics chip from the next time Linux starts.</string>
+    <string name="ln_gpu_off">Linux apps will stop using the graphics chip from the next time Linux starts.</string>
 
     <!-- ── Linux app windows ── -->
     <!-- A Linux app opens as a window of its own; the toast while it starts. -->
@@ -1105,4 +1118,537 @@ If you switch this off again later, Android force-closes Linux and the desktop r
     <string name="sc_try_again">Try again</string>
     <string name="sc_close">Close</string>
     <string name="sc_cancel">Cancel</string>
+    <!-- ── LinuxOnDroid home screen ── -->
+    <!-- The first screen of LinuxOnDroid, the Linux-only app (LinuxHomeActivity): what Linux is doing, and the one button that starts it. Written for someone who has just installed the app from the Play Store: plain words, no em dashes. The desktop never shows this screen. -->
+    <string name="hm_more">More options</string>
+    <string name="hm_privacy">Privacy policy</string>
+    <!-- The Linux window, in recent apps beside the home screen, whose card carries the app name. -->
+    <string name="hm_window_label">Linux desktop</string>
+    <!-- The status pill at the top of the hero. -->
+    <string name="hm_pill_new">Not installed</string>
+    <string name="hm_pill_installing">Installing</string>
+    <string name="hm_pill_installing_pct">Installing · %1$d%%</string>
+    <string name="hm_pill_failed">Needs attention</string>
+    <string name="hm_pill_ready">Ready</string>
+    <string name="hm_pill_running">Running</string>
+    <string name="hm_pill_unsupported">Not supported</string>
+    <!-- Not installed yet. hm_new_space: %1$s is the free space on the phone, e.g. "45 GB". -->
+    <string name="hm_new_title">Linux in your pocket</string>
+    <string name="hm_new_sub">A full Ubuntu desktop on your phone, with apps like Firefox and VS Code. No root and no computer needed.</string>
+    <string name="hm_new_go">Install Linux</string>
+    <string name="hm_new_space">Needs about 3 GB of free space. You have %1$s.</string>
+    <string name="hm_new_space_low">Needs about 3 GB of free space, and this phone has %1$s. Free up some space first.</string>
+    <!-- Installing. -->
+    <string name="hm_installing_title">Setting up Linux</string>
+    <string name="hm_installing_sub">This takes a while. You can leave this screen, and setup carries on in the background.</string>
+    <string name="hm_installing_go">Show progress</string>
+    <!-- The install stopped with an error. -->
+    <string name="hm_failed_title">Setup stopped</string>
+    <string name="hm_failed_sub">Something went wrong while setting up Linux. Trying again usually picks up where it stopped.</string>
+    <string name="hm_failed_go">Try again</string>
+    <string name="hm_failed_more">Show details</string>
+    <!-- Installed and not running. -->
+    <string name="hm_ready_title">Ready when you are</string>
+    <string name="hm_ready_sub">Ubuntu 24.04 with the XFCE desktop</string>
+    <string name="hm_ready_go">Start Linux</string>
+    <!-- Running. hm_stop_body is the question behind its Shut down button. -->
+    <string name="hm_running_title">Linux is running</string>
+    <string name="hm_running_sub">Pick up right where you left off</string>
+    <string name="hm_running_go">Open desktop</string>
+    <string name="hm_stop_body">This ends the Ubuntu session and stops Linux. Anything unsaved inside it is lost.</string>
+    <!-- A phone Linux cannot run on. -->
+    <string name="hm_unsupported_title">Linux can\'t run on this phone</string>
+    <string name="hm_unsupported_sub">LinuxOnDroid needs a phone with a 64-bit processor.</string>
+    <!-- What you get, shown before the first install. Bullet-like: no full stop at the end. -->
+    <string name="hm_get_title">What you get</string>
+    <string name="hm_get_desktop">A real Ubuntu desktop</string>
+    <string name="hm_get_desktop_sub">Ubuntu 24.04 with the XFCE desktop, right on your phone</string>
+    <string name="hm_get_apps">The apps you know</string>
+    <string name="hm_get_apps_sub">Firefox, VS Code, GIMP and more. You pick what to install</string>
+    <string name="hm_get_files">Your files, both ways</string>
+    <string name="hm_get_files_sub">A shared folder connects Android and Linux</string>
+    <string name="hm_get_safe">No root, no computer</string>
+    <string name="hm_get_safe_sub">Everything runs inside this app, on your phone</string>
+    <!-- What is inside, once installed. -->
+    <string name="hm_inside_title">Inside your Linux</string>
+    <string name="hm_inside_add">Add apps</string>
+    <!-- The tiles under the hero. -->
+    <string name="hm_tools_title">Tools</string>
+    <string name="hm_on">On</string>
+    <string name="hm_off">Off</string>
+    <string name="hm_remote_sub_off">Use Linux from a computer</string>
+    <string name="hm_shared_sub">Files for Android and Linux</string>
+    <string name="hm_shared_sub_grant">Needs a permission</string>
+    <string name="hm_gpu_sub">Faster graphics in Linux apps, drawn on this phone\'s graphics chip</string>
+    <string name="hm_set_startup">Startup</string>
+    <string name="hm_set_boot">Start Linux after a restart</string>
+    <string name="hm_set_boot_sub">Linux starts in the background the first time you unlock this phone after turning it on or restarting it.</string>
+    <string name="hm_set_boot_hint">If Linux does not start, open the app settings below and allow %1$s to start automatically or run in the background.</string>
+    <string name="hm_set_app_settings">Open app settings</string>
+    <string name="hm_set_graphics">Graphics for Linux apps</string>
+    <string name="hm_set_gpu_none">Linux apps draw on the processor, as this phone\'s graphics chip does not work with Linux</string>
+    <string name="hm_gpu_sub_virgl">Faster graphics in Linux apps, through Android\'s own graphics driver</string>
+    <string name="hm_set_gpu_32bit">Linux needs a 64-bit phone. Remote desktop uses this phone\'s graphics chip without this switch</string>
+    <!-- Open in a browser (LinuxBrowserServer): LinuxOnDroid's Settings and the notification. -->
+    <string name="bw_set_header">Linux on a computer</string>
+    <string name="bw_set_title">Open in a browser</string>
+    <string name="bw_set_sub">Use your computer\'s screen, keyboard and mouse for Linux. Both devices need the same Wi-Fi.</string>
+    <string name="bw_set_step_open">On the computer, open this address in a browser</string>
+    <string name="bw_set_step_code">Then type this code on the computer</string>
+    <string name="bw_set_copy">Copy the address</string>
+    <string name="bw_set_copied">Address copied</string>
+    <string name="bw_set_waiting">Waiting for your computer</string>
+    <string name="bw_set_starting">Getting ready…</string>
+    <string name="bw_set_watching">Linux is open in %1$s</string>
+    <string name="bw_set_no_network">Connect this phone and the computer to the same Wi-Fi. Or turn on this phone\'s hotspot and connect the computer to the hotspot.</string>
+    <string name="bw_set_failed">Browsers cannot connect to this phone. %1$s</string>
+    <string name="bw_set_warning">On your first visit, the browser may say the connection is not private. If the address matches the one shown here, choose Advanced, then Continue.</string>
+    <string name="bw_set_plain">If the browser still blocks the page, open the address again and choose Continue without encryption. Other people on the same Wi-Fi could see the screen and what you type.</string>
+    <string name="bw_set_quality">In the browser, pick Low for speed, High for the sharpest picture, or Medium in between.</string>
+    <string name="bw_set_browsers">Browsers that can open this page without a new code (%1$d)</string>
+    <string name="bw_set_sign_out">Sign out every browser</string>
+    <string name="bw_set_sign_out_title">Sign out every browser?</string>
+    <string name="bw_set_sign_out_body">Each browser will need the new code to open Linux again.</string>
+    <string name="pr_sign_out_both">Each browser will need the new code to open Linux or this phone\'s screen again.</string>
+    <string name="pr_sign_out_phone">Each browser will need the new code to open this phone\'s screen again.</string>
+    <string name="bw_set_sign_out_ok">Sign out</string>
+    <string name="bw_set_signed_out">Every browser is signed out. The code is new.</string>
+    <string name="bw_if_vpn">VPN</string>
+    <string name="bw_if_other">Network</string>
+    <string name="bw_note_listening">Open %1$s in a browser on the same Wi-Fi</string>
+    <string name="bw_note_watching">Linux is open in a browser</string>
+    <string name="bw_note_no_network">Open in a browser is on. Waiting for Wi-Fi.</string>
+    <string name="bw_note_code">Address and code</string>
+    <string name="bw_set_code_hint">The code works while this page is open and for 10 minutes after. Each code lets in one browser.</string>
+    <string name="bw_set_used_up">Too many wrong codes were typed, so the code stopped working.</string>
+    <string name="bw_set_new_code">Make a new code</string>
+    <string name="bw_set_port">Another app is using the connection Linux needs (port %1$d). Close that app, then turn this setting off and back on.</string>
+    <string name="hm_boot_refused">Linux did not start with the phone. Tap to start it.</string>
+    <!-- The line at the bottom. %1$s: storage, e.g. "2.4 GB". -->
+    <string name="hm_used">Using %1$s</string>
+    <string name="hm_version">Version %1$s</string>
+    <!-- ── LinuxOnDroid, second round: removing, the terminal's words, Add apps, install steps ── -->
+    <!-- An uninstall asked for and still under way (LinuxService stops an install first, then deletes the container). The storage is only said to be free once it is (ln_uninstall_done). -->
+    <string name="hm_pill_removing">Removing</string>
+    <string name="hm_removing_title">Removing Linux</string>
+    <string name="hm_removing_sub">Deleting Ubuntu and everything in it. Your shared folder stays where it is.</string>
+    <string name="hm_removing_sub_noshare">Deleting Ubuntu and everything in it.</string>
+    <!-- The home screen's little terminal. Commands (apt install xfce4, uname, startxfce4) stay as they are in every language; these are what Linux says back, as apt and the shell would say it in that language. hm_term_continue keeps apt's own [Y/n], with the yes letter apt uses in that language. -->
+    <string name="hm_term_need">Need to get about 1 GB of archives.</string>
+    <string name="hm_term_continue">Do you want to continue? [Y/n]</string>
+    <string name="hm_term_progress">Progress:</string>
+    <string name="hm_term_up">desktop up %1$s</string>
+    <string name="hm_term_running">desktop running</string>
+    <string name="hm_term_killed">Killed</string>
+    <string name="hm_term_exit">exit status %1$d</string>
+    <string name="hm_term_removing">Removing everything inside Linux…</string>
+    <string name="hm_term_needs_64">Linux needs a 64-bit phone</string>
+    <!-- The Add apps sheet on the home screen. An app already in Linux cannot be unticked (nothing there uninstalls), so it says Installed instead of its line. hm_apps_save: the button when the only change is dropping an app that was never fetched. -->
+    <string name="hm_apps_installed">Installed</string>
+    <string name="hm_apps_save">Save</string>
+    <!-- The desktop tile's Uninstall, as it starts: the wipe waits for an install in flight to stop. -->
+    <string name="ln_uninstall_started">Removing Linux. This can take a minute.</string>
+    <!-- The install's steps, as the Linux window and the home screen show them (state.env's MSG, from LinuxService and linux-setup.sh). %1$s is an app's name or a Debian package name exactly as apt spells it (libgtk-3-0t64), which is never translated. Several are also the reason an install stopped, after "E: ". -->
+    <string name="ln_step_preparing">Preparing</string>
+    <string name="ln_step_resuming">Picking up where it stopped</string>
+    <string name="ln_step_resetting">Starting over</string>
+    <string name="ln_step_download_ubuntu">Downloading Ubuntu</string>
+    <string name="ln_step_unpack_tools">Unpacking the Linux tools</string>
+    <string name="ln_step_unpack_ubuntu">Unpacking Ubuntu</string>
+    <string name="ln_step_configure">Configuring Ubuntu</string>
+    <string name="ln_step_apt_update">Updating the package lists</string>
+    <string name="ln_step_apt_install">Installing packages</string>
+    <string name="ln_step_reading_lists">Reading package lists</string>
+    <string name="ln_step_resolving">Working out what to install</string>
+    <string name="ln_step_desktop">Installing the desktop</string>
+    <string name="ln_step_display">Setting up the display</string>
+    <string name="ln_step_sound">Setting up sound</string>
+    <string name="ln_step_ssh">Setting up remote access</string>
+    <string name="ln_step_browsers">Installing the browsers</string>
+    <string name="ln_step_browsers_config">Setting up the browsers</string>
+    <string name="ln_step_share">Setting up the shared folder</string>
+    <string name="ln_step_desktop_icons">Setting up the desktop icons</string>
+    <string name="ln_step_vscode_links">Setting up VS Code links</string>
+    <string name="ln_step_dock">Setting up the dock</string>
+    <string name="ln_step_theme">Applying the theme</string>
+    <string name="ln_step_ready">Ready</string>
+    <string name="ln_step_interrupted">Interrupted</string>
+    <string name="ln_step_download_failed">The download failed</string>
+    <string name="ln_step_setup_failed">Setup could not run</string>
+    <string name="ln_step_unsupported">Processor not supported</string>
+    <string name="ln_step_downloading">Downloading %1$s</string>
+    <string name="ln_step_unpacking">Unpacking %1$s</string>
+    <string name="ln_step_setting_up">Setting up %1$s</string>
+    <string name="ln_step_finishing">Finishing %1$s</string>
+    <string name="ln_step_installing">Installing %1$s</string>
+    <string name="ln_step_preparing_app">Preparing %1$s</string>
+    <!-- GPT review 2 (2026-11-19). ln_remove_*: an uninstall that stopped with files it could not delete (LinuxService.uninstall keeps the removing marker; the Linux window, the home screen and a notification say so, with Try again). %1$s is a size, as Settings writes it. hm_term_remove_failed follows "rm: " in the home screen's terminal. ln_step_reset_failed: a Reinstall that could not move the old container aside. ln_step_skip_body_app and ln_shared_grant_body_app: LinuxOnDroid's words where the desktop's point at things it does not have (the tile's right-click menu, a desktop that restarts); %1$s in the first is hm_inside_add. -->
+    <string name="ln_remove_failed_title">Linux was not fully removed</string>
+    <string name="ln_remove_failed_sub">%1$s of its files could not be deleted. Try again.</string>
+    <string name="ln_remove_again">Try again</string>
+    <string name="hm_term_remove_failed">%1$s could not be deleted</string>
+    <string name="ln_step_reset_failed">The old Linux could not be cleared</string>
+    <string name="ln_step_skip_body_app">It will not be installed, and the rest of Linux goes ahead without it. You can add it later with %1$s in LinuxOnDroid.</string>
+    <string name="ln_shared_grant_body_app">The shared folder sits at the top of your internal storage. Android only lets an app create a folder there, or read the files you copy into it, with this permission. Without it there is no shared folder at all. If you switch this off again later, Android closes LinuxOnDroid, and Linux with it.</string>
+    <!-- The child-process limit ("signal 9") on LinuxOnDroid's home screen: a card at the top while it is on, and a dialog with how to switch it off (2026-11-19). The switch's name is the one ln_killed_switch uses; About phone, Software information and Build number are Samsung's words, where they differ from other phones'. The adb commands are shown as they are, never translated. -->
+    <string name="hm_limit_title">Android may close Linux</string>
+    <string name="hm_limit_body">From Android 12, phones close background programs once apps run more than 32 of them, and Linux runs dozens. Switch the limit off once and it stays off.</string>
+    <string name="hm_limit_fix">How to fix</string>
+    <string name="hm_limit_hide">Hide</string>
+    <string name="hm_limit_dialog_title">Stop Android closing Linux</string>
+    <string name="hm_limit_why">From Android 12, Android closes background programs once the apps on a phone run more than 32 of them, and Linux runs dozens. When it does, the desktop closes, or an install stops part way. Other Linux apps show this as “signal 9”.</string>
+    <string name="hm_limit_turn_off">Switch the limit off</string>
+    <string name="hm_limit_step1">Turn on Developer options: open Settings, then About phone (on Samsung, then Software information), and tap Build number 7 times.</string>
+    <string name="hm_limit_step2">Open Developer options and turn on “Disable child process restrictions”.</string>
+    <string name="hm_limit_vendor">Some Samsung and other phones give it another name. On Android 12 and 13 some have it under Feature flags as settings_enable_monitor_phantom_procs, which you turn off. Search Developer options for “child process” or “phantom”.</string>
+    <string name="hm_limit_keep_on">Leave Developer options on: turning them off turns the limit back on.</string>
+    <string name="hm_limit_no_switch">No switch on your phone?</string>
+    <string name="hm_limit_computer">Connect the phone to Open Android DeX on a computer and it switches the limit off for you. Or run these with adb, from a computer or on the phone with Wireless debugging:</string>
+    <string name="hm_limit_commands_note">The first stops Android undoing the second after a restart. The third switches the limit off entirely, from Android 12L.</string>
+    <string name="hm_limit_open_dev">Open Developer options</string>
+    <string name="hm_limit_open_about">Open About phone</string>
+    <string name="hm_limit_copy">Copy commands</string>
+    <string name="hm_limit_copied">Commands copied</string>
+
+    <!-- The Linux viewer page (assets/linux/novnc), handed to it by LinuxViewerText. -->
+    <string name="vw_starting">Starting…</string>
+    <string name="vw_connecting">Connecting…</string>
+    <string name="vw_connected">Connected</string>
+    <string name="vw_reconnecting">Reconnecting…</string>
+    <string name="vw_mode_direct">Interaction method: Direct</string>
+    <string name="vw_mode_touch">Interaction method: Touch</string>
+    <string name="vw_mode_mouse">Interaction method: Mouse</string>
+    <string name="vw_kb_show">Show keyboard</string>
+    <string name="vw_kb_hide">Hide keyboard</string>
+    <string name="vw_fit">Fit</string>
+    <string name="vw_coach_collapse">Tap the chevron to free the whole screen.</string>
+    <string name="vw_coach_bubble">Tap the bubble for controls. Hold and drag to move it.</string>
+    <string name="vw_toast_mouse">Drag anywhere to move the pointer.</string>
+    <string name="vw_toast_touch">Tap the desktop the way you would touch it.</string>
+    <string name="vw_toast_direct">The pointer goes where you point.</string>
+    <string name="vw_toast_cad">Ctrl+Alt+Del sent</string>
+    <string name="vw_toast_middle">Next tap is a middle click</string>
+    <string name="vw_toast_right">Next tap is a right click</string>
+    <string name="vw_foot_desktop">A mouse is connected. These methods apply to touch only.</string>
+    <string name="vw_foot_touch">A keyboard or mouse plugged into the desktop always works as it normally does.</string>
+    <string name="vw_full_on">Leave fullscreen</string>
+    <string name="vw_full_off">Fullscreen</string>
+    <string name="vw_clip_on">Clipboard shared with this computer</string>
+    <string name="vw_clip_off">Clipboard not shared</string>
+    <string name="vw_controls">Controls</string>
+    <string name="vw_mode">Interaction method</string>
+    <string name="vw_keyboard">Keyboard</string>
+    <string name="vw_keys">Keys</string>
+    <string name="vw_zoom">Zoom</string>
+    <string name="vw_clipboard">Clipboard</string>
+    <string name="vw_full_title">Fullscreen (F11)</string>
+    <string name="vw_hide_bar">Hide the bar</string>
+    <string name="vw_zoom_out">Zoom out</string>
+    <string name="vw_zoom_in">Zoom in</string>
+    <string name="vw_zoom_level">Zoom level</string>
+    <string name="vw_show_controls">Show the controls</string>
+    <string name="vw_dock">Dock to the top</string>
+    <string name="vw_direct">Direct</string>
+    <string name="vw_direct_hint">The pointer goes where you point. Best with a mouse.</string>
+    <string name="vw_touch">Touch</string>
+    <string name="vw_touch_hint">Use your device as a remote touchscreen.</string>
+    <string name="vw_mouse">Mouse</string>
+    <string name="vw_mouse_hint">Use your device as a touchpad to control the mouse.</string>
+    <string name="vw_speed">Pointer speed</string>
+    <string name="vw_speed_hint">Slower on the left, faster on the right. Mouse only.</string>
+    <string name="vw_scrolling">Scrolling</string>
+    <string name="vw_natural">Natural</string>
+    <string name="vw_reverse">Reverse</string>
+    <string name="vw_next_tap">Next tap</string>
+    <string name="vw_middle_click">Middle click</string>
+    <string name="vw_right_click">Right click</string>
+    <string name="vw_arm_hint">Arms one tap, then goes back to normal.</string>
+    <string name="vw_g_works">Works as usual</string>
+    <string name="vw_g_tap">Tap</string>
+    <string name="vw_g_click">Click</string>
+    <string name="vw_g_two_tap">Two-finger tap</string>
+    <string name="vw_g_right_click">Right-click</string>
+    <string name="vw_g_drag">Drag</string>
+    <string name="vw_g_drag_act">Drag</string>
+    <string name="vw_g_two_fingers">Two fingers</string>
+    <string name="vw_g_scroll">Scroll</string>
+    <string name="vw_g_wheel">Wheel</string>
+    <string name="vw_g_long_tap">Long tap</string>
+    <string name="vw_g_one_finger">One finger</string>
+    <string name="vw_g_pan">Pan the view</string>
+    <string name="vw_g_pinch">Pinch</string>
+    <string name="vw_g_zoom">Zoom</string>
+    <string name="vw_g_long_drag">Long press and drag</string>
+    <string name="vw_g_select">Select</string>
+    <string name="vw_g_move_mouse">Move the mouse</string>
+    <string name="vw_g_double_drag">Double-tap and drag</string>
+    <string name="vw_key_esc">Escape</string>
+    <string name="vw_key_tab">Tab</string>
+    <string name="vw_key_ctrl">Control</string>
+    <string name="vw_key_alt">Alt</string>
+    <string name="vw_key_super">Super</string>
+    <string name="vw_key_shift">Shift</string>
+    <string name="vw_key_left">Left arrow</string>
+    <string name="vw_key_up">Up arrow</string>
+    <string name="vw_key_down">Down arrow</string>
+    <string name="vw_key_right">Right arrow</string>
+    <string name="vw_key_home">Home</string>
+    <string name="vw_key_end">End</string>
+    <string name="vw_key_pg_up">Page up</string>
+    <string name="vw_key_pg_dn">Page down</string>
+    <string name="vw_key_del">Delete</string>
+    <string name="vw_key_cad">Control Alt Delete</string>
+    <!-- Remote desktop: this phone itself (not Linux) on a computer. PhoneRemote, PhoneStream,
+         PhoneControlService, PhoneRemoteService; the Settings page's card (LinuxSettingsActivity). -->
+    <string name="pr_set_header">Use this phone from a computer</string>
+    <string name="pr_set_title">Remote desktop</string>
+    <string name="pr_set_sub">See this phone\'s screen on a computer, at home or away. Turn on control to tap, scroll and type from the computer. It is free and you do not need an account.</string>
+    <string name="pr_set_live">A computer is using this phone now</string>
+    <string name="pr_set_sharing_on">Screen sharing is on. The computer gets smooth video.</string>
+    <string name="pr_set_sharing_slow">The computer sees about 3 pictures a second. Share the screen for smoother video. Locking this phone can stop screen sharing.</string>
+    <string name="pr_set_sharing_off">Share the screen before a computer can see it.</string>
+    <string name="pr_set_share">Share the screen</string>
+    <string name="pr_set_unattended_on">A computer you have allowed can see the screen without asking each time, even when this phone is locked.</string>
+    <string name="pr_set_ready">Keep full speed ready</string>
+    <string name="pr_set_ready_sub">Screen sharing stays on when no computer is connected, so a computer gets smooth video even with nobody at this phone. While the screen is shared, Android hides notification details on this phone.</string>
+    <string name="pr_set_sharing_asks">When a computer opens this phone, a question to share the screen comes up here. Until someone allows screen sharing, the computer sees about 3 pictures a second.</string>
+    <string name="pr_set_sharing_asks_off">When a computer opens this phone, a question to share the screen comes up here. The computer sees the screen once someone allows screen sharing.</string>
+    <string name="pr_set_control_on">You can tap, scroll and type on this phone from the computer.</string>
+    <string name="pr_set_control_off">Turn on control to tap, scroll and type on this phone from the computer.</string>
+    <string name="pr_set_control_turn_on">Turn on control</string>
+    <!-- Remote desktop's Files in a browser (LinuxService's phoneFiles, the door's /pfs/): the card's line about this phone's own files, the link to Android's All files access screen, and the question before the screen opens (WebFiles.requestAllFiles). -->
+    <string name="pr_set_files_on">From your browser, you can download files from this phone or upload files to it.</string>
+    <string name="pr_set_files_off">Allow file access to send files between this phone and the browser on your computer.</string>
+    <string name="pr_set_files_allow">Allow access to all files</string>
+    <string name="pr_set_files_grant_body">While Remote desktop is on, a browser you let in can look through this phone\'s files, download them or upload new ones. If you turn off this permission, Android closes LinuxOnDroid and Linux.</string>
+    <plurals name="pr_set_computers">
+        <item quantity="one">%d computer added</item>
+        <item quantity="other">%d computers added</item>
+    </plurals>
+    <string name="pr_set_no_computers">No computer added yet</string>
+    <string name="pr_set_add_computer">Add a computer</string>
+    <string name="pr_set_browser">In a browser on the same Wi-Fi as this phone</string>
+    <string name="pr_set_browser_too">Type the address shown under Open in a browser, with /phone.html added at the end. Then type the code shown there.</string>
+    <string name="pr_set_anywhere">From anywhere, in a browser</string>
+    <string name="pr_set_anywhere_sub">Cloudflare gives you a free link to open this phone in a browser. The link can change when you restart this phone or turn this setting off and on.</string>
+    <string name="pr_set_anywhere_wait">Getting an address from Cloudflare…</string>
+    <string name="pr_set_anywhere_open">On any computer, open this address in a browser, then type the code shown above</string>
+    <string name="pr_set_anywhere_note">Cloudflare provides this free link for testing. It may stop working.</string>
+    <string name="pr_set_no_tunnel">Connect to this phone in a browser on the same Wi-Fi. Pairing in the desktop app is unavailable on this phone.</string>
+    <string name="pr_set_boot">Ask to share the screen after a restart</string>
+    <string name="pr_set_boot_sub">Android stops sharing the screen when this phone restarts. After you unlock it, look for a request to share the screen again.</string>
+    <string name="pr_disclose_title">Let the computer control this phone?</string>
+    <string name="pr_disclose_body">Android calls this permission Accessibility. It lets a computer you allow tap, scroll and type on this phone. While a computer is connected, LinuxOnDroid can keep the screen awake and send screenshots when live video is off.</string>
+    <string name="pr_disclose_cloudflare">If you use the Cloudflare link, the screen and what you type pass through Cloudflare.</string>
+    <string name="pr_disclose_next">On the next screen, choose Remote desktop and turn on the switch. If Android says the setting is restricted, open App info for LinuxOnDroid, tap the menu, choose Allow restricted settings, then try again.</string>
+    <string name="pr_disclose_no">Not now</string>
+    <string name="pr_disclose_yes">Continue</string>
+    <string name="pr_channel">Remote desktop</string>
+    <string name="pr_notif_on">Remote desktop is sharing the screen</string>
+    <string name="pr_notif_live">A computer is using this phone</string>
+    <string name="pr_notif_on_text">Computers you added can see and use this phone. Tap Stop sharing to end screen sharing.</string>
+    <string name="pr_notif_stop">Stop sharing</string>
+    <string name="pr_notif_ask">Allow screen sharing for Remote desktop</string>
+    <string name="pr_notif_ask_text">A computer is waiting. Tap here, then Start, for the full-speed picture.</string>
+    <string name="pr_channel_asks">Remote desktop: questions</string>
+    <string name="pr_notif_control">Turn control back on for Remote desktop</string>
+    <string name="pr_notif_control_text">Android turned control off when the app was closed. Tap here, then turn on Remote desktop.</string>
+    <string name="pr_set_control_lost">Android turned off control when the app closed. Turn it back on to tap, scroll and type from your computer.</string>
+    <string name="pr_set_control_unbound">Control is on in Android\'s settings but not connected. Turn Remote desktop off and on again there to tap, scroll and type from your computer.</string>
+    <string name="pr_set_control_reconnect">Open accessibility settings</string>
+    <string name="pr_notif_control_unbound">Control for Remote desktop is not connected</string>
+    <string name="pr_notif_control_unbound_text">Android did not connect control after the app started again. Tap here, then turn Remote desktop off and on.</string>
+    <string name="pr_set_xiaomi_tip">On Xiaomi phones, Clear all in Recent apps also closes LinuxOnDroid. With Autostart on, LinuxOnDroid starts again by itself, usually within a minute.</string>
+    <string name="pr_control_label">Remote desktop</string>
+    <string name="pr_control_summary">Lets a computer you added tap, scroll and type on this phone</string>
+    <string name="pr_control_description">Lets a computer you allow tap, scroll and type on this phone. While connected, LinuxOnDroid can keep the screen awake and send screenshots when live video is off.</string>
+    <!-- Remote desktop's sound (PhoneSound, PhoneSoundActivity): the Settings page's line and link, the words before Android's own question, and the notification a computer's ask leaves on the phone. Android names the permission record audio; only what apps play is sent, never the microphone. -->
+    <string name="pr_sound_notif">Let the computer hear this phone?</string>
+    <string name="pr_sound_notif_text">Tap here, then choose Allow. Android names the permission Record audio, but only the sound apps play goes to the computer, never the microphone.</string>
+    <string name="pr_set_sound_on">You can listen to this phone\'s apps on your computer.</string>
+    <string name="pr_set_sound_off">Tap Allow sound to hear this phone\'s apps on your computer.</string>
+    <string name="pr_set_sound_allow">Allow sound</string>
+    <string name="pr_sound_disclose_title">Let computers hear this phone?</string>
+    <string name="pr_sound_disclose_body">Android calls this permission Record audio. LinuxOnDroid uses it to send the sound that apps play without using the microphone. Calls, ringtones and notification sounds are excluded. If you use the Cloudflare link, the sound passes through Cloudflare.</string>
+    <!-- Email me when an address changes (EmailNotice, EmailNoticeJob, EmailSmtp; doc/address-email.md): the Settings card and its lines, the failures, the notification, and the words of the email itself, which goes out in the phone's language. A line that is one sentence ends with no full stop. The em_fault_ words follow "Not sent: ", so they start in lower case. The em_head_ words follow the phone's name in the subject ("Galaxy S25: a new address from anywhere"). -->
+    <string name="em_set_header">New addresses by email</string>
+    <string name="em_set_title">Email me when an address changes</string>
+    <string name="em_set_sub">After a restart, or when a switch goes off and on, this phone emails you the new addresses and a way to sign in. Handy when you are far from the phone.</string>
+    <string name="em_set_service">Email service that sends the emails</string>
+    <string name="em_prov_gmail">Gmail</string>
+    <string name="em_prov_outlook">Outlook</string>
+    <string name="em_prov_icloud">iCloud</string>
+    <string name="em_prov_yahoo">Yahoo</string>
+    <string name="em_prov_other">Other</string>
+    <string name="em_note_gmail">Gmail needs an app password, made at myaccount.google.com/apppasswords with 2-Step Verification on. The normal Gmail password does not work here.</string>
+    <string name="em_note_outlook">Microsoft refuses app passwords for personal Outlook and Hotmail addresses, and for many work accounts. To get the emails at an Outlook address, send with Gmail, iCloud or Yahoo, and put the Outlook address in Send to.</string>
+    <string name="em_note_icloud">iCloud needs an app-specific password, made at account.apple.com under Sign-In and Security. Send from the full iCloud address.</string>
+    <string name="em_note_yahoo">Yahoo needs an app password, made on the Account security page of Yahoo under Generate app password.</string>
+    <string name="em_note_other">Ask the email service for the SMTP server, the port and the security. The connection is always encrypted, and the certificate of the server is always checked.</string>
+    <string name="em_set_to">Send to</string>
+    <string name="em_set_to_hint">you@example.com</string>
+    <string name="em_set_user">Send from: your address at the email service above</string>
+    <string name="em_set_user_hint">name@example.com</string>
+    <string name="em_set_password">App password</string>
+    <string name="em_set_password_hint">The app password from the email service</string>
+    <string name="em_set_password_saved">Saved and encrypted. Type a new app password here to replace the saved password</string>
+    <string name="em_set_password_error">The phone could not keep the app password safe, so the app password was not saved</string>
+    <string name="em_set_server">SMTP server</string>
+    <string name="em_set_server_hint">smtp.example.com</string>
+    <string name="em_set_port">Port</string>
+    <string name="em_set_security">Security</string>
+    <string name="em_sec_ssl">SSL/TLS</string>
+    <string name="em_sec_starttls">STARTTLS</string>
+    <string name="em_set_server_line">Server: %1$s, port %2$d, %3$s</string>
+    <string name="em_set_links">Put a sign-in link in each email</string>
+    <string name="em_set_links_sub">A sign-in link opens Linux or this phone\'s screen in a browser without the code. Each link works once, for 24 hours. Anyone who can read the email can use the link, so keep the emails to yourself.</string>
+    <string name="em_set_test">Send a test email</string>
+    <string name="em_set_testing">Sending a test email…</string>
+    <string name="em_set_test_ok">Test email sent to %1$s: look in the inbox, and in the spam folder</string>
+    <string name="em_set_not_sent">Not sent: %1$s</string>
+    <string name="em_set_said">The email server said: %1$s</string>
+    <string name="em_set_forget">Forget the email settings</string>
+    <string name="em_set_forgotten">The email settings and the app password are gone from this phone</string>
+    <string name="em_state_need_test">Send a test email to start: the emails start once a test email goes through</string>
+    <string name="em_state_on">On: an email goes to %1$s whenever an address changes</string>
+    <string name="em_state_pending">An address changed: the email goes within a few minutes</string>
+    <string name="em_state_retry">Not sent yet: %1$s. LinuxOnDroid tries again at %2$s</string>
+    <string name="em_state_last">Last email: %1$s, %2$s</string>
+    <string name="em_need_to">Type the email address to send to</string>
+    <string name="em_need_user">Type the email address to send from</string>
+    <string name="em_need_server">Type the SMTP server and the port</string>
+    <string name="em_need_password">Type the app password</string>
+    <string name="em_fault_network">the phone could not reach the email server</string>
+    <string name="em_fault_timeout">the email server did not answer in time</string>
+    <string name="em_fault_busy">the email server asked to try again later</string>
+    <string name="em_fault_certificate">the certificate of the email server is not trusted, or names another server. Check the server name</string>
+    <string name="em_fault_security">the security does not match the port. Port 465 goes with SSL/TLS, and port 587 with STARTTLS</string>
+    <string name="em_fault_tls">the encrypted connection to the email server failed</string>
+    <string name="em_fault_no_tls">the email server offers no encryption, so LinuxOnDroid sent nothing to the server</string>
+    <string name="em_fault_no_login">the email server offers no sign-in by password</string>
+    <string name="em_fault_login">the email server refused the address or the app password. Make a new app password, then send a test email</string>
+    <string name="em_fault_app_password">the email server wants an app password, not the normal password</string>
+    <string name="em_fault_basic_off">Microsoft no longer accepts app passwords for this address. Send with Gmail, iCloud or Yahoo instead</string>
+    <string name="em_fault_sender">the email server refused the address to send from</string>
+    <string name="em_fault_recipient">the email server refused the address to send to</string>
+    <string name="em_fault_refused">the email server refused the email</string>
+    <string name="em_fault_protocol">the server did not answer as an email server does. Check the server name and the port</string>
+    <string name="em_fault_password">the saved app password no longer opens on this phone. Type the app password again</string>
+    <string name="em_channel">Address emails</string>
+    <string name="em_note_title">LinuxOnDroid could not email the new addresses</string>
+    <string name="em_from_name">LinuxOnDroid on %1$s</string>
+    <string name="em_subject">%1$s: %2$s</string>
+    <string name="em_head_test">a test email from LinuxOnDroid</string>
+    <string name="em_head_first">how to reach this phone</string>
+    <string name="em_head_anywhere">a new address from anywhere</string>
+    <string name="em_head_anywhere_off">From anywhere is off</string>
+    <string name="em_head_wifi">a new Wi-Fi address</string>
+    <string name="em_head_linux_on">Open in a browser is on</string>
+    <string name="em_head_linux_off">Open in a browser is off</string>
+    <string name="em_head_phone_on">Remote desktop is on</string>
+    <string name="em_head_phone_off">Remote desktop is off</string>
+    <string name="em_head_up">browsers can reach the phone again</string>
+    <string name="em_head_down">browsers cannot reach the phone now</string>
+    <string name="em_head_remote_on">remote access is on</string>
+    <string name="em_head_remote_off">remote access is off</string>
+    <string name="em_head_changed">new ways to reach this phone</string>
+    <string name="em_test_banner">This is a test email. LinuxOnDroid sends an email like this test whenever an address changes.</string>
+    <string name="em_test_no_links">The emails get sign-in links once Email me when an address changes is on</string>
+    <string name="em_what_changed">What changed</string>
+    <string name="em_why">Why: %1$s</string>
+    <string name="em_cause_boot">the phone restarted</string>
+    <string name="em_cause_update">LinuxOnDroid was updated</string>
+    <string name="em_cause_stopped">LinuxOnDroid had stopped, and started again</string>
+    <string name="em_cause_tunnel">the connection to Cloudflare started again, and Cloudflare gives a new address each time</string>
+    <string name="em_cause_network">the phone changed networks</string>
+    <string name="em_chg_first">Every way to reach this phone now is below</string>
+    <string name="em_chg_linux_on">Open in a browser was turned on</string>
+    <string name="em_chg_linux_off">Open in a browser was turned off</string>
+    <string name="em_chg_phone_on">Remote desktop was turned on</string>
+    <string name="em_chg_phone_off">Remote desktop was turned off</string>
+    <string name="em_chg_anywhere_on">From anywhere was turned on</string>
+    <string name="em_chg_anywhere_off">From anywhere was turned off</string>
+    <string name="em_chg_anywhere_new">The address from anywhere is new</string>
+    <string name="em_chg_anywhere_ready">The address from anywhere is ready</string>
+    <string name="em_chg_anywhere_gone">The address from anywhere stopped working, and a new address is on the way</string>
+    <string name="em_chg_wifi_new">The Wi-Fi address is new</string>
+    <string name="em_chg_wifi_gone">The phone is not on Wi-Fi now</string>
+    <string name="em_chg_wifi_back">The phone is on Wi-Fi again</string>
+    <string name="em_chg_lan_new">Another of the phone\'s addresses is new</string>
+    <string name="em_chg_up">Browsers can reach the phone again</string>
+    <string name="em_chg_remote_on">Remote access is on: computers you added in Open Android DeX can reach the phone</string>
+    <string name="em_chg_remote_off">Remote access is off: computers with Open Android DeX cannot reach the phone</string>
+    <string name="em_route_down">LinuxOnDroid is not running on the phone, so no browser can reach the phone. Someone at the phone has to open LinuxOnDroid</string>
+    <string name="em_route_port">Another app on the phone uses port %1$d, so no browser can reach the phone. Restarting the phone usually frees the port</string>
+    <string name="em_route_failed">The phone cannot let browsers in right now</string>
+    <string name="em_route_nothing">Remote desktop and Open in a browser are both off, so no browser can reach the phone. Both switches are in LinuxOnDroid, Settings, on the phone</string>
+    <string name="em_sec_browsers">In a browser</string>
+    <string name="em_sec_anywhere">This phone\'s screen, from anywhere</string>
+    <string name="em_anywhere_wait">Waiting for an address from Cloudflare. Another email comes when the address is ready</string>
+    <string name="em_sec_wifi">On the same Wi-Fi as the phone</string>
+    <string name="em_no_wifi">The phone is not on Wi-Fi now, so a computer on the Wi-Fi cannot reach the phone</string>
+    <string name="em_sec_wifi_linux">Linux in a browser, on the same Wi-Fi as the phone</string>
+    <string name="em_sec_wifi_phone">This phone\'s screen, on the same Wi-Fi as the phone</string>
+    <string name="em_also_at">%1$s address</string>
+    <string name="em_sign_in">Sign in without a code</string>
+    <string name="em_sign_in_life">Works once, for 24 hours</string>
+    <string name="em_sec_computers">Computers with Open Android DeX</string>
+    <string name="em_computers_on">Computers you added in Open Android DeX reach this phone wherever the phone is, with nothing to type</string>
+    <string name="em_computers_down">Computers you added cannot reach the phone now, because LinuxOnDroid is not running on the phone</string>
+    <string name="em_sec_how">How to sign in</string>
+    <string name="em_how_link">On the computer, open a sign-in link from this email, then press Sign in. Each link works once, for 24 hours, and the links in the next email replace the links in this email.</string>
+    <string name="em_how_code">Or open the address, then type the six-digit code shown on the phone in LinuxOnDroid, Settings. The code needs someone at the phone.</string>
+    <string name="em_how_kept">A browser that signed in at an address before stays signed in at the same address.</string>
+    <string name="em_how_new_address">A new address from anywhere needs a new sign-in, with a sign-in link or the code.</string>
+    <string name="em_how_warning">On a Wi-Fi address, the browser first warns that the connection is not private, because the certificate comes from the phone and not from a known authority. Choose Advanced, then Continue.</string>
+    <string name="em_private">Keep this email to yourself: anyone who can read the email can use a sign-in link once.</string>
+    <string name="em_footer">You get this email because Email me when an address changes is on in LinuxOnDroid on %1$s. To stop the emails, turn the switch off in LinuxOnDroid, Settings.</string>
+    <string name="em_sent_at">Sent %1$s</string>
+    <!-- Remote desktop in the background (LinuxSettingsActivity): Android's battery question (Allow or Deny), and on Xiaomi phones MIUI's Autostart, without which Clear all in Recent apps stops Remote desktop until LinuxOnDroid is opened again. -->
+    <string name="pr_set_bg_on">Remote desktop can keep running in the background</string>
+    <string name="pr_set_bg_off">Android may stop Remote desktop to save battery</string>
+    <string name="pr_set_bg_allow">Let Remote desktop run in the background</string>
+    <string name="pr_set_autostart_off">Autostart is off for LinuxOnDroid, so Clear all in Recent apps stops Remote desktop until you open LinuxOnDroid again</string>
+    <string name="pr_set_autostart_allow">Turn on Autostart</string>
+    <string name="pr_notif_autostart">Turn on Autostart for Remote desktop</string>
+    <!-- Remote desktop: the phone's helper started with no computer (PhoneHelperStart) -->
+    <string name="ph_set_setup_line">Screen off: a computer can turn this phone\'s screen off while you use the phone from there, and press the Allow buttons Android keeps for someone at the phone. Needs a one-time setup on this phone</string>
+    <string name="ph_set_setup">Set up Screen off</string>
+    <string name="ph_set_ready">Screen off is ready: the phone\'s helper is running</string>
+    <string name="ph_set_waiting">Screen off is set up: the phone starts its helper when a computer connects</string>
+    <string name="ph_set_starting">Starting the phone\'s helper…</string>
+    <string name="ph_set_pc">Screen off on Android 10 needs a computer with adb once after each restart of this phone</string>
+    <string name="ph_set_devoff">Screen off needs Developer options. Turn Developer options back on to use Screen off</string>
+    <string name="ph_set_wireless">Screen off needs Wireless debugging. Turn on Wireless debugging in Developer options</string>
+    <string name="ph_set_wifi">Screen off needs Wi-Fi to start the phone\'s helper, because Wireless debugging works only on Wi-Fi</string>
+    <string name="ph_set_ask">Android asks on this phone whether to allow Wireless debugging on this Wi-Fi. Tap Allow, then try again</string>
+    <string name="ph_set_failed">The phone\'s helper did not start: %1$s</string>
+    <string name="ph_set_unpaired">Wireless debugging no longer knows LinuxOnDroid. Set up Screen off again</string>
+    <string name="ph_set_try">Try again</string>
+    <string name="ph_set_open_dev">Open Developer options</string>
+    <string name="ph_setup_title">Set up Screen off</string>
+    <string name="ph_setup_body">A computer can then turn this phone\'s screen off while you use the phone from there, which saves battery, and press the Allow buttons Android keeps for someone at the phone. The phone does this with its own Wireless debugging, so no computer is needed. LinuxOnDroid turns Wireless debugging on when a computer needs the helper, and off again after.</string>
+    <string name="ph_setup_dev">1. Turn on Developer options: in Settings, open About phone and tap Build number 7 times. On some phones Build number is under Software information</string>
+    <string name="ph_setup_dev_done">1. Developer options are on</string>
+    <string name="ph_setup_open_about">Open About phone</string>
+    <string name="ph_setup_wireless">2. In Developer options, turn on Wireless debugging. When Android asks about this Wi-Fi, tick Always allow on this network, then tap Allow</string>
+    <string name="ph_setup_wireless_done">2. Wireless debugging is on</string>
+    <string name="ph_setup_wifi">Wireless debugging works only on Wi-Fi: connect this phone to Wi-Fi first</string>
+    <string name="ph_setup_pair">3. In Wireless debugging, tap Pair device with pairing code. A notification from LinuxOnDroid comes up: type the 6-digit code into the notification</string>
+    <string name="ph_setup_pair_go">Show the notification again</string>
+    <string name="ph_setup_pair_working">3. Pairing…</string>
+    <string name="ph_setup_pair_done">3. Paired</string>
+    <string name="ph_setup_notifs">Allow notifications for LinuxOnDroid first: the pairing code goes into a notification</string>
+    <string name="ph_setup_notifs_allow">Allow notifications</string>
+    <string name="ph_setup_close">Close</string>
+    <string name="ph_pair_title">Pairing code for Screen off</string>
+    <string name="ph_pair_text">In Wireless debugging, tap Pair device with pairing code, then type the 6-digit code here</string>
+    <string name="ph_pair_action">Type the code</string>
+    <string name="ph_pair_hint">6-digit code</string>
+    <string name="ph_pair_six">The pairing code has 6 digits. Type the code Wireless debugging shows</string>
+    <string name="ph_pair_working">Pairing with Wireless debugging…</string>
+    <string name="ph_pair_done">Paired. Screen off is ready</string>
+    <string name="ph_pair_wrong">That code did not work. Tap Pair device with pairing code again and type the new code</string>
+    <string name="ph_pair_closed">Pairing is not open on this phone. In Wireless debugging, tap Pair device with pairing code, then type the code</string>
+    <string name="ph_pair_failed">Pairing did not work: %1$s</string>
 </resources>

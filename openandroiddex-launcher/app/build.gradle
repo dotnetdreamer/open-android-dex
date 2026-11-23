@@ -21,8 +21,8 @@ android {
         // finding a stale one meant pulling base.apk off the device and reading
         // its manifest. Keep these in step with open-android-dex-tauri/
         // package.json when changing them by hand.
-        versionCode 334
-        versionName "0.3.34"
+        versionCode 337
+        versionName "0.3.37"
 
         // armeabi-v7a is here for the desktop, not for Linux or Docker. Plenty
         // of phones run 32-bit Android on a 64-bit chip (Galaxy A13, Redmi 9A,
@@ -129,6 +129,18 @@ android {
             useLegacyPackaging = true
         }
     }
+
+    // Unit tests run on the computer under Robolectric (./gradlew :app:testDebugUnitTest):
+    // the desktop's own windows are built for real at a desktop's size, with the app's
+    // resources. Test-only: nothing here goes into the APK.
+    testOptions {
+        unitTests {
+            includeAndroidResources = true
+            all {
+                maxHeapSize = '3g'
+            }
+        }
+    }
 }
 
 // The ONLY third-party dependency in this APK, and it is here because the
@@ -148,6 +160,10 @@ android {
 // inbound route at all — see doc/web-viewer.md.
 dependencies {
     implementation 'io.github.webrtc-sdk:android:144.7559.12'
+
+    // Tests only (app/src/test): not part of the APK.
+    testImplementation 'junit:junit:4.13.2'
+    testImplementation 'org.robolectric:robolectric:4.14.1'
 }
 
 // Turns `release` above into a signable build type when the release key is in

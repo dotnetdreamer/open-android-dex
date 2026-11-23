@@ -118,6 +118,24 @@ pub(crate) fn label_for(id: &str) -> String {
     format!("desktop-{}", &id[..id.len().min(16)])
 }
 
+/// A phone's own screen in a window (Remote desktop, the phone's Android
+/// screen rather than its Linux): a window of its own, beside the desktop's.
+pub(crate) fn phone_label_for(id: &str) -> String {
+    format!("phonescreen-{}", &id[..id.len().min(16)])
+}
+
+/// The title for whichever window `label` is: the phone's Linux, or the
+/// phone's own screen.
+fn title_for_window(label: &str, name: &str, route: Option<&str>) -> String {
+    if !label.starts_with("phonescreen-") {
+        return title_for(name, route);
+    }
+    match route {
+        Some(route) => format!("{name} — Remote desktop · {route}"),
+        None => format!("{name} — Remote desktop"),
+    }
+}
+
 /// A desktop window's title: the phone, and how the window reaches it.
 pub(crate) fn title_for(name: &str, route: Option<&str>) -> String {
     match route {
@@ -317,7 +335,7 @@ async fn watch_path(
             titled = None;
         } else if let Some(route) = route {
             if titled != Some(route) {
-                let _ = window.set_title(&title_for(&name, Some(route)));
+                let _ = window.set_title(&title_for_window(window.label(), &name, Some(route)));
                 titled = Some(route);
             }
         }
@@ -546,6 +564,123 @@ pub async fn remote_desktop_stream(
     let route = desktop.path_kind().map(route_for);
     log::info!("remote: the desktop goes as video through the tunnel ({})", route.unwrap_or("path unknown"));
     Ok(Some(TunnelVideo { url: format!("ws://127.0.0.1:{port}/stream/{token}"), route }))
+}
+
+/// Open a window on a paired phone's own screen (Remote desktop), or bring it
+/// to the front if it is open. Portrait, like the phone: the picture keeps its
+/// shape in whatever size the window is given.
+#[tauri::command]
+pub async fn remote_open_phone(app: AppHandle, id: String) -> Result<(), String> {
+    let phone = crate::remote::find(&id)?;
+    let label = phone_label_for(&phone.id);
+    if let Some(window) = app.get_webview_window(&label) {
+        let _ = window.unminimize();
+        let _ = window.set_focus();
+        return Ok(());
+    }
+    let (_, h) = window_size(&app);
+    let height = (h * 0.95).max(560.0);
+    let width = (height * 0.5).round().max(320.0);
+    let rule = label.clone();
+    let dev = if tauri::is_dev() { app.config().build.dev_url.clone() } else { None };
+    // The window's own choices from last time, in its address: the window is
+    // private (incognito), so its storage goes when it closes.
+    let mut page = format!("index.html#phone={}", phone.id);
+    if let Some(v) = read_phone_views().get(&phone.id) {
+        if let Some(q) = &v.quality {
+            page.push_str(&format!("&quality={q}"));
+        }
+        if let Some(s) = v.scale {
+            page.push_str(&format!("&scale={s}"));
+        }
+        if let Some(s) = &v.sound {
+            page.push_str(&format!("&sound={s}"));
+        }
+    }
+    WebviewWindowBuilder::new(&app, &label, WebviewUrl::App(page.into()))
+        .title(title_for_window(&label, &phone.name, None))
+        .inner_size(width, height)
+        .min_inner_size(300.0, 420.0)
+        .center()
+        .background_color(tauri::window::Color(9, 11, 16, 255))
+        .incognito(true)
+        .on_navigation(move |url| may_navigate(&rule, dev.as_ref(), url))
+        .on_new_window(|_, _| NewWindowResponse::Deny)
+        .build()
+        .map_err(|e| e.to_string())?;
+    log::info!("remote: opened a phone screen window for {}", phone.name);
+    Ok(())
+}
+
+/// A phone screen window's own choices, one entry per phone: kept here
+/// because the window is private (incognito) and its storage goes with it.
+#[derive(serde::Serialize, serde::Deserialize, Default, Clone)]
+struct PhoneViewChoice {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    quality: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    scale: Option<f64>,
+    /// Where the phone's sound plays: "phone", "here" (this computer), "both" or "off".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    sound: Option<String>,
+}
+
+fn phone_views_path() -> Result<std::path::PathBuf, String> {
+    Ok(crate::remote::computer()?.state_dir().join("phone-views.json"))
+}
+
+fn read_phone_views() -> std::collections::BTreeMap<String, PhoneViewChoice> {
+    phone_views_path()
+        .ok()
+        .and_then(|p| std::fs::read(p).ok())
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default()
+}
+
+/// From a phone screen window: its quality, Picture size or Sound, kept for
+/// the next time it opens. Only the values the window offers are kept.
+#[tauri::command]
+pub fn remote_phone_view_set(id: String, quality: Option<String>, scale: Option<f64>, sound: Option<String>) -> Result<(), String> {
+    crate::remote::find(&id)?;
+    let path = phone_views_path()?;
+    let mut all = read_phone_views();
+    let choice = all.entry(id).or_default();
+    if let Some(q) = quality.filter(|q| matches!(q.as_str(), "low" | "medium" | "high")) {
+        choice.quality = Some(q);
+    }
+    if let Some(s) = scale.filter(|s| [1.0, 0.75, 0.5, 0.333].contains(s)) {
+        choice.scale = Some(s);
+    }
+    if let Some(s) = sound.filter(|s| matches!(s.as_str(), "phone" | "here" | "both" | "off")) {
+        choice.sound = Some(s);
+    }
+    // Whole or not at all: written beside, then renamed over.
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, serde_json::to_vec_pretty(&all).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+    std::fs::rename(&tmp, &path).map_err(|e| e.to_string())
+}
+
+/// From a phone screen window: the WebSocket to its phone's screen through
+/// the tunnel (the daemon's `phone` op, Remote desktop's PhoneStream), this
+/// window's own port with `/phone/<token>`, which takes it from this
+/// window's page alone. `events` hears the path as it changes.
+#[tauri::command]
+pub async fn remote_phone_stream(
+    window: WebviewWindow,
+    id: String,
+    events: Channel<DesktopEvent>,
+) -> Result<TunnelVideo, String> {
+    if window.label() != phone_label_for(&id) {
+        return Err("this window belongs to another phone".into());
+    }
+    let paired = crate::remote::find(&id)?;
+    let phone: EndpointId = id.parse().map_err(|_| "not a phone id".to_string())?;
+    let (desktop, port, channel) = link(&window, &paired, phone).await?;
+    *channel.lock().unwrap() = Some(events);
+    let token = desktop.allow_stream(app_origins(window.app_handle()));
+    let route = desktop.path_kind().map(route_for);
+    log::info!("remote: the phone's screen through the tunnel ({})", route.unwrap_or("path unknown"));
+    Ok(TunnelVideo { url: format!("ws://127.0.0.1:{port}/phone/{token}"), route })
 }
 
 /// Files dropped on a desktop window, onto the Desktop of that phone's Linux:

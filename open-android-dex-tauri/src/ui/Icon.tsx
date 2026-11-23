@@ -255,6 +255,13 @@ const PATHS = {
   folder: (
     <path d="M3.75 7.25V6.5a1.75 1.75 0 0 1 1.75-1.75h3.6a1.5 1.5 0 0 1 1.1.48l1.35 1.47h6.95a1.75 1.75 0 0 1 1.75 1.75v9.05a1.75 1.75 0 0 1-1.75 1.75h-13a1.75 1.75 0 0 1-1.75-1.75z" />
   ),
+  /** A phone's Recent apps key: one card in front of another. */
+  recents: (
+    <>
+      <rect x="4.75" y="8.25" width="11.5" height="11.5" rx="2" />
+      <path d="M8.25 4.75h9a2 2 0 0 1 2 2v9" />
+    </>
+  ),
 } as const;
 
 export type IconName = keyof typeof PATHS;

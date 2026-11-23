@@ -19,15 +19,43 @@
  * desktop file asks for them (X-KDE-Wayland-Interfaces), which is why the app
  * installs one beside this binary, naming its exact path.
  *
+ * Phosh (phoc, a wlroots compositor) has no virtual outputs, but wlroots can
+ * run a headless output beside the phone's panel when the session starts with
+ * it (WLR_BACKENDS=…,headless). This program then sizes that output for the
+ * computer, makes it Phosh's primary screen so the shell (bar, app grid,
+ * windows) is there, copies it with wlr-screencopy into the same encoder, and
+ * types and points on it with a virtual keyboard and pointer. When it ends,
+ * or dies (a guard process of its own sees to that), the phone's panel is
+ * primary again and the headless output is off. See "Phosh" below.
+ *
+ * On KWin, while the computer's screen is up, a script of KWin's own (here.js)
+ * makes an app opened from one screen show on that screen, where Plasma
+ * Mobile's drawer would switch to the app's window on the other. This program
+ * answers it on the session bus. See "What is opened from a screen" below.
+ *
+ * The clipboard goes both ways while a window is open (Wayland's data-control,
+ * see "The clipboard"). Files dropped on the window arrive through `receive`,
+ * into the phone's Downloads, over a second channel of the computer's SSH
+ * connection; serve then drops them on the app where they were let go of
+ * ("Files dropped on the window").
+ *
  *   openandroiddex-pmos version
  *   openandroiddex-pmos probe
  *   openandroiddex-pmos serve --width W --height H --scale S [--cap C] [--encoder E] [--convert gl|cpu]
  *   openandroiddex-pmos snapshot --width W --height H --scale S --out F.png [--wait SECONDS]
+ *   openandroiddex-pmos rest
+ *   openandroiddex-pmos receive [--part]
+ *   openandroiddex-pmos clip [--set TEXT]
  *
  * W and H are the screen's size in pixels (KWin makes its mode that size), S
  * the scale Plasma draws it at. After that the screen follows the window: its
  * size in the window's logical pixels, at scale S, at most C pixels on its
- * long side (W or H, whichever is longer, when C is not given).
+ * long side (W or H, whichever is longer, when C is not given). `rest` turns
+ * Phosh's headless output off and gives the phone's panel the shell back: the
+ * session's autostart runs it at login, and the guard when serve has gone.
+ * `receive` takes files from the computer on stdin (see "Files from the
+ * computer"). `clip` prints the phone's clipboard, or with --set puts TEXT on
+ * it until something else is copied: for looking at the clipboard by hand.
  */
 #define _GNU_SOURCE
 #include <ctype.h>
@@ -37,30 +65,58 @@
 #include <linux/input-event-codes.h>
 #include <math.h>
 #include <poll.h>
+#include <sched.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <sys/statvfs.h>
 #include <sys/uio.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
+#include <gio/gdesktopappinfo.h>
 #include <gio/gio.h>
 #include <glib-unix.h>
 #include <glib.h>
 #include <gst/app/gstappsink.h>
+#include <gst/app/gstappsrc.h>
 #include <gst/gst.h>
 #include <gst/video/video.h>
 #include <wayland-client.h>
 #include <xkbcommon/xkbcommon.h>
 
+#include "ext-data-control-v1-client-protocol.h"
 #include "fake-input-client-protocol.h"
+#include "here-js.h" /* src/here.js as HERE_JS, made by build.sh */
+#include "app-js.h"  /* src/app.js as APP_JS, made by build.sh */
+#include "virtual-keyboard-unstable-v1-client-protocol.h"
+#include "wlr-data-control-unstable-v1-client-protocol.h"
+#include "wlr-layer-shell-unstable-v1-client-protocol.h"
+#include "wlr-output-management-unstable-v1-client-protocol.h"
+#include "wlr-screencopy-unstable-v1-client-protocol.h"
+#include "wlr-virtual-pointer-unstable-v1-client-protocol.h"
 #include "xdg-output-unstable-v1-client-protocol.h"
 #include "zkde-screencast-unstable-v1-client-protocol.h"
 
 /* What `version` prints; pmos.rs compares the whole file's hash, not this. */
-#define VERSION "1"
+#define VERSION "7"
+
+/*
+ * The fewest bits a second the encoder is asked for. The computer's window
+ * on a cable never goes near it; a browser across the internet (the Galaxy
+ * S24 port's Remote Desktop, s24-remote) follows its link down to here.
+ */
+#define MIN_BITRATE 200000
+
+/*
+ * videoconvert's threads (BGRx to I420 on the CPU). One: on the Galaxy S24,
+ * 1600x900 at 30 frames a second took 88% of a core with one and 99% with
+ * four (2026-11-19), as with x264's sliced threads (prefer_fast_cores).
+ */
+#define CONVERT_THREADS 1
 
 /*
  * Frames sent and not yet acknowledged before new ones stop going into the
@@ -104,10 +160,37 @@ struct output {
     gboolean before; /* there before our screen was asked for */
 };
 
+/* wlr-output-management's view of a screen (a "head") and its modes: what Phosh is configured through. */
+struct head_mode {
+    struct zwlr_output_mode_v1 *wl;
+    struct head *head;
+    int w, h, refresh;
+};
+
+struct head {
+    struct zwlr_output_head_v1 *wl;
+    char *name;
+    gboolean enabled;
+    struct head_mode *current;
+    GList *modes;
+    int x, y, transform;
+    double scale;
+};
+
+/* The picture of Phosh's screen, as wlr-screencopy last delivered it: a wl_shm buffer of ours. */
+struct shot {
+    struct wl_buffer *wl;
+    guint8 *data;
+    gsize size;
+    uint32_t format;
+    int w, h, stride;
+};
+
 static struct {
     GMainLoop *loop;
     int status;
     gboolean finishing;
+    gboolean no_session; /* no program of this user's had a desktop to take the session from */
 
     /* what the computer asked for */
     int width, height; /* the screen's first size, in pixels: the mode KWin makes it with */
@@ -185,6 +268,85 @@ static struct {
     gint stream_w, stream_h;
     gint asked_at;          /* when the window asked (ms_now() + 1), until the picture is that size; then 0 */
     gint64 t0;
+
+    /* Phosh, or any wlroots compositor (see "Phosh" below). */
+    gboolean wlr;                     /* the screen is a wlroots headless output, not KWin's virtual one */
+    struct wl_shm *shm;
+    struct zwlr_output_manager_v1 *om;
+    uint32_t om_global, om_version;   /* to bind it again (wlr_make_screen) */
+    uint32_t om_serial;
+    GList *heads;                     /* struct head */
+    struct zwlr_screencopy_manager_v1 *copier;
+    uint32_t copier_version;
+    struct zwlr_virtual_pointer_manager_v1 *vp_manager;
+    uint32_t vp_version;
+    struct zwlr_virtual_pointer_v1 *vpointer;
+    struct zwp_virtual_keyboard_manager_v1 *vk_manager;
+    struct zwp_virtual_keyboard_v1 *vkeyboard;
+    struct xkb_state *vk_state;       /* the virtual keyboard's modifiers: wlroots leaves them to the client */
+    char *keymap_text;                /* the seat's keymap, as the compositor sent it */
+    char *screen_name;                /* the headless output we drive (HEADLESS-1) */
+    char *home_name;                  /* the screen that was primary before ours, for the end */
+    gboolean primary_moved;           /* Phosh's shell is on our screen: give it back at the end */
+    gboolean primary_wanted;          /* waiting for the phone to be unlocked to move it */
+    guint lock_watch;
+    struct zwlr_screencopy_frame_v1 *frame;
+    struct shot shot;
+    uint32_t shot_format;
+    int shot_w, shot_h, shot_stride;
+    gboolean shot_yinvert;
+    gboolean capturing;
+    GstElement *appsrc;
+    int src_w, src_h;                 /* the appsrc's caps: frames of another size rebuild the pipeline */
+    uint32_t src_format;
+    GstBuffer *last_buf;              /* sent again while the screen is still (KEEPALIVE_MS) */
+    gint64 last_push;
+    int wheel_half[4];                /* the window's half-notch clicks, two to a notch here */
+    struct zwlr_output_configuration_v1 *cfg; /* a size on its way to the compositor */
+    int cfg_w, cfg_h;                 /* the size it carries */
+    int next_cfg_w, next_cfg_h;       /* asked for while it was on its way */
+    int guard_fd;                     /* the guard's pipe: it puts the phone back when this closes */
+
+    /* What is opened from a screen shows there (KWin; see here.js). */
+    gchar **session_env;              /* the session's environment, for the windows opened for it */
+    gint64 pressed_at;                /* the computer's last key or button, g_get_monotonic_time() */
+    char *kwin_name;                  /* KWin's unique name on the bus: only its script is answered */
+    guint here_object, here_owner;
+    gboolean here_loaded;
+
+    /* One app in a window of its own on the computer (`serve --app`; see "One app's window"). */
+    char *launch_id;                  /* the app's desktop file, without .desktop; NULL for the desktop */
+    char *app_bus;                    /* this program's name on the session bus, for the app's script */
+    char *app_script;                 /* the script's name in KWin */
+    guint app_object, app_owner;
+    gboolean app_loaded;
+    gboolean app_shown;               /* one of the app's windows has come to the screen */
+    guint app_wait;                   /* no window yet: the app didn't open */
+    guint app_empty;                  /* none of its windows left: the window here closes */
+    char *app_config;                 /* what the script is told first (its CONFIG), kept for its run as `back` */
+    gboolean app_back;                /* that run has called Back: the windows are on the phone's screen */
+
+    /* The clipboard (see "The clipboard"): Wayland's data-control, the standard one or wlroots' older one. */
+    struct ext_data_control_manager_v1 *dc_ext;
+    struct zwlr_data_control_manager_v1 *dc_wlr;
+    struct wl_proxy *dc_device;       /* the seat's device, of whichever of the two */
+    struct clip_offer *clip_now;      /* what the phone's clipboard offers now */
+    struct clip_offer *clip_primary;  /* the selection's, kept only to be let go of */
+    struct clip_source *clip_mine;    /* the computer's text, while it is the phone's clipboard */
+    struct clip_read *clip_reading;   /* the phone's clipboard on its way to the computer */
+    gboolean clip_share;              /* the window's switch is on ("clipshare"): until it says so, nothing goes */
+    gboolean clip_print;              /* `clip`: the phone's clipboard goes to stdout, once */
+
+    /* Files dropped on the window, handed to the app under them (see "Files dropped on the window"). */
+    struct wl_compositor *compositor;
+    struct wl_data_device_manager *ddm;
+    uint32_t ddm_version;
+    struct wl_data_device *data_device;
+    struct wl_data_offer *dnd_offer;  /* one the compositor gave this program's own surface; let go of */
+    struct zwlr_layer_shell_v1 *layer_shell;
+    uint32_t seat_caps;
+    struct wl_pointer *wl_pointer;
+    int last_x, last_y;               /* the computer's pointer, in the picture's pixels */
 } app;
 
 static void say(const char *fmt, ...) G_GNUC_PRINTF(1, 2);
@@ -273,7 +435,7 @@ static void send_state(const char *state, const char *message) {
 /*
  * The value of "key" in a flat JSON object the window wrote: a number, a bare
  * word or a string without escapes. That is every message the window sends
- * this program; "clip", the one with free text in it, is not taken here.
+ * this program but "clip" and "drop", whose free text json_text takes.
  */
 static gboolean json_raw(const char *json, const char *key, char *out, size_t cap) {
     char pat[64];
@@ -290,6 +452,113 @@ static gboolean json_raw(const char *json, const char *key, char *out, size_t ca
     }
     out[n] = 0;
     return TRUE;
+}
+
+static int hex4(const char *p) {
+    int v = 0;
+    for (int i = 0; i < 4; i++) {
+        int d = g_ascii_xdigit_value(p[i]);
+        if (d < 0) return -1;
+        v = v * 16 + d;
+    }
+    return v;
+}
+
+/*
+ * The string value of "key" in a flat JSON object, its escapes undone, as the
+ * window's JSON.stringify wrote it: the clipboard's text, a drop's URIs. NULL
+ * when there is none. A surrogate half without its other half (JSON.stringify
+ * writes those as \uD8xx) becomes U+FFFD; a \u0000 stays, the length says
+ * where the text ends.
+ */
+static GString *json_text(const char *json, const char *key) {
+    char pat[64];
+    g_snprintf(pat, sizeof pat, "\"%s\":", key);
+    const char *p = strstr(json, pat);
+    if (!p) return NULL;
+    p += strlen(pat);
+    while (*p == ' ') p++;
+    if (*p != '"') return NULL;
+    GString *s = g_string_new(NULL);
+    for (p++; *p && *p != '"'; p++) {
+        if (*p != '\\') {
+            g_string_append_c(s, *p);
+            continue;
+        }
+        p++;
+        switch (*p) {
+        case '"':
+        case '\\':
+        case '/': g_string_append_c(s, *p); break;
+        case 'b': g_string_append_c(s, '\b'); break;
+        case 'f': g_string_append_c(s, '\f'); break;
+        case 'n': g_string_append_c(s, '\n'); break;
+        case 'r': g_string_append_c(s, '\r'); break;
+        case 't': g_string_append_c(s, '\t'); break;
+        case 'u': {
+            int c = hex4(p + 1);
+            if (c < 0) goto bad;
+            p += 4;
+            if (c >= 0xD800 && c <= 0xDBFF && p[1] == '\\' && p[2] == 'u') {
+                int lo = hex4(p + 3);
+                if (lo >= 0xDC00 && lo <= 0xDFFF) {
+                    c = 0x10000 + ((c - 0xD800) << 10) + (lo - 0xDC00);
+                    p += 6;
+                }
+            }
+            if (c >= 0xD800 && c <= 0xDFFF) c = 0xFFFD;
+            g_string_append_unichar(s, (gunichar)c);
+            break;
+        }
+        default: goto bad;
+        }
+    }
+    if (*p == '"') return s;
+bad:
+    g_string_free(s, TRUE);
+    return NULL;
+}
+
+/* ── the fast cores ────────────────────────────────────────────────────── */
+
+/*
+ * Phones mix fast and slow cores, and the scheduler kept the encoder on the
+ * slow ones: on the Galaxy S24, x264 made 19 frames a second at 1920x1020
+ * left to it, and 109 on its fast cores (2026-11-16, moving SMPTE bars, one
+ * thread). So this program, and every thread it starts (GStreamer's
+ * included), runs on all but the slowest cores: those whose top clock is
+ * the lowest of the phone's, when the phone has cores of more than one.
+ */
+static void prefer_fast_cores(void) {
+    long n = sysconf(_SC_NPROCESSORS_CONF);
+    if (n <= 1 || n > CPU_SETSIZE) return;
+    guint64 *top = g_new0(guint64, n);
+    guint64 lo = G_MAXUINT64, hi = 0;
+    for (long i = 0; i < n; i++) {
+        char path[96];
+        g_snprintf(path, sizeof path, "/sys/devices/system/cpu/cpu%ld/cpufreq/cpuinfo_max_freq", i);
+        char *s = NULL;
+        top[i] = g_file_get_contents(path, &s, NULL, NULL) ? g_ascii_strtoull(s, NULL, 10) : 0;
+        g_free(s);
+        if (!top[i]) continue;
+        lo = MIN(lo, top[i]);
+        hi = MAX(hi, top[i]);
+    }
+    if (hi > lo) {
+        cpu_set_t set;
+        CPU_ZERO(&set);
+        GString *which = g_string_new(NULL);
+        for (long i = 0; i < n; i++) {
+            if (top[i] > lo) {
+                CPU_SET((size_t)i, &set);
+                g_string_append_printf(which, "%s%ld", which->len ? "," : "", i);
+            }
+        }
+        if (sched_setaffinity(0, sizeof set, &set) == 0)
+            say("cpus: %s, the fast ones (the slow ones top out at %.2f GHz)", which->str, lo / 1e6);
+        g_string_free(which, TRUE);
+    }
+    g_free(top);
 }
 
 /* ── the session: which Wayland, which bus ─────────────────────────────── */
@@ -309,17 +578,54 @@ static const char *environ_get(const char *env, gsize len, const char *key) {
 }
 
 /*
+ * Whether a process belongs to a login session with a seat, the one at the
+ * phone's own screen, as logind sees it. A desktop started from an SSH login
+ * (a nested test session, say) has none, and its shell would otherwise do as
+ * well as the real one. Without logind every process counts as seated.
+ */
+static gboolean seated(GDBusConnection *sys, const char *pid) {
+    if (!sys) return TRUE;
+    GVariant *r = g_dbus_connection_call_sync(sys, "org.freedesktop.login1", "/org/freedesktop/login1",
+                                              "org.freedesktop.login1.Manager", "GetSessionByPID",
+                                              g_variant_new("(u)", (guint32)atoi(pid)), G_VARIANT_TYPE("(o)"),
+                                              G_DBUS_CALL_FLAGS_NONE, 1000, NULL, NULL);
+    if (!r) return FALSE;
+    const char *session = NULL;
+    g_variant_get(r, "(&o)", &session);
+    GVariant *v = g_dbus_connection_call_sync(sys, "org.freedesktop.login1", session, "org.freedesktop.DBus.Properties",
+                                              "Get", g_variant_new("(ss)", "org.freedesktop.login1.Session", "Seat"),
+                                              G_VARIANT_TYPE("(v)"), G_DBUS_CALL_FLAGS_NONE, 1000, NULL, NULL);
+    gboolean yes = FALSE;
+    if (v) {
+        GVariant *seat = NULL;
+        g_variant_get(v, "(v)", &seat);
+        if (g_variant_is_of_type(seat, G_VARIANT_TYPE("(so)"))) {
+            const char *id = NULL;
+            g_variant_get(seat, "(&s&o)", &id, NULL);
+            yes = id && *id;
+        }
+        g_variant_unref(seat);
+        g_variant_unref(v);
+    }
+    g_variant_unref(r);
+    return yes;
+}
+
+/*
  * Over SSH this runs outside the phone's graphical session, so its
  * environment says nothing about it. The session's own programs know: take
  * the Wayland socket, the runtime directory and the session bus from the
- * first of them that is this user's, Plasma's shell before anything else.
+ * first of them that is this user's, the shell (Plasma's or Phosh) first, and
+ * one in the session at the phone's screen before any other (see seated).
  */
 static void adopt_session(void) {
     if (getenv("WAYLAND_DISPLAY") && getenv("XDG_RUNTIME_DIR") && getenv("DBUS_SESSION_BUS_ADDRESS")) return;
-    static const char *const prefer[] = {"plasmashell", "kded6", "ksmserver", "kwin_wayland", NULL};
+    static const char *const prefer[] = {"plasmashell", "phosh", "kded6", "ksmserver", "kwin_wayland", NULL};
+    enum { UNSEATED = 1000 };
+    GDBusConnection *sys = g_bus_get_sync(G_BUS_TYPE_SYSTEM, NULL, NULL);
     char *best = NULL;
     gsize best_len = 0;
-    int best_rank = 1000;
+    int best_rank = 2 * UNSEATED;
     DIR *d = opendir("/proc");
     struct dirent *e;
     while (d && (e = readdir(d))) {
@@ -344,20 +650,38 @@ static void adopt_session(void) {
             g_free(env);
             continue;
         }
+        /* logind is asked about the shell and its companions only; any other program is a last resort. */
+        if (rank >= 100 || !seated(sys, e->d_name)) rank += UNSEATED;
+        if (rank >= best_rank) {
+            g_free(env);
+            continue;
+        }
         g_free(best);
         best = env;
         best_len = len;
         best_rank = rank;
     }
     if (d) closedir(d);
-    static const char *const keys[] = {"WAYLAND_DISPLAY", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS", "DISPLAY",
-                                       "XDG_SESSION_TYPE", "XDG_CURRENT_DESKTOP", NULL};
+    if (sys) g_object_unref(sys);
+    /* XDG_DATA_DIRS: where the session finds desktop files (Flatpak's exports, say), for here.js's apps. */
+    static const char *const keys[] = {"WAYLAND_DISPLAY",     "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS",
+                                       "DISPLAY",             "XDG_SESSION_TYPE", "XDG_CURRENT_DESKTOP",
+                                       "PLASMA_PLATFORM",     "XDG_DATA_DIRS",    NULL};
     if (best) {
         for (int i = 0; keys[i]; i++) {
             const char *v = environ_get(best, best_len, keys[i]);
             if (v && !getenv(keys[i])) setenv(keys[i], v, 1);
         }
+        /* All of it, for a window opened for the session: an app started from here starts as the drawer's do. */
+        GPtrArray *env = g_ptr_array_new();
+        for (const char *p = best; p < best + best_len; p += strlen(p) + 1)
+            if (strchr(p, '=')) g_ptr_array_add(env, g_strdup(p));
+        g_ptr_array_add(env, NULL);
+        app.session_env = (gchar **)g_ptr_array_free(env, FALSE);
         g_free(best);
+    } else {
+        /* No program of this user's has a desktop: nobody is logged in (Phosh's greeter is another user's). */
+        app.no_session = TRUE;
     }
     if (!getenv("XDG_RUNTIME_DIR")) {
         char *dir = g_strdup_printf("/run/user/%u", (unsigned)getuid());
@@ -484,7 +808,10 @@ static void index_keymap(void) {
 }
 
 static void kb_keymap(void *d, struct wl_keyboard *kb, uint32_t format, int32_t fd, uint32_t size) {
-    if (format != WL_KEYBOARD_KEYMAP_FORMAT_XKB_V1 || size == 0) {
+    /* wlroots sends the keymap of whichever keyboard was used last (the phone's
+     * own keys, its on-screen keyboard, ours): once the virtual keyboard has
+     * one, keys are looked up in that one only. */
+    if (format != WL_KEYBOARD_KEYMAP_FORMAT_XKB_V1 || size == 0 || app.vkeyboard) {
         close(fd);
         return;
     }
@@ -494,6 +821,9 @@ static void kb_keymap(void *d, struct wl_keyboard *kb, uint32_t format, int32_t 
     if (!app.xkb) app.xkb = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
     struct xkb_keymap *km =
         xkb_keymap_new_from_buffer(app.xkb, map, strnlen(map, size), XKB_KEYMAP_FORMAT_TEXT_V1, XKB_KEYMAP_COMPILE_NO_FLAGS);
+    /* The virtual keyboard (Phosh) hands the same keymap back to the compositor. */
+    g_free(app.keymap_text);
+    app.keymap_text = g_strndup(map, strnlen(map, size));
     munmap(map, size);
     if (!km) {
         say("keyboard: the phone's keymap would not compile");
@@ -519,6 +849,7 @@ static const struct wl_keyboard_listener keyboard_listener = {
 };
 
 static void seat_capabilities(void *d, struct wl_seat *seat, uint32_t caps) {
+    app.seat_caps = caps; /* the pointer's, for a drop (carry) */
     if ((caps & WL_SEAT_CAPABILITY_KEYBOARD) && !app.keyboard) {
         app.keyboard = wl_seat_get_keyboard(seat);
         wl_keyboard_add_listener(app.keyboard, &keyboard_listener, NULL);
@@ -541,12 +872,144 @@ static void output_free(struct output *o) {
     g_free(o);
 }
 
+/* ── wlroots' screens: wlr-output-management ───────────────────────────── */
+
+static void mode_size(void *d, struct zwlr_output_mode_v1 *m, int32_t w, int32_t h) {
+    struct head_mode *hm = d;
+    hm->w = w;
+    hm->h = h;
+}
+static void mode_refresh(void *d, struct zwlr_output_mode_v1 *m, int32_t refresh) {
+    struct head_mode *hm = d;
+    hm->refresh = refresh;
+}
+static void mode_preferred(void *d, struct zwlr_output_mode_v1 *m) {}
+static void mode_finished(void *d, struct zwlr_output_mode_v1 *m) {
+    struct head_mode *hm = d;
+    if (hm->head) {
+        hm->head->modes = g_list_remove(hm->head->modes, hm);
+        if (hm->head->current == hm) hm->head->current = NULL;
+    }
+    if (zwlr_output_mode_v1_get_version(m) >= ZWLR_OUTPUT_MODE_V1_RELEASE_SINCE_VERSION) zwlr_output_mode_v1_release(m);
+    else zwlr_output_mode_v1_destroy(m);
+    g_free(hm);
+}
+static const struct zwlr_output_mode_v1_listener mode_listener = {
+    .size = mode_size,
+    .refresh = mode_refresh,
+    .preferred = mode_preferred,
+    .finished = mode_finished,
+};
+
+static void head_name(void *d, struct zwlr_output_head_v1 *h, const char *name) {
+    struct head *hd = d;
+    g_free(hd->name);
+    hd->name = g_strdup(name);
+}
+static void head_description(void *d, struct zwlr_output_head_v1 *h, const char *desc) {}
+static void head_physical_size(void *d, struct zwlr_output_head_v1 *h, int32_t w, int32_t hh) {}
+static void head_mode(void *d, struct zwlr_output_head_v1 *h, struct zwlr_output_mode_v1 *m) {
+    struct head *hd = d;
+    struct head_mode *hm = g_new0(struct head_mode, 1);
+    hm->wl = m;
+    hm->head = hd;
+    hd->modes = g_list_append(hd->modes, hm);
+    zwlr_output_mode_v1_add_listener(m, &mode_listener, hm);
+}
+static void head_enabled(void *d, struct zwlr_output_head_v1 *h, int32_t enabled) {
+    struct head *hd = d;
+    hd->enabled = enabled != 0;
+    if (!enabled) hd->current = NULL;
+}
+static void head_current_mode(void *d, struct zwlr_output_head_v1 *h, struct zwlr_output_mode_v1 *m) {
+    struct head *hd = d;
+    hd->current = m ? zwlr_output_mode_v1_get_user_data(m) : NULL;
+}
+static void head_position(void *d, struct zwlr_output_head_v1 *h, int32_t x, int32_t y) {
+    struct head *hd = d;
+    hd->x = x;
+    hd->y = y;
+}
+static void head_transform(void *d, struct zwlr_output_head_v1 *h, int32_t t) {
+    struct head *hd = d;
+    hd->transform = t;
+}
+static void head_scale(void *d, struct zwlr_output_head_v1 *h, wl_fixed_t s) {
+    struct head *hd = d;
+    hd->scale = wl_fixed_to_double(s);
+}
+static void head_finished(void *d, struct zwlr_output_head_v1 *h) {
+    struct head *hd = d;
+    app.heads = g_list_remove(app.heads, hd);
+    for (GList *l = hd->modes; l; l = l->next) ((struct head_mode *)l->data)->head = NULL;
+    g_list_free(hd->modes);
+    if (zwlr_output_head_v1_get_version(h) >= ZWLR_OUTPUT_HEAD_V1_RELEASE_SINCE_VERSION) zwlr_output_head_v1_release(h);
+    else zwlr_output_head_v1_destroy(h);
+    g_free(hd->name);
+    g_free(hd);
+}
+static void head_make(void *d, struct zwlr_output_head_v1 *h, const char *s) {}
+static void head_model(void *d, struct zwlr_output_head_v1 *h, const char *s) {}
+static void head_serial(void *d, struct zwlr_output_head_v1 *h, const char *s) {}
+static void head_adaptive_sync(void *d, struct zwlr_output_head_v1 *h, uint32_t state) {}
+static const struct zwlr_output_head_v1_listener head_listener = {
+    .name = head_name,
+    .description = head_description,
+    .physical_size = head_physical_size,
+    .mode = head_mode,
+    .enabled = head_enabled,
+    .current_mode = head_current_mode,
+    .position = head_position,
+    .transform = head_transform,
+    .scale = head_scale,
+    .finished = head_finished,
+    .make = head_make,
+    .model = head_model,
+    .serial_number = head_serial,
+    .adaptive_sync = head_adaptive_sync,
+};
+
+static void om_head(void *d, struct zwlr_output_manager_v1 *m, struct zwlr_output_head_v1 *h) {
+    struct head *hd = g_new0(struct head, 1);
+    hd->wl = h;
+    hd->scale = 1.0;
+    app.heads = g_list_append(app.heads, hd);
+    zwlr_output_head_v1_add_listener(h, &head_listener, hd);
+}
+static void om_done(void *d, struct zwlr_output_manager_v1 *m, uint32_t serial) { app.om_serial = serial; }
+static void om_finished(void *d, struct zwlr_output_manager_v1 *m) {}
+static const struct zwlr_output_manager_v1_listener om_listener = {
+    .head = om_head,
+    .done = om_done,
+    .finished = om_finished,
+};
+
+static struct head *head_named(const char *name) {
+    for (GList *l = app.heads; l; l = l->next) {
+        struct head *hd = l->data;
+        if (hd->name && name && strcmp(hd->name, name) == 0) return hd;
+    }
+    return NULL;
+}
+
+/* wlroots names a headless output HEADLESS-<n>: the screen for the computer. */
+static struct head *headless_head(void) {
+    for (GList *l = app.heads; l; l = l->next) {
+        struct head *hd = l->data;
+        if (hd->name && g_str_has_prefix(hd->name, "HEADLESS-")) return hd;
+    }
+    return NULL;
+}
+
+/* `clip` looks at the clipboard only: no fake input device of its own, which KWin would add to the seat. */
+static gboolean clipboard_only;
+
 static void global_add(void *data, struct wl_registry *r, uint32_t name, const char *iface, uint32_t version) {
     g_string_append_printf(app.globals, "%s%s:%u", app.globals->len ? "," : "", iface, version);
     if (strcmp(iface, zkde_screencast_unstable_v1_interface.name) == 0) {
         app.screencast_version = MIN(version, (uint32_t)zkde_screencast_unstable_v1_interface.version);
         app.screencast = wl_registry_bind(r, name, &zkde_screencast_unstable_v1_interface, app.screencast_version);
-    } else if (strcmp(iface, org_kde_kwin_fake_input_interface.name) == 0) {
+    } else if (strcmp(iface, org_kde_kwin_fake_input_interface.name) == 0 && !clipboard_only) {
         app.fake_version = MIN(version, (uint32_t)org_kde_kwin_fake_input_interface.version);
         app.fake = wl_registry_bind(r, name, &org_kde_kwin_fake_input_interface, app.fake_version);
         org_kde_kwin_fake_input_authenticate(app.fake, "Open Android DeX",
@@ -558,6 +1021,33 @@ static void global_add(void *data, struct wl_registry *r, uint32_t name, const c
     } else if (strcmp(iface, zxdg_output_manager_v1_interface.name) == 0) {
         app.xdg_manager = wl_registry_bind(r, name, &zxdg_output_manager_v1_interface, MIN(version, 3u));
         for (GList *l = app.outputs; l; l = l->next) attach_xdg(l->data);
+    } else if (strcmp(iface, wl_shm_interface.name) == 0) {
+        app.shm = wl_registry_bind(r, name, &wl_shm_interface, 1);
+    } else if (strcmp(iface, zwlr_output_manager_v1_interface.name) == 0) {
+        app.om_global = name;
+        app.om_version = MIN(version, (uint32_t)zwlr_output_manager_v1_interface.version);
+        app.om = wl_registry_bind(r, name, &zwlr_output_manager_v1_interface, app.om_version);
+        zwlr_output_manager_v1_add_listener(app.om, &om_listener, NULL);
+    } else if (strcmp(iface, zwlr_screencopy_manager_v1_interface.name) == 0) {
+        app.copier_version = MIN(version, (uint32_t)zwlr_screencopy_manager_v1_interface.version);
+        app.copier = wl_registry_bind(r, name, &zwlr_screencopy_manager_v1_interface, app.copier_version);
+    } else if (strcmp(iface, zwlr_virtual_pointer_manager_v1_interface.name) == 0) {
+        app.vp_version = MIN(version, (uint32_t)zwlr_virtual_pointer_manager_v1_interface.version);
+        app.vp_manager = wl_registry_bind(r, name, &zwlr_virtual_pointer_manager_v1_interface, app.vp_version);
+    } else if (strcmp(iface, zwp_virtual_keyboard_manager_v1_interface.name) == 0) {
+        app.vk_manager = wl_registry_bind(r, name, &zwp_virtual_keyboard_manager_v1_interface, 1);
+    } else if (strcmp(iface, ext_data_control_manager_v1_interface.name) == 0) {
+        /* The clipboard: the standard data-control (KWin 6.8 has only this one), else wlroots' own. */
+        app.dc_ext = wl_registry_bind(r, name, &ext_data_control_manager_v1_interface, 1);
+    } else if (strcmp(iface, zwlr_data_control_manager_v1_interface.name) == 0) {
+        app.dc_wlr = wl_registry_bind(r, name, &zwlr_data_control_manager_v1_interface, MIN(version, 2u));
+    } else if (strcmp(iface, wl_compositor_interface.name) == 0) {
+        app.compositor = wl_registry_bind(r, name, &wl_compositor_interface, MIN(version, 4u));
+    } else if (strcmp(iface, wl_data_device_manager_interface.name) == 0) {
+        app.ddm_version = MIN(version, 3u);
+        app.ddm = wl_registry_bind(r, name, &wl_data_device_manager_interface, app.ddm_version);
+    } else if (strcmp(iface, zwlr_layer_shell_v1_interface.name) == 0) {
+        app.layer_shell = wl_registry_bind(r, name, &zwlr_layer_shell_v1_interface, MIN(version, 3u));
     } else if (strcmp(iface, wl_output_interface.name) == 0) {
         struct output *o = g_new0(struct output, 1);
         o->global = name;
@@ -632,8 +1122,11 @@ static gboolean wayland_connect(GString *why) {
     app.globals = g_string_new(NULL);
     app.display = wl_display_connect(NULL);
     if (!app.display) {
-        g_string_printf(why, "Couldn't reach the phone's desktop (Wayland %s in %s).", getenv("WAYLAND_DISPLAY"),
-                        getenv("XDG_RUNTIME_DIR"));
+        if (app.no_session)
+            g_string_assign(why, "Nobody is logged in on the phone yet. Log in on it, then open its desktop here again.");
+        else
+            g_string_printf(why, "Couldn't reach the phone's desktop (Wayland %s in %s).", getenv("WAYLAND_DISPLAY"),
+                            getenv("XDG_RUNTIME_DIR"));
         return FALSE;
     }
     app.registry = wl_display_get_registry(app.display);
@@ -644,8 +1137,16 @@ static gboolean wayland_connect(GString *why) {
     return TRUE;
 }
 
-/* The output KWin made for us: by its name, else the one that came after. */
+/* The output KWin made for us: by its name, else the one that came after. On
+ * Phosh, the headless output we drive, by its name only. */
 static struct output *our_output(void) {
+    if (app.wlr) {
+        for (GList *l = app.outputs; l; l = l->next) {
+            struct output *o = l->data;
+            if (o->name && app.screen_name && strcmp(o->name, app.screen_name) == 0) return o;
+        }
+        return NULL;
+    }
     for (GList *l = app.outputs; l; l = l->next) {
         struct output *o = l->data;
         if (o->name && app.name && strstr(o->name, app.name)) return o;
@@ -657,11 +1158,18 @@ static struct output *our_output(void) {
     return NULL;
 }
 
-/* Ask KWin for the screen, and wait for its PipeWire stream. */
+static gboolean wlr_make_screen(GString *why);
+
+/* Ask KWin for the screen, and wait for its PipeWire stream; or, on Phosh, ready its headless output. */
 static gboolean make_screen(GString *why) {
+    if (!app.screencast && app.om && app.copier && app.shm) {
+        app.wlr = TRUE;
+        return wlr_make_screen(why);
+    }
     if (!app.screencast) {
         g_string_assign(why, "The phone's desktop didn't let Open Android DeX make a screen. "
-                             "It needs KDE Plasma, and the permission file Open Android DeX puts on the phone.");
+                             "It needs KDE Plasma or Phosh (and, on Plasma, the permission file Open Android DeX "
+                             "puts on the phone).");
         return FALSE;
     }
     if (app.screencast_version < 2) {
@@ -761,13 +1269,1161 @@ static void keep_scale(void) {
     say("scale: KWin had %.3f for this screen, now %.3f", have, scale_now());
 }
 
+/* ── Plasma Mobile's docked mode ─────────────────────────────────────── */
+
+/*
+ * Plasma Mobile shows every app full screen and without a title bar, on all
+ * its screens, unless its Docked Mode is on (the quick setting; the key is
+ * convergenceModeEnabled in plasmamobilerc's [General]). The shell and KWin
+ * follow that file live when it is written with --notify. A computer's
+ * screen wants windows, and the phone wants its phone back afterwards: so
+ * docked mode is on while a computer has the screen, and then as the phone
+ * had it. It is one setting, so the phone's own screen has windows too
+ * meanwhile.
+ *
+ * What the phone had is kept in a file until it is put back, so a session
+ * that ends any other way still puts it back (the guard; `rest` from the
+ * login autostart after a restart), and a second session doesn't take the
+ * first one's "on" for the phone's own.
+ */
+static gboolean plasma_mobile(void) {
+    const char *p = getenv("PLASMA_PLATFORM");
+    return p && g_str_has_prefix(p, "phone");
+}
+
+static char *docked_file(void) {
+    return g_build_filename(g_get_user_cache_dir(), "openandroiddex", "plasma-docked-before", NULL);
+}
+
+/* kreadconfig6 (value NULL; the answer in *out) or kwriteconfig6 --notify on docked mode's key; the 5s on older Plasma. */
+static gboolean docked_config(const char *value, char **out) {
+    for (int v = 6; v >= 5; v--) {
+        char prog[24];
+        g_snprintf(prog, sizeof prog, "%s%d", value ? "kwriteconfig" : "kreadconfig", v);
+        char *path = g_find_program_in_path(prog);
+        if (!path) continue;
+        const char *argv[12];
+        int n = 0;
+        argv[n++] = path;
+        if (value) argv[n++] = "--notify";
+        argv[n++] = "--file";
+        argv[n++] = "plasmamobilerc";
+        argv[n++] = "--group";
+        argv[n++] = "General";
+        argv[n++] = "--key";
+        argv[n++] = "convergenceModeEnabled";
+        if (value) argv[n++] = value;
+        argv[n] = NULL;
+        GError *err = NULL;
+        gint status = 0;
+        gboolean ok = g_spawn_sync(NULL, (gchar **)argv, NULL, out ? 0 : G_SPAWN_STDOUT_TO_DEV_NULL, NULL, NULL, out,
+                                   NULL, &status, &err) &&
+                      status == 0;
+        if (err) {
+            say("%s: %s", prog, err->message);
+            g_clear_error(&err);
+        }
+        g_free(path);
+        return ok;
+    }
+    say("docked mode: the phone has no kwriteconfig6 or kwriteconfig5");
+    return FALSE;
+}
+
+static gboolean rest_autostart(void);
+static void start_guard(void);
+
+/*
+ * Plasma Mobile's own docked-mode switch (MobileShellSettings::setConvergenceModeEnabled)
+ * also runs plasma-mobile-envmanager --apply-settings, which gives KWin docked mode's rules
+ * (windows can be dragged, open centred rather than maximized, have a title bar's buttons)
+ * or the phone's back, and has KWin reload them. Writing the setting alone left KWin with
+ * the phone's: no window could be dragged on the computer's screen (S24, 2026-11-16).
+ */
+static void apply_docked_rules(void) {
+    char *prog = g_find_program_in_path("plasma-mobile-envmanager");
+    if (!prog) return;
+    gchar **env = app.session_env ? g_strdupv(app.session_env) : g_get_environ();
+    env = g_environ_unsetenv(env, "XDG_ACTIVATION_TOKEN");
+    env = g_environ_unsetenv(env, "DESKTOP_STARTUP_ID");
+    env = g_environ_setenv(env, "QT_QPA_PLATFORM", "offscreen", TRUE); /* as startplasmamobile runs it */
+    const char *argv[] = {prog, "--apply-settings", NULL};
+    gint status = 0;
+    GError *err = NULL;
+    gboolean ok = g_spawn_sync(NULL, (gchar **)argv, env, G_SPAWN_STDOUT_TO_DEV_NULL | G_SPAWN_STDERR_TO_DEV_NULL,
+                               NULL, NULL, NULL, NULL, &status, &err) &&
+                  g_spawn_check_wait_status(status, NULL);
+    if (!ok) say("docked mode: KWin's rules for it weren't applied (%s)", err ? err->message : "the envmanager failed");
+    g_clear_error(&err);
+    g_strfreev(env);
+    g_free(prog);
+}
+
+/* Docked mode on for this computer's screen, keeping what the phone had. Plasma Mobile only. */
+static void dock(void) {
+    if (!plasma_mobile()) return;
+    char *file = docked_file();
+    char *before = NULL;
+    if (!g_file_get_contents(file, &before, NULL, NULL)) {
+        /* No session left one: this is the phone's own setting. */
+        char *now = NULL;
+        gboolean read = docked_config(NULL, &now);
+        if (read && now && strcmp(g_strstrip(now), "true") == 0) {
+            say("docked mode: on already");
+            /* KWin's rules may still be the phone's (a session that only wrote the setting) */
+            apply_docked_rules();
+            read = FALSE;
+        }
+        g_free(now);
+        char *dir = g_path_get_dirname(file);
+        if (read && (g_mkdir_with_parents(dir, 0700) != 0 || !g_file_set_contents(file, "false", -1, NULL))) {
+            say("docked mode: left as it is (nowhere to keep what the phone had)");
+            read = FALSE;
+        }
+        g_free(dir);
+        if (!read) {
+            g_free(file);
+            return;
+        }
+        before = g_strdup("false");
+    }
+    g_strstrip(before);
+    rest_autostart();
+    if (app.guard_fd == 0) start_guard();
+    if (docked_config("true", NULL)) {
+        apply_docked_rules();
+        say("docked mode: on while this computer has the screen (the phone had it %s)",
+            strcmp(before, "true") == 0 ? "on" : "off");
+    }
+    g_free(before);
+    g_free(file);
+}
+
+/* Docked mode back as the phone had it, if a computer's session turned it on. */
+static void undock(void) {
+    char *file = docked_file();
+    char *before = NULL;
+    if (g_file_get_contents(file, &before, NULL, NULL)) {
+        gboolean on = strcmp(g_strstrip(before), "true") == 0;
+        if (docked_config(on ? "true" : "false", NULL)) {
+            apply_docked_rules();
+            unlink(file);
+            say("docked mode: back %s, as the phone had it", on ? "on" : "off");
+        }
+        g_free(before);
+    }
+    g_free(file);
+}
+
+static void wlr_close_screen(void);
+
 static void close_screen(void) {
+    if (app.wlr) wlr_close_screen();
     if (app.stream) {
         if (!app.closed) zkde_screencast_stream_unstable_v1_close(app.stream);
         else zkde_screencast_stream_unstable_v1_destroy(app.stream);
         app.stream = NULL;
     }
     if (app.display) wl_display_flush(app.display);
+}
+
+/* ── Phosh ─────────────────────────────────────────────────────────────── */
+
+/*
+ * phoc has no virtual output to ask for, but it is wlroots, and wlroots runs a
+ * headless output beside the phone's panel when the session starts with
+ * WLR_BACKENDS=…,headless. phosh-session reads the user's ~/.phoshdebug before
+ * it starts phoc, so that is where the backend is added (setup_phosh), and an
+ * autostart entry turns the output off at each login (`rest`) until a
+ * computer asks for it.
+ *
+ * Phosh draws its shell (bar, app grid, lock screen) on its primary screen
+ * only; the others get the wallpaper. So the headless output is made primary
+ * while a computer has it, through Phosh's DisplayConfig (Mutter's D-Bus API,
+ * which Phosh implements): only a "persistent" config moves the primary, Phosh
+ * keeps it in memory and saves nothing, and it refuses any change while the
+ * phone is locked. The phone's panel gets the primary back at the end. A
+ * primary screen nobody can see would leave the phone's own screen with only
+ * its wallpaper, so a guard process puts it back if this one dies first.
+ *
+ * The picture: wlr-screencopy into a wl_shm buffer of ours, copied into
+ * GStreamer through an appsrc, the encoder as for KWin. The input: a virtual
+ * pointer tied to the output, and a virtual keyboard with the seat's own
+ * keymap, whose modifiers wlroots leaves to its client.
+ */
+
+#define DC_NAME "org.gnome.Mutter.DisplayConfig"
+#define DC_PATH "/org/gnome/Mutter/DisplayConfig"
+#define PHOSHDEBUG_MARK "# Open Android DeX: a screen for a computer"
+
+static void stop_video(void);
+static gboolean start_video(GString *why);
+
+static uint32_t ms32(void) { return (uint32_t)(g_get_monotonic_time() / 1000); }
+
+enum { CFG_PENDING, CFG_OK, CFG_FAILED, CFG_CANCELLED };
+
+static void cfg_succeeded(void *d, struct zwlr_output_configuration_v1 *c) { *(int *)d = CFG_OK; }
+static void cfg_failed(void *d, struct zwlr_output_configuration_v1 *c) { *(int *)d = CFG_FAILED; }
+static void cfg_cancelled(void *d, struct zwlr_output_configuration_v1 *c) { *(int *)d = CFG_CANCELLED; }
+static const struct zwlr_output_configuration_v1_listener cfg_listener = {
+    .succeeded = cfg_succeeded,
+    .failed = cfg_failed,
+    .cancelled = cfg_cancelled,
+};
+
+/*
+ * One configuration of every screen the compositor has (wlr-output-management
+ * takes all or none): `ours` on at w × h pixels and scale s, right of the
+ * others, or off; the others as they are.
+ */
+static struct zwlr_output_configuration_v1 *build_cfg(struct head *ours, gboolean on, int w, int h, double s) {
+    struct zwlr_output_configuration_v1 *c = zwlr_output_manager_v1_create_configuration(app.om, app.om_serial);
+    int right = 0;
+    for (GList *l = app.heads; l; l = l->next) {
+        struct head *hd = l->data;
+        if (hd == ours || !hd->enabled || !hd->current) continue;
+        int lw = (int)lround((hd->transform % 2 ? hd->current->h : hd->current->w) / (hd->scale > 0 ? hd->scale : 1.0));
+        right = MAX(right, hd->x + lw);
+    }
+    for (GList *l = app.heads; l; l = l->next) {
+        struct head *hd = l->data;
+        if (hd == ours && on) {
+            struct zwlr_output_configuration_head_v1 *ch = zwlr_output_configuration_v1_enable_head(c, hd->wl);
+            zwlr_output_configuration_head_v1_set_custom_mode(ch, w, h, 60000);
+            zwlr_output_configuration_head_v1_set_scale(ch, wl_fixed_from_double(s));
+            zwlr_output_configuration_head_v1_set_transform(ch, WL_OUTPUT_TRANSFORM_NORMAL);
+            zwlr_output_configuration_head_v1_set_position(ch, right, 0);
+            zwlr_output_configuration_head_v1_destroy(ch);
+        } else if (hd != ours && hd->enabled) {
+            zwlr_output_configuration_head_v1_destroy(zwlr_output_configuration_v1_enable_head(c, hd->wl));
+        } else {
+            zwlr_output_configuration_v1_disable_head(c, hd->wl);
+        }
+    }
+    return c;
+}
+
+/* Apply and wait for the answer (setting up and putting back: not on the main loop). */
+static gboolean apply_sync(struct head *ours, gboolean on, int w, int h, double s) {
+    for (int attempt = 0; attempt < 4; attempt++) {
+        int result = CFG_PENDING;
+        struct zwlr_output_configuration_v1 *c = build_cfg(ours, on, w, h, s);
+        zwlr_output_configuration_v1_add_listener(c, &cfg_listener, &result);
+        zwlr_output_configuration_v1_apply(c);
+        gint64 deadline = g_get_monotonic_time() + 5 * G_USEC_PER_SEC;
+        while (result == CFG_PENDING && g_get_monotonic_time() < deadline)
+            if (dispatch_for(100) < 0) break;
+        zwlr_output_configuration_v1_destroy(c);
+        if (result == CFG_OK) {
+            wl_display_roundtrip(app.display);
+            wl_display_roundtrip(app.display);
+            return TRUE;
+        }
+        if (result != CFG_CANCELLED) {
+            say("screens: the compositor %s %s %dx%d", result == CFG_FAILED ? "refused" : "didn't answer",
+                on ? "turning on" : "turning off", w, h);
+            return FALSE;
+        }
+        /* Changed meanwhile (Phosh configures screens too): again, with the new serial. */
+        wl_display_roundtrip(app.display);
+    }
+    return FALSE;
+}
+
+/* The size the screen had last, kept for `rest`: the next computer most likely asks for it again. */
+static char *size_file(void) { return g_build_filename(g_get_user_cache_dir(), "openandroiddex", "phosh-screen", NULL); }
+
+static void remember_size(int w, int h, double s) {
+    char *f = size_file();
+    char *dir = g_path_get_dirname(f);
+    char num[G_ASCII_DTOSTR_BUF_SIZE];
+    char *line = g_strdup_printf("%d %d %s\n", w, h, g_ascii_formatd(num, sizeof num, "%.4f", s));
+    g_mkdir_with_parents(dir, 0700);
+    g_file_set_contents(f, line, -1, NULL);
+    g_free(line);
+    g_free(dir);
+    g_free(f);
+}
+
+static gboolean remembered_size(int *w, int *h, double *s) {
+    char *f = size_file(), *text = NULL;
+    gboolean ok = FALSE;
+    if (g_file_get_contents(f, &text, NULL, NULL)) {
+        gchar **v = g_strsplit(g_strstrip(text), " ", 3);
+        if (g_strv_length(v) == 3) {
+            *w = atoi(v[0]);
+            *h = atoi(v[1]);
+            *s = g_ascii_strtod(v[2], NULL);
+            ok = *w >= 320 && *h >= 240 && *w <= 7680 && *h <= 4320 && *s >= 0.5 && *s <= 4;
+        }
+        g_strfreev(v);
+    }
+    g_free(text);
+    g_free(f);
+    return ok;
+}
+
+/* While serving: a new size, one at a time, the latest asked for. */
+static void size_next(void);
+static void acfg_result(struct zwlr_output_configuration_v1 *c, int result) {
+    zwlr_output_configuration_v1_destroy(c);
+    app.cfg = NULL;
+    if (result == CFG_OK) {
+        say("size: %dx%d in place", app.cfg_w, app.cfg_h);
+        remember_size(app.cfg_w, app.cfg_h, app.scale);
+    }
+    else if (result == CFG_CANCELLED && !app.next_cfg_w) {
+        app.next_cfg_w = app.cfg_w;
+        app.next_cfg_h = app.cfg_h;
+    } else if (result == CFG_FAILED) say("size: the compositor refused %dx%d", app.cfg_w, app.cfg_h);
+    size_next();
+}
+static void acfg_succeeded(void *d, struct zwlr_output_configuration_v1 *c) { acfg_result(c, CFG_OK); }
+static void acfg_failed(void *d, struct zwlr_output_configuration_v1 *c) { acfg_result(c, CFG_FAILED); }
+static void acfg_cancelled(void *d, struct zwlr_output_configuration_v1 *c) { acfg_result(c, CFG_CANCELLED); }
+static const struct zwlr_output_configuration_v1_listener acfg_listener = {
+    .succeeded = acfg_succeeded,
+    .failed = acfg_failed,
+    .cancelled = acfg_cancelled,
+};
+
+static void size_next(void) {
+    if (app.cfg || !app.next_cfg_w || app.finishing) return;
+    struct head *hd = head_named(app.screen_name);
+    if (!hd) return;
+    app.cfg_w = app.next_cfg_w;
+    app.cfg_h = app.next_cfg_h;
+    app.next_cfg_w = app.next_cfg_h = 0;
+    app.cfg = build_cfg(hd, TRUE, app.cfg_w, app.cfg_h, app.scale);
+    zwlr_output_configuration_v1_add_listener(app.cfg, &acfg_listener, NULL);
+    zwlr_output_configuration_v1_apply(app.cfg);
+    wl_display_flush(app.display);
+}
+
+/* The screen at w × h pixels: the next frame comes at that size, and the pipeline follows it (push_shot). */
+static void wlr_resize(int w, int h) {
+    app.next_cfg_w = w;
+    app.next_cfg_h = h;
+    size_next();
+}
+
+/* Phosh's DisplayConfig, with no wait for a session bus that isn't there. */
+static GVariant *dc_call(const char *method, GVariant *args, const GVariantType *reply, GError **err) {
+    if (!app.bus) app.bus = g_bus_get_sync(G_BUS_TYPE_SESSION, NULL, NULL);
+    if (!app.bus) {
+        g_set_error_literal(err, G_IO_ERROR, G_IO_ERROR_NOT_CONNECTED, "no session bus");
+        if (args) g_variant_unref(g_variant_ref_sink(args));
+        return NULL;
+    }
+    return g_dbus_connection_call_sync(app.bus, DC_NAME, DC_PATH, DC_NAME, method, args, reply,
+                                       G_DBUS_CALL_FLAGS_NONE, 5000, NULL, err);
+}
+
+/* A screen's mode as Phosh names it, and its size. */
+struct dc_mode {
+    char *id;
+    int w, h;
+};
+
+static void dc_mode_free(gpointer p) {
+    struct dc_mode *m = p;
+    g_free(m->id);
+    g_free(m);
+}
+
+/*
+ * The shell on `primary` (NULL: where it is), every screen kept as it is except
+ * `drop`, which is left out and so turned off (NULL: none), and `add`, a screen
+ * that is off, turned on right of the others at app.scale in its first mode
+ * (NULL: none). With `was`, the primary before.
+ */
+static gboolean phosh_layout(const char *primary, const char *drop, const char *add, char **was, GString *why) {
+    GError *err = NULL;
+    GVariant *st = dc_call("GetCurrentState", NULL, NULL, &err);
+    if (!st) {
+        g_string_printf(why, "Phosh's display settings didn't answer: %s", err ? err->message : "?");
+        g_clear_error(&err);
+        return FALSE;
+    }
+    guint32 serial = 0;
+    GVariant *monitors = NULL, *logical = NULL;
+    g_variant_get(st, "(u@a((ssss)a(siiddada{sv})a{sv})@a(iiduba(ssss)a{sv})@a{sv})", &serial, &monitors, &logical,
+                  NULL);
+    /* The mode each screen has now (or, for one that is off, its first), by its id: Phosh wants it named. */
+    GHashTable *mode_of = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, dc_mode_free);
+    GVariantIter it;
+    GVariant *mon;
+    g_variant_iter_init(&it, monitors);
+    while ((mon = g_variant_iter_next_value(&it))) {
+        const char *conn = NULL;
+        GVariant *modes = NULL;
+        g_variant_get(mon, "((&s&s&s&s)@a(siiddada{sv})@a{sv})", &conn, NULL, NULL, NULL, &modes, NULL);
+        GVariantIter mit;
+        GVariant *mode;
+        g_variant_iter_init(&mit, modes);
+        while ((mode = g_variant_iter_next_value(&mit))) {
+            const char *id = NULL;
+            gint32 w = 0, h = 0;
+            GVariant *props = NULL;
+            gboolean current = FALSE;
+            g_variant_get(mode, "(&siidd@ad@a{sv})", &id, &w, &h, NULL, NULL, NULL, &props);
+            if (props) g_variant_lookup(props, "is-current", "b", &current);
+            if (current || !g_hash_table_contains(mode_of, conn)) {
+                struct dc_mode *m = g_new0(struct dc_mode, 1);
+                m->id = g_strdup(id);
+                m->w = w;
+                m->h = h;
+                g_hash_table_replace(mode_of, g_strdup(conn), m);
+            }
+            if (props) g_variant_unref(props);
+            g_variant_unref(mode);
+        }
+        g_variant_unref(modes);
+        g_variant_unref(mon);
+    }
+    GVariantBuilder lb;
+    g_variant_builder_init(&lb, G_VARIANT_TYPE("a(iiduba(ssa{sv}))"));
+    gboolean found = FALSE;
+    int right = 0;
+    g_variant_iter_init(&it, logical);
+    GVariant *lm;
+    while ((lm = g_variant_iter_next_value(&it))) {
+        gint32 x, y;
+        gdouble scale;
+        guint32 transform;
+        gboolean is_primary;
+        GVariant *mons = NULL;
+        g_variant_get(lm, "(iidub@a(ssss)@a{sv})", &x, &y, &scale, &transform, &is_primary, &mons, NULL);
+        const char *conn = NULL;
+        if (g_variant_n_children(mons) > 0) g_variant_get_child(mons, 0, "(&s&s&s&s)", &conn, NULL, NULL, NULL);
+        if (conn && is_primary && was) *was = g_strdup(conn);
+        struct dc_mode *m = conn ? g_hash_table_lookup(mode_of, conn) : NULL;
+        if (conn && m && !(drop && strcmp(conn, drop) == 0) && !(add && strcmp(conn, add) == 0)) {
+            gboolean p = primary ? strcmp(conn, primary) == 0 : is_primary;
+            found |= p;
+            right = MAX(right, x + (int)lround((transform % 2 ? m->h : m->w) / (scale > 0 ? scale : 1.0)));
+            GVariantBuilder mb;
+            g_variant_builder_init(&mb, G_VARIANT_TYPE("a(ssa{sv})"));
+            g_variant_builder_add(&mb, "(ss@a{sv})", conn, m->id, g_variant_new_array(G_VARIANT_TYPE("{sv}"), NULL, 0));
+            g_variant_builder_add(&lb, "(iidub@a(ssa{sv}))", x, y, scale, transform, p, g_variant_builder_end(&mb));
+        }
+        g_variant_unref(mons);
+        g_variant_unref(lm);
+    }
+    struct dc_mode *am = add ? g_hash_table_lookup(mode_of, add) : NULL;
+    if (am) {
+        gboolean p = primary && strcmp(add, primary) == 0;
+        found |= p;
+        GVariantBuilder mb;
+        g_variant_builder_init(&mb, G_VARIANT_TYPE("a(ssa{sv})"));
+        g_variant_builder_add(&mb, "(ss@a{sv})", add, am->id, g_variant_new_array(G_VARIANT_TYPE("{sv}"), NULL, 0));
+        g_variant_builder_add(&lb, "(iidub@a(ssa{sv}))", right, 0, app.scale > 0 ? app.scale : 1.0, 0u, p,
+                              g_variant_builder_end(&mb));
+    } else if (add) {
+        g_string_printf(why, "Phosh doesn't list the screen %s.", add);
+        g_variant_builder_clear(&lb);
+        g_variant_unref(monitors);
+        g_variant_unref(logical);
+        g_variant_unref(st);
+        g_hash_table_unref(mode_of);
+        return FALSE;
+    }
+    g_variant_unref(monitors);
+    g_variant_unref(logical);
+    g_variant_unref(st);
+    g_hash_table_unref(mode_of);
+    if (!found) {
+        g_variant_builder_clear(&lb);
+        g_string_printf(why, "Phosh has no screen %s to put its shell on.", primary ? primary : "(its own)");
+        return FALSE;
+    }
+    GVariant *r = dc_call("ApplyMonitorsConfig",
+                          g_variant_new("(uu@a(iiduba(ssa{sv}))@a{sv})", serial, 2u, g_variant_builder_end(&lb),
+                                        g_variant_new_array(G_VARIANT_TYPE("{sv}"), NULL, 0)),
+                          NULL, &err);
+    if (!r) {
+        g_string_printf(why, "Phosh didn't take the screens' new layout: %s", err ? err->message : "?");
+        g_clear_error(&err);
+        return FALSE;
+    }
+    g_variant_unref(r);
+    return TRUE;
+}
+
+/*
+ * logind's LockedHint for this user's session on the phone's own seat, which
+ * Phosh sets as it locks (seen right on 2026-11-15, where GNOME's ScreenSaver
+ * GetActive said false on the lock screen). FALSE when there is no such answer.
+ */
+static gboolean session_locked_hint(gboolean *locked) {
+    GDBusConnection *sys = g_bus_get_sync(G_BUS_TYPE_SYSTEM, NULL, NULL);
+    if (!sys) return FALSE;
+    gboolean found = FALSE;
+    GVariant *r = g_dbus_connection_call_sync(sys, "org.freedesktop.login1", "/org/freedesktop/login1",
+                                              "org.freedesktop.login1.Manager", "ListSessions", NULL,
+                                              G_VARIANT_TYPE("(a(susso))"), G_DBUS_CALL_FLAGS_NONE, 2000, NULL, NULL);
+    if (r) {
+        GVariantIter *it = NULL;
+        const char *id, *user, *seat, *path;
+        guint32 uid;
+        g_variant_get(r, "(a(susso))", &it);
+        while (!found && g_variant_iter_next(it, "(&su&s&s&o)", &id, &uid, &user, &seat, &path)) {
+            if (uid != getuid() || strcmp(seat, "seat0") != 0) continue;
+            GVariant *v = g_dbus_connection_call_sync(sys, "org.freedesktop.login1", path, "org.freedesktop.DBus.Properties",
+                                                      "Get", g_variant_new("(ss)", "org.freedesktop.login1.Session", "LockedHint"),
+                                                      G_VARIANT_TYPE("(v)"), G_DBUS_CALL_FLAGS_NONE, 2000, NULL, NULL);
+            if (v) {
+                GVariant *b = NULL;
+                g_variant_get(v, "(v)", &b);
+                if (b && g_variant_is_of_type(b, G_VARIANT_TYPE_BOOLEAN)) {
+                    *locked = g_variant_get_boolean(b);
+                    found = TRUE;
+                }
+                if (b) g_variant_unref(b);
+                g_variant_unref(v);
+            }
+        }
+        g_variant_iter_free(it);
+        g_variant_unref(r);
+    }
+    g_object_unref(sys);
+    return found;
+}
+
+/* Phosh's lock screen is up. It refuses to move screens while it is. */
+static gboolean phone_locked(void) {
+    gboolean locked = FALSE;
+    if (session_locked_hint(&locked)) return locked;
+    if (!app.bus) return FALSE;
+    GVariant *r = g_dbus_connection_call_sync(app.bus, "org.gnome.ScreenSaver", "/org/gnome/ScreenSaver",
+                                              "org.gnome.ScreenSaver", "GetActive", NULL, G_VARIANT_TYPE("(b)"),
+                                              G_DBUS_CALL_FLAGS_NONE, 2000, NULL, NULL);
+    gboolean active = FALSE;
+    if (r) {
+        g_variant_get(r, "(b)", &active);
+        g_variant_unref(r);
+    }
+    return active;
+}
+
+/* The shell onto the computer's screen: now, or once the phone is unlocked (retry_primary). */
+static void move_primary(void) {
+    static gboolean told;
+    if (!app.primary_wanted || app.primary_moved || app.finishing) return;
+    if (phone_locked()) {
+        if (!told) say("phosh: the phone is locked; its shell comes to this screen once it is unlocked");
+        told = TRUE;
+        return;
+    }
+    GString *why = g_string_new(NULL);
+    char *was = NULL;
+    if (phosh_layout(app.screen_name, NULL, NULL, &was, why)) {
+        if (was && strcmp(was, app.screen_name) != 0) {
+            g_free(app.home_name);
+            app.home_name = g_strdup(was);
+        }
+        app.primary_moved = TRUE;
+        app.primary_wanted = FALSE;
+        say("phosh: the shell is on this computer's screen (it was on %s)", app.home_name ? app.home_name : "?");
+    } else {
+        say("phosh: %s", why->str);
+    }
+    g_free(was);
+    g_string_free(why, TRUE);
+}
+
+static void on_lock_changed(GDBusConnection *c, const char *sender, const char *path, const char *iface,
+                            const char *signal, GVariant *params, gpointer d) {
+    gboolean active = FALSE;
+    g_variant_get(params, "(b)", &active);
+    if (!active) move_primary();
+}
+
+/* Once a second while the shell waits to come over: ScreenSaver's signal is not to be relied on (see above). */
+static gboolean retry_primary(gpointer d) {
+    if (app.finishing || !app.primary_wanted || app.primary_moved) return G_SOURCE_REMOVE;
+    move_primary();
+    return app.primary_moved ? G_SOURCE_REMOVE : G_SOURCE_CONTINUE;
+}
+
+/* A screen that isn't ours, for the shell to go back to: the phone's panel. */
+static const char *home_screen(struct head *ours) {
+    if (app.home_name && head_named(app.home_name)) return app.home_name;
+    for (GList *l = app.heads; l; l = l->next) {
+        struct head *hd = l->data;
+        if (hd != ours && hd->enabled && hd->name && !g_str_has_prefix(hd->name, "HEADLESS-")) return hd->name;
+    }
+    return NULL;
+}
+
+/*
+ * The phone as it was: the shell on its panel, the headless output off. Phosh
+ * first, which turns the output off by leaving it out; wlr-output-management
+ * if Phosh won't (its lock screen is up): Phosh then finds its primary gone
+ * and takes the panel.
+ */
+static void put_phone_back(struct head *ours) {
+    if (!ours || !ours->enabled) return;
+    const char *home = home_screen(ours);
+    GString *why = g_string_new(NULL);
+    if (home && phosh_layout(home, ours->name, NULL, NULL, why)) {
+        gint64 deadline = g_get_monotonic_time() + 3 * G_USEC_PER_SEC;
+        while (ours->enabled && g_get_monotonic_time() < deadline)
+            if (dispatch_for(100) < 0) break;
+    } else if (why->len) {
+        say("phosh: %s", why->str);
+    }
+    if (ours->enabled && !apply_sync(ours, FALSE, 0, 0, 0)) say("screens: %s stays on", ours->name);
+    else say("screens: %s is off, the shell is on %s", ours->name, home ? home : "the phone's screen");
+    g_string_free(why, TRUE);
+}
+
+/* ~/.phoshdebug and the autostart entry: the headless output from the next login on, off until it is used. */
+static gboolean setup_phosh(void) {
+    gboolean ok = TRUE;
+    char *path = g_build_filename(g_get_home_dir(), ".phoshdebug", NULL);
+    char *old = NULL;
+    g_file_get_contents(path, &old, NULL, NULL);
+    if (!old || !strstr(old, PHOSHDEBUG_MARK)) {
+        GString *s = g_string_new(old ? old : "");
+        if (s->len && s->str[s->len - 1] != '\n') g_string_append_c(s, '\n');
+        g_string_append(s, PHOSHDEBUG_MARK " (wlroots' headless output, off until a computer opens it)\n"
+                           "case \",$WLR_BACKENDS,\" in *,headless,*) ;; "
+                           "*) WLR_BACKENDS=\"${WLR_BACKENDS:-drm,libinput},headless\" ;; esac\n"
+                           "export WLR_BACKENDS\n");
+        ok &= g_file_set_contents(path, s->str, -1, NULL);
+        g_string_free(s, TRUE);
+    }
+    g_free(old);
+    g_free(path);
+    ok &= rest_autostart();
+    return ok;
+}
+
+/*
+ * The login autostart that runs `rest`: on Phosh the headless output off
+ * until a computer opens it, on Plasma Mobile docked mode as the phone had it
+ * if a session ended without putting it back (a restart, a flat battery).
+ */
+static gboolean rest_autostart(void) {
+    char exe[4096];
+    ssize_t n = readlink("/proc/self/exe", exe, sizeof exe - 1);
+    if (n <= 0) return FALSE;
+    exe[n] = 0;
+    gboolean ok = TRUE;
+    char *dir = g_build_filename(g_get_user_config_dir(), "autostart", NULL);
+    char *file = g_build_filename(dir, "com.ccrstech.openandroiddex.pmos-rest.desktop", NULL);
+    char *entry = g_strdup_printf("[Desktop Entry]\n"
+                                  "Type=Application\n"
+                                  "Name=Open Android DeX\n"
+                                  "Comment=Puts the phone back after a computer's screen: off until a computer opens "
+                                  "it, and Plasma Mobile's docked mode as it was\n"
+                                  "Exec=\"%s\" rest\n"
+                                  "NoDisplay=true\n"
+                                  "OnlyShowIn=Phosh;KDE;\n",
+                                  exe);
+    char *had = NULL;
+    if (!g_file_get_contents(file, &had, NULL, NULL) || strcmp(had, entry) != 0)
+        ok = g_mkdir_with_parents(dir, 0755) == 0 && g_file_set_contents(file, entry, -1, NULL);
+    g_free(had);
+    g_free(entry);
+    g_free(file);
+    g_free(dir);
+    return ok;
+}
+
+/*
+ * A process of its own that waits for this one to end, however it ends, and
+ * then runs `rest`; for one app's window (`script`), unloads that app's KWin
+ * script and does nothing else: the desktop's is someone else's.
+ */
+static void start_guard_for(const char *script) {
+    int p[2];
+    char exe[4096];
+    ssize_t n = readlink("/proc/self/exe", exe, sizeof exe - 1);
+    if (n <= 0 || pipe2(p, O_CLOEXEC) < 0) return;
+    exe[n] = 0;
+    pid_t pid = fork();
+    if (pid == 0) {
+        /* Only what is safe between fork and exec: the guard is a fresh program. */
+        int nul = open("/dev/null", O_RDWR);
+        if (nul >= 0) {
+            dup2(nul, 0);
+            dup2(nul, 1);
+            dup2(nul, 2);
+        }
+        if (p[0] == 3) fcntl(3, F_SETFD, 0); /* dup2 onto itself would keep close-on-exec */
+        else dup2(p[0], 3);
+        setsid();
+        if (script) execl(exe, "openandroiddex-pmos", "guard", "--script", script, (char *)NULL);
+        else execl(exe, "openandroiddex-pmos", "guard", (char *)NULL);
+        _exit(127);
+    }
+    close(p[0]);
+    if (pid < 0) {
+        close(p[1]);
+        return;
+    }
+    app.guard_fd = p[1];
+    if (script) say("guard: %d stops %s if this ends without doing so", (int)pid, script);
+    else say("guard: %d puts the phone's screen back if this ends without doing so", (int)pid);
+}
+
+static void start_guard(void) { start_guard_for(NULL); }
+
+/* The virtual pointer on our screen and the virtual keyboard with the seat's keymap. */
+static void wlr_input(void) {
+    struct output *o = our_output();
+    if (app.vp_manager && app.seat && o) {
+        app.vpointer = app.vp_version >= 2
+                           ? zwlr_virtual_pointer_manager_v1_create_virtual_pointer_with_output(app.vp_manager, app.seat, o->wl)
+                           : zwlr_virtual_pointer_manager_v1_create_virtual_pointer(app.vp_manager, app.seat);
+    }
+    if (!app.vk_manager || !app.seat) return;
+    if (!app.keymap) {
+        /* A seat with no keyboard of its own: the default layout. */
+        if (!app.xkb) app.xkb = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
+        app.keymap = xkb_keymap_new_from_names(app.xkb, NULL, XKB_KEYMAP_COMPILE_NO_FLAGS);
+        if (!app.keymap) return;
+        g_free(app.keymap_text);
+        app.keymap_text = xkb_keymap_get_as_string(app.keymap, XKB_KEYMAP_FORMAT_TEXT_V1);
+        index_keymap();
+    }
+    gsize size = strlen(app.keymap_text) + 1;
+    int fd = memfd_create("openandroiddex-keymap", MFD_CLOEXEC);
+    if (fd < 0 || write(fd, app.keymap_text, size) != (ssize_t)size) {
+        if (fd >= 0) close(fd);
+        say("keyboard: no keymap for the virtual keyboard");
+        return;
+    }
+    app.vkeyboard = zwp_virtual_keyboard_manager_v1_create_virtual_keyboard(app.vk_manager, app.seat);
+    zwp_virtual_keyboard_v1_keymap(app.vkeyboard, WL_KEYBOARD_KEYMAP_FORMAT_XKB_V1, fd, (uint32_t)size);
+    close(fd);
+    app.vk_state = xkb_state_new(app.keymap);
+}
+
+/*
+ * wlroots 0.19's output management asserts (head_send_state: found) when a
+ * head with a custom mode is turned on while a client is bound that has no
+ * mode object for it, which is every client that bound while it was off,
+ * as long as another client (Phosh) still holds one from before: phoc
+ * aborts and the session ends (seen on the S24, 2026-11-15, twice). So this
+ * program lets go of output management, has Phosh turn the screen on, and
+ * binds again once the screen is there.
+ */
+static void release_om(void) {
+    for (GList *l = app.heads; l; l = l->next) {
+        struct head *hd = l->data;
+        for (GList *m = hd->modes; m; m = m->next) {
+            struct head_mode *hm = m->data;
+            if (zwlr_output_mode_v1_get_version(hm->wl) >= ZWLR_OUTPUT_MODE_V1_RELEASE_SINCE_VERSION)
+                zwlr_output_mode_v1_release(hm->wl);
+            else zwlr_output_mode_v1_destroy(hm->wl);
+            g_free(hm);
+        }
+        g_list_free(hd->modes);
+        if (zwlr_output_head_v1_get_version(hd->wl) >= ZWLR_OUTPUT_HEAD_V1_RELEASE_SINCE_VERSION)
+            zwlr_output_head_v1_release(hd->wl);
+        else zwlr_output_head_v1_destroy(hd->wl);
+        g_free(hd->name);
+        g_free(hd);
+    }
+    g_list_free(app.heads);
+    app.heads = NULL;
+    if (app.om) {
+        zwlr_output_manager_v1_stop(app.om);
+        zwlr_output_manager_v1_destroy(app.om);
+        app.om = NULL;
+    }
+    wl_display_roundtrip(app.display);
+}
+
+static void rebind_om(void) {
+    app.om = wl_registry_bind(app.registry, app.om_global, &zwlr_output_manager_v1_interface, app.om_version);
+    zwlr_output_manager_v1_add_listener(app.om, &om_listener, NULL);
+    wl_display_roundtrip(app.display);
+    wl_display_roundtrip(app.display);
+}
+
+/*
+ * Phosh turns `name` on beside its screens, its shell left where it is; wait
+ * for the compositor to show it. Turned on and made primary in one config, the
+ * screen's wallpaper came out zoomed in (seen 2026-11-15): Phosh draws the
+ * primary screen's wallpaper for its "usable area", not yet the new screen's.
+ * So the shell moves in a config of its own, in wlr_make_screen, which also
+ * has the order of shell and size.
+ */
+static gboolean phosh_turn_on(const char *name, GString *why) {
+    /* Phosh refuses while its lock screen is up ("Can't configure outputs when
+     * locked"), whether or not its ScreenSaver says so: the person may be
+     * unlocking it now, so it is asked again for a while. */
+    gint64 give_up = g_get_monotonic_time() + 25 * G_USEC_PER_SEC;
+    gboolean told = FALSE;
+    char *was = NULL;
+    for (;;) {
+        if (!phone_locked()) {
+            release_om();
+            g_string_truncate(why, 0);
+            if (phosh_layout(NULL, NULL, name, &was, why)) break;
+            rebind_om();
+            g_clear_pointer(&was, g_free);
+            if (!strstr(why->str, "locked")) return FALSE;
+        }
+        if (g_get_monotonic_time() > give_up) {
+            g_string_assign(why, "The phone is locked. Unlock it, then open its desktop here again.");
+            return FALSE;
+        }
+        if (!told) say("phosh: the phone is locked; waiting for it to be unlocked");
+        told = TRUE;
+        g_usleep(500 * 1000);
+    }
+    if (was && strcmp(was, name) != 0) {
+        g_free(app.home_name);
+        app.home_name = g_strdup(was);
+    }
+    g_free(was);
+    gint64 deadline = g_get_monotonic_time() + 5 * G_USEC_PER_SEC;
+    while (!our_output() && g_get_monotonic_time() < deadline)
+        if (dispatch_for(100) < 0) break;
+    rebind_om();
+    if (!our_output()) {
+        g_string_assign(why, "Phosh didn't turn on the screen for this computer.");
+        return FALSE;
+    }
+    say("phosh: turned %s on beside %s", name, app.home_name ? app.home_name : "?");
+    return TRUE;
+}
+
+static gboolean wlr_make_screen(GString *why) {
+    struct head *hd = headless_head();
+    if (!hd) {
+        gboolean phosh = (getenv("XDG_CURRENT_DESKTOP") && strstr(getenv("XDG_CURRENT_DESKTOP"), "Phosh"));
+        if (phosh && setup_phosh()) {
+            g_string_assign(why, "The phone is ready to make a screen for this computer from its next login. "
+                                 "Log out on the phone (or restart it), then open its desktop here again.");
+        } else {
+            g_string_assign(why, "The phone's desktop has no screen to spare for this computer. On Phosh, Open "
+                                 "Android DeX sets one up in ~/.phoshdebug; this desktop isn't Phosh.");
+        }
+        return FALSE;
+    }
+    setup_phosh(); /* the autostart entry, for a phone whose headless output was set up by hand */
+    app.screen_name = g_strdup(hd->name);
+    if (!app.bus) app.bus = g_bus_get_sync(G_BUS_TYPE_SESSION, NULL, NULL);
+    if (!hd->enabled) {
+        /* Off, as `rest` leaves it: Phosh turns it on (see release_om). */
+        if (!phosh_turn_on(app.screen_name, why)) return FALSE;
+        hd = head_named(app.screen_name);
+        if (!hd) {
+            g_string_assign(why, "The phone's screen for this computer went away as it was turned on.");
+            return FALSE;
+        }
+    }
+    /* Its wl_output: the registry announces it once the output is on. */
+    gint64 deadline = g_get_monotonic_time() + 3 * G_USEC_PER_SEC;
+    while (!our_output() && g_get_monotonic_time() < deadline)
+        if (dispatch_for(100) < 0) break;
+    if (!our_output()) {
+        g_string_assign(why, "The phone's desktop turned on a screen for this computer but never showed it.");
+        put_phone_back(hd);
+        return FALSE;
+    }
+    start_guard();
+    wlr_input();
+    /* Phosh's shell onto it, and back to it after any lock the phone was in. */
+    app.primary_wanted = TRUE;
+    if (app.bus)
+        app.lock_watch = g_dbus_connection_signal_subscribe(app.bus, NULL, "org.gnome.ScreenSaver", "ActiveChanged",
+                                                            "/org/gnome/ScreenSaver", NULL, G_DBUS_SIGNAL_FLAGS_NONE,
+                                                            on_lock_changed, NULL, NULL);
+    /*
+     * The shell first, then the size. Phosh sizes the primary screen's
+     * wallpaper from its usable area, and a screen sized and then made primary
+     * within the same second came out with it zoomed in (2026-11-15). Made
+     * primary at the size it came on at, given a moment, and then sized, it is
+     * drawn right, as the window's own later sizes always were. No frame goes
+     * to the window before all this: the picture starts after (cmd_serve).
+     */
+    if (!hd->current || hd->current->w != app.width || hd->current->h != app.height || fabs(hd->scale - app.scale) > 0.01) {
+        move_primary();
+        if (app.primary_moved) {
+            gint64 settle = g_get_monotonic_time() + 2 * G_USEC_PER_SEC;
+            while (g_get_monotonic_time() < settle)
+                if (dispatch_for(100) < 0) break;
+        }
+        hd = head_named(app.screen_name);
+        if (!hd) {
+            g_string_assign(why, "The phone's screen for this computer went away as it was turned on.");
+            return FALSE;
+        }
+    }
+    if (!apply_sync(hd, TRUE, app.width, app.height, app.scale)) {
+        g_string_assign(why, "The phone's desktop wouldn't size its screen for this computer.");
+        put_phone_back(hd);
+        return FALSE;
+    }
+    remember_size(app.width, app.height, app.scale);
+    say("screen %s: %dx%d pixels at scale %.3f (Phosh: a headless output)%s%s", hd->name, app.width, app.height,
+        app.scale, app.vpointer ? "" : ", no pointer", app.vkeyboard ? "" : ", no keyboard");
+    move_primary();
+    return TRUE;
+}
+
+/* ── Phosh: the picture ────────────────────────────────────────────────── */
+
+static const char *shm_gst_format(uint32_t f) {
+    switch (f) {
+    case WL_SHM_FORMAT_XRGB8888: return "BGRx";
+    case WL_SHM_FORMAT_ARGB8888: return "BGRA";
+    case WL_SHM_FORMAT_XBGR8888: return "RGBx";
+    case WL_SHM_FORMAT_ABGR8888: return "RGBA";
+    default: return NULL;
+    }
+}
+
+static void shot_free(void) {
+    if (app.shot.wl) wl_buffer_destroy(app.shot.wl);
+    if (app.shot.data) munmap(app.shot.data, app.shot.size);
+    memset(&app.shot, 0, sizeof app.shot);
+}
+
+static gboolean shot_alloc(uint32_t format, int w, int h, int stride) {
+    if (app.shot.wl && app.shot.format == format && app.shot.w == w && app.shot.h == h && app.shot.stride == stride)
+        return TRUE;
+    shot_free();
+    gsize size = (gsize)stride * h;
+    int fd = memfd_create("openandroiddex-shot", MFD_CLOEXEC);
+    if (fd < 0) return FALSE;
+    if (ftruncate(fd, (off_t)size) < 0) {
+        close(fd);
+        return FALSE;
+    }
+    guint8 *data = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    if (data == MAP_FAILED) {
+        close(fd);
+        return FALSE;
+    }
+    struct wl_shm_pool *pool = wl_shm_create_pool(app.shm, fd, (int32_t)size);
+    app.shot.wl = wl_shm_pool_create_buffer(pool, 0, w, h, stride, format);
+    wl_shm_pool_destroy(pool);
+    close(fd);
+    app.shot.data = data;
+    app.shot.size = size;
+    app.shot.format = format;
+    app.shot.w = w;
+    app.shot.h = h;
+    app.shot.stride = stride;
+    return TRUE;
+}
+
+static void capture_next(void);
+static int capture_failures;
+
+static gboolean capture_again(gpointer d) {
+    capture_next();
+    return G_SOURCE_REMOVE;
+}
+
+/* The pipeline built again for frames of a new size or kind, as KWin's stream gets one (restart_stream). */
+static void rebuild_for_shot(void) {
+    stop_video();
+    gst_buffer_replace(&app.last_buf, NULL);
+    app.src_w = app.shot.w;
+    app.src_h = app.shot.h;
+    app.src_format = app.shot.format;
+    GString *why = g_string_new(NULL);
+    if (!start_video(why)) {
+        say("video: the picture would not start again at %dx%d: %s", app.src_w, app.src_h, why->str);
+        send_state("stopped", why->str);
+        finish(1);
+    }
+    g_string_free(why, TRUE);
+}
+
+static void push_buffer(GstBuffer *b) {
+    app.last_push = g_get_monotonic_time();
+    if (app.appsrc) gst_app_src_push_buffer(GST_APP_SRC(app.appsrc), b);
+    else gst_buffer_unref(b);
+}
+
+/* The frame wlroots just copied into our buffer, into the encoder: rows in order, packed. */
+static void push_shot(void) {
+    if (!app.pipeline || app.finishing || !shm_gst_format(app.shot.format)) return;
+    if (app.shot.w != app.src_w || app.shot.h != app.src_h || app.shot.format != app.src_format) {
+        rebuild_for_shot();
+        if (!app.appsrc) return;
+    }
+    gsize row = (gsize)app.shot.w * 4;
+    GstBuffer *b = gst_buffer_new_allocate(NULL, row * app.shot.h, NULL);
+    GstMapInfo m;
+    if (!b || !gst_buffer_map(b, &m, GST_MAP_WRITE)) {
+        if (b) gst_buffer_unref(b);
+        return;
+    }
+    for (int y = 0; y < app.shot.h; y++) {
+        int sy = app.shot_yinvert ? app.shot.h - 1 - y : y;
+        memcpy(m.data + (gsize)y * row, app.shot.data + (gsize)sy * app.shot.stride, row);
+    }
+    gst_buffer_unmap(b, &m);
+    gst_buffer_replace(&app.last_buf, b);
+    push_buffer(b);
+}
+
+static void shot_copy(struct zwlr_screencopy_frame_v1 *f) {
+    if (!shm_gst_format(app.shot_format) || !shot_alloc(app.shot_format, app.shot_w, app.shot_h, app.shot_stride)) {
+        say("video: the phone's screen comes as wl_shm format 0x%x, %dx%d, which this can't take", app.shot_format,
+            app.shot_w, app.shot_h);
+        zwlr_screencopy_frame_v1_destroy(f);
+        app.frame = NULL;
+        app.capturing = FALSE;
+        send_state("stopped", "The phone's screen comes in a picture format Open Android DeX can't take.");
+        finish(1);
+        return;
+    }
+    /* After the first frame of a size, only a changed screen is copied: KeepAlive sends the still one again. */
+    if (app.copier_version >= 2 && app.last_buf && app.shot_w == app.src_w && app.shot_h == app.src_h)
+        zwlr_screencopy_frame_v1_copy_with_damage(f, app.shot.wl);
+    else
+        zwlr_screencopy_frame_v1_copy(f, app.shot.wl);
+}
+
+static void shot_buffer(void *d, struct zwlr_screencopy_frame_v1 *f, uint32_t format, uint32_t w, uint32_t h,
+                        uint32_t stride) {
+    app.shot_format = format;
+    app.shot_w = (int)w;
+    app.shot_h = (int)h;
+    app.shot_stride = (int)stride;
+    if (app.copier_version < 3) shot_copy(f);
+}
+static void shot_flags(void *d, struct zwlr_screencopy_frame_v1 *f, uint32_t flags) {
+    app.shot_yinvert = (flags & ZWLR_SCREENCOPY_FRAME_V1_FLAGS_Y_INVERT) != 0;
+}
+static void shot_ready(void *d, struct zwlr_screencopy_frame_v1 *f, uint32_t hi, uint32_t lo, uint32_t ns) {
+    zwlr_screencopy_frame_v1_destroy(f);
+    app.frame = NULL;
+    capture_failures = 0;
+    push_shot();
+    capture_next();
+}
+static void shot_failed(void *d, struct zwlr_screencopy_frame_v1 *f) {
+    zwlr_screencopy_frame_v1_destroy(f);
+    app.frame = NULL;
+    app.capturing = FALSE;
+    /* The screen changed size or went for a moment. Gone for good: give up after ten seconds. */
+    if (++capture_failures > 100) {
+        say("video: the phone's screen can't be copied any more");
+        send_state("stopped", "The phone's screen for this computer went away.");
+        finish(1);
+        return;
+    }
+    g_timeout_add(100, capture_again, NULL);
+}
+static void shot_damage(void *d, struct zwlr_screencopy_frame_v1 *f, uint32_t x, uint32_t y, uint32_t w, uint32_t h) {}
+static void shot_dmabuf(void *d, struct zwlr_screencopy_frame_v1 *f, uint32_t format, uint32_t w, uint32_t h) {}
+static void shot_buffer_done(void *d, struct zwlr_screencopy_frame_v1 *f) { shot_copy(f); }
+static const struct zwlr_screencopy_frame_v1_listener shot_listener = {
+    .buffer = shot_buffer,
+    .flags = shot_flags,
+    .ready = shot_ready,
+    .failed = shot_failed,
+    .damage = shot_damage,
+    .linux_dmabuf = shot_dmabuf,
+    .buffer_done = shot_buffer_done,
+};
+
+/* The next frame, while a window is watching; one at a time. */
+static void capture_next(void) {
+    if (app.frame || app.finishing || !app.copier) return;
+    struct output *o = our_output();
+    if (!o || !g_atomic_int_get(&app.attached)) {
+        app.capturing = FALSE;
+        return;
+    }
+    app.capturing = TRUE;
+    app.frame = zwlr_screencopy_manager_v1_capture_output(app.copier, 0, o->wl);
+    zwlr_screencopy_frame_v1_add_listener(app.frame, &shot_listener, NULL);
+    wl_display_flush(app.display);
+}
+
+/* A still screen sends nothing: its last frame again, for a key frame asked for and the encoder's second pass. */
+static gboolean keepalive(gpointer d) {
+    if (app.finishing) return G_SOURCE_REMOVE;
+    if (app.appsrc && app.last_buf && g_atomic_int_get(&app.attached) &&
+        g_get_monotonic_time() - app.last_push >= KEEPALIVE_MS * 1000)
+        push_buffer(gst_buffer_ref(app.last_buf));
+    return G_SOURCE_CONTINUE;
+}
+
+/* ── Phosh: input ──────────────────────────────────────────────────────── */
+
+static void wlr_press(guint code, gboolean down) {
+    if (!app.vkeyboard) return;
+    zwp_virtual_keyboard_v1_key(app.vkeyboard, ms32(), code,
+                                down ? WL_KEYBOARD_KEY_STATE_PRESSED : WL_KEYBOARD_KEY_STATE_RELEASED);
+    if (!app.vk_state) return;
+    xkb_state_update_key(app.vk_state, code + 8, down ? XKB_KEY_DOWN : XKB_KEY_UP);
+    zwp_virtual_keyboard_v1_modifiers(app.vkeyboard, xkb_state_serialize_mods(app.vk_state, XKB_STATE_MODS_DEPRESSED),
+                                      xkb_state_serialize_mods(app.vk_state, XKB_STATE_MODS_LATCHED),
+                                      xkb_state_serialize_mods(app.vk_state, XKB_STATE_MODS_LOCKED),
+                                      xkb_state_serialize_layout(app.vk_state, XKB_STATE_LAYOUT_EFFECTIVE));
+}
+
+/* Two of the window's wheel clicks are one notch here (WHEEL_STEP): wlroots counts whole notches. */
+static void wlr_wheel(int idx, uint32_t axis, int dir) {
+    app.wheel_half[idx ^ 1] = 0;
+    if (++app.wheel_half[idx] < 2) return;
+    app.wheel_half[idx] = 0;
+    zwlr_virtual_pointer_v1_axis_source(app.vpointer, WL_POINTER_AXIS_SOURCE_WHEEL);
+    zwlr_virtual_pointer_v1_axis_discrete(app.vpointer, ms32(), axis, wl_fixed_from_double(dir * 2 * WHEEL_STEP), dir);
+}
+
+static void wlr_pointer(guint8 mask, int x, int y) {
+    if (!app.vpointer) return;
+    int pw = g_atomic_int_get(&app.pw), ph = g_atomic_int_get(&app.ph);
+    uint32_t t = ms32();
+    if (pw > 0 && ph > 0)
+        zwlr_virtual_pointer_v1_motion_absolute(app.vpointer, t, (uint32_t)CLAMP(x, 0, pw - 1),
+                                                (uint32_t)CLAMP(y, 0, ph - 1), (uint32_t)pw, (uint32_t)ph);
+    static const struct {
+        guint8 bit;
+        uint32_t code;
+    } buttons[] = {{1, BTN_LEFT}, {2, BTN_MIDDLE}, {4, BTN_RIGHT}, {128, BTN_SIDE}};
+    guint8 changed = mask ^ app.buttons;
+    for (gsize i = 0; i < G_N_ELEMENTS(buttons); i++) {
+        if (changed & buttons[i].bit)
+            zwlr_virtual_pointer_v1_button(app.vpointer, t, buttons[i].code,
+                                           (mask & buttons[i].bit) ? WL_POINTER_BUTTON_STATE_PRESSED
+                                                                   : WL_POINTER_BUTTON_STATE_RELEASED);
+    }
+    guint8 pressed = changed & mask;
+    if (pressed & 8) wlr_wheel(0, WL_POINTER_AXIS_VERTICAL_SCROLL, -1);
+    if (pressed & 16) wlr_wheel(1, WL_POINTER_AXIS_VERTICAL_SCROLL, 1);
+    if (pressed & 32) wlr_wheel(2, WL_POINTER_AXIS_HORIZONTAL_SCROLL, -1);
+    if (pressed & 64) wlr_wheel(3, WL_POINTER_AXIS_HORIZONTAL_SCROLL, 1);
+    zwlr_virtual_pointer_v1_frame(app.vpointer);
+    app.buttons = mask;
+}
+
+static void wlr_close_screen(void) {
+    if (app.frame) {
+        zwlr_screencopy_frame_v1_destroy(app.frame);
+        app.frame = NULL;
+    }
+    if (app.vpointer) {
+        zwlr_virtual_pointer_v1_destroy(app.vpointer);
+        app.vpointer = NULL;
+    }
+    if (app.vkeyboard) {
+        zwp_virtual_keyboard_v1_destroy(app.vkeyboard);
+        app.vkeyboard = NULL;
+    }
+    if (app.lock_watch && app.bus) g_dbus_connection_signal_unsubscribe(app.bus, app.lock_watch);
+    app.lock_watch = 0;
+    if (app.display) wl_display_roundtrip(app.display);
+    put_phone_back(head_named(app.screen_name));
+    app.primary_moved = FALSE;
+    shot_free();
 }
 
 /* ── the screen following its window ───────────────────────────────────── */
@@ -1031,7 +2687,7 @@ static void stop_sizer(void) {
 /* The window's size, in its logical pixels: the screen's, in pixels at the session's scale. */
 static void on_resize(const char *json) {
     char v[32];
-    if (!app.sizer || !json_raw(json, "w", v, sizeof v)) return;
+    if ((!app.sizer && !app.wlr) || !json_raw(json, "w", v, sizeof v)) return;
     int w = atoi(v);
     if (!json_raw(json, "h", v, sizeof v)) return;
     int h = atoi(v);
@@ -1057,7 +2713,8 @@ static void on_resize(const char *json) {
     /* + 1: 0 is "no size on its way". */
     g_atomic_int_set(&app.asked_at, ms_now() + 1);
     say("size: the window is %dx%d, so the screen is %dx%d", w, h, sw, sh);
-    ask_size(sw, sh);
+    if (app.wlr) wlr_resize(sw, sh);
+    else ask_size(sw, sh);
 }
 
 /* ── input ─────────────────────────────────────────────────────────────── */
@@ -1082,6 +2739,15 @@ static void axis(uint32_t which, double value) {
 
 /* RFB's button mask, as the window sends it: 1 left, 2 middle, 4 right, 8/16 wheel up/down, 32/64 left/right, 128 back. */
 static void pointer(guint8 mask, int x, int y) {
+    /* A button pressed or let go of: what here.js asks about (not the wheel, not moving). */
+    if ((mask ^ app.buttons) & (1 | 2 | 4 | 128)) app.pressed_at = g_get_monotonic_time();
+    /* Where the pointer goes back to after a drop has borrowed it (carry). */
+    app.last_x = x;
+    app.last_y = y;
+    if (app.wlr) {
+        wlr_pointer(mask, x, y);
+        return;
+    }
     if (!app.fake) return;
     double gx, gy;
     if (to_global(x, y, &gx, &gy))
@@ -1164,7 +2830,8 @@ static guint held_now(guint bits, GArray *codes) {
 }
 
 static void press(guint code, gboolean down) {
-    org_kde_kwin_fake_input_keyboard_key(app.fake, code, down ? WL_KEYBOARD_KEY_STATE_PRESSED : WL_KEYBOARD_KEY_STATE_RELEASED);
+    if (app.wlr) wlr_press(code, down);
+    else org_kde_kwin_fake_input_keyboard_key(app.fake, code, down ? WL_KEYBOARD_KEY_STATE_PRESSED : WL_KEYBOARD_KEY_STATE_RELEASED);
 }
 
 /*
@@ -1204,13 +2871,14 @@ static void type_press(guint code, guint need, gboolean printable) {
  * the Shift that was only there for the press.
  */
 static void key(gboolean down, guint32 keysym) {
-    if (!app.fake || app.fake_version < 4) return;
+    if (app.wlr ? !app.vkeyboard : (!app.fake || app.fake_version < 4)) return;
+    if (down) app.pressed_at = g_get_monotonic_time();
     gpointer was = g_hash_table_lookup(app.keys_down, GUINT_TO_POINTER(keysym));
     if (!down) {
         if (!was) return;
         guint code = GPOINTER_TO_UINT(was) - 1;
         if (code) press(code, FALSE);
-        else if (app.fake_version >= 6) org_kde_kwin_fake_input_keyboard_keysym(app.fake, keysym, 0);
+        else if (!app.wlr && app.fake_version >= 6) org_kde_kwin_fake_input_keyboard_keysym(app.fake, keysym, 0);
         g_hash_table_remove(app.keys_down, GUINT_TO_POINTER(keysym));
         return;
     }
@@ -1227,8 +2895,8 @@ static void key(gboolean down, guint32 keysym) {
     guint32 found = keymap_lookup(keysym);
     if (found == G_MAXUINT32 && (keysym & 0xff000000u) == 0x01000000u) found = keymap_lookup(xkb_utf32_to_keysym(keysym & 0xffffff));
     if (found == G_MAXUINT32) {
-        /* Not on the phone's layout: KWin's own keysym typing is the last try. */
-        if (app.fake_version < 6) return;
+        /* Not on the phone's layout: KWin's own keysym typing is the last try. wlroots has none. */
+        if (app.wlr || app.fake_version < 6) return;
         if (was) org_kde_kwin_fake_input_keyboard_keysym(app.fake, keysym, 0);
         org_kde_kwin_fake_input_keyboard_keysym(app.fake, keysym, 1);
         g_hash_table_insert(app.keys_down, GUINT_TO_POINTER(keysym), GUINT_TO_POINTER(1));
@@ -1243,7 +2911,7 @@ static void key(gboolean down, guint32 keysym) {
 
 /* Nothing stays held on the phone once the computer has let go of the window. */
 static void release_all(void) {
-    if (!app.fake) return;
+    if (!app.fake && !app.vpointer && !app.vkeyboard) return;
     if (app.buttons) pointer(0, 0, 0);
     GList *held = g_hash_table_get_keys(app.keys_down);
     for (GList *l = held; l; l = l->next) key(FALSE, GPOINTER_TO_UINT(l->data));
@@ -1277,6 +2945,20 @@ static GstPadProbeReturn gate(GstPad *pad, GstPadProbeInfo *info, gpointer d) {
         if (g_get_monotonic_time() - app.last_ack < G_USEC_PER_SEC) return GST_PAD_PROBE_DROP;
         g_atomic_int_set(&app.inflight, 0);
     }
+    return GST_PAD_PROBE_OK;
+}
+
+/*
+ * The same test before the colour conversion, so that a frame the encoder
+ * won't take is never converted: KWin may send 60 a second where a browser
+ * across the internet takes 20. It only drops; the gate above is the one that
+ * decides when a silent window has been waited for long enough.
+ */
+static GstPadProbeReturn early_gate(GstPad *pad, GstPadProbeInfo *info, gpointer d) {
+    if (!g_atomic_int_get(&app.attached)) return GST_PAD_PROBE_DROP;
+    if (g_atomic_int_get(&app.acks) && g_atomic_int_get(&app.inflight) >= MAX_INFLIGHT &&
+        g_get_monotonic_time() - app.last_ack < G_USEC_PER_SEC)
+        return GST_PAD_PROBE_DROP;
     return GST_PAD_PROBE_OK;
 }
 
@@ -1315,7 +2997,7 @@ static GstFlowReturn on_sample(GstAppSink *sink, gpointer d) {
         GstPad *pad = src ? gst_element_get_static_pad(src, "src") : NULL;
         GstCaps *caps = pad ? gst_pad_get_current_caps(pad) : NULL;
         char *text = caps ? gst_caps_to_string(caps) : NULL;
-        say("video: KWin sends %s", text ? text : "?");
+        say("video: the screen sends %s", text ? text : "?");
         g_free(text);
         if (caps) gst_caps_unref(caps);
         if (pad) gst_object_unref(pad);
@@ -1330,7 +3012,7 @@ static GstFlowReturn on_sample(GstAppSink *sink, gpointer d) {
         GstPad *pad = src ? gst_element_get_static_pad(src, "src") : NULL;
         GstCaps *caps = pad ? gst_pad_get_current_caps(pad) : NULL;
         char *text = caps ? gst_caps_to_string(caps) : NULL;
-        say("video: KWin sends %s", text ? text : "?");
+        say("video: the screen sends %s", text ? text : "?");
         g_free(text);
         if (caps) gst_caps_unref(caps);
         if (pad) gst_object_unref(pad);
@@ -1384,10 +3066,12 @@ static GPtrArray *encoder_candidates(void) {
  */
 static char *convert_desc(const char *format) {
     if (app.convert && strcmp(app.convert, "gl") == 0)
-        return g_strdup_printf("glupload ! glcolorconvert ! video/x-raw(memory:GLMemory),format=%s ! gldownload ! "
+        return g_strdup_printf("glupload name=conv ! glcolorconvert ! video/x-raw(memory:GLMemory),format=%s ! gldownload ! "
                                "video/x-raw,format=%s",
                                format, format);
-    return g_strdup_printf("videoconvert n-threads=4 ! video/x-raw,format=%s", format);
+    const char *threads = g_getenv("OADX_CONVERT_THREADS"); /* for measuring; see CONVERT_THREADS */
+    return g_strdup_printf("videoconvert name=conv n-threads=%d ! video/x-raw,format=%s",
+                           threads ? CLAMP(atoi(threads), 1, 8) : CONVERT_THREADS, format);
 }
 
 static char *pipeline_desc(const char *enc) {
@@ -1407,19 +3091,29 @@ static char *pipeline_desc(const char *enc) {
                                 conv, app.bitrate);
         g_free(conv);
     } else {
+        /* One thread, on a fast core (prefer_fast_cores): on the Galaxy S24 at 1920x1020 that encoded
+         * 56-109 frames a second where four sliced threads made 26-85, and x264 by itself about 130.
+         * Each slice keeps its core only partly busy, so the cores' clocks never went up. */
         char *conv = convert_desc(app.convert && strcmp(app.convert, "gl") == 0 ? "NV12" : "I420");
         coder = g_strdup_printf("%s ! " LEAKY " ! "
                                 "x264enc name=enc tune=zerolatency speed-preset=ultrafast bitrate=%u "
-                                "key-int-max=600 threads=4 sliced-threads=true",
+                                "key-int-max=600 threads=1",
                                 conv, kbps);
         g_free(conv);
     }
-    /* "size": the screen's size, asked of KWin's stream (restart_stream). */
-    char *desc = g_strdup_printf("pipewiresrc name=src do-timestamp=true keepalive-time=%d ! capsfilter name=size ! "
-                                 LEAKY " ! %s ! "
+    /* "size": the screen's size, asked of KWin's stream (restart_stream). On
+     * Phosh the frames come from wlr-screencopy through an appsrc (push_shot),
+     * which resends the last one itself (keepalive). */
+    char *source = app.wlr ? g_strdup("appsrc name=src is-live=true do-timestamp=true format=time max-buffers=2 "
+                                      "leaky-type=downstream")
+                           : g_strdup_printf("pipewiresrc name=src do-timestamp=true keepalive-time=%d ! "
+                                             "capsfilter name=size",
+                                             KEEPALIVE_MS);
+    char *desc = g_strdup_printf("%s ! " LEAKY " ! %s ! "
                                  "h264parse config-interval=-1 ! video/x-h264,stream-format=byte-stream,alignment=au ! "
                                  "appsink name=out sync=false max-buffers=8 enable-last-sample=false",
-                                 KEEPALIVE_MS, coder);
+                                 source, coder);
+    g_free(source);
     g_free(coder);
     return desc;
 }
@@ -1444,7 +3138,8 @@ static void stop_video(void) {
     gst_bus_remove_watch(gst_element_get_bus(app.pipeline));
     gst_object_unref(app.pipeline);
     if (app.sizecaps) gst_object_unref(app.sizecaps);
-    app.pipeline = app.appsink = app.encoder_el = app.sizecaps = NULL;
+    if (app.appsrc) gst_object_unref(app.appsrc);
+    app.pipeline = app.appsink = app.encoder_el = app.sizecaps = app.appsrc = NULL;
 }
 
 static gboolean start_video(GString *why) {
@@ -1464,11 +3159,28 @@ static gboolean start_video(GString *why) {
         app.pipeline = p;
         app.encoder = enc;
         app.hw = strcmp(enc, "v4l2h264enc") == 0;
-        aim_source(gst_bin_get_by_name(GST_BIN(p), "src"));
+        if (app.wlr) {
+            /* Phosh's frames, as wlr-screencopy gives them: their size and kind are the caps. */
+            app.appsrc = gst_bin_get_by_name(GST_BIN(p), "src");
+            GstCaps *caps = gst_caps_new_simple("video/x-raw", "format", G_TYPE_STRING, shm_gst_format(app.src_format),
+                                                "width", G_TYPE_INT, app.src_w, "height", G_TYPE_INT, app.src_h,
+                                                "framerate", GST_TYPE_FRACTION, 0, 1, NULL);
+            gst_app_src_set_caps(GST_APP_SRC(app.appsrc), caps);
+            gst_caps_unref(caps);
+        } else {
+            aim_source(gst_bin_get_by_name(GST_BIN(p), "src"));
+        }
         app.encoder_el = gst_bin_get_by_name(GST_BIN(p), "enc");
         GstPad *in = gst_element_get_static_pad(app.encoder_el, "sink");
         gst_pad_add_probe(in, GST_PAD_PROBE_TYPE_BUFFER, gate, NULL, NULL);
         gst_object_unref(in);
+        GstElement *conv = gst_bin_get_by_name(GST_BIN(p), "conv");
+        if (conv) {
+            GstPad *cin = gst_element_get_static_pad(conv, "sink");
+            gst_pad_add_probe(cin, GST_PAD_PROBE_TYPE_BUFFER, early_gate, NULL, NULL);
+            gst_object_unref(cin);
+            gst_object_unref(conv);
+        }
         app.sizecaps = gst_bin_get_by_name(GST_BIN(p), "size");
         ask_stream_size(g_atomic_int_get(&app.stream_w), g_atomic_int_get(&app.stream_h));
         app.appsink = gst_bin_get_by_name(GST_BIN(p), "out");
@@ -1537,15 +3249,30 @@ static gboolean on_bus(GstBus *bus, GstMessage *m, gpointer d) {
 
 /*
  * The phone's own idle timers know nothing of a computer using it: without
- * these it would dim, lock and suspend under the person typing. Both are held
- * on this process's bus connection and go with it, however it ends.
+ * these it would dim, lock and suspend under the person typing. All are held
+ * on this process's bus connection and go with it, however it ends. Phosh's
+ * session (GNOME's session manager) takes idle and suspend inhibitions of its
+ * own kind; Plasma takes the freedesktop ones.
  */
 static void inhibit(void) {
     GError *err = NULL;
-    app.bus = g_bus_get_sync(G_BUS_TYPE_SESSION, NULL, &err);
+    if (!app.bus) app.bus = g_bus_get_sync(G_BUS_TYPE_SESSION, NULL, &err);
     if (!app.bus) {
         say("no session bus, so the phone may sleep: %s", err ? err->message : "?");
         g_clear_error(&err);
+        return;
+    }
+    if (app.wlr) {
+        /* Flags: 4 suspend, 8 idle (gnome-session's GsmInhibitorFlag). */
+        GVariant *r = g_dbus_connection_call_sync(
+            app.bus, "org.gnome.SessionManager", "/org/gnome/SessionManager", "org.gnome.SessionManager", "Inhibit",
+            g_variant_new("(susu)", "Open Android DeX", 0u, "This phone's desktop is open on a computer", 4u | 8u),
+            G_VARIANT_TYPE("(u)"), G_DBUS_CALL_FLAGS_NONE, 3000, NULL, &err);
+        if (r) g_variant_unref(r);
+        else {
+            say("org.gnome.SessionManager: %s", err ? err->message : "?");
+            g_clear_error(&err);
+        }
         return;
     }
     static const char *const who[][3] = {
@@ -1566,6 +3293,1902 @@ static void inhibit(void) {
     }
 }
 
+/* ── What is opened from a screen shows there (KWin) ───────────────────── */
+
+/*
+ * Plasma Mobile's app drawer and dock switch to an app's window when it has
+ * one, on whichever screen that window is. Tapped on the computer's screen,
+ * Brave, Calls or VLC came up on the phone's (Firefox only opened where it was
+ * tapped because its window's id doesn't match its desktop file, so the drawer
+ * started it again). While the computer's screen is up, KWin runs a script of
+ * ours, here.js, that brings such a window to the screen it was asked from, or
+ * opens a new one of the app there: see the script for the rules. KWin's
+ * scripts can't start programs, or see the computer's mouse apart from the
+ * phone's touch, so this program answers it on the session bus:
+ *
+ *   Look(app) → (screen, pressed, windows)  the computer's screen, how many ms
+ *                                           ago the computer last pressed a key
+ *                                           or button, and whether the app's
+ *                                           desktop file has a new-window action
+ *   NewWindow(app) → opened                 that action, as the session would run it
+ *   Note(text)                              a line for this program's log
+ *
+ * Only KWin (the script runs in it) is answered.
+ */
+#define HERE_BUS "com.ccrstech.openandroiddex.Pmos"
+#define HERE_PATH "/com/ccrstech/openandroiddex/Pmos"
+#define HERE_SCRIPT "openandroiddex-pmos"
+
+static const char here_xml[] =
+    "<node><interface name='" HERE_BUS "'>"
+    "<method name='Look'><arg type='s' name='app' direction='in'/><arg type='s' name='screen' direction='out'/>"
+    "<arg type='u' name='pressed' direction='out'/><arg type='b' name='windows' direction='out'/></method>"
+    "<method name='NewWindow'><arg type='s' name='app' direction='in'/><arg type='b' name='opened' direction='out'/></method>"
+    "<method name='Note'><arg type='s' name='text' direction='in'/></method>"
+    "</interface></node>";
+
+/* An app as KWin names a window's (its desktop file, without .desktop): nothing that could be a path. */
+static GDesktopAppInfo *app_info(const char *id) {
+    if (!id || !*id || *id == '.' || strlen(id) > 200) return NULL;
+    for (const char *p = id; *p; p++)
+        if (!g_ascii_isalnum(*p) && *p != '.' && *p != '-' && *p != '_') return NULL;
+    char *file = g_strconcat(id, ".desktop", NULL);
+    GDesktopAppInfo *info = g_desktop_app_info_new(file);
+    g_free(file);
+    return info;
+}
+
+/*
+ * The desktop file's action for another window: "new-window" in the
+ * specification's example and GNOME's apps, "NewWindow" in KDE's,
+ * "new-empty-window" in VS Code's. Not a private window, and none for an app
+ * that says it has a single main window.
+ */
+static const char *new_window_action(GDesktopAppInfo *info) {
+    if (!info || g_desktop_app_info_get_boolean(info, "SingleMainWindow")) return NULL;
+    const char *const *acts = g_desktop_app_info_list_actions(info);
+    for (int i = 0; acts && acts[i]; i++) {
+        char flat[64];
+        gsize n = 0;
+        for (const char *p = acts[i]; *p && n + 1 < sizeof flat; p++)
+            if (g_ascii_isalnum(*p)) flat[n++] = g_ascii_tolower(*p);
+        flat[n] = 0;
+        if (strcmp(flat, "newwindow") == 0 || strcmp(flat, "newemptywindow") == 0 || strcmp(flat, "windownew") == 0)
+            return acts[i];
+    }
+    return NULL;
+}
+
+static void child_setsid(gpointer d) { setsid(); }
+
+static void opened_ended(GPid pid, gint status, gpointer d) {
+    if (!g_spawn_check_wait_status(status, NULL)) say("here: %s ended with status %d", (char *)d, status);
+    g_spawn_close_pid(pid);
+    g_free(d);
+}
+
+/*
+ * Run a desktop action's Exec line as the session would: in the session's
+ * environment, in its own process session (nothing of this program's SSH
+ * login reaches it), with nothing on this program's stdout, which is the
+ * computer's stream. GLib's own launcher would leave that stdout to it.
+ * No action is the app's own Exec: the app started as the drawer starts it.
+ */
+static gboolean spawn_action(GDesktopAppInfo *info, const char *action, GString *why) {
+    const char *file = g_desktop_app_info_get_filename(info);
+    GKeyFile *kf = g_key_file_new();
+    char *group = action ? g_strdup_printf("Desktop Action %s", action) : g_strdup(G_KEY_FILE_DESKTOP_GROUP);
+    char *exec = NULL, *dir = NULL, *icon = NULL;
+    gchar **words = NULL;
+    GError *err = NULL;
+    gboolean ok = FALSE;
+    if (file && g_key_file_load_from_file(kf, file, G_KEY_FILE_NONE, NULL)) {
+        exec = g_key_file_get_string(kf, group, G_KEY_FILE_DESKTOP_KEY_EXEC, NULL);
+        dir = g_key_file_get_string(kf, G_KEY_FILE_DESKTOP_GROUP, G_KEY_FILE_DESKTOP_KEY_PATH, NULL);
+        icon = g_key_file_get_string(kf, G_KEY_FILE_DESKTOP_GROUP, G_KEY_FILE_DESKTOP_KEY_ICON, NULL);
+    }
+    if (!exec) g_string_assign(why, "its desktop file has no Exec for the action");
+    else if (g_shell_parse_argv(exec, NULL, &words, &err)) {
+        /* The field codes: no files or URLs to give it; the icon, name and file as the specification says. */
+        GPtrArray *argv = g_ptr_array_new_with_free_func(g_free);
+        for (int i = 0; words[i]; i++) {
+            const char *w = words[i];
+            if (w[0] == '%' && w[1] && !w[2]) {
+                if (w[1] == 'i' && icon && *icon) {
+                    g_ptr_array_add(argv, g_strdup("--icon"));
+                    g_ptr_array_add(argv, g_strdup(icon));
+                } else if (w[1] == 'c') {
+                    g_ptr_array_add(argv, g_strdup(g_app_info_get_name(G_APP_INFO(info))));
+                } else if (w[1] == 'k') {
+                    g_ptr_array_add(argv, g_strdup(file));
+                } else if (w[1] == '%') {
+                    g_ptr_array_add(argv, g_strdup("%"));
+                }
+                continue;
+            }
+            GString *s = g_string_new(NULL);
+            for (const char *p = w; *p; p++) {
+                if (p[0] == '%' && p[1] == '%') p++;
+                g_string_append_c(s, *p);
+            }
+            g_ptr_array_add(argv, g_string_free(s, FALSE));
+        }
+        g_ptr_array_add(argv, NULL);
+        if (argv->len > 1) {
+            gchar **env = app.session_env ? g_strdupv(app.session_env) : g_get_environ();
+            /* The session's own start had these; they are not this window's. */
+            env = g_environ_unsetenv(env, "XDG_ACTIVATION_TOKEN");
+            env = g_environ_unsetenv(env, "DESKTOP_STARTUP_ID");
+            const char *home = g_environ_getenv(env, "HOME");
+            int nul = open("/dev/null", O_RDWR | O_CLOEXEC);
+            GPid pid = 0;
+            ok = nul >= 0 && g_spawn_async_with_fds(dir && *dir ? dir : home, (gchar **)argv->pdata, env,
+                                                    G_SPAWN_SEARCH_PATH_FROM_ENVP | G_SPAWN_DO_NOT_REAP_CHILD,
+                                                    child_setsid, NULL, &pid, nul, nul, nul, &err);
+            if (nul >= 0) close(nul);
+            if (ok) g_child_watch_add(pid, opened_ended, g_strdup(g_desktop_app_info_get_filename(info)));
+            else if (!err) g_string_assign(why, "no /dev/null to start it with");
+            g_strfreev(env);
+        } else {
+            g_string_assign(why, "the action's Exec is empty");
+        }
+        g_ptr_array_free(argv, TRUE);
+    }
+    if (err) {
+        g_string_assign(why, err->message);
+        g_clear_error(&err);
+    }
+    g_strfreev(words);
+    g_free(exec);
+    g_free(dir);
+    g_free(icon);
+    g_free(group);
+    g_key_file_unref(kf);
+    return ok;
+}
+
+/* The app's new-window action: over the bus for an app that is started that way, else run here. */
+static gboolean open_new_window(const char *id) {
+    GDesktopAppInfo *info = app_info(id);
+    const char *action = new_window_action(info);
+    gboolean ok = FALSE;
+    GString *why = g_string_new(NULL);
+    if (!action) {
+        g_string_assign(why, info ? "its desktop file has no new-window action" : "no desktop file for it");
+    } else if (g_desktop_app_info_get_boolean(info, "DBusActivatable")) {
+        /* org.freedesktop.Application.ActivateAction; GLib runs nothing here for such an app. */
+        g_desktop_app_info_launch_action(info, action, NULL);
+        ok = TRUE;
+    } else {
+        ok = spawn_action(info, action, why);
+    }
+    if (ok) say("here: %s: opening its \"%s\"", id, action);
+    else say("here: %s: no new window (%s)", id, why->str);
+    g_string_free(why, TRUE);
+    if (info) g_object_unref(info);
+    return ok;
+}
+
+static void here_call(GDBusConnection *c, const char *sender, const char *path, const char *iface,
+                      const char *method, GVariant *params, GDBusMethodInvocation *inv, gpointer d) {
+    if (!app.kwin_name || g_strcmp0(sender, app.kwin_name) != 0) {
+        g_dbus_method_invocation_return_dbus_error(inv, "org.freedesktop.DBus.Error.AccessDenied",
+                                                   "Only KWin's script for the computer's screen asks this.");
+        return;
+    }
+    const char *text = NULL;
+    g_variant_get(params, "(&s)", &text);
+    if (strcmp(method, "Look") == 0) {
+        struct output *o = our_output();
+        gint64 ago = app.pressed_at ? (g_get_monotonic_time() - app.pressed_at) / 1000 : G_MAXUINT32;
+        GDesktopAppInfo *info = *text ? app_info(text) : NULL;
+        gboolean more = new_window_action(info) != NULL;
+        if (info) g_object_unref(info);
+        g_dbus_method_invocation_return_value(
+            inv, g_variant_new("(sub)", o && o->name ? o->name : "", (guint32)MIN(ago, (gint64)G_MAXUINT32), more));
+    } else if (strcmp(method, "NewWindow") == 0) {
+        g_dbus_method_invocation_return_value(inv, g_variant_new("(b)", open_new_window(text)));
+    } else {
+        say("here: %s", text);
+        g_dbus_method_invocation_return_value(inv, NULL);
+    }
+}
+
+static GVariant *kwin_scripting(GDBusConnection *bus, const char *method, GVariant *args, const char *reply,
+                                GError **err) {
+    return g_dbus_connection_call_sync(bus, "org.kde.KWin", "/Scripting", "org.kde.kwin.Scripting", method, args,
+                                       reply ? G_VARIANT_TYPE(reply) : NULL, G_DBUS_CALL_FLAGS_NONE, 3000, NULL, err);
+}
+
+/* KWin unloads a script of ours by its name; TRUE if it had it. */
+static gboolean kwin_unload(GDBusConnection *bus, const char *name) {
+    gboolean had = FALSE;
+    GVariant *r = kwin_scripting(bus, "unloadScript", g_variant_new("(s)", name), "(b)", NULL);
+    if (r) {
+        g_variant_get(r, "(b)", &had);
+        g_variant_unref(r);
+    }
+    return had;
+}
+
+static gboolean unload_here(GDBusConnection *bus) { return kwin_unload(bus, HERE_SCRIPT); }
+
+/* The session bus, and KWin's unique name on it: only KWin's scripts are answered. */
+static gboolean kwin_owner(GError **err) {
+    if (!app.bus) app.bus = g_bus_get_sync(G_BUS_TYPE_SESSION, NULL, err);
+    if (!app.bus) return FALSE;
+    if (app.kwin_name) return TRUE;
+    GVariant *r = g_dbus_connection_call_sync(app.bus, "org.freedesktop.DBus", "/org/freedesktop/DBus",
+                                              "org.freedesktop.DBus", "GetNameOwner", g_variant_new("(s)", "org.kde.KWin"),
+                                              G_VARIANT_TYPE("(s)"), G_DBUS_CALL_FLAGS_NONE, 3000, NULL, err);
+    if (!r) return FALSE;
+    g_variant_get(r, "(s)", &app.kwin_name);
+    g_variant_unref(r);
+    return TRUE;
+}
+
+/*
+ * KWin runs the script in `file` as `name`. One of that name a session that
+ * died left behind goes first: KWin loads a name once.
+ */
+static gboolean kwin_run_script(const char *file, const char *name, GError **err) {
+    kwin_unload(app.bus, name);
+    /* KWin numbers a script by how many it has (Scripting::loadScript), so after another was
+     * unloaded the number can be one in use, whose /Scripting/ScriptN is that one's. */
+    char *before = NULL;
+    GVariant *r = g_dbus_connection_call_sync(app.bus, "org.kde.KWin", "/Scripting",
+                                              "org.freedesktop.DBus.Introspectable", "Introspect", NULL,
+                                              G_VARIANT_TYPE("(s)"), G_DBUS_CALL_FLAGS_NONE, 3000, NULL, NULL);
+    if (r) {
+        g_variant_get(r, "(s)", &before);
+        g_variant_unref(r);
+    }
+    gint id = -1;
+    r = kwin_scripting(app.bus, "loadScript", g_variant_new("(ss)", file, name), "(i)", err);
+    if (r) {
+        g_variant_get(r, "(i)", &id);
+        g_variant_unref(r);
+    }
+    char node[48], path[48];
+    g_snprintf(node, sizeof node, "name=\"Script%d\"", id);
+    g_snprintf(path, sizeof path, "/Scripting/Script%d", id);
+    if (id >= 0 && before && !strstr(before, node)) {
+        /* Ours alone; KWin answers once it has read the file. */
+        r = g_dbus_connection_call_sync(app.bus, "org.kde.KWin", path, "org.kde.kwin.Script", "run", NULL, NULL,
+                                        G_DBUS_CALL_FLAGS_NONE, 5000, NULL, err);
+        if (r) g_variant_unref(r);
+    } else if (id >= 0) {
+        /* start() also applies KWin's script settings (what is on or off), as its settings page does. */
+        say("KWin's number %d for %s is another's; starting it with KWin's own", id, name);
+        r = kwin_scripting(app.bus, "start", NULL, NULL, err);
+        if (r) g_variant_unref(r);
+    }
+    g_free(before);
+    return id >= 0 && !*err;
+}
+
+/* The service, then the script: KWin reads it from a file, in the cache, written anew each time. */
+static void here_start(void) {
+    if (app.wlr) return;
+    GError *err = NULL;
+    if (!kwin_owner(&err)) {
+        say("here: apps open where KWin puts them (%s)", err ? err->message : "no session bus");
+        g_clear_error(&err);
+        return;
+    }
+    static const GDBusInterfaceVTable vtable = {here_call, NULL, NULL, {0}};
+    GDBusNodeInfo *node = g_dbus_node_info_new_for_xml(here_xml, NULL);
+    app.here_object = g_dbus_connection_register_object(app.bus, HERE_PATH, node->interfaces[0], &vtable, NULL, NULL, &err);
+    g_dbus_node_info_unref(node);
+    if (!app.here_object) {
+        say("here: apps open where KWin puts them (%s)", err ? err->message : "?");
+        g_clear_error(&err);
+        return;
+    }
+    app.here_owner = g_bus_own_name_on_connection(app.bus, HERE_BUS,
+                                                  G_BUS_NAME_OWNER_FLAGS_REPLACE | G_BUS_NAME_OWNER_FLAGS_ALLOW_REPLACEMENT,
+                                                  NULL, NULL, NULL, NULL);
+    char *dir = g_build_filename(g_get_user_cache_dir(), "openandroiddex", NULL);
+    char *file = g_build_filename(dir, "kwin-here.js", NULL);
+    g_mkdir_with_parents(dir, 0700);
+    if (g_file_set_contents(file, HERE_JS, -1, &err) && kwin_run_script(file, HERE_SCRIPT, &err)) {
+        app.here_loaded = TRUE;
+        say("here: KWin runs %s: what is opened from a screen shows there", file);
+        /* If this program dies, the guard's `rest` unloads it. */
+        if (app.guard_fd == 0) start_guard();
+    } else {
+        say("here: KWin would not run %s (%s)", file, err ? err->message : "no script id");
+    }
+    g_clear_error(&err);
+    g_free(file);
+    g_free(dir);
+}
+
+/* ── KWin's on-screen keyboard after a session ─────────────────────────── */
+
+/*
+ * plasma-keyboard, Plasma Mobile's on-screen keyboard (KWin's input method),
+ * sizes itself for one screen and doesn't always follow when it is shown on
+ * another. After sessions on a computer's screen the phone's keyboard was a
+ * narrow strip of its keys, and stayed so until a new keyboard process came
+ * (S24, 2026-11-16). So when the computer's screen has gone, the keyboard
+ * process goes too, and KWin starts a new one, laid out for the phone: KWin
+ * starts its input method again whenever it crashes, and gives up only after
+ * five crashes each within 20 s of the last (InputMethod::startInputMethod).
+ * SIGTERM won't do: plasma-keyboard ends cleanly then, which KWin leaves be.
+ * Nothing of the user's settings is touched.
+ */
+static pid_t kwin_pid(GDBusConnection *bus) {
+    GVariant *r = bus ? g_dbus_connection_call_sync(bus, "org.freedesktop.DBus", "/org/freedesktop/DBus",
+                                                    "org.freedesktop.DBus", "GetConnectionUnixProcessID",
+                                                    g_variant_new("(s)", "org.kde.KWin"), G_VARIANT_TYPE("(u)"),
+                                                    G_DBUS_CALL_FLAGS_NONE, 1000, NULL, NULL)
+                      : NULL;
+    guint32 pid = 0;
+    if (r) {
+        g_variant_get(r, "(u)", &pid);
+        g_variant_unref(r);
+    }
+    return (pid_t)pid;
+}
+
+/* KWin's input method: the child it gave the variable only that one gets (MALIIT_ENABLE_ANIMATIONS). */
+static pid_t input_method_pid(pid_t kwin) {
+    pid_t found = 0;
+    DIR *d = opendir("/proc");
+    struct dirent *e;
+    while (d && !found && (e = readdir(d))) {
+        if (!isdigit((unsigned char)e->d_name[0])) continue;
+        char path[64];
+        g_snprintf(path, sizeof path, "/proc/%s/stat", e->d_name);
+        char *line = read_file(path, NULL);
+        /* pid (comm) state ppid ...: the comm can hold spaces, so from its closing parenthesis */
+        const char *close = line ? strrchr(line, ')') : NULL;
+        int ppid = 0;
+        if (close && sscanf(close + 1, " %*c %d", &ppid) == 1 && ppid == kwin) {
+            g_snprintf(path, sizeof path, "/proc/%s/environ", e->d_name);
+            gsize len = 0;
+            char *env = read_file(path, &len);
+            if (env && environ_get(env, len, "MALIIT_ENABLE_ANIMATIONS") && environ_get(env, len, "WAYLAND_SOCKET"))
+                found = (pid_t)atoi(e->d_name);
+            g_free(env);
+        }
+        g_free(line);
+    }
+    if (d) closedir(d);
+    return found;
+}
+
+static void restart_keyboard(GDBusConnection *bus, const char *who) {
+    pid_t kwin = kwin_pid(bus);
+    pid_t old = kwin > 0 ? input_method_pid(kwin) : 0;
+    if (old <= 0) return; /* no KWin (Phosh, or the session has ended), or no keyboard of its */
+    if (kill(old, SIGKILL) != 0) {
+        say("%s: the on-screen keyboard (%d) could not be started again: %s", who, (int)old, g_strerror(errno));
+        return;
+    }
+    pid_t now = 0;
+    for (int i = 0; i < 30 && (now <= 0 || now == old); i++) {
+        g_usleep(100 * 1000);
+        now = input_method_pid(kwin);
+    }
+    if (now > 0 && now != old) say("%s: the on-screen keyboard started again, for the phone's screen (%d, was %d)", who, (int)now, (int)old);
+    else say("%s: the on-screen keyboard (%d) ended, and KWin hasn't started another yet", who, (int)old);
+}
+
+static void here_stop(void) {
+    if (app.here_loaded && unload_here(app.bus)) say("here: KWin's script stopped");
+    app.here_loaded = FALSE;
+    if (app.here_owner) g_bus_unown_name(app.here_owner);
+    if (app.here_object) g_dbus_connection_unregister_object(app.bus, app.here_object);
+    app.here_owner = app.here_object = 0;
+}
+
+/* ── One app's window (serve --app) ───────────────────────────────────── */
+
+/*
+ * One of the phone's apps in a window of its own on the computer, as an
+ * Android app's is (apps-on-pc.md): a screen of its own, made and streamed as
+ * the desktop's is and sized for the window, with the app's windows on it full
+ * screen (app.js, KWin's), and the app started first if it wasn't running.
+ * What is the desktop's is left out: Plasma Mobile's docked mode, here.js and
+ * its name on the bus, the on-screen keyboard. So several of these can run at
+ * once, each with a screen, a script and a name on the bus of its own, beside
+ * the desktop's. KWin only: Phosh has no way to put a window on a screen.
+ *
+ * What the app's script calls (KWin alone is answered):
+ *   Started(found)  it has looked; found: the app's window was brought over, else the app is started
+ *   Shown(title)    a window of the app's is on the screen, full screen
+ *   Title(title)    the app's window in front has this title
+ *   Empty()         none of the app's windows is left on the screen
+ *   Note(text)      a line for this program's log
+ *   Back(text)      run as `back`: the windows have gone to the phone's screen (text: how many, for the log)
+ */
+#define APP_IFACE "com.ccrstech.openandroiddex.PmosApp"
+#define APP_PATH "/com/ccrstech/openandroiddex/PmosApp"
+/* The app's first window comes within this, or it isn't coming. */
+#define APP_OPEN_S 25
+/* None of its windows left this long, and the window on the computer closes: a dialog closing may have the main window next. */
+#define APP_EMPTY_MS 1500
+/* The script's run as `back` takes about 2 s (app.js's RESEND_MS); the screen goes after this at the latest. */
+#define APP_BACK_MS 4000
+
+static const char app_xml[] =
+    "<node><interface name='" APP_IFACE "'>"
+    "<method name='Started'><arg type='s' name='found' direction='in'/></method>"
+    "<method name='Shown'><arg type='s' name='title' direction='in'/></method>"
+    "<method name='Title'><arg type='s' name='title' direction='in'/></method>"
+    "<method name='Empty'/>"
+    "<method name='Note'><arg type='s' name='text' direction='in'/></method>"
+    "<method name='Back'><arg type='s' name='text' direction='in'/></method>"
+    "</interface></node>";
+
+/* The app's name, for what the computer's window says. */
+static char *app_label(void) {
+    GDesktopAppInfo *info = app_info(app.launch_id);
+    char *name = g_strdup(info ? g_app_info_get_name(G_APP_INFO(info)) : app.launch_id);
+    if (info) g_object_unref(info);
+    return name;
+}
+
+static void send_title(const char *title) {
+    GString *s = g_string_new("{\"t\":\"title\",\"title\":");
+    json_string(s, title ? title : "");
+    g_string_append_c(s, '}');
+    send_text(s->str);
+    g_string_free(s, TRUE);
+}
+
+static void app_fail(const char *message) {
+    say("app: %s", message);
+    send_state("failed", message);
+    finish(1);
+}
+
+static gboolean app_never_came(gpointer d) {
+    app.app_wait = 0;
+    if (!app.app_shown) {
+        char *name = app_label();
+        char *msg = g_strdup_printf("%s didn't open a window on the phone.", name);
+        app_fail(msg);
+        g_free(msg);
+        g_free(name);
+    }
+    return G_SOURCE_REMOVE;
+}
+
+static gboolean app_closed(gpointer d) {
+    app.app_empty = 0;
+    say("app: %s has no window on the screen any more", app.launch_id);
+    send_state("stopped", "The app was closed on the phone.");
+    finish(0);
+    return G_SOURCE_REMOVE;
+}
+
+/* The app, started as the drawer starts it: over the bus for an app started that way, else its Exec here. */
+static gboolean launch_app(GString *why) {
+    GDesktopAppInfo *info = app_info(app.launch_id);
+    if (!info) {
+        g_string_assign(why, "it isn't installed");
+        return FALSE;
+    }
+    gboolean ok;
+    if (g_desktop_app_info_get_boolean(info, "DBusActivatable")) {
+        /* org.freedesktop.Application.Activate: GLib runs nothing here for such an app. */
+        GError *err = NULL;
+        ok = g_app_info_launch(G_APP_INFO(info), NULL, NULL, &err);
+        if (!ok) g_string_assign(why, err ? err->message : "it didn't answer");
+        g_clear_error(&err);
+    } else {
+        ok = spawn_action(info, NULL, why);
+    }
+    g_object_unref(info);
+    return ok;
+}
+
+static void app_call(GDBusConnection *c, const char *sender, const char *path, const char *iface,
+                     const char *method, GVariant *params, GDBusMethodInvocation *inv, gpointer d) {
+    if (!app.kwin_name || g_strcmp0(sender, app.kwin_name) != 0) {
+        g_dbus_method_invocation_return_dbus_error(inv, "org.freedesktop.DBus.Error.AccessDenied",
+                                                   "Only KWin's script for the app's screen asks this.");
+        return;
+    }
+    if (strcmp(method, "Started") == 0) {
+        /* A string: KWin's scripts hand the bus numbers as doubles. */
+        const char *found = NULL;
+        g_variant_get(params, "(&s)", &found);
+        gboolean brought = g_strcmp0(found, "1") == 0;
+        g_dbus_method_invocation_return_value(inv, NULL);
+        if (brought) return;
+        GString *why = g_string_new(NULL);
+        if (launch_app(why)) {
+            say("app: %s: started", app.launch_id);
+        } else {
+            char *name = app_label();
+            char *msg = g_strdup_printf("The phone couldn't start %s: %s", name, why->str);
+            app_fail(msg);
+            g_free(msg);
+            g_free(name);
+        }
+        g_string_free(why, TRUE);
+        return;
+    }
+    const char *text = NULL;
+    if (g_variant_is_of_type(params, G_VARIANT_TYPE("(s)"))) g_variant_get(params, "(&s)", &text);
+    if (strcmp(method, "Shown") == 0) {
+        if (!app.app_shown) say("app: %s: its window is on the screen", app.launch_id);
+        app.app_shown = TRUE;
+        if (app.app_wait) g_source_remove(app.app_wait);
+        if (app.app_empty) g_source_remove(app.app_empty);
+        app.app_wait = app.app_empty = 0;
+        send_title(text);
+    } else if (strcmp(method, "Title") == 0) {
+        send_title(text);
+    } else if (strcmp(method, "Empty") == 0) {
+        if (!app.app_empty) app.app_empty = g_timeout_add(APP_EMPTY_MS, app_closed, NULL);
+    } else if (strcmp(method, "Back") == 0) {
+        say("app: back on the phone's screen: %s", text ? text : "");
+        app.app_back = TRUE;
+    } else {
+        say("app: %s", text ? text : "");
+    }
+    g_dbus_method_invocation_return_value(inv, NULL);
+}
+
+/* A program that starts the app, not the app: its windows don't go by that name. */
+static gboolean launcher_name(const char *exe) {
+    static const char *const launchers[] = {"flatpak", "env", "sh", "bash", "dash", "python", "python3", "java",
+                                            "sudo", "pkexec", "gtk-launch", "kstart", "kstart5", "kstart6",
+                                            "dbus-launch", "snap", NULL};
+    for (int i = 0; launchers[i]; i++)
+        if (strcmp(exe, launchers[i]) == 0) return TRUE;
+    return FALSE;
+}
+
+/*
+ * The app's script, with what it needs to know first (app_config) in front,
+ * written to a file in the cache that KWin reads, and run; `back`: once more,
+ * to hand the windows back (app_hand_back), under a name of its own.
+ */
+static gboolean app_run_js(gboolean back, GError **err) {
+    const char *suffix = back ? "-back" : "";
+    GString *js = g_string_new("const CONFIG = ");
+    g_string_append(js, app.app_config);
+    g_string_append(js, ";\n");
+    if (back) g_string_append(js, "CONFIG.back = true;\n");
+    g_string_append(js, APP_JS);
+    char *dir = g_build_filename(g_get_user_cache_dir(), "openandroiddex", NULL);
+    char *base = g_strdup_printf("kwin-%s%s.js", app.name, suffix);
+    char *file = g_build_filename(dir, base, NULL);
+    char *name = g_strconcat(app.app_script, suffix, NULL);
+    g_mkdir_with_parents(dir, 0700);
+    gboolean ok = g_file_set_contents(file, js->str, -1, err) && kwin_run_script(file, name, err);
+    if (ok) say("app: KWin runs %s %s %s", file, back ? "to hand back the windows of" : "for", app.launch_id);
+    g_free(name);
+    g_free(file);
+    g_free(base);
+    g_free(dir);
+    g_string_free(js, TRUE);
+    return ok;
+}
+
+/*
+ * The app's screen is up: the name on the bus its script calls, then the
+ * script, with what it needs to know first (the screen, the app, the names
+ * its windows may go by).
+ */
+static gboolean app_start(GString *why) {
+    GError *err = NULL;
+    GDesktopAppInfo *info = app_info(app.launch_id);
+    if (!info) {
+        g_string_assign(why, "The phone doesn't have that app any more.");
+        return FALSE;
+    }
+    if (!kwin_owner(&err)) {
+        g_string_printf(why, "KWin isn't answering on the phone (%s).", err ? err->message : "no session bus");
+        g_clear_error(&err);
+        g_object_unref(info);
+        return FALSE;
+    }
+    static const GDBusInterfaceVTable vtable = {app_call, NULL, NULL, {0}};
+    GDBusNodeInfo *node = g_dbus_node_info_new_for_xml(app_xml, NULL);
+    app.app_object = g_dbus_connection_register_object(app.bus, APP_PATH, node->interfaces[0], &vtable, NULL, NULL, &err);
+    g_dbus_node_info_unref(node);
+    /* Taken before the script runs: it calls at once. */
+    app.app_bus = g_strdup_printf(APP_IFACE ".p%d", (int)getpid());
+    guint32 got = 0;
+    GVariant *r = app.app_object ? g_dbus_connection_call_sync(app.bus, "org.freedesktop.DBus", "/org/freedesktop/DBus",
+                                                               "org.freedesktop.DBus", "RequestName",
+                                                               g_variant_new("(su)", app.app_bus, 4 /* DO_NOT_QUEUE */),
+                                                               G_VARIANT_TYPE("(u)"), G_DBUS_CALL_FLAGS_NONE, 3000, NULL, &err)
+                                 : NULL;
+    if (r) {
+        g_variant_get(r, "(u)", &got);
+        g_variant_unref(r);
+    }
+    if (got != 1 /* PRIMARY_OWNER */) {
+        g_string_printf(why, "The phone's session bus wouldn't take the app's name (%s).", err ? err->message : "taken");
+        g_clear_error(&err);
+        g_object_unref(info);
+        return FALSE;
+    }
+
+    struct output *o = our_output();
+    GString *cfg = g_string_new("{\"bus\":");
+    json_string(cfg, app.app_bus);
+    g_string_append(cfg, ",\"path\":");
+    json_string(cfg, APP_PATH);
+    g_string_append(cfg, ",\"iface\":");
+    json_string(cfg, APP_IFACE);
+    g_string_append(cfg, ",\"output\":");
+    json_string(cfg, o && o->name ? o->name : "");
+    g_string_append(cfg, ",\"app\":");
+    json_string(cfg, app.launch_id);
+    /* The names its windows may go by when they don't go by the app's: its window class, its program. */
+    g_string_append(cfg, ",\"classes\":[");
+    const char *wm = g_desktop_app_info_get_startup_wm_class(info);
+    const char *exe_path = g_app_info_get_executable(G_APP_INFO(info));
+    char *exe = exe_path ? g_path_get_basename(exe_path) : NULL;
+    gboolean any = FALSE;
+    if (wm && *wm) {
+        json_string(cfg, wm);
+        any = TRUE;
+    }
+    if (exe && *exe && !launcher_name(exe)) {
+        if (any) g_string_append_c(cfg, ',');
+        json_string(cfg, exe);
+    }
+    g_string_append(cfg, "]}");
+    app.app_config = g_string_free(cfg, FALSE);
+    g_free(exe);
+    g_object_unref(info);
+
+    app.app_script = g_strdup_printf("openandroiddex-pmos-%s", app.name);
+    gboolean ok = app_run_js(FALSE, &err);
+    if (ok) {
+        app.app_loaded = TRUE;
+        /* If this program dies, the guard unloads it: KWin keeps a script until it is told. */
+        if (app.guard_fd == 0) start_guard_for(app.app_script);
+        if (!app.app_shown) app.app_wait = g_timeout_add_seconds(APP_OPEN_S, app_never_came, NULL);
+    } else {
+        g_string_printf(why, "KWin wouldn't run the app's script (%s).", err ? err->message : "no script id");
+    }
+    g_clear_error(&err);
+    return ok;
+}
+
+static gboolean app_back_late(gpointer d) {
+    *(gboolean *)d = TRUE;
+    return G_SOURCE_REMOVE;
+}
+
+/*
+ * Before the app's screen goes: the windows on it go to the phone's screen,
+ * the app's out of full screen, by the app's script run once more as `back`
+ * (app.js), which calls Back once they are there and have stayed. KWin would
+ * otherwise put them on a screen of its choosing as the screen goes, full
+ * screen still: the phone's desktop on the computer, when that is open too.
+ * The script that brought them over goes first: what it would make of them
+ * leaving (Empty) is no one's now.
+ */
+static void app_hand_back(void) {
+    if (!app.app_object || !app.app_config) return;
+    GError *err = NULL;
+    app.app_back = FALSE;
+    if (!app_run_js(TRUE, &err)) {
+        say("app: KWin wouldn't hand the windows back (%s): KWin puts them where it puts them",
+            err ? err->message : "no script id");
+        g_clear_error(&err);
+        return;
+    }
+    /* Back comes over the bus, which the main loop answers; it has ended, so it runs here a little. */
+    gboolean late = FALSE;
+    guint timer = g_timeout_add(APP_BACK_MS, app_back_late, &late);
+    while (!app.app_back && !late) g_main_context_iteration(NULL, TRUE);
+    if (late) say("app: the windows weren't handed back within %d ms", APP_BACK_MS);
+    else g_source_remove(timer);
+    char *back = g_strconcat(app.app_script, "-back", NULL);
+    kwin_unload(app.bus, back);
+    g_free(back);
+}
+
+static void app_stop(void) {
+    if (app.app_wait) g_source_remove(app.app_wait);
+    if (app.app_empty) g_source_remove(app.app_empty);
+    app.app_wait = app.app_empty = 0;
+    if (app.app_loaded && kwin_unload(app.bus, app.app_script)) say("app: KWin's script stopped");
+    app.app_loaded = FALSE;
+    app_hand_back();
+    if (app.app_object) g_dbus_connection_unregister_object(app.bus, app.app_object);
+    app.app_object = 0;
+}
+
+/* ── The clipboard ─────────────────────────────────────────────────────── */
+
+/*
+ * Both ways, by the window's rules (clipboardShare.ts): the computer's text
+ * comes as {"t":"clip","text":…} when the window comes to the front, and
+ * what is copied on the phone goes to the window as the same message while
+ * one is open. The window decides whether it lands on the computer's
+ * clipboard; an empty text from it takes back what it gave.
+ *
+ * A Wayland program sees the clipboard only while it has the keyboard, which
+ * this one never has. Data-control is what clipboard managers use instead:
+ * the seat's clipboard at any time, and a way to set it. KWin 6.8 has the
+ * standard one (ext-data-control-v1); wlroots (Phosh) also its own older
+ * one (zwlr-data-control-unstable-v1), the same but for its names.
+ *
+ * Text only, in the types toolkits ask for. What the computer put there
+ * carries a type of this program's own beside them, so that when the phone
+ * says its clipboard is now that, it isn't sent back. The phone's text goes
+ * only once a window is open, only while its switch is on
+ * ({"t":"clipshare","on":…}, which the window says when it shows the picture
+ * and whenever the switch moves), and only when it changes: a window that
+ * opens hands the computer's clipboard over (if it is in front), which the
+ * phone's older one mustn't overwrite.
+ */
+#define CLIP_MINE "application/x-openandroiddex-pmos"
+/* The most the window takes from the phone at once (clipboardShare.ts's COMPUTER_MAX). */
+#define CLIP_MAX (4 << 20)
+static const char *const CLIP_TYPES[] = {"text/plain;charset=utf-8", "UTF8_STRING", "text/plain", "TEXT", "STRING",
+                                         NULL};
+
+struct clip_offer {
+    struct wl_proxy *wl;
+    GPtrArray *types;
+};
+
+struct clip_source {
+    struct wl_proxy *wl;
+    GBytes *text;
+};
+
+struct clip_read {
+    int fd;
+    guint watch, timeout;
+    GByteArray *buf;
+};
+
+struct clip_write {
+    GBytes *text;
+    gsize off;
+};
+
+static gboolean clip_has(struct clip_offer *o, const char *mime) {
+    for (guint i = 0; i < o->types->len; i++)
+        if (strcmp(g_ptr_array_index(o->types, i), mime) == 0) return TRUE;
+    return FALSE;
+}
+
+static void clip_offer_free(struct clip_offer *o) {
+    if (!o) return;
+    if (app.dc_ext) ext_data_control_offer_v1_destroy((struct ext_data_control_offer_v1 *)o->wl);
+    else zwlr_data_control_offer_v1_destroy((struct zwlr_data_control_offer_v1 *)o->wl);
+    g_ptr_array_free(o->types, TRUE);
+    g_free(o);
+}
+
+static void clip_offer_type(struct clip_offer *o, const char *mime) {
+    if (o->types->len < 64) g_ptr_array_add(o->types, g_strdup(mime));
+}
+static void ext_offer_type(void *d, struct ext_data_control_offer_v1 *o, const char *mime) { clip_offer_type(d, mime); }
+static void wlr_offer_type(void *d, struct zwlr_data_control_offer_v1 *o, const char *mime) { clip_offer_type(d, mime); }
+static const struct ext_data_control_offer_v1_listener ext_offer_listener = {.offer = ext_offer_type};
+static const struct zwlr_data_control_offer_v1_listener wlr_offer_listener = {.offer = wlr_offer_type};
+
+static void clip_read_stop(void) {
+    struct clip_read *r = app.clip_reading;
+    if (!r) return;
+    app.clip_reading = NULL;
+    if (r->watch) g_source_remove(r->watch);
+    if (r->timeout) g_source_remove(r->timeout);
+    close(r->fd);
+    g_byte_array_free(r->buf, TRUE);
+    g_free(r);
+}
+
+/* What was copied on the phone, to the window; for `clip`, to stdout. */
+static void clip_arrived(const guint8 *data, gsize len) {
+    if (app.clip_print) {
+        fwrite(data, 1, len, stdout);
+        fflush(stdout);
+        if (app.loop) g_main_loop_quit(app.loop);
+        return;
+    }
+    if (!len || !g_atomic_int_get(&app.attached) || !app.clip_share) return;
+    char *text = g_utf8_make_valid((const char *)data, (gssize)len);
+    GString *s = g_string_sized_new(len + 32);
+    g_string_append(s, "{\"t\":\"clip\",\"text\":");
+    json_string(s, text);
+    g_string_append_c(s, '}');
+    send_frame(KIND_TEXT, s->str, s->len, NULL, 0);
+    say("clipboard: %zu bytes copied on the phone, to the computer", len);
+    g_string_free(s, TRUE);
+    g_free(text);
+}
+
+static gboolean clip_read_more(gint fd, GIOCondition cond, gpointer d) {
+    struct clip_read *r = d;
+    guint8 chunk[65536];
+    for (;;) {
+        ssize_t n = read(fd, chunk, sizeof chunk);
+        if (n > 0) {
+            if (r->buf->len + (gsize)n > CLIP_MAX) {
+                say("clipboard: what was copied on the phone is over %d MB; it stays there", CLIP_MAX >> 20);
+                break;
+            }
+            g_byte_array_append(r->buf, chunk, (guint)n);
+            continue;
+        }
+        if (n < 0 && errno == EINTR) continue;
+        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) return G_SOURCE_CONTINUE;
+        if (n == 0) clip_arrived(r->buf->data, r->buf->len);
+        break;
+    }
+    r->watch = 0; /* this source, which ends with this call */
+    clip_read_stop();
+    return G_SOURCE_REMOVE;
+}
+
+static gboolean clip_read_late(gpointer d) {
+    struct clip_read *r = d;
+    say("clipboard: the app the phone's clipboard is from didn't hand it over");
+    r->timeout = 0;
+    clip_read_stop();
+    if (app.clip_print && app.loop) g_main_loop_quit(app.loop);
+    return G_SOURCE_REMOVE;
+}
+
+/* The phone's clipboard is something new: its text, if it is text the computer didn't put there. */
+static void clip_changed(void) {
+    clip_read_stop();
+    struct clip_offer *o = app.clip_now;
+    if (!o) return; /* emptied: the app it came from has gone; the computer keeps its own */
+    /* Nothing leaves the phone unless a window is there and its switch is on. */
+    if (!app.clip_print && (clip_has(o, CLIP_MINE) || !g_atomic_int_get(&app.attached) || !app.clip_share)) return;
+    const char *mime = NULL;
+    for (int k = 0; CLIP_TYPES[k] && !mime; k++)
+        if (clip_has(o, CLIP_TYPES[k])) mime = CLIP_TYPES[k];
+    if (!mime) {
+        /* A picture, or files: not shared. */
+        if (app.clip_print) {
+            GString *all = g_string_new(NULL);
+            for (guint i = 0; i < o->types->len; i++)
+                g_string_append_printf(all, "%s%s", i ? ", " : "", (char *)g_ptr_array_index(o->types, i));
+            say("clip: the clipboard has no text, only %s", all->len ? all->str : "nothing");
+            g_string_free(all, TRUE);
+        }
+        return;
+    }
+    int p[2];
+    if (pipe2(p, O_CLOEXEC | O_NONBLOCK) != 0) return;
+    if (app.dc_ext) ext_data_control_offer_v1_receive((struct ext_data_control_offer_v1 *)o->wl, mime, p[1]);
+    else zwlr_data_control_offer_v1_receive((struct zwlr_data_control_offer_v1 *)o->wl, mime, p[1]);
+    close(p[1]); /* the request has its own copy */
+    wl_display_flush(app.display);
+    struct clip_read *r = g_new0(struct clip_read, 1);
+    r->fd = p[0];
+    r->buf = g_byte_array_new();
+    r->watch = g_unix_fd_add(p[0], G_IO_IN | G_IO_HUP | G_IO_ERR, clip_read_more, r);
+    r->timeout = g_timeout_add_seconds(5, clip_read_late, r);
+    app.clip_reading = r;
+}
+
+static void clip_offered(struct wl_proxy *wl) {
+    struct clip_offer *o = g_new0(struct clip_offer, 1);
+    o->wl = wl;
+    o->types = g_ptr_array_new_with_free_func(g_free);
+    if (app.dc_ext) ext_data_control_offer_v1_add_listener((struct ext_data_control_offer_v1 *)wl, &ext_offer_listener, o);
+    else zwlr_data_control_offer_v1_add_listener((struct zwlr_data_control_offer_v1 *)wl, &wlr_offer_listener, o);
+}
+
+static void clip_selection(struct wl_proxy *wl) {
+    struct clip_offer *o = wl ? wl_proxy_get_user_data(wl) : NULL;
+    if (app.clip_now && app.clip_now != o && app.clip_now != app.clip_primary) clip_offer_free(app.clip_now);
+    app.clip_now = o;
+    clip_changed();
+}
+
+static void clip_primary_selection(struct wl_proxy *wl) {
+    struct clip_offer *o = wl ? wl_proxy_get_user_data(wl) : NULL;
+    if (app.clip_primary && app.clip_primary != o && app.clip_primary != app.clip_now) clip_offer_free(app.clip_primary);
+    app.clip_primary = o;
+}
+
+static void clip_finished(void) {
+    say("clipboard: the phone's desktop has stopped telling this program about its clipboard");
+    clip_read_stop();
+    if (app.dc_ext) ext_data_control_device_v1_destroy((struct ext_data_control_device_v1 *)app.dc_device);
+    else zwlr_data_control_device_v1_destroy((struct zwlr_data_control_device_v1 *)app.dc_device);
+    app.dc_device = NULL;
+}
+
+static void ext_dev_offer(void *d, struct ext_data_control_device_v1 *dev, struct ext_data_control_offer_v1 *o) {
+    clip_offered((struct wl_proxy *)o);
+}
+static void ext_dev_selection(void *d, struct ext_data_control_device_v1 *dev, struct ext_data_control_offer_v1 *o) {
+    clip_selection((struct wl_proxy *)o);
+}
+static void ext_dev_finished(void *d, struct ext_data_control_device_v1 *dev) { clip_finished(); }
+static void ext_dev_primary(void *d, struct ext_data_control_device_v1 *dev, struct ext_data_control_offer_v1 *o) {
+    clip_primary_selection((struct wl_proxy *)o);
+}
+static const struct ext_data_control_device_v1_listener ext_device_listener = {
+    .data_offer = ext_dev_offer,
+    .selection = ext_dev_selection,
+    .finished = ext_dev_finished,
+    .primary_selection = ext_dev_primary,
+};
+static void wlr_dev_offer(void *d, struct zwlr_data_control_device_v1 *dev, struct zwlr_data_control_offer_v1 *o) {
+    clip_offered((struct wl_proxy *)o);
+}
+static void wlr_dev_selection(void *d, struct zwlr_data_control_device_v1 *dev, struct zwlr_data_control_offer_v1 *o) {
+    clip_selection((struct wl_proxy *)o);
+}
+static void wlr_dev_finished(void *d, struct zwlr_data_control_device_v1 *dev) { clip_finished(); }
+static void wlr_dev_primary(void *d, struct zwlr_data_control_device_v1 *dev, struct zwlr_data_control_offer_v1 *o) {
+    clip_primary_selection((struct wl_proxy *)o);
+}
+static const struct zwlr_data_control_device_v1_listener wlr_device_listener = {
+    .data_offer = wlr_dev_offer,
+    .selection = wlr_dev_selection,
+    .finished = wlr_dev_finished,
+    .primary_selection = wlr_dev_primary,
+};
+
+static void clip_source_free(struct clip_source *s) {
+    if (!s) return;
+    if (app.dc_ext) ext_data_control_source_v1_destroy((struct ext_data_control_source_v1 *)s->wl);
+    else zwlr_data_control_source_v1_destroy((struct zwlr_data_control_source_v1 *)s->wl);
+    g_bytes_unref(s->text);
+    g_free(s);
+}
+
+static gboolean clip_write_more(gint fd, GIOCondition cond, gpointer d) {
+    struct clip_write *w = d;
+    gsize len = 0;
+    const guint8 *data = g_bytes_get_data(w->text, &len);
+    while (w->off < len) {
+        ssize_t n = write(fd, data + w->off, len - w->off);
+        if (n > 0) {
+            w->off += (gsize)n;
+            continue;
+        }
+        if (n < 0 && errno == EINTR) continue;
+        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) return G_SOURCE_CONTINUE;
+        break; /* the app pasting has gone (EPIPE) */
+    }
+    close(fd);
+    g_bytes_unref(w->text);
+    g_free(w);
+    return G_SOURCE_REMOVE;
+}
+
+/* An app on the phone pastes: the computer's text, as much at once as the pipe takes, the rest as it reads. */
+static void clip_send(struct clip_source *s, const char *mime, int fd) {
+    if (strcmp(mime, CLIP_MINE) == 0) {
+        close(fd);
+        return;
+    }
+    struct clip_write *w = g_new0(struct clip_write, 1);
+    w->text = g_bytes_ref(s->text);
+    fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK);
+    if (clip_write_more(fd, G_IO_OUT, w) == G_SOURCE_CONTINUE)
+        g_unix_fd_add(fd, G_IO_OUT | G_IO_ERR | G_IO_HUP, clip_write_more, w);
+}
+
+/* `clip --set`: it holds the clipboard until something else is copied. */
+static gboolean clip_holding;
+
+/* Something else was copied on the phone: the computer's text is no longer there. */
+static void clip_cancelled(struct clip_source *s) {
+    if (app.clip_mine == s) app.clip_mine = NULL;
+    clip_source_free(s);
+    if (clip_holding && app.loop) g_main_loop_quit(app.loop);
+}
+
+static void ext_src_send(void *d, struct ext_data_control_source_v1 *src, const char *mime, int32_t fd) {
+    clip_send(d, mime, fd);
+}
+static void ext_src_cancelled(void *d, struct ext_data_control_source_v1 *src) { clip_cancelled(d); }
+static const struct ext_data_control_source_v1_listener ext_source_listener = {
+    .send = ext_src_send,
+    .cancelled = ext_src_cancelled,
+};
+static void wlr_src_send(void *d, struct zwlr_data_control_source_v1 *src, const char *mime, int32_t fd) {
+    clip_send(d, mime, fd);
+}
+static void wlr_src_cancelled(void *d, struct zwlr_data_control_source_v1 *src) { clip_cancelled(d); }
+static const struct zwlr_data_control_source_v1_listener wlr_source_listener = {
+    .send = wlr_src_send,
+    .cancelled = wlr_src_cancelled,
+};
+
+/* The computer's text, onto the phone's clipboard; none takes back what it gave, if it is still there. */
+static void clip_give(const char *text, gsize len) {
+    if (!app.dc_device) return;
+    if (!len) {
+        if (app.clip_mine) {
+            if (app.dc_ext) ext_data_control_device_v1_set_selection((struct ext_data_control_device_v1 *)app.dc_device, NULL);
+            else zwlr_data_control_device_v1_set_selection((struct zwlr_data_control_device_v1 *)app.dc_device, NULL);
+            clip_source_free(app.clip_mine);
+            app.clip_mine = NULL;
+            say("clipboard: the computer took its text back");
+        }
+        wl_display_flush(app.display);
+        return;
+    }
+    struct clip_source *s = g_new0(struct clip_source, 1);
+    s->text = g_bytes_new(text, len);
+    if (app.dc_ext) {
+        struct ext_data_control_source_v1 *src = ext_data_control_manager_v1_create_data_source(app.dc_ext);
+        ext_data_control_source_v1_add_listener(src, &ext_source_listener, s);
+        s->wl = (struct wl_proxy *)src;
+        ext_data_control_source_v1_offer(src, CLIP_MINE);
+        for (int k = 0; CLIP_TYPES[k]; k++) ext_data_control_source_v1_offer(src, CLIP_TYPES[k]);
+        ext_data_control_device_v1_set_selection((struct ext_data_control_device_v1 *)app.dc_device, src);
+    } else {
+        struct zwlr_data_control_source_v1 *src = zwlr_data_control_manager_v1_create_data_source(app.dc_wlr);
+        zwlr_data_control_source_v1_add_listener(src, &wlr_source_listener, s);
+        s->wl = (struct wl_proxy *)src;
+        zwlr_data_control_source_v1_offer(src, CLIP_MINE);
+        for (int k = 0; CLIP_TYPES[k]; k++) zwlr_data_control_source_v1_offer(src, CLIP_TYPES[k]);
+        zwlr_data_control_device_v1_set_selection((struct zwlr_data_control_device_v1 *)app.dc_device, src);
+    }
+    /* After the new one is set, so the clipboard is never empty between the two. */
+    if (app.clip_mine) clip_source_free(app.clip_mine);
+    app.clip_mine = s;
+    wl_display_flush(app.display);
+    say("clipboard: %zu bytes from the computer, on the phone's clipboard", len);
+}
+
+static void clip_start(void) {
+    if (!app.seat || app.dc_device) return;
+    if (app.dc_ext) {
+        struct ext_data_control_device_v1 *dev = ext_data_control_manager_v1_get_data_device(app.dc_ext, app.seat);
+        ext_data_control_device_v1_add_listener(dev, &ext_device_listener, NULL);
+        app.dc_device = (struct wl_proxy *)dev;
+    } else if (app.dc_wlr) {
+        struct zwlr_data_control_device_v1 *dev = zwlr_data_control_manager_v1_get_data_device(app.dc_wlr, app.seat);
+        zwlr_data_control_device_v1_add_listener(dev, &wlr_device_listener, NULL);
+        app.dc_device = (struct wl_proxy *)dev;
+    } else {
+        say("clipboard: this desktop has no data-control, so the clipboard stays the phone's");
+    }
+}
+
+static void on_clip(const char *json) {
+    GString *text = json_text(json, "text");
+    if (!text) return;
+    clip_give(text->str, text->len);
+    g_string_free(text, TRUE);
+}
+
+/* The window's switch: off, and what is copied on the phone stays on the phone, not read, not sent. */
+static void on_clipshare(const char *json) {
+    char v[16];
+    gboolean on = json_raw(json, "on", v, sizeof v) && strcmp(v, "true") == 0;
+    if (on != app.clip_share) say("clipboard: sharing %s", on ? "on" : "off");
+    app.clip_share = on;
+    if (!on) clip_read_stop(); /* one on its way goes nowhere */
+}
+
+/* ── Files dropped on the window ───────────────────────────────────────── */
+
+/*
+ * The computer copies a drop into the phone's Downloads first (`receive`,
+ * below), then asks for it to be dropped where it was let go of:
+ * {"t":"drop","x":X,"y":Y,"uris":"file:///…\r\n"}, X and Y in the picture's
+ * pixels. Wayland lets a program start a drag only from a button pressed on a
+ * surface of its own. So this program puts eight pixels of its own over
+ * everything at that point (a layer-shell surface), presses the button on them
+ * with its own pointer, starts a drag there carrying the files' URIs, has them
+ * let the pointer through, moves the pointer a pixel and back so the
+ * compositor looks for what is under it, and lets go. The app there takes the
+ * files as it would from its own file manager (a browser's upload, a chat, a
+ * terminal typing the path), or doesn't; either way they are in Downloads.
+ * It answers {"t":"dropped","taken":…,"why":…}.
+ *
+ * The pointer is borrowed for a moment and put back where the computer has
+ * it. This runs on the main loop, so the computer's own messages wait
+ * meanwhile; with a button held on the computer it isn't tried.
+ */
+#define DROP_SIZE 8
+
+static struct {
+    struct wl_surface *surface;
+    struct zwlr_layer_surface_v1 *layer;
+    struct wl_buffer *buffer;
+    struct wl_data_source *source;
+    const char *uris;
+    uint32_t serial, action;
+    gboolean configured, entered, pressed, accepted, agreed, sent, dropped, finished, cancelled, over;
+} drag;
+
+static void dp_enter(void *d, struct wl_pointer *p, uint32_t serial, struct wl_surface *s, wl_fixed_t x, wl_fixed_t y) {
+    if (s && s == drag.surface) drag.entered = TRUE;
+}
+static void dp_leave(void *d, struct wl_pointer *p, uint32_t serial, struct wl_surface *s) {
+    if (s && s == drag.surface) drag.entered = FALSE;
+}
+static void dp_motion(void *d, struct wl_pointer *p, uint32_t t, wl_fixed_t x, wl_fixed_t y) {}
+static void dp_button(void *d, struct wl_pointer *p, uint32_t serial, uint32_t t, uint32_t button, uint32_t state) {
+    if (drag.entered && button == BTN_LEFT && state == WL_POINTER_BUTTON_STATE_PRESSED) {
+        drag.serial = serial;
+        drag.pressed = TRUE;
+    }
+}
+static void dp_axis(void *d, struct wl_pointer *p, uint32_t t, uint32_t axis, wl_fixed_t v) {}
+static void dp_frame(void *d, struct wl_pointer *p) {}
+static void dp_axis_source(void *d, struct wl_pointer *p, uint32_t source) {}
+static void dp_axis_stop(void *d, struct wl_pointer *p, uint32_t t, uint32_t axis) {}
+static void dp_axis_discrete(void *d, struct wl_pointer *p, uint32_t axis, int32_t discrete) {}
+static const struct wl_pointer_listener drop_pointer_listener = {
+    .enter = dp_enter,
+    .leave = dp_leave,
+    .motion = dp_motion,
+    .button = dp_button,
+    .axis = dp_axis,
+    .frame = dp_frame,
+    .axis_source = dp_axis_source,
+    .axis_stop = dp_axis_stop,
+    .axis_discrete = dp_axis_discrete,
+};
+
+/* The compositor's offers to this program's own surface (the drag passing over it): let go of. */
+static void dd_forget(void) {
+    if (app.dnd_offer) wl_data_offer_destroy(app.dnd_offer);
+    app.dnd_offer = NULL;
+}
+static void dd_offer(void *d, struct wl_data_device *dd, struct wl_data_offer *o) {
+    dd_forget();
+    app.dnd_offer = o;
+}
+static void dd_enter(void *d, struct wl_data_device *dd, uint32_t serial, struct wl_surface *s, wl_fixed_t x, wl_fixed_t y,
+                     struct wl_data_offer *o) {}
+static void dd_leave(void *d, struct wl_data_device *dd) { dd_forget(); }
+static void dd_motion(void *d, struct wl_data_device *dd, uint32_t t, wl_fixed_t x, wl_fixed_t y) {}
+static void dd_drop(void *d, struct wl_data_device *dd) { dd_forget(); }
+static void dd_selection(void *d, struct wl_data_device *dd, struct wl_data_offer *o) {
+    if (o && o == app.dnd_offer) dd_forget();
+}
+static const struct wl_data_device_listener drop_device_listener = {
+    .data_offer = dd_offer,
+    .enter = dd_enter,
+    .leave = dd_leave,
+    .motion = dd_motion,
+    .drop = dd_drop,
+    .selection = dd_selection,
+};
+
+/* The URIs to whoever took the drop: a few hundred bytes, waited on for a moment if the pipe is full. */
+static void ds_send(void *d, struct wl_data_source *s, const char *mime, int32_t fd) {
+    const char *p = drag.uris ? drag.uris : "";
+    gsize left = strlen(p);
+    fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK);
+    gint64 until = g_get_monotonic_time() + 2 * G_USEC_PER_SEC;
+    while (left && g_get_monotonic_time() < until) {
+        ssize_t n = write(fd, p, left);
+        if (n > 0) {
+            p += n;
+            left -= (gsize)n;
+        } else if (n < 0 && (errno == EAGAIN || errno == EINTR)) {
+            struct pollfd w = {fd, POLLOUT, 0};
+            poll(&w, 1, 100);
+        } else {
+            break;
+        }
+    }
+    close(fd);
+    drag.sent = left == 0;
+}
+static void ds_target(void *d, struct wl_data_source *s, const char *mime) {
+    drag.accepted = mime != NULL;
+    drag.agreed = drag.accepted && (app.ddm_version < 3 || drag.action);
+}
+static void ds_cancelled(void *d, struct wl_data_source *s) { drag.cancelled = drag.over = TRUE; }
+static void ds_drop_performed(void *d, struct wl_data_source *s) { drag.dropped = TRUE; }
+static void ds_finished(void *d, struct wl_data_source *s) { drag.finished = drag.over = TRUE; }
+static void ds_action(void *d, struct wl_data_source *s, uint32_t a) {
+    drag.action = a;
+    drag.agreed = drag.accepted && a;
+}
+static const struct wl_data_source_listener drop_source_listener = {
+    .target = ds_target,
+    .send = ds_send,
+    .cancelled = ds_cancelled,
+    .dnd_drop_performed = ds_drop_performed,
+    .dnd_finished = ds_finished,
+    .action = ds_action,
+};
+
+static void dl_configure(void *d, struct zwlr_layer_surface_v1 *l, uint32_t serial, uint32_t w, uint32_t h) {
+    zwlr_layer_surface_v1_ack_configure(l, serial);
+    drag.configured = TRUE;
+}
+static void dl_closed(void *d, struct zwlr_layer_surface_v1 *l) {}
+static const struct zwlr_layer_surface_v1_listener drop_layer_listener = {.configure = dl_configure, .closed = dl_closed};
+
+/* A buffer of nothing: fully transparent pixels, zeroes. */
+static struct wl_buffer *clear_buffer(int w, int h) {
+    int fd = memfd_create("openandroiddex-drop", MFD_CLOEXEC);
+    if (fd < 0) return NULL;
+    struct wl_buffer *b = NULL;
+    if (ftruncate(fd, (off_t)w * h * 4) == 0) {
+        struct wl_shm_pool *pool = wl_shm_create_pool(app.shm, fd, w * h * 4);
+        b = wl_shm_pool_create_buffer(pool, 0, w, h, w * 4, WL_SHM_FORMAT_ARGB8888);
+        wl_shm_pool_destroy(pool);
+    }
+    close(fd);
+    return b;
+}
+
+/* The compositor's events until *flag, the drag is over, or `ms` have passed. */
+static gboolean drag_wait(gboolean *flag, int ms) {
+    gint64 until = g_get_monotonic_time() + (gint64)ms * 1000;
+    while (!*flag && !drag.over) {
+        gint64 left = (until - g_get_monotonic_time()) / 1000;
+        if (left <= 0 || dispatch_for((int)MAX(left, 1)) < 0) break;
+    }
+    return *flag;
+}
+
+/* This program's own pointer, borrowed: fake input on KWin, the virtual pointer on wlroots. */
+static void drag_move(int x, int y) {
+    int pw = g_atomic_int_get(&app.pw), ph = g_atomic_int_get(&app.ph);
+    if (app.wlr) {
+        if (!app.vpointer || pw <= 0 || ph <= 0) return;
+        zwlr_virtual_pointer_v1_motion_absolute(app.vpointer, ms32(), (uint32_t)CLAMP(x, 0, pw - 1),
+                                                (uint32_t)CLAMP(y, 0, ph - 1), (uint32_t)pw, (uint32_t)ph);
+        zwlr_virtual_pointer_v1_frame(app.vpointer);
+    } else {
+        double gx, gy;
+        if (app.fake && to_global(x, y, &gx, &gy))
+            org_kde_kwin_fake_input_pointer_motion_absolute(app.fake, wl_fixed_from_double(gx), wl_fixed_from_double(gy));
+    }
+    wl_display_flush(app.display);
+}
+
+static void drag_button(gboolean down) {
+    uint32_t state = down ? WL_POINTER_BUTTON_STATE_PRESSED : WL_POINTER_BUTTON_STATE_RELEASED;
+    if (app.wlr) {
+        zwlr_virtual_pointer_v1_button(app.vpointer, ms32(), BTN_LEFT, state);
+        zwlr_virtual_pointer_v1_frame(app.vpointer);
+    } else {
+        org_kde_kwin_fake_input_button(app.fake, BTN_LEFT, state);
+    }
+    wl_display_flush(app.display);
+}
+
+static gboolean can_carry(void) {
+    return app.compositor && app.shm && app.layer_shell && app.ddm && app.seat &&
+           (app.wlr ? app.vpointer != NULL : app.fake != NULL);
+}
+
+static gboolean carry(int x, int y, const char *uris, GString *why) {
+    struct output *o = our_output();
+    int pw = g_atomic_int_get(&app.pw), ph = g_atomic_int_get(&app.ph);
+    if (!can_carry() || !o || pw <= 0 || ph <= 0) {
+        g_string_assign(why, "this phone's desktop can't hand files to its apps");
+        return FALSE;
+    }
+    if (!(app.seat_caps & WL_SEAT_CAPABILITY_POINTER)) {
+        g_string_assign(why, "the phone's desktop has no pointer to drop with");
+        return FALSE;
+    }
+    if (app.buttons) {
+        g_string_assign(why, "a mouse button was held down on the computer");
+        return FALSE;
+    }
+    x = CLAMP(x, 0, pw - 1);
+    y = CLAMP(y, 0, ph - 1);
+    if (!app.wl_pointer) {
+        app.wl_pointer = wl_seat_get_pointer(app.seat);
+        wl_pointer_add_listener(app.wl_pointer, &drop_pointer_listener, NULL);
+    }
+    if (!app.data_device) {
+        app.data_device = wl_data_device_manager_get_data_device(app.ddm, app.seat);
+        wl_data_device_add_listener(app.data_device, &drop_device_listener, NULL);
+    }
+    memset(&drag, 0, sizeof drag);
+    drag.uris = uris;
+    gint64 t0 = g_get_monotonic_time();
+    gboolean ok = FALSE;
+
+    /* Eight pixels of this program's own over everything, around the point (in the screen's logical units). */
+    double lw = o->logical && o->lw > 0 ? o->lw : pw / app.scale;
+    double lh = o->logical && o->lh > 0 ? o->lh : ph / app.scale;
+    int cx = (int)((x + 0.5) * lw / pw), cy = (int)((y + 0.5) * lh / ph);
+    int left = CLAMP(cx - DROP_SIZE / 2, 0, MAX(0, (int)lw - DROP_SIZE));
+    int top = CLAMP(cy - DROP_SIZE / 2, 0, MAX(0, (int)lh - DROP_SIZE));
+    drag.surface = wl_compositor_create_surface(app.compositor);
+    drag.layer = zwlr_layer_shell_v1_get_layer_surface(app.layer_shell, drag.surface, o->wl,
+                                                       ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY, "openandroiddex-drop");
+    zwlr_layer_surface_v1_add_listener(drag.layer, &drop_layer_listener, NULL);
+    zwlr_layer_surface_v1_set_size(drag.layer, DROP_SIZE, DROP_SIZE);
+    zwlr_layer_surface_v1_set_anchor(drag.layer, ZWLR_LAYER_SURFACE_V1_ANCHOR_TOP | ZWLR_LAYER_SURFACE_V1_ANCHOR_LEFT);
+    zwlr_layer_surface_v1_set_margin(drag.layer, top, 0, 0, left);
+    zwlr_layer_surface_v1_set_exclusive_zone(drag.layer, -1);
+    zwlr_layer_surface_v1_set_keyboard_interactivity(drag.layer, ZWLR_LAYER_SURFACE_V1_KEYBOARD_INTERACTIVITY_NONE);
+    wl_surface_commit(drag.surface);
+    if (!drag_wait(&drag.configured, 1000)) {
+        g_string_assign(why, "the phone's desktop didn't place the drop");
+        goto out;
+    }
+    drag.buffer = clear_buffer(DROP_SIZE, DROP_SIZE);
+    if (!drag.buffer) {
+        g_string_assign(why, "no memory for the drop");
+        goto out;
+    }
+    wl_surface_attach(drag.surface, drag.buffer, 0, 0);
+    wl_surface_damage(drag.surface, 0, 0, DROP_SIZE, DROP_SIZE);
+    wl_surface_commit(drag.surface);
+    wl_display_roundtrip(app.display);
+
+    /* The pointer onto them, the button pressed there. */
+    int nx = x + 1 < pw ? x + 1 : x - 1;
+    drag_move(nx, y);
+    drag_move(x, y);
+    if (!drag_wait(&drag.entered, 600)) {
+        g_string_assign(why, "the drop didn't get the pointer");
+        goto out;
+    }
+    drag_button(TRUE);
+    if (!drag_wait(&drag.pressed, 600)) {
+        drag_button(FALSE);
+        g_string_assign(why, "the drop didn't get the button");
+        goto out;
+    }
+
+    /* The drag, from them, carrying the URIs; then they let the pointer through. */
+    drag.source = wl_data_device_manager_create_data_source(app.ddm);
+    wl_data_source_add_listener(drag.source, &drop_source_listener, NULL);
+    wl_data_source_offer(drag.source, "text/uri-list");
+    if (app.ddm_version >= 3) wl_data_source_set_actions(drag.source, WL_DATA_DEVICE_MANAGER_DND_ACTION_COPY);
+    wl_data_device_start_drag(app.data_device, drag.source, drag.surface, NULL, drag.serial);
+    struct wl_region *none = wl_compositor_create_region(app.compositor);
+    wl_surface_set_input_region(drag.surface, none);
+    wl_region_destroy(none);
+    wl_surface_commit(drag.surface);
+    wl_display_roundtrip(app.display);
+
+    /* A pixel and back: the compositor looks for what is under the pointer as it moves. Apps say
+     * whether they take it as the pointer comes over them, a browser after asking its page. */
+    for (int tries = 0; tries < 3 && !drag.agreed && !drag.over; tries++) {
+        drag_move(nx, y);
+        drag_wait(&drag.agreed, 60);
+        drag_move(x, y);
+        drag_wait(&drag.agreed, tries == 0 ? 500 : 300);
+    }
+    drag_button(FALSE);
+    drag_wait(&drag.over, 3000);
+    ok = drag.dropped && (drag.finished || drag.sent);
+    if (!ok) g_string_assign(why, drag.agreed ? "the app there didn't take it" : "nothing there takes files");
+    say("drop: %s, %d ms", ok ? "taken by the app under it" : why->str, (int)((g_get_monotonic_time() - t0) / 1000));
+out:
+    if (drag.source) wl_data_source_destroy(drag.source);
+    if (drag.layer) zwlr_layer_surface_v1_destroy(drag.layer);
+    if (drag.surface) wl_surface_destroy(drag.surface);
+    if (drag.buffer) wl_buffer_destroy(drag.buffer);
+    memset(&drag, 0, sizeof drag);
+    /* The pointer back where the computer has it (if it has said yet: no pushing into a corner). */
+    if (app.last_x >= 0) drag_move(app.last_x, app.last_y);
+    wl_display_roundtrip(app.display);
+    return ok;
+}
+
+static void on_drop(const char *json) {
+    char v[32];
+    int x = json_raw(json, "x", v, sizeof v) ? atoi(v) : -1;
+    int y = json_raw(json, "y", v, sizeof v) ? atoi(v) : -1;
+    GString *uris = json_text(json, "uris");
+    GString *why = g_string_new(NULL);
+    gboolean taken = FALSE;
+    if (!uris || !g_str_has_prefix(uris->str, "file://") || x < 0 || y < 0)
+        g_string_assign(why, "the drop came without its files or its place");
+    else taken = carry(x, y, uris->str, why);
+    GString *s = g_string_new("{\"t\":\"dropped\",\"taken\":");
+    g_string_append(s, taken ? "true" : "false");
+    if (!taken) {
+        g_string_append(s, ",\"why\":");
+        json_string(s, why->str);
+    }
+    g_string_append_c(s, '}');
+    send_text(s->str);
+    g_string_free(s, TRUE);
+    g_string_free(why, TRUE);
+    if (uris) g_string_free(uris, TRUE);
+}
+
+/* ── Files from the computer: receive ──────────────────────────────────── */
+
+/*
+ * The computer starts `receive` for each drop on its window, on a second
+ * channel of its SSH connection, and hands it the files on stdin in frames
+ * like serve's, whose kind says what each one is:
+ *
+ *   'I' [u8 folder][name]                       an item dropped: a file, or a folder with all in it
+ *   'D' [path]                                  a folder in the item ("photos/raw"), parents first
+ *   'F' [u64 size][i64 mtime][u32 mode][path]   a file in it ("" for an item that is a file),
+ *                                               then its bytes in 'B' frames, `size` in all
+ *   'G' (as 'F')                                the same, answering {"t":"opened"} once the file is made
+ *   'B' [bytes]
+ *   'S'                                         the file's bytes came another way (below): all there now
+ *   'E' [i64 mtime]                             the item is whole
+ *   'X'                                         take the item back (cancelled, or unreadable there)
+ *   'Q'                                         that was all
+ *
+ * A big file's bytes come faster over several channels at once: the phone's
+ * SSH server (dropbear) gives each channel a window of 24 KB, which on a cable
+ * is about 10 MB/s a channel; four together made 30 (S24, 2026-11-16). So the
+ * computer may send a big file's 'G' here, and once it is "opened" (made: the
+ * channels are separate, nothing orders them), its bytes through `receive
+ * --part` processes on channels of their own, each writing its share where it
+ * goes, and then 'S'. Those take:
+ *
+ *   'O' [path]                                  a file this receive made, under Downloads ("trip (1)/a.mp4")
+ *   'P' [u64 offset][bytes]                     bytes of it, at that offset
+ *   'C'                                         that file is done for now: answers {"t":"done"}
+ *   'Q'                                         that was all
+ *
+ * All of it goes into the user's Downloads (XDG_DOWNLOAD_DIR), never over
+ * anything there: an item whose name is taken is called "name (1).ext", as a
+ * browser names a second download, and every file and folder is made with
+ * O_EXCL or mkdir, which refuse a name taken meanwhile, and nothing is
+ * followed through a link. Names are checked a part at a time. An item that
+ * doesn't finish (stdin ending first, 'X', a write that fails) is taken back
+ * whole. It answers in serve's JSON frames: {"t":"ready","dir","free"},
+ * {"t":"claimed","name"} for each item as it is named, {"t":"landed","name",
+ * "uri"} once it is whole, {"t":"undone"}, {"t":"error","message"},
+ * {"t":"bye"}.
+ */
+static struct {
+    int dir_fd;
+    char *dir;
+    char *name;             /* the item's name in Downloads, once it has one */
+    gboolean is_dir;
+    int item_fd;            /* the item's folder */
+    GPtrArray *files, *dirs; /* what the item has made, under Downloads, for taking it back */
+    int file_fd;            /* the file being written */
+    char *file_name;        /* its path in the item, for a message */
+    guint64 size, left;     /* its size, and its bytes still to come here */
+    gint64 mtime;
+} rx = {.dir_fd = -1, .item_fd = -1, .file_fd = -1};
+
+/* A name's extension, where a copy's number goes in front of it: Thunar's rule, as sftp.rs's copy_name. */
+static const char *dot_before(const char *name, const char *before) {
+    for (const char *p = before - 1; p > name; p--)
+        if (*p == '.') return p;
+    return NULL;
+}
+static const char *extension_of(const char *name) {
+    const char *dot = strrchr(name, '.');
+    if (!dot || dot == name || !dot[1]) return NULL;
+    const char *ext = dot + 1;
+    static const char *const packed[] = {"gz", "bz2", "lzma", "lrz", "rpm", "lzo", "xz", "z", NULL};
+    for (int i = 0; packed[i]; i++) {
+        if (g_ascii_strcasecmp(ext, packed[i]) != 0) continue;
+        const char *d2 = dot_before(name, dot);
+        if (d2 && dot - d2 - 1 >= 2 && dot - d2 - 1 <= 5) dot = d2; /* backup.tar.gz */
+        return dot;
+    }
+    if (g_ascii_strcasecmp(ext, "in") == 0) {
+        for (int i = 0; i < 3; i++) {
+            const char *d2 = dot_before(name, dot);
+            if (!d2 || dot - d2 - 1 < 2) break;
+            gboolean another_in = dot - d2 - 1 == 2 && g_ascii_strncasecmp(d2 + 1, "in", 2) == 0;
+            dot = d2;
+            if (!another_in) break;
+        }
+    }
+    return dot;
+}
+
+/* The nth other name for an item already in Downloads: "report (1).pdf", "photos (2)". */
+static char *numbered_name(const char *name, int n, gboolean is_dir) {
+    const char *ext = is_dir ? NULL : extension_of(name);
+    if (!ext) return g_strdup_printf("%s (%d)", name, n);
+    return g_strdup_printf("%.*s (%d)%s", (int)(ext - name), name, n, ext);
+}
+
+static gboolean part_ok(const char *s, gsize n) {
+    if (n == 0 || n > 255 || memchr(s, '/', n) || memchr(s, 0, n)) return FALSE;
+    return !(n == 1 && s[0] == '.') && !(n == 2 && s[0] == '.' && s[1] == '.');
+}
+
+/* A path inside the item, from the computer: parts that are names, never "." or "..", never starting at /. */
+static gboolean path_ok(const char *s) {
+    if (!*s || strlen(s) > 4000) return FALSE;
+    for (const char *p = s;;) {
+        const char *slash = strchr(p, '/');
+        if (!part_ok(p, slash ? (gsize)(slash - p) : strlen(p))) return FALSE;
+        if (!slash) return TRUE;
+        p = slash + 1;
+    }
+}
+
+static void rx_say(const char *t, const char *key, const char *value) {
+    GString *s = g_string_new("{\"t\":");
+    json_string(s, t);
+    if (key) {
+        g_string_append_printf(s, ",\"%s\":", key);
+        json_string(s, value);
+    }
+    g_string_append_c(s, '}');
+    send_text(s->str);
+    g_string_free(s, TRUE);
+}
+
+static void rx_clear(void) {
+    if (rx.file_fd >= 0) close(rx.file_fd);
+    if (rx.item_fd >= 0) close(rx.item_fd);
+    rx.file_fd = rx.item_fd = -1;
+    g_ptr_array_set_size(rx.files, 0);
+    g_ptr_array_set_size(rx.dirs, 0);
+    g_clear_pointer(&rx.name, g_free);
+    g_clear_pointer(&rx.file_name, g_free);
+    rx.left = 0;
+}
+
+/* The item in progress, taken back: its files, then its folders, deepest first. */
+static void rx_undo(void) {
+    if (rx.file_fd >= 0) close(rx.file_fd);
+    if (rx.item_fd >= 0) close(rx.item_fd);
+    rx.file_fd = rx.item_fd = -1;
+    for (guint i = 0; i < rx.files->len; i++) unlinkat(rx.dir_fd, g_ptr_array_index(rx.files, i), 0);
+    for (guint i = rx.dirs->len; i > 0; i--) unlinkat(rx.dir_fd, g_ptr_array_index(rx.dirs, i - 1), AT_REMOVEDIR);
+    if (rx.name) say("receive: %s taken back", rx.name);
+    rx_clear();
+}
+
+static int rx_fail(const char *what, int err) {
+    char *msg = g_strdup_printf("%s couldn't be written on the phone: %s", what, g_strerror(err));
+    say("receive: %s", msg);
+    rx_say("error", "message", msg);
+    g_free(msg);
+    rx_undo();
+    return -1;
+}
+
+static void rx_set_time(int fd, gint64 mtime) {
+    if (fd < 0 || mtime <= 0) return;
+    struct timespec ts[2] = {{.tv_sec = (time_t)mtime}, {.tv_sec = (time_t)mtime}};
+    futimens(fd, ts);
+}
+
+/* The current file has all its bytes. */
+static void rx_file_done(void) {
+    rx_set_time(rx.file_fd, rx.mtime);
+    close(rx.file_fd);
+    rx.file_fd = -1;
+}
+
+static guint64 be64(const guint8 *p) {
+    guint64 v = 0;
+    for (int i = 0; i < 8; i++) v = (v << 8) | p[i];
+    return v;
+}
+
+/* One frame from the computer: 0 to go on, 1 when it is all done, -1 after a failure (said and undone). */
+static int rx_frame(guint8 kind, const guint8 *p, gsize n) {
+    if (kind == 'B') {
+        if (rx.file_fd < 0 || n > rx.left) return rx_fail(rx.name ? rx.name : "a file", EPROTO);
+        for (gsize off = 0; off < n;) {
+            ssize_t w = write(rx.file_fd, p + off, n - off);
+            if (w < 0 && errno == EINTR) continue;
+            if (w <= 0) return rx_fail(rx.file_name ? rx.file_name : rx.name, w < 0 ? errno : EIO);
+            off += (gsize)w;
+        }
+        rx.left -= n;
+        if (!rx.left) rx_file_done();
+        return 0;
+    }
+    if (kind == 'Q') {
+        if (rx.name) rx_undo();
+        rx_say("bye", NULL, NULL);
+        return 1;
+    }
+    if (kind == 'X') {
+        rx_undo();
+        rx_say("undone", NULL, NULL);
+        return 0;
+    }
+    char *text = NULL;
+    gsize head = kind == 'I' ? 1 : kind == 'F' || kind == 'G' ? 20 : 0;
+    if (kind == 'I' || kind == 'D' || kind == 'F' || kind == 'G') {
+        if (n < head) return rx_fail("a file", EPROTO);
+        text = g_strndup((const char *)p + head, n - head);
+        if (strlen(text) != n - head || !g_utf8_validate(text, -1, NULL)) {
+            g_free(text);
+            return rx_fail("a file with an unusable name", EINVAL);
+        }
+    }
+    int result = 0;
+    if (kind == 'I') {
+        if (rx.name) rx_undo(); /* the last one never finished */
+        gboolean is_dir = p[0] != 0;
+        if (!part_ok(text, strlen(text))) {
+            result = rx_fail(text, EINVAL);
+        } else {
+            int err = EEXIST;
+            for (int i = 0; i < 1000 && err == EEXIST; i++) {
+                char *cand = i ? numbered_name(text, i, is_dir) : g_strdup(text);
+                int r = is_dir ? mkdirat(rx.dir_fd, cand, 0755)
+                               : openat(rx.dir_fd, cand, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0644);
+                err = r < 0 ? errno : 0;
+                if (r >= 0) {
+                    rx.name = cand;
+                    rx.is_dir = is_dir;
+                    g_ptr_array_add(is_dir ? rx.dirs : rx.files, g_strdup(cand));
+                    if (is_dir) rx.item_fd = openat(rx.dir_fd, cand, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+                    else rx.file_fd = r;
+                    if (is_dir && rx.item_fd < 0) err = errno;
+                } else {
+                    g_free(cand);
+                }
+            }
+            if (err) result = rx_fail(text, err);
+            else rx_say("claimed", "name", rx.name); /* where --part finds its files */
+        }
+    } else if (kind == 'S') {
+        /* A big file's bytes, written by `receive --part` processes: all of them, or the item fails. */
+        struct stat st;
+        if (rx.file_fd < 0 || !rx.left) result = rx_fail(rx.name ? rx.name : "a file", EPROTO);
+        else if (fstat(rx.file_fd, &st) != 0 || (guint64)st.st_size != rx.size)
+            result = rx_fail(rx.file_name ? rx.file_name : rx.name, EIO);
+        else {
+            rx.left = 0;
+            rx_file_done();
+        }
+    } else if (kind == 'D') {
+        if (!rx.name || !rx.is_dir || !path_ok(text)) result = rx_fail(text, EINVAL);
+        else if (mkdirat(rx.item_fd, text, 0755) != 0) result = rx_fail(text, errno);
+        else g_ptr_array_add(rx.dirs, g_build_filename(rx.name, text, NULL));
+    } else if (kind == 'F' || kind == 'G') {
+        guint64 size = be64(p);
+        gint64 mtime = (gint64)be64(p + 8);
+        guint32 mode = ((guint32)p[16] << 24) | ((guint32)p[17] << 16) | ((guint32)p[18] << 8) | p[19];
+        mode = (mode & 0777) | 0600;
+        if (!rx.name || (rx.is_dir ? !path_ok(text) : (*text || rx.file_fd < 0)) || (rx.is_dir && rx.file_fd >= 0)) {
+            result = rx_fail(*text ? text : rx.name ? rx.name : "a file", EPROTO);
+        } else {
+            if (rx.is_dir) {
+                int fd = openat(rx.item_fd, text, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, mode);
+                if (fd < 0) result = rx_fail(text, errno);
+                else {
+                    rx.file_fd = fd;
+                    g_ptr_array_add(rx.files, g_build_filename(rx.name, text, NULL));
+                }
+            } else {
+                fchmod(rx.file_fd, mode);
+            }
+            if (!result) {
+                g_free(rx.file_name);
+                rx.file_name = g_strdup(*text ? text : rx.name);
+                rx.size = rx.left = size;
+                rx.mtime = mtime;
+                if (!size) rx_file_done();
+                /* The file is there now: --part may open it. */
+                if (kind == 'G') rx_say("opened", NULL, NULL);
+            }
+        }
+    } else if (kind == 'E') {
+        if (!rx.name || rx.left || (!rx.is_dir && rx.file_fd >= 0)) {
+            result = rx_fail(rx.name ? rx.name : "an item", EPROTO);
+        } else {
+            if (rx.is_dir && n >= 8) rx_set_time(rx.item_fd, (gint64)be64(p));
+            char *path = g_build_filename(rx.dir, rx.name, NULL);
+            char *uri = g_filename_to_uri(path, NULL, NULL);
+            GString *s = g_string_new("{\"t\":\"landed\",\"name\":");
+            json_string(s, rx.name);
+            g_string_append(s, ",\"uri\":");
+            json_string(s, uri ? uri : "");
+            g_string_append_c(s, '}');
+            send_text(s->str);
+            say("receive: %s", path);
+            g_string_free(s, TRUE);
+            g_free(uri);
+            g_free(path);
+            rx_clear();
+        }
+    } else {
+        result = rx_fail(rx.name ? rx.name : "a file", EPROTO);
+    }
+    g_free(text);
+    return result;
+}
+
+/* Downloads, as the user's folders name it (GLib gives the home folder for one switched off), opened. */
+static gboolean rx_open_downloads(void) {
+    const char *dl = g_get_user_special_dir(G_USER_DIRECTORY_DOWNLOAD);
+    rx.dir = dl && *dl && g_strcmp0(dl, g_get_home_dir()) != 0 ? g_strdup(dl)
+                                                              : g_build_filename(g_get_home_dir(), "Downloads", NULL);
+    g_mkdir_with_parents(rx.dir, 0755);
+    rx.dir_fd = open(rx.dir, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (rx.dir_fd >= 0) return TRUE;
+    char *msg = g_strdup_printf("The phone's Downloads (%s) can't be opened: %s", rx.dir, g_strerror(errno));
+    rx_say("error", "message", msg);
+    say("receive: %s", msg);
+    g_free(msg);
+    return FALSE;
+}
+
+/* The frames on stdin, each handed to `frame` until it says to stop: its 0 goes on, 1 is done, -1 failed. */
+static int rx_read_frames(int (*frame)(guint8, const guint8 *, gsize), void (*cut_short)(void)) {
+    GByteArray *in = g_byte_array_new();
+    guint8 buf[65536];
+    int status = 0;
+    for (;;) {
+        gsize off = 0;
+        int r = 0;
+        while (r == 0 && in->len - off >= 5) {
+            const guint8 *h = in->data + off;
+            guint32 len = ((guint32)h[1] << 24) | ((guint32)h[2] << 16) | ((guint32)h[3] << 8) | h[4];
+            if (len > (1u << 22)) {
+                r = rx_fail("a file", EMSGSIZE);
+                break;
+            }
+            if (in->len - off - 5 < len) break;
+            r = frame(h[0], h + 5, len);
+            off += 5 + len;
+        }
+        if (off) g_byte_array_remove_range(in, 0, (guint)off);
+        if (r) {
+            status = r < 0 ? 1 : 0;
+            break;
+        }
+        ssize_t n = read(STDIN_FILENO, buf, sizeof buf);
+        if (n > 0) g_byte_array_append(in, buf, (guint)n);
+        else if (n < 0 && errno == EINTR) continue;
+        else {
+            /* The computer went part way. */
+            if (cut_short) cut_short();
+            break;
+        }
+    }
+    g_byte_array_free(in, TRUE);
+    return status;
+}
+
+static void rx_cut_short(void) {
+    if (rx.name) rx_undo(); /* what was in progress goes */
+}
+
+/*
+ * A file under Downloads that receive made, for --part: each folder on the way
+ * opened without following a link, the file too, and nothing created.
+ */
+static int rx_open_part(const char *path) {
+    if (!path_ok(path)) {
+        errno = EINVAL;
+        return -1;
+    }
+    char *copy = g_strdup(path);
+    int at = dup(rx.dir_fd);
+    char *p = copy;
+    for (char *slash; at >= 0 && (slash = strchr(p, '/')); p = slash + 1) {
+        *slash = 0;
+        int next = openat(at, p, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+        close(at);
+        at = next;
+    }
+    int fd = at >= 0 ? openat(at, p, O_WRONLY | O_NOFOLLOW | O_CLOEXEC) : -1;
+    if (at >= 0) close(at);
+    g_free(copy);
+    return fd;
+}
+
+static int part_fd = -1;
+
+static int part_frame(guint8 kind, const guint8 *p, gsize n) {
+    if (kind == 'O') {
+        char *path = g_strndup((const char *)p, n);
+        if (part_fd >= 0) close(part_fd);
+        errno = EINVAL;
+        part_fd = strlen(path) == n ? rx_open_part(path) : -1;
+        int result = part_fd < 0 ? rx_fail(path, errno) : 0;
+        g_free(path);
+        return result;
+    }
+    if (kind == 'P') {
+        if (part_fd < 0 || n < 8) return rx_fail("a part of a file", EPROTO);
+        off_t at = (off_t)be64(p);
+        for (gsize done = 8; done < n;) {
+            ssize_t w = pwrite(part_fd, p + done, n - done, at + (off_t)(done - 8));
+            if (w < 0 && errno == EINTR) continue;
+            if (w <= 0) return rx_fail("a part of a file", w < 0 ? errno : EIO);
+            done += (gsize)w;
+        }
+        return 0;
+    }
+    if (kind == 'C') {
+        if (part_fd >= 0) close(part_fd);
+        part_fd = -1;
+        rx_say("done", NULL, NULL);
+        return 0;
+    }
+    if (kind == 'Q') {
+        rx_say("bye", NULL, NULL);
+        return 1;
+    }
+    return rx_fail("a part of a file", EPROTO);
+}
+
+/* `receive --part`: a big file's share of bytes, beside the receive that made it (see above). */
+static int cmd_receive_part(void) {
+    signal(SIGPIPE, SIG_IGN);
+    rx.files = g_ptr_array_new_with_free_func(g_free);
+    rx.dirs = g_ptr_array_new_with_free_func(g_free);
+    if (!rx_open_downloads()) return 1;
+    rx_say("ready", NULL, NULL);
+    int status = rx_read_frames(part_frame, NULL);
+    if (part_fd >= 0) close(part_fd);
+    return status;
+}
+
+static int cmd_receive(void) {
+    signal(SIGPIPE, SIG_IGN);
+    rx.files = g_ptr_array_new_with_free_func(g_free);
+    rx.dirs = g_ptr_array_new_with_free_func(g_free);
+    if (!rx_open_downloads()) return 1;
+    struct statvfs fs;
+    guint64 room = fstatvfs(rx.dir_fd, &fs) == 0 ? (guint64)fs.f_bavail * fs.f_frsize : 0;
+    GString *s = g_string_new("{\"t\":\"ready\",\"dir\":");
+    json_string(s, rx.dir);
+    g_string_append_printf(s, ",\"free\":%" G_GUINT64_FORMAT "}", room);
+    send_text(s->str);
+    g_string_free(s, TRUE);
+    return rx_read_frames(rx_frame, rx_cut_short);
+}
+
+/* ── clip: the phone's clipboard, by hand ──────────────────────────────── */
+
+static gboolean clip_cli_wayland(gint fd, GIOCondition cond, gpointer d) {
+    if ((cond & (G_IO_ERR | G_IO_HUP | G_IO_NVAL)) || wl_display_dispatch(app.display) < 0) {
+        g_main_loop_quit(app.loop);
+        return G_SOURCE_REMOVE;
+    }
+    wl_display_flush(app.display);
+    return G_SOURCE_CONTINUE;
+}
+
+static gboolean clip_cli_enough(gpointer d) {
+    g_main_loop_quit(app.loop);
+    return G_SOURCE_REMOVE;
+}
+
+static const char *arg_value(int argc, char **argv, const char *name);
+
+static int cmd_clip(int argc, char **argv) {
+    const char *set = arg_value(argc, argv, "--set");
+    GString *why = g_string_new(NULL);
+    clipboard_only = TRUE;
+    if (!wayland_connect(why)) {
+        say("%s", why->str);
+        return 1;
+    }
+    clip_start();
+    if (!app.dc_device) return 1;
+    app.loop = g_main_loop_new(NULL, FALSE);
+    g_unix_fd_add(wl_display_get_fd(app.display), G_IO_IN | G_IO_HUP | G_IO_ERR, clip_cli_wayland, NULL);
+    if (set) {
+        clip_holding = TRUE;
+        clip_give(set, strlen(set));
+        g_timeout_add_seconds(600, clip_cli_enough, NULL);
+    } else {
+        app.clip_print = TRUE;
+        wl_display_roundtrip(app.display); /* the clipboard as it is, which starts the read */
+        if (!app.clip_reading) {
+            say("clip: there is no text on the phone's clipboard");
+            return 1;
+        }
+        g_timeout_add_seconds(6, clip_cli_enough, NULL);
+    }
+    g_main_loop_run(app.loop);
+    wl_display_disconnect(app.display);
+    return 0;
+}
+
 /* ── the computer's messages ───────────────────────────────────────────── */
 
 static void on_hello(const char *json) {
@@ -1574,15 +5197,26 @@ static void on_hello(const char *json) {
     if (json_raw(json, "bitrate", v, sizeof v)) {
         int b = atoi(v);
         /* The software encoder's cost grows with its bits; past this a cable gains nothing visible. */
-        app.bitrate = CLAMP(b, 2000000, app.hw ? 40000000 : 16000000);
+        app.bitrate = CLAMP(b, MIN_BITRATE, app.hw ? 40000000 : 16000000);
         apply_bitrate();
     }
     g_atomic_int_set(&app.inflight, 0);
     app.last_ack = g_get_monotonic_time();
     g_atomic_int_set(&app.need_config, 1);
+    /* A window that comes says where its clipboard switch is once it shows the picture; not before. */
+    app.clip_share = FALSE;
     g_atomic_int_set(&app.attached, 1);
     send_state("running", NULL);
     force_keyframe();
+    /* Phosh's screen is copied only while a window watches it; its last frame meanwhile goes again. A
+     * headless output has no cursor plane, so phoc draws its pointer into the picture: the window's
+     * own goes (a cursor message of no size), or there would be two. */
+    if (app.wlr) {
+        static const guint8 no_cursor[9] = {0x02};
+        send_frame(KIND_BINARY, no_cursor, sizeof no_cursor, NULL, 0);
+        capture_next();
+        if (app.last_buf) push_buffer(gst_buffer_ref(app.last_buf));
+    }
     /* A window that comes back may have been resized meanwhile. */
     on_resize(json);
 }
@@ -1602,17 +5236,25 @@ static void on_text(const char *json) {
     } else if (strcmp(t, "bitrate") == 0) {
         char v[32];
         if (json_raw(json, "bitrate", v, sizeof v)) {
-            app.bitrate = CLAMP(atoi(v), 2000000, app.hw ? 40000000 : 16000000);
+            app.bitrate = CLAMP(atoi(v), MIN_BITRATE, app.hw ? 40000000 : 16000000);
             apply_bitrate();
         }
     } else if (strcmp(t, "bye") == 0) {
         /* The window went (pmos.rs says so); the screen stays for the next one. */
         g_atomic_int_set(&app.attached, 0);
+        app.clip_share = FALSE;
+        clip_read_stop();
         release_all();
     } else if (strcmp(t, "stop") == 0) {
         finish(0);
     } else if (strcmp(t, "resize") == 0) {
         on_resize(json);
+    } else if (strcmp(t, "clip") == 0) {
+        on_clip(json);
+    } else if (strcmp(t, "clipshare") == 0) {
+        on_clipshare(json);
+    } else if (strcmp(t, "drop") == 0) {
+        on_drop(json);
     }
     /* "hb" only feeds the watchdog. */
 }
@@ -1698,6 +5340,17 @@ static gboolean on_tick(gpointer d) {
         char *msg = g_strdup_printf("{\"t\":\"stats\",\"fps\":%d,\"kbps\":%d,\"encodeMs\":0}", frames, bytes / 125);
         send_text(msg);
         g_free(msg);
+        /* For the log: every ten seconds that had more than the still screen's resends, what went out. */
+        static int sum, best, kb, ticks;
+        sum += frames;
+        best = MAX(best, frames);
+        kb += bytes / 125;
+        if (++ticks == 10) {
+            if (best > 1000 / KEEPALIVE_MS + 1)
+                say("video: %.1f frames a second over 10 s, %d in the busiest second, %d kb/s", sum / 10.0, best,
+                    kb / 10);
+            sum = best = kb = ticks = 0;
+        }
     }
     return G_SOURCE_CONTINUE;
 }
@@ -1738,7 +5391,10 @@ static gboolean parse_args(int argc, char **argv) {
         } else if (strcmp(a, "--encoder") == 0) app.forced_encoder = g_strdup(v);
         else if (strcmp(a, "--convert") == 0) app.convert = g_strdup(v);
         else if (strcmp(a, "--bitrate") == 0) app.bitrate = atoi(v);
-        else if (strcmp(a, "--out") == 0 || strcmp(a, "--wait") == 0) continue; /* snapshot's, read there */
+        else if (strcmp(a, "--app") == 0) {
+            g_free(app.launch_id);
+            app.launch_id = g_strdup(v);
+        } else if (strcmp(a, "--out") == 0 || strcmp(a, "--wait") == 0) continue; /* snapshot's, read there */
         else {
             say("unknown option %s", a);
             return FALSE;
@@ -1787,6 +5443,27 @@ static int cmd_probe(void) {
     GstElementFactory *pw = gst_element_factory_find("pipewiresrc");
     g_string_append_printf(s, "],\"pipewire\":%s", pw ? "true" : "false");
     if (pw) gst_object_unref(pw);
+    /* Phosh's way (wlroots): its screens, and the headless one that would be the computer's. */
+    struct head *hl = headless_head();
+    g_string_append_printf(s, ",\"wlr\":{\"outputManagement\":%s,\"screencopy\":%u,\"virtualPointer\":%u,"
+                              "\"virtualKeyboard\":%s,\"headless\":",
+                           app.om ? "true" : "false", app.copier_version, app.vp_version,
+                           app.vk_manager ? "true" : "false");
+    json_string(s, hl ? hl->name : "");
+    g_string_append_printf(s, ",\"headlessOn\":%s,\"heads\":[", hl && hl->enabled ? "true" : "false");
+    for (GList *l = app.heads; l; l = l->next) {
+        struct head *hd = l->data;
+        g_string_append_printf(s, "%s{\"name\":", l == app.heads ? "" : ",");
+        json_string(s, hd->name);
+        g_string_append_printf(s, ",\"on\":%s,\"w\":%d,\"h\":%d,\"scale\":%.3f,\"x\":%d,\"y\":%d}",
+                               hd->enabled ? "true" : "false", hd->current ? hd->current->w : 0,
+                               hd->current ? hd->current->h : 0, hd->scale, hd->x, hd->y);
+    }
+    g_string_append(s, "]}");
+    /* The clipboard (data-control) and handing dropped files to apps (layer shell, drag and drop). */
+    g_string_append_printf(s, ",\"dataControl\":\"%s\",\"layerShell\":%s,\"dataDevice\":%u",
+                           app.dc_ext ? "ext" : app.dc_wlr ? "wlr" : "", app.layer_shell ? "true" : "false",
+                           app.ddm ? app.ddm_version : 0);
     g_string_append(s, ",\"globals\":");
     json_string(s, app.globals ? app.globals->str : "");
     if (!wl) {
@@ -1811,7 +5488,15 @@ static int cmd_snapshot(int argc, char **argv) {
         return 2;
     }
     GString *why = g_string_new(NULL);
-    if (!wayland_connect(why) || !make_screen(why)) {
+    if (!wayland_connect(why)) {
+        say("%s", why->str);
+        return 1;
+    }
+    if (!app.screencast && app.om) {
+        say("snapshot is for KWin's virtual output; on Phosh, grim -o HEADLESS-1 shows the computer's screen");
+        return 2;
+    }
+    if (!make_screen(why)) {
         say("%s", why->str);
         return 1;
     }
@@ -1857,22 +5542,243 @@ static int cmd_snapshot(int argc, char **argv) {
     return status;
 }
 
+/* ── The phone's apps, for the computer's Apps page (`apps`) ─────────────── */
+
+/*
+ * What the phone's own launcher lists (GLib's should_show: not NoDisplay, and
+ * meant for this desktop), each with its icon as a file of the icon theme the
+ * session uses, for the computer to draw: an SVG as it is, else the biggest
+ * PNG up to 256. An app that runs in a terminal is left out: it has no window
+ * of its own to show. Printed once, as JSON:
+ *   {"apps":[{"id":"org.kde.kalk","name":"Calculator","icon":"<base64>","type":"svg"}]}
+ */
+struct icon_pick {
+    char *path;
+    int score;
+};
+
+static void icon_pick_free(gpointer p) {
+    struct icon_pick *k = p;
+    g_free(k->path);
+    g_free(k);
+}
+
+/* An icon's size from its folder: 48 in hicolor's ".../48x48/apps/" and Breeze's ".../apps/48/"; scalable is any. */
+static int icon_size(const char *path) {
+    if (strstr(path, "/scalable/")) return 512;
+    int best = 0;
+    for (const char *p = path; *p; p++) {
+        if (*p == '/' && g_ascii_isdigit(p[1])) {
+            int n = atoi(p + 1);
+            if (n > best && n <= 1024) best = n;
+        }
+    }
+    return best ? best : 48;
+}
+
+/* Every icon under `dir`, the best of each name kept: the theme first (`rank`), apps' icons, then an SVG or a big PNG. */
+static void index_icons(GHashTable *index, const char *dir, int rank, int depth) {
+    GDir *d = g_dir_open(dir, 0, NULL);
+    if (!d) return;
+    const char *e;
+    while ((e = g_dir_read_name(d))) {
+        char *path = g_build_filename(dir, e, NULL);
+        const char *ext = strrchr(e, '.');
+        gboolean svg = ext && strcmp(ext, ".svg") == 0, png = ext && strcmp(ext, ".png") == 0;
+        if (!svg && !png) {
+            if (depth < 4 && g_file_test(path, G_FILE_TEST_IS_DIR)) index_icons(index, path, rank, depth + 1);
+        } else {
+            /* A PNG of 256 is plenty for the computer's tiles; one bigger is only more to send. */
+            int size = icon_size(path);
+            int drawing = svg ? 2600 : size <= 256 ? size * 10 : 2560 - MIN(size - 256, 2000);
+            int score = (100 - rank) * 100000 + (strstr(path, "/apps") ? 50000 : 0) -
+                        (strstr(path, "symbolic") ? 40000 : 0) + drawing;
+            char *name = g_strndup(e, ext - e);
+            struct icon_pick *had = g_hash_table_lookup(index, name);
+            if (!had || score > had->score) {
+                struct icon_pick *k = g_new0(struct icon_pick, 1);
+                k->path = path;
+                k->score = score;
+                path = NULL;
+                g_hash_table_replace(index, name, k);
+            } else {
+                g_free(name);
+            }
+        }
+        g_free(path);
+    }
+    g_dir_close(d);
+}
+
+/* The session's icon theme, what it inherits, then hicolor: KDE's from kdeglobals, GNOME's (Phosh) from its settings. */
+static GPtrArray *icon_themes(void) {
+    GPtrArray *themes = g_ptr_array_new_with_free_func(g_free);
+    char *theme = NULL;
+    GKeyFile *kf = g_key_file_new();
+    char *globals = g_build_filename(g_get_user_config_dir(), "kdeglobals", NULL);
+    if (g_key_file_load_from_file(kf, globals, G_KEY_FILE_NONE, NULL)) theme = g_key_file_get_string(kf, "Icons", "Theme", NULL);
+    g_free(globals);
+    g_key_file_unref(kf);
+    const char *desktop = getenv("XDG_CURRENT_DESKTOP");
+    gboolean kde = desktop && strstr(desktop, "KDE");
+    if (!theme && !kde) {
+        GSettingsSchemaSource *src = g_settings_schema_source_get_default();
+        GSettingsSchema *schema = src ? g_settings_schema_source_lookup(src, "org.gnome.desktop.interface", TRUE) : NULL;
+        if (schema) {
+            GSettings *s = g_settings_new("org.gnome.desktop.interface");
+            theme = g_settings_get_string(s, "icon-theme");
+            g_object_unref(s);
+            g_settings_schema_unref(schema);
+        }
+    }
+    if (!theme || !*theme) {
+        g_free(theme);
+        theme = g_strdup(kde ? "breeze" : "Adwaita");
+    }
+    g_ptr_array_add(themes, theme);
+    /* What each inherits (its index.theme's Inherits), in order, as far as they go. */
+    GPtrArray *bases = g_ptr_array_new();
+    g_ptr_array_add(bases, (gpointer)g_get_user_data_dir());
+    for (const char *const *d = g_get_system_data_dirs(); *d; d++) g_ptr_array_add(bases, (gpointer)*d);
+    for (guint i = 0; i < themes->len && themes->len < 12; i++) {
+        for (guint b = 0; b < bases->len; b++) {
+            char *index = g_build_filename(bases->pdata[b], "icons", (char *)themes->pdata[i], "index.theme", NULL);
+            GKeyFile *ik = g_key_file_new();
+            gchar **inherits = NULL;
+            if (g_key_file_load_from_file(ik, index, G_KEY_FILE_NONE, NULL))
+                inherits = g_key_file_get_string_list(ik, "Icon Theme", "Inherits", NULL, NULL);
+            for (int k = 0; inherits && inherits[k]; k++) {
+                gboolean have = FALSE;
+                for (guint m = 0; m < themes->len; m++)
+                    if (strcmp(themes->pdata[m], inherits[k]) == 0) have = TRUE;
+                if (!have && *inherits[k]) g_ptr_array_add(themes, g_strdup(inherits[k]));
+            }
+            g_strfreev(inherits);
+            g_key_file_unref(ik);
+            g_free(index);
+        }
+    }
+    g_ptr_array_free(bases, TRUE);
+    gboolean hicolor = FALSE;
+    for (guint m = 0; m < themes->len; m++)
+        if (strcmp(themes->pdata[m], "hicolor") == 0) hicolor = TRUE;
+    if (!hicolor) g_ptr_array_add(themes, g_strdup("hicolor"));
+    return themes;
+}
+
+/* The file for an app's icon: a file named outright, else the best of its names in the themes. */
+static char *icon_path(GIcon *icon, GHashTable *index) {
+    if (!icon) return NULL;
+    if (G_IS_FILE_ICON(icon)) return g_file_get_path(g_file_icon_get_file(G_FILE_ICON(icon)));
+    if (!G_IS_THEMED_ICON(icon)) return NULL;
+    const char *const *names = g_themed_icon_get_names(G_THEMED_ICON(icon));
+    for (int i = 0; names && names[i]; i++) {
+        if (g_path_is_absolute(names[i])) {
+            if (g_file_test(names[i], G_FILE_TEST_IS_REGULAR)) return g_strdup(names[i]);
+            continue;
+        }
+        struct icon_pick *k = g_hash_table_lookup(index, names[i]);
+        if (k) return g_strdup(k->path);
+    }
+    return NULL;
+}
+
+static int cmd_apps(void) {
+    /* Names in the phone's own language: the session's, not this login's. */
+    static const char *const lang[] = {"LANGUAGE", "LC_ALL", "LC_MESSAGES", "LANG", NULL};
+    for (int i = 0; lang[i] && app.session_env; i++) {
+        const char *v = g_environ_getenv(app.session_env, lang[i]);
+        if (v && !getenv(lang[i])) setenv(lang[i], v, 1);
+    }
+    GHashTable *index = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, icon_pick_free);
+    GPtrArray *themes = icon_themes();
+    const char *const *dirs = g_get_system_data_dirs();
+    for (guint i = 0; i < themes->len; i++) {
+        char *mine = g_build_filename(g_get_user_data_dir(), "icons", (char *)themes->pdata[i], NULL);
+        index_icons(index, mine, (int)i, 0);
+        g_free(mine);
+        for (int j = 0; dirs[j]; j++) {
+            char *dir = g_build_filename(dirs[j], "icons", (char *)themes->pdata[i], NULL);
+            index_icons(index, dir, (int)i, 0);
+            g_free(dir);
+        }
+    }
+    index_icons(index, "/usr/share/pixmaps", (int)themes->len, 3);
+
+    GString *out = g_string_new("{\"apps\":[");
+    GList *all = g_app_info_get_all();
+    gboolean first = TRUE;
+    int n = 0;
+    for (GList *l = all; l; l = l->next) {
+        GAppInfo *info = l->data;
+        if (!G_IS_DESKTOP_APP_INFO(info) || !g_app_info_should_show(info)) continue;
+        if (g_desktop_app_info_get_boolean(G_DESKTOP_APP_INFO(info), "Terminal")) continue;
+        const char *file_id = g_app_info_get_id(info);
+        if (!file_id || !g_str_has_suffix(file_id, ".desktop")) continue;
+        char *id = g_strndup(file_id, strlen(file_id) - strlen(".desktop"));
+        if (strcmp(id, "com.ccrstech.openandroiddex.pmos") == 0) {
+            g_free(id);
+            continue;
+        }
+        g_string_append(out, first ? "{\"id\":" : ",{\"id\":");
+        first = FALSE;
+        json_string(out, id);
+        g_string_append(out, ",\"name\":");
+        json_string(out, g_app_info_get_name(info));
+        char *path = icon_path(g_app_info_get_icon(info), index);
+        gchar *data = NULL;
+        gsize len = 0;
+        if (path && g_file_get_contents(path, &data, &len, NULL) && len > 0 && len <= 512 * 1024) {
+            gchar *b64 = g_base64_encode((const guchar *)data, len);
+            g_string_append(out, ",\"icon\":\"");
+            g_string_append(out, b64);
+            g_string_append_printf(out, "\",\"type\":\"%s\"", g_str_has_suffix(path, ".svg") ? "svg" : "png");
+            g_free(b64);
+        }
+        g_free(data);
+        g_free(path);
+        g_string_append_c(out, '}');
+        g_free(id);
+        n++;
+    }
+    g_list_free_full(all, g_object_unref);
+    g_string_append(out, "]}\n");
+    fwrite(out->str, 1, out->len, stdout);
+    fflush(stdout);
+    say("apps: %d, icons from %s", n, (char *)themes->pdata[0]);
+    g_string_free(out, TRUE);
+    g_ptr_array_free(themes, TRUE);
+    g_hash_table_destroy(index);
+    return 0;
+}
+
 static int cmd_serve(void) {
     signal(SIGPIPE, SIG_IGN);
     app.in = g_byte_array_new();
     app.keys_down = g_hash_table_new(NULL, NULL);
     app.last_rx = g_get_monotonic_time();
+    app.last_x = app.last_y = -1; /* the computer's pointer: not said yet */
     GString *why = g_string_new(NULL);
-    if (!wayland_connect(why) || !make_screen(why)) {
+    gboolean up = wayland_connect(why);
+    if (up && app.launch_id && !app.screencast) {
+        g_string_assign(why, "Opening one of the phone's apps in a window of its own needs KDE Plasma on the phone. "
+                             "Open the phone's desktop to use its apps.");
+        up = FALSE;
+    }
+    if (!up || !make_screen(why)) {
         say("%s", why->str);
         send_state("failed", why->str);
         return 1;
     }
-    keep_scale();
+    if (!app.wlr) keep_scale();
     /* The stream starts at the size the screen was made at. */
     app.t0 = g_get_monotonic_time();
     ask_stream_size(app.width, app.height);
-    start_sizer();
+    if (!app.wlr) start_sizer();
+    /* Phosh's frames are XRGB8888 on every renderer seen so far; another kind rebuilds the pipeline (push_shot). */
+    app.src_w = app.width;
+    app.src_h = app.height;
+    app.src_format = WL_SHM_FORMAT_XRGB8888;
     app.candidates = encoder_candidates();
     if (!start_video(why)) {
         say("%s", why->str);
@@ -1881,14 +5787,33 @@ static int cmd_serve(void) {
         close_screen();
         return 1;
     }
+    if (app.launch_id) {
+        /* One app's window: its script, and the app; none of the desktop's below. */
+        if (!app_start(why)) {
+            say("%s", why->str);
+            send_state("failed", why->str);
+            app_stop();
+            stop_video();
+            stop_sizer();
+            close_screen();
+            return 1;
+        }
+    } else if (!app.wlr) {
+        dock();
+    }
     inhibit();
+    if (!app.launch_id) here_start();
+    clip_start();
     {
+        /* What the window can count on: typing, the clipboard, files dropped handed to the app under them. */
         struct output *o = our_output();
         GString *s = g_string_new("{\"t\":\"ready\",\"output\":");
         json_string(s, o && o->name ? o->name : "");
-        g_string_append_printf(s, ",\"w\":%d,\"h\":%d,\"scale\":%.4f,\"encoder\":\"%s\",\"hw\":%s,\"keys\":%s}",
+        g_string_append_printf(s, ",\"w\":%d,\"h\":%d,\"scale\":%.4f,\"encoder\":\"%s\",\"hw\":%s,\"keys\":%s",
                                app.width, app.height, app.scale, app.encoder, app.hw ? "true" : "false",
-                               app.fake && app.fake_version >= 4 ? "true" : "false");
+                               (app.wlr ? app.vkeyboard != NULL : app.fake && app.fake_version >= 4) ? "true" : "false");
+        g_string_append_printf(s, ",\"clipboard\":%s,\"carry\":%s}", app.dc_device ? "true" : "false",
+                               can_carry() ? "true" : "false");
         send_text(s->str);
         g_string_free(s, TRUE);
     }
@@ -1898,19 +5823,127 @@ static int cmd_serve(void) {
     wl_display_flush(app.display);
     g_unix_fd_add(wl_display_get_fd(app.display), G_IO_IN | G_IO_HUP | G_IO_ERR, on_wayland, NULL);
     g_timeout_add_seconds(1, on_tick, NULL);
+    if (app.wlr) g_timeout_add(KEEPALIVE_MS / 5, keepalive, NULL);
+    if (app.wlr && app.primary_wanted && !app.primary_moved) g_timeout_add_seconds(1, retry_primary, NULL);
     g_unix_signal_add(SIGTERM, on_signal, NULL);
     g_unix_signal_add(SIGINT, on_signal, NULL);
     g_unix_signal_add(SIGHUP, on_signal, NULL);
     g_main_loop_run(app.loop);
 
+    /* Before the screen goes: its windows come to the phone's, and that is no one's asking. */
+    if (app.launch_id) app_stop();
+    else here_stop();
     release_all();
     g_atomic_int_set(&app.attached, 0);
     stop_video();
     stop_sizer();
     close_screen();
+    /* An app's window ends here: its windows are on the phone's screen now, and the app goes on there. */
+    if (!app.launch_id) {
+        /* After the screen has gone, so its windows come to the phone's screen as phone apps. */
+        undock();
+        /* And a keyboard laid out for the phone alone (see restart_keyboard); the guard needn't, then. */
+        if (!app.wlr) restart_keyboard(app.bus, "the computer's screen has gone");
+        if (app.guard_fd > 0 && write(app.guard_fd, "k", 1) != 1) say("guard: couldn't tell it the keyboard is done");
+    }
     wl_display_disconnect(app.display);
     say("done");
     return app.status;
+}
+
+/*
+ * The phone as it was before a computer: Plasma Mobile's docked mode as the
+ * phone had it, and Phosh's headless output off with its shell on the
+ * phone's panel. The session's autostart runs this at login (the output
+ * comes on with the session), and the guard after serve has gone, however
+ * it went.
+ */
+static int cmd_rest(void) {
+    /* The script a serve that died left in KWin; no session bus, or no KWin (Phosh), is nothing to do. */
+    GDBusConnection *bus = g_bus_get_sync(G_BUS_TYPE_SESSION, NULL, NULL);
+    if (bus) {
+        if (unload_here(bus)) say("rest: KWin's script stopped");
+        g_object_unref(bus);
+    }
+    undock();
+    GString *why = g_string_new(NULL);
+    if (!wayland_connect(why)) {
+        say("rest: %s", why->str);
+        return 1;
+    }
+    struct head *hd = headless_head();
+    if (!hd) say("rest: this desktop has no headless output");
+    else if (!hd->enabled) say("rest: %s is off already", hd->name);
+    else {
+        /* Off at the size it had last: Phosh turns it on at that size next time, so
+         * the same computer's window needs no new one (see wlr_make_screen). */
+        int w, h;
+        double s;
+        if (remembered_size(&w, &h, &s) &&
+            (!hd->current || hd->current->w != w || hd->current->h != h || fabs(hd->scale - s) > 0.01) &&
+            apply_sync(hd, TRUE, w, h, s))
+            say("rest: %s at %dx%d for the next computer", hd->name, w, h);
+        hd = headless_head();
+        if (hd) put_phone_back(hd);
+    }
+    wl_display_disconnect(app.display);
+    g_string_free(why, TRUE);
+    return 0;
+}
+
+/*
+ * start_guard's process: waits on fd 3 for serve to end, then rests; for one
+ * app's window (--script), unloads that app's script only. It logs to a
+ * file: it has no stderr.
+ */
+static int cmd_guard(int argc, char **argv) {
+    const char *script = arg_value(argc, argv, "--script");
+    char *dir = g_build_filename(g_get_user_cache_dir(), "openandroiddex", NULL);
+    char *log = g_build_filename(dir, "guard.log", NULL);
+    struct stat st;
+    g_mkdir_with_parents(dir, 0700);
+    int fd = open(log, O_WRONLY | O_CREAT | O_CLOEXEC | (stat(log, &st) == 0 && st.st_size > 262144 ? O_TRUNC : O_APPEND),
+                  0600);
+    if (fd >= 0) {
+        dup2(fd, 2);
+        close(fd);
+    }
+    g_free(log);
+    g_free(dir);
+    char c;
+    gboolean keyboard_done = FALSE; /* serve ended cleanly and saw to the keyboard ('k') */
+    for (;;) {
+        ssize_t n = read(3, &c, 1);
+        if (n > 0 && c == 'k') keyboard_done = TRUE;
+        if (n > 0 || (n < 0 && errno == EINTR)) continue;
+        break;
+    }
+    close(3);
+    GDateTime *now = g_date_time_new_now_local();
+    char *when = g_date_time_format(now, "%F %T");
+    say("guard: serve ended at %s", when);
+    g_free(when);
+    g_date_time_unref(now);
+    if (script) {
+        /* An app's window: its scripts (the one that hands the windows back too), which a serve that ended well has unloaded already. */
+        GDBusConnection *bus = g_bus_get_sync(G_BUS_TYPE_SESSION, NULL, NULL);
+        if (bus) {
+            char *back = g_strconcat(script, "-back", NULL);
+            if (kwin_unload(bus, script)) say("guard: KWin's %s stopped", script);
+            if (kwin_unload(bus, back)) say("guard: KWin's %s stopped", back);
+            g_free(back);
+            g_object_unref(bus);
+        }
+        return 0;
+    }
+    int status = cmd_rest();
+    /* serve died with the computer's screen up: the keyboard as serve would have left it (restart_keyboard). */
+    GDBusConnection *bus = keyboard_done ? NULL : g_bus_get_sync(G_BUS_TYPE_SESSION, NULL, NULL);
+    if (bus) {
+        restart_keyboard(bus, "guard");
+        g_object_unref(bus);
+    }
+    return status;
 }
 
 int main(int argc, char **argv) {
@@ -1920,11 +5953,30 @@ int main(int argc, char **argv) {
         printf("openandroiddex-pmos %s\n", VERSION);
         return 0;
     }
+    if (strcmp(cmd, "rest") == 0 || strcmp(cmd, "guard") == 0) {
+        adopt_session();
+        return strcmp(cmd, "rest") == 0 ? cmd_rest() : cmd_guard(argc, argv);
+    }
+    /* The phone's apps for the computer's Apps page: the session's desktop files and icons, no screen. */
+    if (strcmp(cmd, "apps") == 0) {
+        adopt_session();
+        return cmd_apps();
+    }
+    /* Files into Downloads: no desktop needed. */
+    if (strcmp(cmd, "receive") == 0)
+        return argc > 2 && strcmp(argv[2], "--part") == 0 ? cmd_receive_part() : cmd_receive();
+    if (strcmp(cmd, "clip") == 0) {
+        adopt_session();
+        return cmd_clip(argc, argv);
+    }
     if (strcmp(cmd, "probe") != 0 && strcmp(cmd, "serve") != 0 && strcmp(cmd, "snapshot") != 0) {
-        fprintf(stderr, "usage: openandroiddex-pmos version|probe|serve|snapshot [--width W --height H --scale S]\n");
+        fprintf(stderr, "usage: openandroiddex-pmos version|probe|serve|snapshot|rest|receive|clip|apps [--width W "
+                        "--height H --scale S] [--app ID]\n");
         return 2;
     }
     if (!parse_args(argc, argv)) return 2;
+    /* Before any thread starts (adopt_session's bus has one): they all take this process's cores. */
+    if (strcmp(cmd, "serve") == 0) prefer_fast_cores();
     adopt_session();
     /*
      * A registry of its own, so a hardware encoder this user was only lately

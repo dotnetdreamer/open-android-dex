@@ -134,10 +134,18 @@ at your monitor's size, sitting next to your other windows.
   desktop, step through your windows. It is under Touchpad in quick settings
   too
 - **Proper windows.** Every app gets a title bar with close, minimise, maximise
-  and snap left or right. Drag them where you want. On Android 14 and newer,
-  resize them from any edge or corner: the grab area reaches past the window's
-  border, and your pointer turns into a resize arrow over it. Put two apps side by side and get
-  something done
+  and snap left or right, plus the same Back, ☰ and speaker buttons as the app
+  windows on your computer. Back goes to that window's app, even if another
+  window was in front. ☰ has Copy, Paste, Phone size, Tablet size and Use phone
+  as touchpad, and the speaker picks where the sound plays. Drag them where you
+  want. On Android 14 and newer, resize them from any edge or corner: the grab
+  area reaches past the window's border, and your pointer turns into a resize
+  arrow over it. Put two apps side by side and get something done
+- **A way out of full screen apps.** On Windows, the desktop's own window has
+  Back, Home and Recent apps buttons at the left end of its title bar. They work
+  even when an app covers the whole desktop and its taskbar, like a video made
+  full screen. With the desktop itself full screen, move the mouse to the top
+  middle of the screen to find them
 - **Windows stay where you put them.** Move an app or resize it, and that is
   where it opens next time. Every app remembers its own spot
 - **An app drawer** you can search, and a desktop you can drop shortcuts onto
@@ -362,8 +370,10 @@ How it works: [doc/linux-windows.md](doc/linux-windows.md).
 [releases page](https://github.com/dotnetdreamer/open-android-dex/releases/latest)
 there is a separate download called **LinuxOnDroid**. It is about 1 MB, you
 install it on the phone by itself, and that is all you need. No computer, no
-cable, no desktop app. Tap the icon and Ubuntu opens on your phone. Keep about
-3 GB free for it.
+cable, no desktop app. Tap the icon and its home screen shows what Linux is
+doing: press **Install Linux** the first time, and **Start Linux** after that.
+The same screen opens remote access and the shared folder, and adds apps to
+Ubuntu later. Keep about 3 GB free for it.
 
 <img src="doc/img/phone-linux.png" alt="Ubuntu running on the phone on its own, with the control strip along the top" width="300">
 
@@ -391,6 +401,56 @@ the same job, the desktop included (`dexremote desktop`, in a browser tab). How
 it works, and what was ruled out on the way:
 [doc/remote-access.md](doc/remote-access.md).
 
+#### Open it in a browser on your computer
+
+Use your laptop as Linux's big screen, with its own keyboard and mouse, and
+install nothing on it. The phone and the computer just need the same Wi-Fi.
+Joining the phone's hotspot from the computer should work too, but nobody has
+tried it yet.
+
+1. On the phone, in LinuxOnDroid: ⋮ → **Settings** → **Open in a browser**. It
+   shows an address and a six digit code. The code works while that page is
+   open, and for 10 minutes after
+2. On the computer, type the address into Chrome, Edge or Firefox (Safari
+   should work too, but nobody has tried it yet). The first time, the browser
+   warns that the connection is not private, because the phone made its own
+   certificate. Choose Advanced, then Continue (Firefox calls it Proceed)
+3. Type the code. Linux fills the window, and follows it when you resize it
+
+At the top of the page you pick the picture: **Low** when the Wi-Fi is slow,
+**High** for the sharpest text, **Medium** for everything in between. The
+phone's own video chip makes the picture and the computer's graphics chip shows
+it, so scrolling and videos stay smooth. Copy and paste work both ways. In
+Chrome and Edge, full screen hands every key to Linux, Alt+Tab included. The
+browser remembers that you let it in, so next time it is just the address. To
+shut every browser out again, use **Sign out every browser** on the same page. How it
+works: [doc/linux-browser.md](doc/linux-browser.md).
+
+**Files** on that bar shows Linux's files instead of the desktop. Drag files or
+whole folders from your computer onto the page to copy the files to Linux, or
+onto the desktop picture to put the files on Linux's desktop. Click a file to
+preview the file: photos, videos, music, PDFs and text open right in the
+browser. Download one file, or a whole folder as a ZIP. Deleting moves files to
+Linux's Trash, and Undo puts the files back. Files works even when Linux is shut
+down, and with no desktop picture being made, files move as fast as your Wi-Fi
+allows. To open Files straight away, add `#files` to the address.
+
+**On a tablet or a phone**, the page works with your fingers. Tap the short
+line at the top of the screen to bring the bar down. The hand button switches
+between Touch, where you tap what you want, and Trackpad, where your finger
+moves the pointer like on a laptop. Pinch to zoom in, and **Fit** shows the
+whole desktop again. The keyboard button opens the screen keyboard, with a row
+of the keys a screen keyboard lacks: Esc, Tab, Ctrl, Alt, Super and the arrows.
+
+The **microphone** button lets Linux hear your computer's microphone, for a
+call or a recording in Linux. The browser asks you first, and the microphone
+works on the secure address, the one starting with https.
+
+When you switch to another tab, the phone stops making the picture and keeps
+the sound playing, which saves the phone's battery and your Wi-Fi. When the
+Wi-Fi slows down, the phone lowers the picture's quality as soon as frames
+start arriving late, so the picture stays live instead of falling behind.
+
 A control strip sits along the top wherever Linux is running, on the phone or in
 a window. It holds the pointer, the keyboard, the screen and zoom. Tap the
 pointer and you pick how touch should behave: point where you look, use the
@@ -398,6 +458,74 @@ screen as a touchscreen, or use it as a trackpad. Each one spells out what taps,
 drags and two finger gestures do.
 
 <img src="doc/img/linux-controls.png" alt="The interaction method panel offering Direct, Touch and Mouse control" width="380">
+
+### Use your phone from your computer, from anywhere
+
+LinuxOnDroid can also put the phone itself on your computer: its own screen,
+its apps, its settings, with your mouse and keyboard. Help a parent with their
+phone from across town, or reach your own phone when it's in another room or
+another country.
+
+1. On the phone, in LinuxOnDroid: ⋮ → **Settings** → **Remote desktop**. Turn
+   it on and Android asks once to share the screen. **Turn on control** lets the
+   computer tap and type too
+2. Add your computer once: **Add a computer** shows a code, and you type it in
+   Open Android DeX on the computer, in the Linux tab
+3. From then on, **Phone screen** on the computer opens the phone in a window
+
+No app on the computer? On the same Wi-Fi, any browser works: the Remote desktop
+card shows an address and a code. Open the address, enter the code, and the
+phone's screen is in the tab, with the same keys and the same Low, Medium and
+High. The first time, the browser warns that the connection is not private,
+because the phone made its own certificate: choose Advanced, then Continue.
+
+Not on the same Wi-Fi? Turn on **From anywhere, in a browser** on the same card.
+Cloudflare then gives the phone a web address that works from any network, for
+free and with no account. Open it anywhere and enter the same code. The address
+changes whenever the phone restarts, and Cloudflare calls these addresses a
+service for testing, with no promise to stay up.
+
+The app works over home Wi-Fi and across the internet, with nothing to set up on
+a router and no account anywhere. The phone and computer talk to each other
+directly whenever the networks allow, so nobody pays for a server in between.
+
+In the window on the computer, pick **Low** for the fastest picture on a slow
+network, **High** for the sharpest, or **Medium** in between, any time. On home
+Wi-Fi a click reaches the phone and comes back as a picture in about 75 ms in
+the app's window and about 50 ms in a browser (Galaxy S25 Ultra, the middle of
+30 clicks).
+
+**Picture size**, next to those, makes the picture smaller: Three quarters,
+Half size or A third of the size the quality gives. A smaller picture comes
+sooner when the whole screen changes, as when an app opens: on the S25 Ultra,
+Half size brought such a change in about 115 ms instead of 150 over home Wi-Fi,
+and in about 145 ms instead of 235 through Cloudflare. A single button press is
+just as quick at every size, so Full size is the default. The app's window
+remembers both choices for each phone.
+
+On a Xiaomi, Redmi or POCO phone, **Clear all** in Recent apps closes
+LinuxOnDroid too, and Android then turns control off. To keep Remote desktop
+running, lock LinuxOnDroid in Recent apps: press and hold the LinuxOnDroid
+card, then tap the lock. If control is off anyway, a notification on the
+phone leads back to the switch.
+
+- The left mouse button is your finger, the right one is Back and the middle one
+  is Home. The wheel scrolls. Typing goes into whatever box is selected, and
+  Ctrl+V pastes your computer's clipboard
+- The window has buttons for Back, Home, Recent apps and the notifications
+- If the phone is asleep, the computer wakes it. You see the lock screen and can
+  unlock it with the phone's PIN, as you would in your hand
+- Android stops screen sharing whenever the phone locks, and asks again each
+  time. Until someone says yes at the phone, the computer gets a slower view,
+  about three pictures a second, that still works with nobody there
+- **Ask to share the screen after a restart** makes the phone ask once, right
+  after you unlock the phone
+
+To use a phone with nobody next to it at full speed, even while it's locked,
+allow it once from a computer with USB debugging:
+`adb shell cmd appops set com.dotnetdreamer.linuxondroid PROJECT_MEDIA allow`
+(for the app from GitHub, `com.ccrstech.linuxondroid`). Android then shares the
+screen without asking. Uninstalling the app undoes it.
 
 ### Your desktop in a web browser
 
@@ -609,8 +737,8 @@ for Wi-Fi connections, and Accessibility, which is only used for full screen
 
 Yes. That is what the separate **LinuxOnDroid** download on the
 [releases page](https://github.com/dotnetdreamer/open-android-dex/releases/latest)
-is for. About 1 MB, installed on the phone, and you tap the icon to get Ubuntu
-fullscreen. No cable and no desktop app.
+is for. About 1 MB, installed on the phone. Tap the icon, then **Start Linux**,
+and Ubuntu fills the screen. No cable and no desktop app.
 
 If you install both, they keep their own separate copies of Ubuntu, because
 Android does not let one app read another's files. That means two downloads.

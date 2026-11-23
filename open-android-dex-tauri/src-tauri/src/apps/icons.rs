@@ -12,9 +12,17 @@ use tauri::Manager;
 /// few hundred kilobytes.
 pub const PX: u32 = 96;
 
+/// Where they are kept, named for how the phone draws them, so a change there
+/// has every icon asked for again. 2: an app's own icon where the maker's
+/// styling fails in the app server, and MediaTek's drawable cache given a
+/// context (AppCatalog, PhoneContext). Before it, a realme C100's apps, and
+/// all but a few of a Redmi 9A's, were the platform's default robot. The old
+/// folder stays: a pinned taskbar button's .ico is read from it.
+const DIR: &str = "phone-apps-2";
+
 fn dir(app: &tauri::AppHandle, serial: &str) -> Option<PathBuf> {
     let safe: String = serial.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect();
-    let d = app.path().app_cache_dir().ok()?.join("phone-apps").join(safe);
+    let d = app.path().app_cache_dir().ok()?.join(DIR).join(safe);
     std::fs::create_dir_all(&d).ok()?;
     Some(d)
 }

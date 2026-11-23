@@ -1,0 +1,716 @@
+/*
+ * LinuxOnDroid in a browser. LinuxOnDroid's own look: the home screen's deep
+ * navy, its amber and its blue glow, cards of the same colour. Everything but
+ * the desktop stays out of the way: the bar sits above the top edge until the
+ * pointer goes there, and the desktop is the whole window.
+ */
+:root {
+  --bg: #0b1222;
+  --bg-deep: #060a14;
+  --card: rgba(20, 27, 39, 0.86);
+  --edge: rgba(255, 255, 255, 0.09);
+  --ink: #f5f7fb;
+  --ink-2: #b4bfcf;
+  --ink-3: #7f8a9c;
+  --amber: #ffc131;
+  --amber-2: #ffd876;
+  --blue: #5b7cff;
+  --sky: #7dd3fc;
+  --green: #4ade80;
+  --red: #ff6b6b;
+  --font: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans", "Helvetica Neue", Arial, sans-serif;
+  --mono: ui-monospace, "Cascadia Mono", "Cascadia Code", "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  --ease: cubic-bezier(0.2, 0.8, 0.2, 1);
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+  background: #000;
+  color: var(--ink);
+  font: 15px/1.45 var(--font);
+  -webkit-font-smoothing: antialiased;
+  -webkit-tap-highlight-color: transparent;
+}
+
+button { font: inherit; color: inherit; }
+
+:focus-visible { outline: 2px solid var(--sky); outline-offset: 2px; }
+
+/* ── the desktop ── */
+
+#screen {
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  height: 100vh;
+  display: block;
+  background: #000;
+  object-fit: contain;
+  /* One pixel for one: sharp edges even where a screen's scale stretches it. */
+  image-rendering: pixelated;
+  touch-action: none;
+  outline: none;
+  cursor: default;
+}
+/* Low draws a smaller picture and scales it back: smoothed, not blocky. */
+#screen.smooth { image-rendering: auto; }
+
+/* The http page's picture: the browser's video player, laid exactly over the
+   canvas and fitted the same way. Clicks go through it to the canvas, which
+   keeps the input and wears the pointer. Nothing shows until a stream plays. */
+#video {
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  height: 100vh;
+  display: none;
+  object-fit: contain;
+  background: transparent;
+  pointer-events: none;
+}
+body.player #video { display: block; }
+
+/* A thin line at the top edge: where the bar comes from. Never takes a click. */
+.hint {
+  position: fixed;
+  top: 3px;
+  left: 50%;
+  width: 46px;
+  height: 4px;
+  margin-left: -23px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.34);
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.25);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.4s var(--ease);
+  z-index: 9;
+}
+body.up:not(.bar-on) .hint { opacity: 0.7; }
+body.up.fullscreen:not(.bar-on) .hint { opacity: 0.35; }
+
+/* ── the bar ── */
+
+.bar {
+  position: fixed;
+  top: 10px;
+  left: 50%;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  /* Its own width: anchored at 50%, a fixed box would otherwise get half the window. */
+  width: max-content;
+  max-width: calc(100vw - 20px);
+  padding: 5px 5px 5px 14px;
+  border-radius: 999px;
+  background: rgba(15, 21, 33, 0.8);
+  border: 1px solid var(--edge);
+  box-shadow: 0 12px 36px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.06);
+  -webkit-backdrop-filter: blur(20px) saturate(150%);
+  backdrop-filter: blur(20px) saturate(150%);
+  white-space: nowrap;
+  opacity: 0;
+  transform: translate(-50%, calc(-100% - 16px));
+  pointer-events: none;
+  transition: transform 0.32s var(--ease), opacity 0.22s var(--ease);
+}
+body.bar-on .bar {
+  opacity: 1;
+  transform: translate(-50%, 0);
+  pointer-events: auto;
+}
+
+.who {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  max-width: 190px;
+  padding-right: 4px;
+  font-weight: 650;
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+#bar-name { overflow: hidden; text-overflow: ellipsis; }
+/* Over plain http: said beside the name, in the colour a warning has. */
+.who .plain {
+  flex: none;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: rgba(255, 193, 49, 0.14);
+  color: var(--amber-2);
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.who .plain[hidden] { display: none; }
+.who:has(.plain:not([hidden])) { max-width: 300px; }
+
+.dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--ink-3);
+}
+.dot.ok { background: var(--green); box-shadow: 0 0 0 3px rgba(74, 222, 128, 0.18); }
+.dot.warn { background: var(--amber); box-shadow: 0 0 0 3px rgba(255, 193, 49, 0.18); }
+
+/* Low · Medium · High, with a highlight that slides to the one chosen. */
+.seg {
+  position: relative;
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: 1fr;
+  padding: 3px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.06);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.05);
+}
+.seg button {
+  position: relative;
+  z-index: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  min-width: 78px;
+  padding: 6px 12px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--ink-2);
+  font-size: 12.5px;
+  font-weight: 650;
+  letter-spacing: 0.01em;
+  cursor: pointer;
+  transition: color 0.25s var(--ease);
+}
+.seg button svg { width: 13px; height: 13px; flex: none; }
+.seg button:hover { color: var(--ink); }
+.seg button[aria-checked="true"] { color: #161208; }
+.seg .glide {
+  position: absolute;
+  top: 3px;
+  bottom: 3px;
+  left: 3px;
+  width: calc((100% - 6px) / 3);
+  border-radius: 999px;
+  background: linear-gradient(180deg, var(--amber-2), var(--amber));
+  box-shadow: 0 3px 14px rgba(255, 193, 49, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.45);
+  transition: transform 0.36s var(--ease);
+}
+.seg[data-mode="medium"] .glide { transform: translateX(100%); }
+.seg[data-mode="high"] .glide { transform: translateX(200%); }
+
+.stats {
+  min-width: 132px;
+  padding: 0 6px;
+  color: var(--ink-3);
+  font: 500 12px/1 var(--mono);
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+
+.sep { width: 1px; height: 20px; background: rgba(255, 255, 255, 0.1); }
+
+.icon {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--ink-2);
+  cursor: pointer;
+  transition: background 0.2s var(--ease), color 0.2s var(--ease);
+}
+.icon:hover { background: rgba(255, 255, 255, 0.08); color: var(--ink); }
+.icon svg { width: 18px; height: 18px; }
+#clip .strike { display: none; }
+#clip[aria-pressed="false"] { color: var(--ink-3); }
+#clip[aria-pressed="false"] .strike { display: inline; }
+#sound .strike { display: none; }
+#sound[aria-pressed="false"] { color: var(--ink-3); }
+#sound[aria-pressed="false"] .waves { display: none; }
+#sound[aria-pressed="false"] .strike { display: inline; }
+/* Files: Linux's files without the picture, a word and not only an icon. */
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 34px;
+  padding: 0 14px 0 11px;
+  border: 0;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.07);
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 650;
+  cursor: pointer;
+  transition: background 0.2s var(--ease);
+}
+.pill:hover { background: rgba(255, 255, 255, 0.13); }
+.pill svg { width: 17px; height: 17px; flex: none; color: var(--amber); }
+#full .leave { display: none; }
+body.fullscreen #full .enter { display: none; }
+body.fullscreen #full .leave { display: inline; }
+
+.menu {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  min-width: 210px;
+  padding: 6px;
+  border-radius: 16px;
+  background: rgba(18, 25, 38, 0.96);
+  border: 1px solid var(--edge);
+  box-shadow: 0 18px 44px rgba(0, 0, 0, 0.55);
+  -webkit-backdrop-filter: blur(20px);
+  backdrop-filter: blur(20px);
+}
+.menu button {
+  display: block;
+  width: 100%;
+  padding: 10px 12px;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  text-align: left;
+  font-size: 14px;
+  cursor: pointer;
+}
+.menu button:hover, .menu button:focus-visible { background: rgba(255, 255, 255, 0.07); }
+.menu button[hidden] { display: none; }
+
+/* The microphone: grey while off, red while Linux hears this computer, amber
+   when it is on and the phone says Linux cannot hear it yet. */
+#mic .strike { display: inline; }
+#mic { color: var(--ink-3); }
+#mic[aria-pressed="true"] { color: var(--red); }
+#mic[aria-pressed="true"] .strike { display: none; }
+#mic.warn { color: var(--amber); }
+#mic[aria-pressed="true"]:not(.warn) svg { animation: mic-live 1.6s ease-in-out infinite; }
+@keyframes mic-live { 50% { opacity: 0.55; } }
+
+/* ── touch screens (touch.js) ── */
+
+.touch-only { display: none; }
+body.touch .touch-only { display: grid; }
+#tmode .tm-pad { display: none; }
+body.pad #tmode .tm-touch { display: none; }
+body.pad #tmode .tm-pad { display: inline; }
+#kbd[aria-pressed="true"] { color: var(--amber); }
+
+/* The picture zoomed by a pinch: scaled about its top left, then moved. */
+#screen, #video { transform-origin: 0 0; }
+
+/* The trackpad's pointer: Linux's own shape, and a ring round its hot spot
+   that a finger can find on a busy desktop. */
+.tcur {
+  position: fixed;
+  left: 0;
+  top: 0;
+  z-index: 5;
+  width: 0;
+  height: 0;
+  pointer-events: none;
+  will-change: transform;
+  transition: opacity 0.4s var(--ease);
+}
+.tcur[hidden] { display: none; }
+.tcur img { position: absolute; image-rendering: pixelated; }
+.tcur::after {
+  content: "";
+  position: absolute;
+  left: -13px;
+  top: -13px;
+  width: 26px;
+  height: 26px;
+  border: 2px solid rgba(255, 216, 118, 0.85);
+  border-radius: 50%;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.5), 0 0 12px rgba(255, 193, 49, 0.35);
+}
+.tcur.idle { opacity: 0.35; }
+
+/* A long press deciding between a right-click and a drag. */
+.armed {
+  position: fixed;
+  left: -18px;
+  top: -18px;
+  z-index: 5;
+  width: 36px;
+  height: 36px;
+  border: 2px solid rgba(255, 216, 118, 0.9);
+  border-radius: 50%;
+  background: rgba(255, 193, 49, 0.18);
+  pointer-events: none;
+  animation: armed-in 0.18s var(--ease);
+}
+.armed[hidden] { display: none; }
+@keyframes armed-in { from { opacity: 0; scale: 0.6; } }
+
+/* Back from a pinch to the whole desktop. */
+.fit {
+  position: fixed;
+  left: 50%;
+  bottom: calc(18px + env(safe-area-inset-bottom));
+  z-index: 8;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 38px;
+  padding: 0 16px 0 13px;
+  border: 1px solid var(--edge);
+  border-radius: 999px;
+  background: rgba(15, 21, 33, 0.82);
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 650;
+  transform: translateX(-50%);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45);
+  -webkit-backdrop-filter: blur(16px);
+  backdrop-filter: blur(16px);
+  cursor: pointer;
+}
+.fit[hidden] { display: none; }
+.fit svg { width: 16px; height: 16px; color: var(--amber); }
+body.kbd-on .fit { bottom: calc(70px + env(safe-area-inset-bottom)); }
+
+/* The bar's handle, for a finger: a short line at the top, a large target. */
+.handle {
+  position: fixed;
+  top: 0;
+  left: 50%;
+  z-index: 9;
+  display: none;
+  width: 96px;
+  height: 30px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  transform: translateX(-50%);
+  cursor: pointer;
+}
+.handle span {
+  display: block;
+  width: 44px;
+  height: 5px;
+  margin: 7px auto 0;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.45);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.6);
+}
+body.touch.up:not(.bar-on) .handle { display: block; }
+
+/* The field the screen's keyboard types into: there, focusable, unseen. */
+.kbd-in {
+  position: fixed;
+  left: 0;
+  bottom: 0;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  border: 0;
+  opacity: 0;
+  resize: none;
+  font-size: 16px;
+  caret-color: transparent;
+  pointer-events: none;
+}
+
+/* The keys a screen keyboard lacks, on top of the screen's keyboard. */
+.keys {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 12;
+  display: none;
+  gap: 6px;
+  padding: 7px max(8px, env(safe-area-inset-left)) calc(7px + env(safe-area-inset-bottom)) max(8px, env(safe-area-inset-right));
+  overflow-x: auto;
+  background: rgba(11, 18, 34, 0.94);
+  border-top: 1px solid var(--edge);
+  -webkit-backdrop-filter: blur(16px);
+  backdrop-filter: blur(16px);
+}
+body.kbd-on .keys { display: flex; }
+.keys button {
+  flex: none;
+  min-width: 46px;
+  height: 40px;
+  padding: 0 12px;
+  border: 1px solid var(--edge);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.07);
+  color: var(--ink);
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.keys button:active { background: rgba(255, 255, 255, 0.16); }
+.keys button[aria-pressed="true"] { background: var(--amber); border-color: var(--amber); color: #1a1405; }
+.keys .hide { margin-left: auto; display: grid; place-items: center; }
+.keys .hide svg { width: 20px; height: 20px; }
+
+/* A narrow window: the bar keeps what matters. */
+@media (max-width: 640px) {
+  .stats, .sep, .who { display: none; }
+  .seg button { min-width: 0; padding: 6px 10px; }
+  .bar { padding-left: 5px; }
+}
+
+/* ── covers: everything that is not the desktop ── */
+
+.cover {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  display: grid;
+  place-items: center;
+  padding: 16px;
+  overflow: auto;
+  background:
+    radial-gradient(1100px 620px at 88% -12%, rgba(255, 193, 49, 0.13), transparent 62%),
+    radial-gradient(900px 560px at 4% -4%, rgba(91, 124, 255, 0.2), transparent 64%),
+    linear-gradient(180deg, #0e1730 0%, var(--bg) 46%, var(--bg-deep) 100%);
+  transition: opacity 0.3s var(--ease), background 0.3s var(--ease);
+}
+/* Over a picture already there (reconnecting, Linux ended): the desktop shows through, dimmed. */
+.cover.over {
+  background: rgba(4, 7, 14, 0.62);
+  -webkit-backdrop-filter: blur(8px) saturate(80%);
+  backdrop-filter: blur(8px) saturate(80%);
+}
+body.up .cover { opacity: 0; pointer-events: none; }
+/* Words over a live picture need a solid page under them. */
+.cover.over .card { background: rgba(14, 20, 31, 0.94); }
+
+.aura {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background:
+    radial-gradient(420px 260px at 50% 38%, rgba(255, 193, 49, 0.06), transparent 70%);
+}
+.cover.over .aura { display: none; }
+
+.card {
+  position: relative;
+  width: min(440px, 100%);
+  padding: 34px 30px 28px;
+  border-radius: 30px;
+  background: var(--card);
+  border: 1px solid var(--edge);
+  box-shadow: 0 40px 100px rgba(0, 0, 0, 0.55), inset 0 1px 0 rgba(255, 255, 255, 0.06);
+  -webkit-backdrop-filter: blur(24px);
+  backdrop-filter: blur(24px);
+  text-align: center;
+  animation: rise 0.55s var(--ease) both;
+}
+@keyframes rise {
+  from { opacity: 0; transform: translateY(14px) scale(0.985); }
+  to { opacity: 1; transform: none; }
+}
+
+.mark {
+  display: block;
+  width: 60px;
+  height: 60px;
+  margin: 0 auto;
+  border-radius: 17px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45), 0 0 0 1px rgba(255, 255, 255, 0.06);
+}
+
+h1 {
+  margin: 20px 0 8px;
+  font-size: 25px;
+  font-weight: 750;
+  line-height: 1.2;
+  letter-spacing: -0.015em;
+}
+
+.lede {
+  margin: 0 auto 24px;
+  max-width: 340px;
+  color: var(--ink-2);
+}
+.lede b { color: var(--ink); font-weight: 650; }
+
+.fine {
+  margin: 20px 0 0;
+  color: var(--ink-3);
+  font-size: 13px;
+}
+
+/* The six digits: one real input under six drawn cells, so typing, pasting
+   and a password manager all just work. */
+.code {
+  position: relative;
+  display: block;
+  width: 100%;
+  max-width: 344px;
+  height: 66px;
+  margin: 0 auto;
+  cursor: text;
+}
+.code input {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  width: 100%;
+  height: 100%;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: transparent;
+  caret-color: transparent;
+  font-size: 16px;
+  opacity: 0.01;
+}
+.cells {
+  display: flex;
+  gap: 8px;
+  height: 100%;
+}
+.cells i {
+  position: relative;
+  flex: 1;
+  display: grid;
+  place-items: center;
+  border-radius: 15px;
+  background: rgba(255, 255, 255, 0.045);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.11);
+  font: 700 29px/1 var(--mono);
+  font-style: normal;
+  color: var(--ink);
+  transition: box-shadow 0.18s var(--ease), background 0.18s var(--ease), transform 0.18s var(--ease);
+}
+.cells b { flex: none; width: 6px; }
+.cells i.filled { background: rgba(255, 255, 255, 0.07); }
+.code.focus .cells i.next {
+  box-shadow: inset 0 0 0 2px var(--amber), 0 0 0 4px rgba(255, 193, 49, 0.14);
+}
+.code.focus .cells i.next::after {
+  content: "";
+  width: 2px;
+  height: 28px;
+  border-radius: 1px;
+  background: var(--amber);
+  animation: blink 1.05s steps(1) infinite;
+}
+@keyframes blink { 50% { opacity: 0; } }
+.code.bad .cells i { box-shadow: inset 0 0 0 2px var(--red); }
+.code.bad { animation: shake 0.42s var(--ease); }
+.code.busy .cells i { opacity: 0.55; }
+@keyframes shake {
+  20% { transform: translateX(-9px); }
+  40% { transform: translateX(8px); }
+  60% { transform: translateX(-5px); }
+  80% { transform: translateX(3px); }
+}
+
+.error {
+  min-height: 22px;
+  margin: 14px 0 0;
+  color: var(--red);
+  font-size: 14px;
+  font-weight: 550;
+}
+
+/* Waiting: the mark, with a ring running round it. */
+.orbit {
+  position: relative;
+  width: 92px;
+  height: 92px;
+  margin: 0 auto;
+  display: grid;
+  place-items: center;
+}
+.orbit img { width: 60px; height: 60px; border-radius: 17px; box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45); }
+.orbit::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: conic-gradient(from 0deg, transparent 0 62%, rgba(255, 193, 49, 0.9) 82%, transparent 100%);
+  -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 3px), #000 calc(100% - 2px));
+  mask: radial-gradient(farthest-side, transparent calc(100% - 3px), #000 calc(100% - 2px));
+  animation: spin 1.1s linear infinite;
+}
+@keyframes spin { to { transform: rotate(1turn); } }
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 10px;
+}
+
+.primary, .ghost {
+  min-height: 46px;
+  padding: 0 24px;
+  border-radius: 15px;
+  font-size: 15px;
+  font-weight: 650;
+  cursor: pointer;
+  transition: transform 0.12s var(--ease), filter 0.2s var(--ease), background 0.2s var(--ease);
+}
+.primary {
+  border: 0;
+  color: #161208;
+  background: linear-gradient(180deg, var(--amber-2), var(--amber));
+  box-shadow: 0 8px 24px rgba(255, 193, 49, 0.3), inset 0 1px 0 rgba(255, 255, 255, 0.5);
+}
+.primary:hover { filter: brightness(1.05); }
+.primary:active, .ghost:active { transform: translateY(1px); }
+.ghost {
+  border: 1px solid var(--edge);
+  color: var(--ink);
+  background: rgba(255, 255, 255, 0.04);
+}
+.ghost:hover { background: rgba(255, 255, 255, 0.08); }
+
+/* ── a word now and then ── */
+
+.toast {
+  position: fixed;
+  left: 50%;
+  bottom: 28px;
+  z-index: 30;
+  max-width: min(560px, calc(100vw - 32px));
+  padding: 11px 18px;
+  border-radius: 999px;
+  background: rgba(15, 21, 33, 0.9);
+  border: 1px solid var(--edge);
+  box-shadow: 0 14px 40px rgba(0, 0, 0, 0.5);
+  -webkit-backdrop-filter: blur(18px);
+  backdrop-filter: blur(18px);
+  color: var(--ink);
+  font-size: 14px;
+  text-align: center;
+  opacity: 0;
+  transform: translate(-50%, 12px);
+  pointer-events: none;
+  transition: opacity 0.25s var(--ease), transform 0.3s var(--ease);
+}
+.toast.show { opacity: 1; transform: translate(-50%, 0); }
+.toast b { color: var(--amber); font-weight: 700; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}

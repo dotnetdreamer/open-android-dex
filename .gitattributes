@@ -10,3 +10,9 @@
 # it starts (the Tauri CLI's manifest rewrite). Checked out with CRLF on Windows
 # (core.autocrlf), git then lists it as modified with no change in it: LF here too.
 open-android-dex-tauri/src-tauri/Cargo.toml text eol=lf
+
+# The guest's own tools (oadx-run, oadx-apps-menu) have no .sh for the rule
+# above to match, and run inside Linux, where a CR at the end of each line
+# breaks every command in them: LF too, in the source and in the APK's copy.
+openandroiddex-linux/guest/* text eol=lf
+openandroiddex-launcher/app/src/main/assets/linux/guest/* text eol=lf

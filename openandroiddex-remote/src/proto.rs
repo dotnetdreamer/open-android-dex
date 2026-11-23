@@ -28,6 +28,13 @@ pub const ALPN_PAIR: &[u8] = b"/openandroiddex/pair/1";
 pub const FEATURE_DESKTOP: &str = "desktop";
 /// In [`CtlStatus::features`]: its desktop also comes as video ([`DesktopOp::Stream`]).
 pub const FEATURE_DESKTOP_STREAM: &str = "desktop-stream";
+/// In [`CtlStatus::features`]: the phone's own screen comes as video too
+/// ([`DesktopOp::Phone`]): Remote desktop, which the phone's user switches on
+/// apart from Linux's remote access.
+pub const FEATURE_PHONE: &str = "phone";
+/// In [`CtlStatus::features`]: the phone's own screen also comes straight to
+/// a browser, by WebRTC ([`DesktopOp::PhoneRtc`]).
+pub const FEATURE_PHONE_RTC: &str = "phone-rtc";
 
 /// Close codes, so the side that was turned away can say why.
 pub const CLOSE_NOT_PAIRED: u32 = 403;
@@ -125,6 +132,12 @@ pub enum Refusal {
     DesktopFailed,
     /// The desktop's video did not answer on the phone.
     StreamUnavailable,
+    /// Linux's remote access is off on the phone: the tunnel is up for
+    /// Remote desktop alone, and offers nothing of Linux's.
+    LinuxOff,
+    /// Remote desktop (the phone's own screen) is off on the phone, or
+    /// nothing answered for it.
+    PhoneUnavailable,
 }
 
 /// The phone's answer to [`SshHello`]. After `ok: true`, raw bytes.
@@ -183,6 +196,43 @@ pub enum DesktopOp {
     /// encoder — the launcher's LinuxStream, the same the desktop app reaches
     /// over adb: a WebSocket upgrade on `/stream`, then its frames.
     Stream,
+    /// After the answer, raw bytes to the phone's own screen as video:
+    /// Remote desktop's PhoneStream, a WebSocket upgrade on `/phone`, then
+    /// its frames, on the same wire as [`DesktopOp::Stream`].
+    Phone,
+    /// The phone's own screen straight to a browser, for the Remote desktop
+    /// page on the web, which has no UDP of its own and so reaches the phone
+    /// only through a relay. After the answer, [`RtcSignal`] frames both
+    /// ways: the browser's WebRTC offer, the phone's answer, each side's
+    /// candidates, and `up` once a data channel named `phone` is open. That
+    /// channel then carries what [`DesktopOp::Phone`]'s stream does, byte for
+    /// byte. Only a phone built with WebRTC (the `rtc` feature, which says
+    /// [`FEATURE_PHONE_RTC`]) offers it.
+    PhoneRtc,
+}
+
+/// One frame of a [`DesktopOp::PhoneRtc`] stream, either way. Each carries
+/// one of these.
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct RtcSignal {
+    /// Browser → phone, first: its offer, SDP.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offer: Option<String>,
+    /// Phone → browser, first: the answer, SDP, with the phone's own
+    /// addresses as candidates.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answer: Option<String>,
+    /// Either way, later: one more candidate, as `RTCIceCandidate.candidate`
+    /// has it (the address a STUN server saw, found after the answer).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidate: Option<String>,
+    /// Phone → browser: the data channel is open, and the phone's screen
+    /// is on it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub up: bool,
+    /// Phone → browser: no WebRTC this time, and why (for the log).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 /// A desktop's size in pixels, which for a computer's window is its screen's

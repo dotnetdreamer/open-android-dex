@@ -1,5 +1,6 @@
 mod adb;
 mod apps;
+mod deskbar;
 mod diag;
 mod display;
 mod embed;
@@ -121,6 +122,9 @@ pub fn run() {
             remote_desktop::remote_desktop_put_cancel,
             remote_desktop::remote_desktop_inbox,
             remote_desktop::remote_desktop_stream,
+            remote_desktop::remote_open_phone,
+            remote_desktop::remote_phone_view_set,
+            remote_desktop::remote_phone_stream,
             remote_desktop::remote_desktop_reveal,
             remote_usb::remote_desktop_usb,
             pmos::pmos_status,
@@ -130,6 +134,11 @@ pub fn run() {
             pmos::pmos_close,
             pmos::pmos_session,
             pmos::pmos_window_link,
+            pmos::pmos_put,
+            pmos::pmos_put_cancel,
+            pmos::pmos_apps,
+            pmos::pmos_open_app,
+            pmos::pmos_app_windows,
             apps::apps_prepare,
             apps::apps_drop,
             apps::apps_list,

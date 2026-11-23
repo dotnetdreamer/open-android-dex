@@ -22,6 +22,13 @@ export interface DesktopHost {
   attach(sink: (msg: ToGuest) => void): () => void;
   /** The desktop is showing — a drop lands on it — or it is not. */
   showing(up: boolean): void;
+  /**
+   * Where a point of the window falls on the desktop, in the desktop's own
+   * pixels, while the view shows it; null once it doesn't. A postmarketOS
+   * phone drops files on the app under that point. A window whose drops all
+   * go to one folder needn't ask.
+   */
+  point?(map: ((clientX: number, clientY: number) => [number, number]) | null): void;
 }
 
 /** A byte count the way a file manager says one (as dexremote::sftp::size). */
@@ -143,9 +150,22 @@ export function DesktopCover({
 
 /**
  * Over everything while files are dragged across the window. No blur: it lies
- * over a picture that repaints all the time.
+ * over a picture that repaints all the time. `title` and `how` say where a
+ * drop goes when it isn't the guest's Desktop (a postmarketOS phone's).
  */
-export function DropCover({ name, open, busy }: { name: string; open: boolean; busy: boolean }) {
+export function DropCover({
+  name,
+  open,
+  busy,
+  title,
+  how,
+}: {
+  name: string;
+  open: boolean;
+  busy: boolean;
+  title?: string;
+  how?: string;
+}) {
   return (
     <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-black/65 p-6">
       <div
@@ -157,38 +177,55 @@ export function DropCover({ name, open, busy }: { name: string; open: boolean; b
           <Icon name="upload" size={22} />
         </span>
         <p className="heading text-[15px]">
-          {open ? `Drop to copy to the Desktop on ${name}` : `The desktop on ${name} isn't open yet`}
+          {open ? (title ?? `Drop to copy to the Desktop on ${name}`) : `The desktop on ${name} isn't open yet`}
         </p>
         <p className="body">
           {!open
             ? "Wait for it to open, then drop again."
             : busy
               ? "It's copied as soon as the copy in progress has finished."
-              : "Folders come with everything in them. Nothing already there is replaced."}
+              : (how ?? "Folders come with everything in them. Nothing already there is replaced.")}
         </p>
       </div>
     </div>
   );
 }
 
-/** The copy in the window's corner: how far, and the way to stop it. */
-export function CopyCard({ copy, name, onCancel, onClose }: { copy: Copy; name: string; onCancel: () => void; onClose: () => void }) {
+/**
+ * The copy in the window's corner: how far, and the way to stop it. `where`
+ * is where a copy lands ("the Desktop on Pixel", "Downloads on Galaxy S24").
+ */
+export function CopyCard({
+  copy,
+  name,
+  where,
+  onCancel,
+  onClose,
+}: {
+  copy: Copy;
+  name: string;
+  where?: string;
+  onCancel: () => void;
+  onClose: () => void;
+}) {
+  const place = where ?? `the Desktop on ${name}`;
   let title: string;
   let detail: string;
   let note = "";
   let done: number | null = null;
   if (copy.kind === "copying") {
     const p = copy.progress;
-    title = `Copying to the Desktop on ${name}`;
+    title = `Copying to ${place}`;
     if (!p) detail = "Reaching the phone…";
     else if (p.filesTotal > 1) detail = `${p.current || "…"} · ${Math.min(p.filesDone + 1, p.filesTotal)} of ${p.filesTotal}`;
     else detail = p.current || "…";
     if (p) done = p.bytesTotal > 0 ? p.bytesDone / p.bytesTotal : p.filesTotal > 0 ? p.filesDone / p.filesTotal : 0;
     if (copy.waiting > 0) note = copy.waiting === 1 ? "Then 1 more drop" : `Then ${copy.waiting} more drops`;
   } else if (copy.kind === "done") {
-    title = `Copied to the Desktop on ${name}`;
+    // A postmarketOS phone also drops it on the app it was let go over.
+    title = copy.report.taken ? `Dropped into the app on ${name}` : `Copied to ${place}`;
     detail = `${names(copy.report.landed)} · ${size(copy.report.bytes)}`;
-    note = leftOut(copy.report);
+    note = [copy.report.taken ? `A copy is in ${place}` : "", leftOut(copy.report)].filter(Boolean).join(" · ");
   } else if (copy.kind === "stopped") {
     title = "Copy stopped";
     detail = copy.report.landed.length

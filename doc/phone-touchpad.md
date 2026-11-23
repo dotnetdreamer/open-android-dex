@@ -453,8 +453,9 @@ arrow's position read from SurfaceFlinger:
   `block_untrusted_touches` set to block for the test, then put back.
 - **Home** as `KEYCODE_HOME` did nothing on the desktop and closed the pad; it is
   the taskbar's ○ now, and the pad stays. On this phone the taskbar's ○ itself
-  does not bring the desktop in front of a freeform window either — the same
-  `goHome`, with or without the pad.
+  did not bring the desktop in front of a freeform window either — the same
+  `goHome`, with or without the pad. Since 2026-11-17 ○ is Show desktop on every
+  phone, which hides the windows instead (`doc/desktop-window-buttons.md`).
 - `CURSOR` refuses a picture wider than 256 px, and a line that is not one.
 - Below Android 13 the permission check finds nothing to grant.
 

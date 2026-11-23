@@ -265,7 +265,7 @@ public final class AppServer {
                 }
             });
         }
-        audio = AppAudio.open(this::audioChanged);
+        audio = AppAudio.open(this::audioChanged, socketName);
         AppDrop.sweep();
         server = new LocalServerSocket(socketName);
         Thread accept = new Thread(this::acceptLoop, "apps-accept");
@@ -353,16 +353,26 @@ public final class AppServer {
     }
 
     /**
+     * Held while a word of the phone's sound is made and sent: two threads say
+     * it (an output coming or going, an answer to the computer), and each word
+     * must reach the computer in the order it was made — the Mute in a word
+     * made before it changed, arriving after, would turn it back there.
+     */
+    private final Object sayingSound = new Object();
+
+    /**
      * Where the sound can go, to the computer. Nothing about the phone's
      * sound may end the control connection it rides on: a phone that will
      * not say is a menu with the computer's half only.
      */
     private void sendAudio(Wire w) {
         if (audio == null) return;
-        try {
-            w.json(audio.state());
-        } catch (Throwable t) {
-            // the computer's end went, or the phone would not say; either way, nothing to send
+        synchronized (sayingSound) {
+            try {
+                w.json(audio.state());
+            } catch (Throwable t) {
+                // the computer's end went, or the phone would not say; either way, nothing to send
+            }
         }
     }
 
@@ -385,6 +395,36 @@ public final class AppServer {
             r.put("ok", false).put("message", String.valueOf(e.getMessage()));
         }
         return r;
+    }
+
+    /**
+     * The windows' Mute, on or off ({@link AppMute}), answered at once
+     * ({@code muted}, with the Mute as it is after: the computer takes it from
+     * the answer, in the order the phone said it). Off with {@code
+     * afterCapture}, the phone's media may stay silent a moment longer, until
+     * the computer's capture of it is running. On only while a window is
+     * open: the Mute is theirs, and ends with the last of them.
+     */
+    private JSONObject mute(JSONObject j) throws org.json.JSONException {
+        boolean on = j.optBoolean("on");
+        JSONObject r = new JSONObject().put("t", "muted").put("on", on);
+        if (audio == null) {
+            log("sound: " + (on ? "could not mute" : "could not unmute") + " (the shell may not change the phone's sound)");
+            return r.put("ok", false).put("message", "the phone will not let the shell change its sound").put("muted", false);
+        }
+        String refused;
+        try {
+            // Each window leaves the list before it lifts the Mute.
+            refused = on ? audio.mute(() -> !running.isEmpty()) : audio.unmute(j.optBoolean("afterCapture"));
+        } catch (Throwable e) {
+            refused = e.getMessage() != null ? e.getMessage() : e.toString();
+        }
+        r.put("muted", audio.muted());
+        if (refused != null) {
+            log("sound: " + (on ? "could not mute" : "could not unmute") + " (" + refused + ")");
+            return r.put("ok", false).put("message", refused);
+        }
+        return r.put("ok", true);
     }
 
     /**
@@ -552,6 +592,8 @@ public final class AppServer {
                     w.run();
                 } finally {
                     running.remove(w);
+                    // The windows' Mute ends with the last of them, whether or not the computer is there to say so.
+                    if (running.isEmpty() && audio != null && audio.lift("the last window has closed")) audioChanged();
                 }
                 break;
             }
@@ -739,6 +781,13 @@ public final class AppServer {
                         break;
                     case "audioMode":
                         tellLauncher(j);
+                        break;
+                    case "mute":
+                        // The answer, then the sound as it is now: no older word of it between them.
+                        synchronized (sayingSound) {
+                            wire.json(mute(j));
+                            sendAudio(wire);
+                        }
                         break;
                     case "ping":
                         wire.json(new JSONObject().put("t", "pong").put("n", j.opt("n"))
@@ -1225,6 +1274,8 @@ public final class AppServer {
         // The windows' drag pixels down, and the overlay app-op back if they had it given.
         drags.stopping();
         gamepads.stop();
+        // The phone's media plays again, if the windows' Mute still had it silent.
+        if (audio != null) audio.lift("the server is stopping");
         System.out.flush();
         System.exit(0);
     }

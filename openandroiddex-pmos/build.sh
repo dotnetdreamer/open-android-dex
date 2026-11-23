@@ -22,11 +22,22 @@ MSYS_NO_PATHCONV=1 docker run --rm -v "$HOST_DIR:/src" -w /src "$IMAGE" sh -euc 
   for xml in \
     /usr/share/plasma-wayland-protocols/zkde-screencast-unstable-v1.xml \
     /usr/share/plasma-wayland-protocols/fake-input.xml \
-    /usr/share/wayland-protocols/unstable/xdg-output/xdg-output-unstable-v1.xml; do
+    /usr/share/wayland-protocols/unstable/xdg-output/xdg-output-unstable-v1.xml \
+    /usr/share/wlr-protocols/unstable/wlr-output-management-unstable-v1.xml \
+    /usr/share/wlr-protocols/unstable/wlr-screencopy-unstable-v1.xml \
+    /usr/share/wlr-protocols/unstable/wlr-virtual-pointer-unstable-v1.xml \
+    /usr/share/wlr-protocols/unstable/wlr-data-control-unstable-v1.xml \
+    /usr/share/wlr-protocols/unstable/wlr-layer-shell-unstable-v1.xml \
+    /usr/share/wayland-protocols/staging/ext-data-control/ext-data-control-v1.xml \
+    /usr/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml \
+    protocols/virtual-keyboard-unstable-v1.xml; do
     base=$(basename "$xml" .xml)
     wayland-scanner client-header "$xml" "$gen/$base-client-protocol.h"
     wayland-scanner private-code "$xml" "$gen/$base-protocol.c"
   done
+  # The KWin scripts the program hands KWin (see src/here.js, src/app.js), as C strings.
+  sh cstring.sh HERE_JS src/here.js >"$gen/here-js.h"
+  sh cstring.sh APP_JS src/app.js >"$gen/app-js.h"
   export PKG_CONFIG_SYSROOT_DIR=/sysroot
   export PKG_CONFIG_LIBDIR=/sysroot/usr/lib/pkgconfig:/sysroot/usr/share/pkgconfig
   pkgs="wayland-client xkbcommon gio-unix-2.0 gstreamer-1.0 gstreamer-app-1.0 gstreamer-video-1.0"

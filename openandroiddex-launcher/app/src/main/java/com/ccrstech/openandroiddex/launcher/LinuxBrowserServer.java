@@ -1,0 +1,1475 @@
+package com.ccrstech.openandroiddex.launcher;
+
+import java.io.BufferedInputStream;
+import java.io.ByteArrayInputStream;
+import java.io.Closeable;
+import java.io.EOFException;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.io.SequenceInputStream;
+import java.net.InetAddress;
+import java.net.InetSocketAddress;
+import java.net.ServerSocket;
+import java.net.Socket;
+import java.net.SocketTimeoutException;
+import java.net.URLDecoder;
+import java.nio.charset.StandardCharsets;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
+
+import javax.net.ssl.SSLSocket;
+
+/**
+ * Linux in a computer's browser: an HTTPS server on the phone's own network
+ * that serves the viewer page and hands a browser that was let in to
+ * {@link LinuxStream}, the same hardware-encoded H.264 the desktop app gets
+ * over adb. The browser decodes it on its GPU (WebCodecs) and draws the
+ * pointer itself. Nothing is installed on the computer. Design record:
+ * doc/linux-browser.md.
+ *
+ * <p><b>One port, both schemes.</b> The first byte of every connection is
+ * looked at before anything reads it: 0x16 is a TLS handshake, and the rest is
+ * plain HTTP. Both are served the same way. https is the way in: the phone's
+ * card shows it, and over it the browser decodes on its GPU (WebCodecs is
+ * only given to secure pages). Plain HTTP is there for a browser that will not
+ * take the phone's certificate at all, as a managed laptop's may not: a person
+ * types {@code 192.168.1.20:7443}, the browser asks over plain HTTP, and the
+ * page offers the secure address first ({@code viewer.js}), going there by
+ * itself once this browser has taken the certificate. Over plain HTTP the
+ * page decodes with the browser's own video player (Media Source
+ * Extensions), and what crosses the network is not encrypted.
+ *
+ * <p><b>Who gets in.</b>
+ * <ul>
+ *   <li>Only a connection that came in on one of the addresses the phone
+ *       offers ({@link LinuxBrowser#addresses}: Wi-Fi, its hotspot, a cable, a
+ *       VPN), from a private address. Not mobile data, where other
+ *       subscribers may share the carrier's private range, and not loopback,
+ *       which every app on the phone can reach. Anything else is closed before
+ *       a byte is read.</li>
+ *   <li>Only a browser with a token. A token is had once, for the six-digit
+ *       code the phone shows, through {@code POST /pair}, which takes one try
+ *       at a time; the code's own budget is in {@link LinuxBrowser}. Five wrong
+ *       codes from one address also lock that address out, 30 s doubling to
+ *       ten minutes.</li>
+ *   <li>The token comes with the WebSocket's request ({@code ?t=}) and is
+ *       checked before a single frame is read: a peer without one gets a
+ *       sentence saying so and a closed socket.</li>
+ *   <li>{@code Host} must be an address, not a name, so a page elsewhere that
+ *       points its own name at the phone (DNS rebinding) is answered with
+ *       nothing; and every request that changes something must come from this
+ *       origin's own page ({@code Origin}).</li>
+ *   <li>Every request has {@link #preAuthMs} to come and be answered,
+ *       however slowly it is sent, until its connection is let in (a stream,
+ *       or Linux's files); and one address may hold sixteen at once.</li>
+ *   <li>The one exception to loopback: while Remote desktop's Cloudflare
+ *       tunnel is up ({@link PhoneTunnel}), cloudflared on this phone brings
+ *       browsers from anywhere over loopback, under the tunnel's name. Those
+ *       get the phone's own page, screen and files ({@link #TUNNEL_FILES},
+ *       {@code /pair}, {@code /link}, {@code /phone}, {@code /pfs/}) and nothing of Linux's,
+ *       whatever Linux's switch says; the lockout counts the address
+ *       Cloudflare saw.</li>
+ * </ul>
+ *
+ * <p><b>The page.</b> Files from the APK's assets, never from the guest:
+ * anything running as root in Linux can rewrite the guest's web root, and the
+ * page holds the browser's token. Served with a policy that lets it load
+ * nothing but itself.
+ *
+ * <p>Pure Java but for {@link Sniffer}, which the service gives it: the
+ * stand-in tests on a computer run this very file.
+ */
+final class LinuxBrowserServer {
+
+    /** What the server needs from the process it runs in. */
+    interface Host {
+        /**
+         * A browser let in: its WebSocket, upgraded, and the hello it opened
+         * with. The desktop is the host's to give it, once {@code gate} says
+         * it still may have it. {@code ended} runs once the stream is over.
+         * False when there is nothing to hand it to.
+         */
+        boolean stream(LinuxStreamSocket ws, String hello, Closeable sock, String who, Gate gate, Runnable ended);
+
+        /** The phone's name, which the page shows once it has been let in. */
+        String phoneName();
+
+        /** One of the page's files, or null. */
+        byte[] asset(String name);
+
+        /** Something the Settings page shows has changed. */
+        void changed();
+
+        /** Linux's files for the page's Files, or null where there are none to give. */
+        default LinuxFiles files() {
+            return null;
+        }
+
+        /**
+         * Whether Linux is offered ("Open in a browser" on). The door also
+         * stays up for Remote desktop alone, and then gives nothing of Linux's.
+         */
+        default boolean linuxOn() {
+            return true;
+        }
+
+        /**
+         * A line to the phone's own screen (Remote desktop's PhoneStream, an
+         * abstract socket on the phone), or null while Remote desktop is off.
+         *
+         * @throws IOException Remote desktop is on, and its stream is not
+         *         running (no control, nothing shared)
+         */
+        default PhoneLine phoneLine() throws IOException {
+            return null;
+        }
+
+        /**
+         * The phone's own files for Remote desktop's Files ({@code /pfs/}): a
+         * {@link LinuxFiles} of {@link LinuxFiles.Kind#PHONE} over the phone's
+         * shared storage, or null while Remote desktop is off (or this APK has
+         * none). Its layout says when the storage cannot be read: no "All
+         * files access" yet, or a build without it.
+         */
+        default LinuxFiles phoneFiles() {
+            return null;
+        }
+    }
+
+    /** Bytes to the phone's screen and from it ({@link Host#phoneLine}); closing it ends both ways. */
+    interface PhoneLine extends Closeable {
+        InputStream in() throws IOException;
+
+        OutputStream out() throws IOException;
+    }
+
+    /**
+     * Whether a browser let in may still have the desktop. Asked by its stream
+     * at the moment it takes the desktop, under the lock that a sign-out or
+     * the switch going off reads the watching stream by: one of those that
+     * came first is seen here, and one that comes after finds the stream and
+     * ends it. Asked any earlier, a browser let in a moment before either
+     * would watch on, since from the token's check to that moment its
+     * connection is in neither place: {@link #dropOpen} no longer has it, and
+     * nothing watches yet.
+     */
+    interface Gate {
+        /** Null while it may; else what its page is told: "unauthorized" or "off". */
+        String refusal();
+    }
+
+    /** The first byte a connection sent, left where it is; -1 when none came in time. */
+    interface Sniffer {
+        int peek(Socket s, int timeoutMs) throws IOException;
+    }
+
+    /** The port is another app's: said, rather than moving to one a bookmark does not know. */
+    static final class PortTaken extends IOException {
+        final int port;
+
+        PortTaken(int port, Throwable cause) {
+            super("port " + port + " is in use by another app", cause);
+            this.port = port;
+        }
+    }
+
+    private static final int MAX_HEAD = 16 * 1024;
+    private static final int MAX_BODY = 4 * 1024;
+    /** Two browsers at their most, and room. */
+    private static final int MAX_HANDLERS = 48;
+    /**
+     * A browser opens six to an address for each scheme (Chromium's limit is
+     * per scheme, host and port), and the page uses both: the plain page and
+     * the secure one it goes to can hold twelve between them for as long as
+     * they are kept alive, and the stream and a transfer of Files' are more;
+     * eight (until 2026-11-20) left no room. A connection past this is closed
+     * unread; one that says nothing still has only its deadline.
+     */
+    private static final int MAX_PER_PEER = 16;
+    private static final int FIRST_BYTE_MS = 10_000;
+    private static final int IDLE_MS = 15_000;
+    /** Wrong codes from one address before it waits. Not final: the test raises it to reach the code's own budget. */
+    static volatile int lockAfter = 5;
+    private static final long LOCK_FIRST_MS = 30_000;
+    private static final long LOCK_MAX_MS = 10 * 60_000;
+
+    /**
+     * From the first byte to being let in (the page's files, a pairing, a
+     * stream's request), however slowly the far end sends: a byte now and then
+     * would otherwise hold a connection for ever, and enough of them every
+     * slot. Not final: the test makes it short.
+     */
+    static volatile int preAuthMs = 30_000;
+
+    /**
+     * A browser that sends nothing for this long is gone: its laptop shut or
+     * left the network, and no FIN came. The page sends a ping every two
+     * seconds, and a hidden tab's timers can slow to once a minute. Without
+     * it the phone would hold its wake lock for a session nobody sees. Not
+     * final: the test makes it short.
+     */
+    static volatile int sessionReadMs = 75_000;
+
+    /** The page's files and their types. Nothing else is served. */
+    private static final Map<String, String> FILES = new HashMap<>();
+
+    static {
+        FILES.put("index.html", "text/html; charset=utf-8");
+        FILES.put("phone.html", "text/html; charset=utf-8");
+        FILES.put("phone.js", "text/javascript; charset=utf-8");
+        FILES.put("phone.css", "text/css; charset=utf-8");
+        FILES.put("viewer.css", "text/css; charset=utf-8");
+        FILES.put("viewer.js", "text/javascript; charset=utf-8");
+        FILES.put("h264.js", "text/javascript; charset=utf-8");
+        FILES.put("mse.js", "text/javascript; charset=utf-8");
+        FILES.put("video-worker.js", "text/javascript; charset=utf-8");
+        FILES.put("touch.js", "text/javascript; charset=utf-8");
+        FILES.put("mic-worklet.js", "text/javascript; charset=utf-8");
+        FILES.put("keysym.js", "text/javascript; charset=utf-8");
+        FILES.put("sound.js", "text/javascript; charset=utf-8");
+        FILES.put("files.js", "text/javascript; charset=utf-8");
+        FILES.put("fileicons.js", "text/javascript; charset=utf-8");
+        FILES.put("transfer.js", "text/javascript; charset=utf-8");
+        FILES.put("peek.js", "text/javascript; charset=utf-8");
+        FILES.put("files.css", "text/css; charset=utf-8");
+        FILES.put("phone-files.js", "text/javascript; charset=utf-8");
+        FILES.put("phone-files.css", "text/css; charset=utf-8");
+        FILES.put("icon.svg", "image/svg+xml");
+        // The page an email's sign-in link opens (EmailNotice, POST /link).
+        FILES.put("signin.html", "text/html; charset=utf-8");
+        FILES.put("signin.js", "text/javascript; charset=utf-8");
+        FILES.put("signin.css", "text/css; charset=utf-8");
+    }
+
+    /**
+     * What the door gives through the Cloudflare tunnel (PhoneTunnel): the
+     * phone's own page and its files, and nothing of Linux's. The tunnel is
+     * Remote desktop's switch; Linux's "Open in a browser" is for the
+     * phone's Wi-Fi, and stays there however the two switches are set. The
+     * phone's page has Files too (phone-files.js), which is Linux's file
+     * manager's code with the phone's words: code from the APK, no data, and
+     * what it reads comes from {@code /pfs/} alone, never Linux's {@code /fs/}.
+     */
+    private static final Set<String> TUNNEL_FILES = new HashSet<>(java.util.Arrays.asList(
+            "phone.html", "phone.js", "phone.css", "sound.js", "h264.js", "keysym.js", "icon.svg",
+            "phone-files.js", "phone-files.css", "files.js", "fileicons.js", "transfer.js", "peek.js", "files.css",
+            "signin.html", "signin.js", "signin.css"));
+
+    /**
+     * Itself and nothing else. connect-src 'self' covers this origin's wss://,
+     * and from the plain page its ws:// and the same address over https, which
+     * it looks for (CSP 3); img-src data: is the pointer's shape, which
+     * arrives as pixels and is shown as a data URL, and blob: the Files'
+     * thumbnails; media-src blob: is the plain page's picture, a MediaSource
+     * the page fills itself, and 'self' a video or a song of Linux's played in
+     * Files; frame-src 'self' a PDF of Linux's, in the browser's own viewer.
+     */
+    /** The Cloudflare tunnel's name while one is up (PhoneTunnel), or null: the one name the door answers. */
+    static volatile String tunnelHost;
+
+    private static final String CSP = "default-src 'none'; script-src 'self'; style-src 'self'; "
+            + "img-src 'self' data: blob:; media-src 'self' blob:; frame-src 'self'; connect-src 'self'; "
+            + "font-src 'self'; manifest-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'";
+
+    private final LinuxBrowser store;
+    private final Host host;
+    private final Sniffer sniffer;
+    private final ServerSocket server;
+    private final Thread acceptor;
+    private final Thread reaper;
+    private final AtomicInteger handlers = new AtomicInteger();
+    /** Every connection not yet handed to a stream: what {@link #stop} and a sign-out close. */
+    private final Set<Socket> open = ConcurrentHashMap.newKeySet();
+    /** When each of those must have been let in by. */
+    private final Map<Socket, Long> deadlines = new ConcurrentHashMap<>();
+    /**
+     * Connections a browser let in uses for its files, and when each last
+     * moved a byte: past every deadline for being let in (a big file takes
+     * minutes), closed by a sign-out like the rest, and by the reaper once one
+     * has not moved for {@link #STALL_MS} (a laptop shut mid-download leaves a
+     * write that would wait for ever).
+     */
+    private final Map<Socket, long[]> working = new ConcurrentHashMap<>();
+    /**
+     * The same for the phone's own files (Remote desktop's Files,
+     * {@code /pfs/}), each with the token it was let in by: a sign-out, a
+     * browser's own Forget, the door stopping and Remote desktop going off
+     * end them, as they end the phone's screen ({@link #phones}). A connection
+     * is in this map or in {@link #working}, as its last request was.
+     */
+    private final Map<Socket, PhoneTransfer> phoneWorking = new ConcurrentHashMap<>();
+
+    /** The phone's files as the host last gave them: whose links a sign-out takes back, Remote desktop on or not. */
+    private volatile LinuxFiles phoneSeen;
+
+    private static final class PhoneTransfer {
+        final String token;
+        /** When it last moved a byte, as {@link #working}'s. */
+        final long[] moved = {System.currentTimeMillis()};
+
+        PhoneTransfer(String token) {
+            this.token = token;
+        }
+    }
+
+    /**
+     * The phone's screen, open now for a browser ({@link #openPhone}): each
+     * connection, by the token it was let in with. A sign-out, a browser's
+     * own Forget, and the door stopping close those whose token is gone: the
+     * token is checked as a stream opens, and a stream outlives that check.
+     */
+    private final Map<Socket, PhonePipe> phones = new ConcurrentHashMap<>();
+
+    private static final class PhonePipe {
+        final String token;
+        final Closeable browser;
+        final Closeable phone;
+
+        PhonePipe(String token, Closeable browser, Closeable phone) {
+            this.token = token;
+            this.browser = browser;
+            this.phone = phone;
+        }
+
+        void close() {
+            closeQuietly(browser);
+            closeQuietly(phone);
+        }
+    }
+
+    private static final long STALL_MS = 90_000;
+    /** A request's body may stop this long before the transfer is given up (the page carries on from what came). */
+    private static final int BODY_READ_MS = 45_000;
+    /** A form of the Files' (the paths of what is chosen) may be this long; an upload is a stream, never read whole. */
+    private static final int MAX_FILES_FORM = 1 << 20;
+    private final Map<String, AtomicInteger> perPeer = new ConcurrentHashMap<>();
+    private volatile LinuxBrowserCert cert;
+    private volatile boolean stopped;
+    private long certCheckedAt;
+    /** The addresses answered on, and when they were last read. */
+    private volatile Set<String> offered = new HashSet<>();
+    private volatile long offeredAt;
+    /**
+     * The streams running now, oldest first, each as its number, address and
+     * what it is; the state names the newest. Under {@link #watchLock}, with
+     * every state line written while a stream starts or ends.
+     */
+    private final java.util.LinkedHashSet<String> watchers = new java.util.LinkedHashSet<>();
+    private final Object watchLock = new Object();
+
+    private static final class Fails {
+        int count;
+        long until;
+        long last;
+    }
+
+    /** Per address; and the lock every pairing takes, one at a time. */
+    private final Map<String, Fails> fails = new HashMap<>();
+
+    private LinuxBrowserServer(LinuxBrowser store, LinuxBrowserCert cert, Host host, Sniffer sniffer, int port)
+            throws IOException {
+        this.store = store;
+        this.cert = cert;
+        this.host = host;
+        this.sniffer = sniffer;
+        ServerSocket s = new ServerSocket();
+        s.setReuseAddress(true);
+        try {
+            s.bind(new InetSocketAddress(port), 16);
+        } catch (IOException taken) {
+            s.close();
+            store.setState("failed port " + port);
+            throw new PortTaken(port, taken);
+        }
+        this.server = s;
+        this.certCheckedAt = System.currentTimeMillis();
+        acceptor = new Thread(this::acceptLoop, "linux-browser");
+        acceptor.setDaemon(true);
+        reaper = new Thread(this::reapLoop, "linux-browser-reaper");
+        reaper.setDaemon(true);
+        acceptor.start();
+        reaper.start();
+        store.setState("listening " + port());
+        DexLog.step("browser", "listening on port " + port() + " (" + LinuxBrowser.addresses() + ")");
+    }
+
+    static LinuxBrowserServer start(LinuxBrowser store, LinuxBrowserCert cert, Host host, Sniffer sniffer, int port)
+            throws IOException {
+        return new LinuxBrowserServer(store, cert, host, sniffer, port);
+    }
+
+    int port() {
+        return server.getLocalPort();
+    }
+
+    /** What is open now, for a log or a test: connections not yet streams, handlers, and each address's count. */
+    String connections() {
+        StringBuilder b = new StringBuilder("open ").append(open.size()).append(", handlers ").append(handlers.get());
+        for (Map.Entry<String, AtomicInteger> e : perPeer.entrySet()) {
+            if (e.getValue().get() != 0) b.append(", ").append(e.getKey()).append(' ').append(e.getValue().get());
+        }
+        return b.toString();
+    }
+
+    LinuxBrowserCert cert() {
+        return cert;
+    }
+
+    /** Stop listening, and close every connection not yet a stream: a page half-loaded, a pairing, a request. */
+    void stop() {
+        stopped = true;
+        closeQuietly(server);
+        dropOpen();
+        // The phone's screen too, signed in or not: nothing listens any more.
+        for (PhonePipe p : phones.values().toArray(new PhonePipe[0])) p.close();
+        synchronized (watchLock) {
+            store.setState("off");
+        }
+    }
+
+    /**
+     * Close every connection not yet handed to a stream. A sign-out on the
+     * phone does this, so a browser keeping a connection open cannot finish a
+     * request it began before. Linux's stream is LinuxService's to end; the
+     * phone's screen ends here for every browser whose token went with the
+     * sign-out.
+     */
+    void dropOpen() {
+        for (Socket s : open.toArray(new Socket[0])) closeQuietly(s);
+        // A transfer too: the browsers it was for are signed out, all of them.
+        for (Socket s : working.keySet().toArray(new Socket[0])) closeQuietly(s);
+        LinuxFiles files = host.files();
+        if (files != null) files.dropTickets();
+        // The phone's own files, every one of them, signed in or not.
+        for (Socket s : phoneWorking.keySet().toArray(new Socket[0])) closeQuietly(s);
+        LinuxFiles phone = phoneSeen;
+        if (phone != null) phone.dropTickets();
+        dropSignedOutPhones();
+    }
+
+    /**
+     * Linux is no longer offered ("Open in a browser" went off, or Linux is
+     * being removed) while the door stays up for Remote desktop: Linux's file
+     * transfers and the links handed out for them end now. Linux's picture is
+     * LinuxService's to end, and a stream let in a moment later is turned
+     * away by its Gate, which asks {@link Host#linuxOn}.
+     */
+    void dropLinux() {
+        for (Socket s : working.keySet().toArray(new Socket[0])) closeQuietly(s);
+        LinuxFiles files = host.files();
+        if (files != null) files.dropTickets();
+    }
+
+    /** The phone's screen, and its files' transfers, close for each browser no longer signed in. */
+    private void dropSignedOutPhones() {
+        for (PhonePipe p : phones.values().toArray(new PhonePipe[0])) {
+            if (!store.tokenValid(p.token)) p.close();
+        }
+        for (Map.Entry<Socket, PhoneTransfer> e : phoneWorking.entrySet()) {
+            if (!store.tokenValid(e.getValue().token)) closeQuietly(e.getKey());
+        }
+    }
+
+    /**
+     * Remote desktop is off (switched off on the phone, by whatever way) while
+     * the door stays up for Linux: the phone's file transfers and the links
+     * handed out for them end now. Each request after this is refused as it
+     * comes ({@link Host#phoneFiles} is null). The reaper does it too, so that
+     * a switch that tells this server nothing still ends them.
+     */
+    void dropPhone() {
+        for (Socket s : phoneWorking.keySet().toArray(new Socket[0])) closeQuietly(s);
+        LinuxFiles phone = phoneSeen;
+        if (phone != null) phone.dropTickets();
+    }
+
+    /** How many browsers have the phone's screen open now, for a log or a test. */
+    int phoneStreams() {
+        return phones.size();
+    }
+
+    /** How many connections carry the phone's files now, for a log or a test. */
+    int phoneTransfers() {
+        return phoneWorking.size();
+    }
+
+    private void acceptLoop() {
+        while (!stopped) {
+            final Socket s;
+            try {
+                s = server.accept();
+            } catch (IOException e) {
+                if (!stopped) DexLog.warn("browser", "accept: " + e);
+                return;
+            }
+            InetAddress remote = s.getInetAddress();
+            // Not from a network the phone offers: not a byte read, not a byte said.
+            // Loopback too, while the Cloudflare tunnel is up: cloudflared on
+            // this phone brings browsers from anywhere (PhoneTunnel), and the
+            // tunnel's name is then the one the door answers (handle).
+            boolean viaTunnel = tunnelHost != null && remote.isLoopbackAddress() && s.getLocalAddress().isLoopbackAddress();
+            if (stopped || (!viaTunnel && (!LinuxBrowser.isLocalPeer(remote) || !offered(s.getLocalAddress())))) {
+                closeQuietly(s);
+                continue;
+            }
+            InetAddress v4 = LinuxBrowser.mappedV4(remote);
+            final String peer = (v4 != null ? v4 : remote).getHostAddress();
+            AtomicInteger mine = perPeer.computeIfAbsent(peer, k -> new AtomicInteger());
+            if (mine.incrementAndGet() > MAX_PER_PEER) {
+                mine.decrementAndGet();
+                closeQuietly(s);
+                continue;
+            }
+            if (handlers.incrementAndGet() > MAX_HANDLERS) {
+                handlers.decrementAndGet();
+                mine.decrementAndGet();
+                closeQuietly(s);
+                continue;
+            }
+            open.add(s);
+            deadlines.put(s, System.currentTimeMillis() + preAuthMs);
+            Thread t = new Thread(() -> {
+                try {
+                    handle(s, peer);
+                } finally {
+                    open.remove(s);
+                    deadlines.remove(s);
+                    working.remove(s);
+                    phoneWorking.remove(s);
+                    mine.decrementAndGet();
+                    handlers.decrementAndGet();
+                }
+            }, "linux-browser-conn");
+            t.setDaemon(true);
+            t.start();
+        }
+    }
+
+    /** Close what has not been let in by its time. */
+    private void reapLoop() {
+        while (!stopped) {
+            try {
+                Thread.sleep(500);
+            } catch (InterruptedException e) {
+                return;
+            }
+            long now = System.currentTimeMillis();
+            for (Map.Entry<Socket, Long> e : deadlines.entrySet()) {
+                Long at = e.getValue();
+                // Only the deadline seen: one renewed meanwhile (a new request) stands.
+                if (at < now && deadlines.remove(e.getKey(), at)) closeQuietly(e.getKey());
+            }
+            for (Map.Entry<Socket, long[]> e : working.entrySet()) {
+                if (now - e.getValue()[0] > STALL_MS) {
+                    working.remove(e.getKey());
+                    closeQuietly(e.getKey());
+                }
+            }
+            for (Map.Entry<Socket, PhoneTransfer> e : phoneWorking.entrySet()) {
+                if (now - e.getValue().moved[0] > STALL_MS) {
+                    phoneWorking.remove(e.getKey());
+                    closeQuietly(e.getKey());
+                }
+            }
+            // Remote desktop off, however it went off: its transfers with it.
+            // Never at the reaper's expense: it is what holds every deadline.
+            try {
+                if (!phoneWorking.isEmpty() && host.phoneFiles() == null) dropPhone();
+            } catch (RuntimeException e) {
+                DexLog.warn("browser", "the phone's files: " + e);
+            }
+        }
+    }
+
+    /** {@code local} is one of the addresses the phone offers, read again every couple of seconds. */
+    private boolean offered(InetAddress local) {
+        if (local == null) return false;
+        InetAddress v4 = LinuxBrowser.mappedV4(local);
+        String ip = (v4 != null ? v4 : local).getHostAddress();
+        long now = System.currentTimeMillis();
+        if (now - offeredAt > 2000 || !offered.contains(ip)) {
+            Set<String> fresh = new HashSet<>(ips());
+            offered = fresh;
+            offeredAt = now;
+        }
+        return offered.contains(ip);
+    }
+
+    /**
+     * Only a certificate that is running out is made again, the same way the
+     * first one was. Looked at no more than every few seconds.
+     */
+    private void refreshCert() {
+        long now = System.currentTimeMillis();
+        synchronized (this) {
+            if (now - certCheckedAt < 5000) return;
+            certCheckedAt = now;
+        }
+        if (!cert.renewDue(now + 7L * 24 * 3600_000)) return;
+        try {
+            cert = LinuxBrowserCert.loadOrMake(store.dir(), ips(), now);
+            DexLog.step("browser", "a new certificate (" + cert.fingerprint.substring(0, 11) + ")");
+        } catch (Exception e) {
+            DexLog.warn("browser", "cannot make a new certificate: " + e);
+        }
+    }
+
+    static List<String> ips() {
+        List<String> ips = new java.util.ArrayList<>();
+        for (LinuxBrowser.Address a : LinuxBrowser.addresses()) ips.add(a.ip);
+        return ips;
+    }
+
+    // ── one connection ──
+
+    private void handle(Socket s, String peer) {
+        SSLSocket tls = null;
+        boolean handed = false;
+        try {
+            s.setTcpNoDelay(true);
+            s.setSoTimeout(FIRST_BYTE_MS);
+            int first;
+            byte[] consumed = null;
+            if (sniffer != null) {
+                first = sniffer.peek(s, FIRST_BYTE_MS);
+            } else {
+                // No way to look without taking (a computer's JVM): taken, and given back below.
+                first = s.getInputStream().read();
+                if (first >= 0) consumed = new byte[]{(byte) first};
+            }
+            if (first < 0) return;
+            if (first != 0x16) {
+                // Plain HTTP, served as it is: for a browser that will not
+                // take the phone's certificate at any price (a managed
+                // laptop's says "You can't visit … right now" and offers no
+                // way on). The page says it is not encrypted and offers the
+                // https address; nothing else differs.
+                InputStream raw = consumed == null ? s.getInputStream()
+                        : new SequenceInputStream(new ByteArrayInputStream(consumed), s.getInputStream());
+                s.setSoTimeout(IDLE_MS);
+                handed = serve(new BufferedInputStream(raw, 8192), s, s, peer, false);
+                return;
+            }
+            refreshCert();
+            if (consumed == null) {
+                tls = (SSLSocket) cert.context.getSocketFactory().createSocket(s, peer, s.getPort(), true);
+                tls.setUseClientMode(false);
+            } else {
+                // Java 8's way to hand TLS the byte already read. Android has no
+                // such method, which is why the phone looks without taking
+                // (Sniffer); named by reflection so that this compiles there.
+                try {
+                    tls = (SSLSocket) javax.net.ssl.SSLSocketFactory.class
+                            .getMethod("createSocket", Socket.class, InputStream.class, boolean.class)
+                            .invoke(cert.context.getSocketFactory(), s, new ByteArrayInputStream(consumed), true);
+                } catch (ReflectiveOperationException e) {
+                    throw new IOException("TLS over a socket already read from: " + e);
+                }
+            }
+            tls.setSoTimeout(IDLE_MS);
+            tls.startHandshake();
+            handed = serve(new BufferedInputStream(tls.getInputStream(), 8192), tls, s, peer, true);
+        } catch (SocketTimeoutException | EOFException e) {
+            // too slow, or gone
+        } catch (IOException e) {
+            // A browser that had not yet said yes to the certificate drops the
+            // handshake, every time: that is the warning page, not a fault.
+        } catch (RuntimeException e) {
+            DexLog.warn("browser", "connection from " + peer + ": " + e);
+        } finally {
+            // Every way out but one closes both: a TLS socket left to the
+            // collector holds native state until it gets round to it.
+            if (!handed) {
+                if (tls != null) closeQuietly(tls);
+                closeQuietly(s);
+            }
+        }
+    }
+
+    /**
+     * Requests, kept alive between them, until one is a stream or it goes
+     * quiet: over TLS ({@code secure}), or plain for a browser that refused
+     * the certificate. {@code io} is what they travel on (the TLS socket, or
+     * the connection itself), {@code raw} the connection under it.
+     *
+     * @return true when the socket was handed to a stream
+     */
+    private boolean serve(InputStream in, Socket io, Socket raw, String peer, boolean secure) throws IOException {
+        OutputStream out = new java.io.BufferedOutputStream(io.getOutputStream(), 16 * 1024);
+        boolean first = true;
+        while (!stopped) {
+            // The deadline times each request, not the connection's life: a
+            // browser keeps a connection for the page's next file, and one
+            // cut at the deadline set when it came, in the middle of a file,
+            // is that file lost. The time between requests is IDLE_MS's.
+            if (!first) deadlines.computeIfPresent(raw, (k, v) -> System.currentTimeMillis() + preAuthMs);
+            first = false;
+            Req r = readHead(in);
+            if (r == null || stopped) return false;
+            String hostOnly = addressHost(r.headers.getOrDefault("host", ""));
+            // The one name answered: the Cloudflare tunnel's (PhoneTunnel), for
+            // a browser anywhere. Those come through cloudflared on this
+            // phone, so the peer is loopback; the address Cloudflare saw is
+            // what the lockout counts, or every browser would share one.
+            String tunnel = tunnelHost;
+            boolean viaTunnel = false;
+            if (raw.getInetAddress().isLoopbackAddress()) {
+                // Loopback is let in only for the tunnel (acceptLoop): its name
+                // and nothing else, or the phone's other apps could ask by address.
+                if (tunnel == null || !tunnel.equalsIgnoreCase(r.headers.getOrDefault("host", ""))) {
+                    send(out, 421, "Misdirected Request", "text/plain", new byte[0], false);
+                    return false;
+                }
+                hostOnly = tunnel;
+                viaTunnel = true;
+                String seen = r.headers.get("cf-connecting-ip");
+                if (seen != null && !seen.isEmpty()) peer = "tunnel " + seen.trim();
+            }
+            if (hostOnly == null) {
+                // A name, not an address: someone else's page rebinding its name to this phone.
+                send(out, 421, "Misdirected Request", "text/plain", "Open this by its address.".getBytes(StandardCharsets.UTF_8), false);
+                return false;
+            }
+            String origin = r.headers.get("origin");
+            // The page's own origin, scheme and all: an https page cannot
+            // pair or stream through the plain door, nor an http one through TLS.
+            String self = (secure ? "https://" : "http://") + r.headers.get("host").toLowerCase(Locale.ROOT);
+            boolean sameOrigin = origin != null && origin.toLowerCase(Locale.ROOT).equals(self);
+            boolean keep = !"close".equalsIgnoreCase(r.headers.get("connection"));
+
+            // Linux's routes only while Linux is offered, and never through the
+            // tunnel: the door may be up for Remote desktop alone, and the
+            // tunnel is Remote desktop's.
+            boolean linux = host.linuxOn() && !viaTunnel;
+            if (r.path.startsWith("/fs/")) {
+                if (!linux) {
+                    send(out, 403, "Forbidden", "text/plain", new byte[0], false);
+                    return false;
+                }
+                if (!files(host.files(), false, in, out, r, io, raw, sameOrigin, keep) || !keep) return false;
+                continue;
+            }
+            // The phone's own files (Remote desktop's Files): through the
+            // tunnel too, for it is Remote desktop's, and only while Remote
+            // desktop is on, whatever Linux's switch says.
+            if (r.path.startsWith("/pfs/")) {
+                LinuxFiles phone = host.phoneFiles();
+                if (phone == null) {
+                    send(out, 403, "Forbidden", "application/json", "{\"error\":\"off\"}".getBytes(StandardCharsets.UTF_8), false);
+                    return false;
+                }
+                phoneSeen = phone;
+                if (!files(phone, true, in, out, r, io, raw, sameOrigin, keep) || !keep) return false;
+                continue;
+            }
+            if ("GET".equals(r.method) && "/stream".equals(r.path)
+                    && "websocket".equalsIgnoreCase(r.headers.get("upgrade"))) {
+                if (!sameOrigin || !linux) {
+                    send(out, 403, "Forbidden", "text/plain", new byte[0], false);
+                    return false;
+                }
+                return openStream(io, raw, in, r, peer, secure);
+            }
+            // The phone's own screen (Remote desktop), for a browser let in
+            // with the same code and token as Linux's.
+            if ("GET".equals(r.method) && "/phone".equals(r.path)
+                    && "websocket".equalsIgnoreCase(r.headers.get("upgrade"))) {
+                if (!sameOrigin) {
+                    send(out, 403, "Forbidden", "text/plain", new byte[0], false);
+                    return false;
+                }
+                return openPhone(io, raw, in, r, peer, secure, viaTunnel);
+            }
+            if ("POST".equals(r.method)) {
+                if (r.headers.containsKey("transfer-encoding")) {
+                    // A browser's form says how long it is; nothing here reads chunks.
+                    send(out, 411, "Length Required", "text/plain", new byte[0], false);
+                    return false;
+                }
+                byte[] body = readBody(in, r, MAX_BODY);
+                if (!sameOrigin) {
+                    send(out, 403, "Forbidden", "text/plain", new byte[0], false);
+                    return false;
+                }
+                Map<String, String> form = form(body);
+                if ("/pair".equals(r.path)) {
+                    pair(out, peer, form, r.headers.getOrDefault("user-agent", ""), keep);
+                } else if ("/link".equals(r.path)) {
+                    // An email's sign-in link (EmailNotice), at the address it was made for.
+                    link(out, peer, form, r.headers.getOrDefault("user-agent", ""), keep, hostOnly, secure);
+                } else if ("/forget".equals(r.path)) {
+                    store.removeToken(form.get("token"));
+                    dropSignedOutPhones();
+                    host.changed();
+                    send(out, 200, "OK", "application/json", "{\"ok\":true}".getBytes(StandardCharsets.UTF_8), keep);
+                } else {
+                    send(out, 404, "Not Found", "text/plain", new byte[0], keep);
+                }
+            } else if ("GET".equals(r.method) || "HEAD".equals(r.method)) {
+                if ("/hello".equals(r.path)) {
+                    // The phone's name only to a browser already let in: anyone
+                    // on the network may ask, and the name is often its owner's.
+                    String auth = r.headers.getOrDefault("authorization", "");
+                    boolean known = auth.startsWith("Bearer ") && store.tokenValid(auth.substring(7).trim());
+                    String json = known ? "{\"v\":1,\"name\":" + jsonString(host.phoneName()) + "}" : "{\"v\":1}";
+                    send(out, 200, "OK", "application/json", json.getBytes(StandardCharsets.UTF_8), keep);
+                } else {
+                    // The door's own page is Linux's; with only Remote desktop
+                    // on, it is the phone's.
+                    String name = "/".equals(r.path) ? (linux ? "index.html" : "phone.html") : r.path.substring(1);
+                    String type = viaTunnel && !TUNNEL_FILES.contains(name) ? null : FILES.get(name);
+                    byte[] file = type == null ? null : host.asset(name);
+                    if (file == null) {
+                        send(out, 404, "Not Found", "text/plain", new byte[0], keep);
+                    } else {
+                        send(out, 200, "OK", type, "HEAD".equals(r.method) ? new byte[0] : file, keep);
+                    }
+                }
+            } else {
+                send(out, 405, "Method Not Allowed", "text/plain", new byte[0], false);
+                return false;
+            }
+            if (!keep) return false;
+        }
+        return false;
+    }
+
+    // ── Linux's files ──
+
+    /**
+     * One request of the page's Files ({@link LinuxFiles}). In by the
+     * browser's token (Authorization, as {@code /hello} takes it), or, for the
+     * two things a browser fetches by itself (a download, a video's source),
+     * by a ticket the page was given for exactly that, which holds only while
+     * its browser stays signed in. Every change comes from the page itself
+     * ({@code Origin}), as a pairing does. A connection let in this way is
+     * past the deadline for being let in, and in {@link #working} instead.
+     *
+     * <p>The phone's own files ({@code phone}, {@code /pfs/}) the same way, in
+     * by the same token, with their transfers in {@link #phoneWorking} under
+     * that token: counted before a byte moves, and the token asked again
+     * after, so that a sign-out or a Forget is seen here or finds the
+     * transfer to close.
+     *
+     * @return whether the connection may carry another request
+     */
+    private boolean files(LinuxFiles files, boolean phone, InputStream in, OutputStream out, Req r, Socket io,
+                          Socket raw, boolean sameOrigin, boolean keep) throws IOException {
+        String op = r.path.substring(phone ? "/pfs/".length() : "/fs/".length());
+        boolean read = "GET".equals(r.method) || "HEAD".equals(r.method);
+        boolean hasBody = r.contentLength > 0;
+        byte[] no = "{\"error\":\"unauthorized\"}".getBytes(StandardCharsets.UTF_8);
+        if (files == null || (!read && !"POST".equals(r.method) && !"PUT".equals(r.method))) {
+            send(out, files == null ? 404 : 405, files == null ? "Not Found" : "Method Not Allowed", "application/json",
+                    "{\"error\":\"op\"}".getBytes(StandardCharsets.UTF_8), keep && !hasBody);
+            return keep && !hasBody;
+        }
+        if (r.headers.containsKey("transfer-encoding") || r.contentLength < 0) {
+            send(out, 411, "Length Required", "text/plain", new byte[0], false);
+            return false;
+        }
+        String auth = r.headers.getOrDefault("authorization", "");
+        String token = auth.startsWith("Bearer ") ? auth.substring(7).trim() : null;
+        LinuxFiles.Ticket ticket = null;
+        if (token == null && read && ("get".equals(op) || "zip".equals(op))) {
+            ticket = files.ticket(r.query.get("k"));
+            if (ticket != null) token = ticket.token;
+        }
+        if (token == null || !store.tokenValid(token)) {
+            // Its body, if it has one, unread: this connection carries no more.
+            send(out, 401, "Unauthorized", "application/json", no, keep && !hasBody);
+            return keep && !hasBody;
+        }
+        if (!read && !sameOrigin) {
+            send(out, 403, "Forbidden", "application/json", "{\"error\":\"origin\"}".getBytes(StandardCharsets.UTF_8), false);
+            return false;
+        }
+        deadlines.remove(raw);
+        open.remove(raw);
+        final long[] moved;
+        if (phone) {
+            working.remove(raw);
+            PhoneTransfer t = new PhoneTransfer(token);
+            phoneWorking.put(raw, t);
+            if (stopped || !store.tokenValid(token)) {
+                // Signed out, or forgotten, between the check above and now.
+                phoneWorking.remove(raw, t);
+                send(out, 401, "Unauthorized", "application/json", no, false);
+                return false;
+            }
+            moved = t.moved;
+        } else {
+            phoneWorking.remove(raw);
+            moved = working.computeIfAbsent(raw, k -> new long[1]);
+        }
+        moved[0] = System.currentTimeMillis();
+        Runnable alive = () -> moved[0] = System.currentTimeMillis();
+        Map<String, List<String>> params = multiForm(r.rawQuery);
+        LinuxFiles.Body body = null;
+        if (hasBody) {
+            if ("100-continue".equalsIgnoreCase(r.headers.get("expect"))) {
+                out.write("HTTP/1.1 100 Continue\r\n\r\n".getBytes(StandardCharsets.US_ASCII));
+                out.flush();
+            }
+            if ("put".equals(op) || "batch".equals(op)) {
+                body = new LinuxFiles.Body(in, r.contentLength, alive);
+            } else if (r.contentLength > MAX_FILES_FORM) {
+                send(out, 413, "Payload Too Large", "application/json",
+                        "{\"error\":\"toolarge\"}".getBytes(StandardCharsets.UTF_8), false);
+                return false;
+            } else {
+                String form = new String(readBody(in, r, MAX_FILES_FORM), StandardCharsets.ISO_8859_1);
+                for (Map.Entry<String, List<String>> e : multiForm(form).entrySet()) {
+                    params.computeIfAbsent(e.getKey(), k -> new java.util.ArrayList<>()).addAll(e.getValue());
+                }
+            }
+        }
+        try {
+            io.setSoTimeout(BODY_READ_MS);
+            return files.handle(new LinuxFiles.Call(r.method, op, params, r.headers, body, token, ticket, alive), out, keep);
+        } finally {
+            moved[0] = System.currentTimeMillis();
+            try {
+                io.setSoTimeout(IDLE_MS);
+            } catch (IOException ignored) {
+                // closed: nothing to wait for
+            }
+        }
+    }
+
+    /** {@code a=1&a=2&b=3}, every value of every name, UTF-8. */
+    static Map<String, List<String>> multiForm(String s) {
+        Map<String, List<String>> m = new HashMap<>();
+        if (s == null || s.isEmpty()) return m;
+        for (String pair : s.split("&")) {
+            int eq = pair.indexOf('=');
+            if (eq <= 0) continue;
+            try {
+                m.computeIfAbsent(URLDecoder.decode(pair.substring(0, eq), "UTF-8"), k -> new java.util.ArrayList<>())
+                        .add(URLDecoder.decode(pair.substring(eq + 1), "UTF-8"));
+            } catch (Exception ignored) {
+                // a broken pair: left out
+            }
+        }
+        return m;
+    }
+
+    // ── the code, for a token ──
+
+    private void pair(OutputStream out, String peer, Map<String, String> form, String userAgent, boolean keep)
+            throws IOException {
+        long now = System.currentTimeMillis();
+        String reply;
+        int status;
+        String label = null;
+        String token = null;
+        // One pairing at a time, from anywhere: twenty-four connections at
+        // once get no more tries between them than one does.
+        synchronized (fails) {
+            if (fails.size() > 512) {
+                // Only addresses long quiet and not locked: a lockout outlives a crowd.
+                fails.values().removeIf(x -> x.until < now && now - x.last > LOCK_MAX_MS);
+            }
+            Fails f = fails.get(peer);
+            if (f != null && f.until > now) {
+                long secs = (f.until - now + 999) / 1000;
+                send(out, 429, "Too Many Requests", "application/json",
+                        ("{\"error\":\"locked\",\"retryIn\":" + secs + "}").getBytes(StandardCharsets.UTF_8), keep);
+                return;
+            }
+            // The code tried and, when right, the browser let in, in one step:
+            // a sign-out on the phone is wholly before it (the code it made is
+            // not this one) or wholly after (and takes this token with the rest).
+            LinuxBrowser.Tried tried = store.tryCode(form.get("code"), now, describe(userAgent) + " · " + peer);
+            switch (tried.pair) {
+                case OK:
+                    fails.remove(peer);
+                    label = tried.label;
+                    token = tried.token;
+                    status = 200;
+                    reply = null;
+                    break;
+                case CLOSED:
+                    status = 403;
+                    reply = "{\"error\":\"closed\"}";
+                    break;
+                case USED_UP:
+                    status = 403;
+                    reply = "{\"error\":\"used\"}";
+                    break;
+                default: { // WRONG
+                    if (f == null) {
+                        f = new Fails();
+                        fails.put(peer, f);
+                    }
+                    f.count++;
+                    f.last = now;
+                    if (f.count >= lockAfter) {
+                        long wait = Math.min(LOCK_MAX_MS, LOCK_FIRST_MS << Math.min(10, f.count - lockAfter));
+                        f.until = now + wait;
+                        status = 429;
+                        reply = "{\"error\":\"locked\",\"retryIn\":" + (wait / 1000) + "}";
+                    } else {
+                        status = 403;
+                        reply = "{\"error\":\"wrong\"}";
+                    }
+                }
+            }
+        }
+        if (status == 200) {
+            DexLog.step("browser", "a browser was let in: " + label);
+            host.changed();
+            send(out, 200, "OK", "application/json", ("{\"token\":\"" + token + "\"}").getBytes(StandardCharsets.UTF_8), keep);
+            return;
+        }
+        DexLog.step("browser", "pairing from " + peer + ": " + reply);
+        // A code used up is news on the phone's card.
+        if (reply.contains("used")) host.changed();
+        send(out, status, status == 429 ? "Too Many Requests" : "Forbidden", "application/json",
+                reply.getBytes(StandardCharsets.UTF_8), keep);
+    }
+
+    // ── an email's sign-in link, for a token ──
+
+    /**
+     * A sign-in link from an email ("Email me when an address changes",
+     * EmailNotice; doc/address-email.md): its secret, for a token as a code
+     * gives one, without the phone's card open. From the page's own origin
+     * (checked by the caller), over TLS only: through the tunnel that is TLS
+     * to Cloudflare and TLS again from cloudflared to here. The secret never
+     * travels in a URL anyone could log: the email puts it after the #, which
+     * a browser never sends, and signin.js posts it in this request's body.
+     * The link works only at the address it was made for ({@code at}: the
+     * tunnel's name, or the Wi-Fi address the browser typed), once.
+     *
+     * <p>Wrong secrets count against the address that sent them, with a
+     * code's: five, from one address, and that address waits, 30 s doubling
+     * to ten minutes, for links and codes alike.
+     */
+    private void link(OutputStream out, String peer, Map<String, String> form, String userAgent, boolean keep,
+                      String at, boolean secure) throws IOException {
+        if (!secure) {
+            send(out, 403, "Forbidden", "application/json", "{\"error\":\"plain\"}".getBytes(StandardCharsets.UTF_8), keep);
+            return;
+        }
+        long now = System.currentTimeMillis();
+        String reply;
+        int status;
+        String label = null;
+        String token = null;
+        synchronized (fails) {
+            Fails f = fails.get(peer);
+            if (f != null && f.until > now) {
+                long secs = (f.until - now + 999) / 1000;
+                send(out, 429, "Too Many Requests", "application/json",
+                        ("{\"error\":\"locked\",\"retryIn\":" + secs + "}").getBytes(StandardCharsets.UTF_8), keep);
+                return;
+            }
+            LinuxBrowser.LinkTried tried = store.tryLink(form.get("k"), at, now,
+                    describe(userAgent) + " · " + peer);
+            if (tried.link == LinuxBrowser.Link.OK) {
+                fails.remove(peer);
+                label = tried.label;
+                token = tried.token;
+                status = 200;
+                reply = null;
+            } else if (tried.link == LinuxBrowser.Link.WRONG) {
+                if (f == null) {
+                    f = new Fails();
+                    fails.put(peer, f);
+                }
+                f.count++;
+                f.last = now;
+                if (f.count >= lockAfter) {
+                    long wait = Math.min(LOCK_MAX_MS, LOCK_FIRST_MS << Math.min(10, f.count - lockAfter));
+                    f.until = now + wait;
+                    status = 429;
+                    reply = "{\"error\":\"locked\",\"retryIn\":" + (wait / 1000) + "}";
+                } else {
+                    status = 403;
+                    reply = "{\"error\":\"wrong\"}";
+                }
+            } else {
+                // A real link that no longer works: said why, and not held against the address.
+                status = 403;
+                reply = "{\"error\":\"" + tried.link.name().toLowerCase(Locale.ROOT) + "\"}";
+            }
+        }
+        if (status == 200) {
+            DexLog.step("browser", "a browser was let in by an email's sign-in link: " + label);
+            host.changed();
+            send(out, 200, "OK", "application/json", ("{\"token\":\"" + token + "\"}").getBytes(StandardCharsets.UTF_8), keep);
+            return;
+        }
+        DexLog.step("browser", "a sign-in link from " + peer + ": " + reply);
+        send(out, status, status == 429 ? "Too Many Requests" : "Forbidden", "application/json",
+                reply.getBytes(StandardCharsets.UTF_8), keep);
+    }
+
+    // ── the phone's own screen ──
+
+    /**
+     * A browser let in, onto the phone's own screen: Remote desktop's stream
+     * (PhoneStream) serves it, in the app's main process, on an abstract
+     * socket that lets this app's uid in. The browser's upgrade goes through
+     * as it came, with this phone's loopback for its Host and no Origin (it
+     * was checked here: same origin, and a token this door gave), and from
+     * then on the bytes go both ways untouched, TLS ending here. The stream
+     * says everything else itself: waiting, which picture, who took over.
+     *
+     * @return true when the socket was handed over
+     */
+    private boolean openPhone(Socket s, Socket raw, InputStream in, Req r, String peer, boolean secure,
+                              boolean viaTunnel) throws IOException {
+        String token = r.query.get("t");
+        PhoneLine phone = null;
+        String refusal = null;
+        if (!store.tokenValid(token)) {
+            refusal = "{\"t\":\"state\",\"state\":\"unauthorized\"}";
+        } else {
+            try {
+                phone = host.phoneLine();
+                if (phone == null) {
+                    refusal = "{\"t\":\"state\",\"state\":\"off\",\"message\":\"Remote desktop is turned off on the phone.\"}";
+                }
+            } catch (IOException e) {
+                refusal = "{\"t\":\"state\",\"state\":\"off\",\"message\":\"Remote desktop is not running on the phone. Turn on control in its Settings, or share the screen there.\"}";
+            }
+        }
+        if (refusal != null) {
+            LinuxStreamSocket ws = new LinuxStreamSocket(in, s.getOutputStream(), s);
+            ws.accept(new LinuxStreamSocket.Request(r.method, r.path, r.headers));
+            ws.sendText(refusal);
+            ws.closeAfterWord(LAST_WORD_MS);
+            return false;
+        }
+        // Counted before the first byte goes, and the token asked again after:
+        // a sign-out is then either seen here, or finds this pipe to close.
+        final PhoneLine to = phone;
+        PhonePipe pipe = new PhonePipe(token, s, to);
+        phones.put(raw, pipe);
+        if (stopped || !store.tokenValid(token)) {
+            phones.remove(raw);
+            pipe.close();
+            return false;
+        }
+        // The browser's upgrade, with this phone's loopback for its Host, no
+        // Origin (checked here), and which way it came in, said by the door
+        // alone: a browser's own x-dex-* headers never get through.
+        StringBuilder head = new StringBuilder("GET /phone HTTP/1.1\r\nHost: 127.0.0.1\r\n");
+        for (Map.Entry<String, String> h : r.headers.entrySet()) {
+            String k = h.getKey();
+            if ("host".equals(k) || "origin".equals(k) || k.startsWith("x-dex-")) continue;
+            head.append(k).append(": ").append(h.getValue()).append("\r\n");
+        }
+        head.append("x-dex-via: ").append(viaTunnel ? "tunnel" : "wifi").append("\r\n\r\n");
+        OutputStream toPhone;
+        InputStream fromPhone;
+        try {
+            toPhone = to.out();
+            fromPhone = to.in();
+            toPhone.write(head.toString().getBytes(StandardCharsets.ISO_8859_1));
+            toPhone.flush();
+        } catch (IOException e) {
+            phones.remove(raw);
+            pipe.close();
+            throw e;
+        }
+        // Let in: no deadline and no read timeout from here; the stream and
+        // its acknowledgements are the phone's to keep alive.
+        deadlines.remove(raw);
+        open.remove(raw);
+        s.setSoTimeout(0);
+        OutputStream toBrowser = s.getOutputStream();
+        DexLog.step("browser", "the phone's screen for " + describe(r.headers.getOrDefault("user-agent", ""))
+                + " at " + peer + (secure ? "" : ", not encrypted"));
+        Runnable done = () -> {
+            phones.remove(raw, pipe);
+            pipe.close();
+        };
+        Thread up = new Thread(() -> pipe(in, toPhone, done), "browser-phone-up");
+        Thread down = new Thread(() -> pipe(fromPhone, toBrowser, done), "browser-phone-down");
+        up.setDaemon(true);
+        down.setDaemon(true);
+        down.setPriority(Thread.MAX_PRIORITY);
+        up.start();
+        down.start();
+        return true;
+    }
+
+    /** Bytes one way until either end goes; then both ends close ({@code done}), which ends the other way too. */
+    private static void pipe(InputStream from, OutputStream to, Runnable done) {
+        byte[] buf = new byte[64 * 1024];
+        try {
+            for (int n; (n = from.read(buf)) > 0; ) {
+                to.write(buf, 0, n);
+                to.flush();
+            }
+        } catch (IOException ignored) {
+            // an end went: the close below is the answer either way
+        } finally {
+            done.run();
+        }
+    }
+
+    // ── the stream ──
+
+    private final AtomicInteger streams = new AtomicInteger();
+
+    /** @return true when the socket was handed to a stream */
+    private boolean openStream(Socket s, Socket raw, InputStream in, Req r, String peer, boolean secure)
+            throws IOException {
+        // The socket's own output, not the buffered one the page's files went
+        // through (it holds nothing; every answer was flushed): video frames
+        // are big, and one buffer is enough.
+        LinuxStreamSocket ws = new LinuxStreamSocket(in, s.getOutputStream(), s);
+        ws.accept(new LinuxStreamSocket.Request(r.method, r.path, r.headers));
+        // The token came with the request: a browser not let in is told so
+        // before it can send a single frame, and none is read from it.
+        final String token = r.query.get("t");
+        if (!store.tokenValid(token)) {
+            ws.sendText("{\"t\":\"state\",\"state\":\"unauthorized\"}");
+            // Its hello is on its way, unread: closed over it, the word could go too.
+            ws.closeAfterWord(LAST_WORD_MS);
+            return false;
+        }
+        // The first message is the hello: the size it wants, the quality.
+        LinuxStreamSocket.Message m = ws.read();
+        if (m == null || m.opcode != LinuxStreamSocket.OP_TEXT || stopped) {
+            ws.close();
+            return false;
+        }
+        String hello = m.text();
+        // Let in: no deadline from here, but a browser silent this long is gone.
+        deadlines.remove(raw);
+        open.remove(raw);
+        s.setSoTimeout(sessionReadMs);
+        String ua = r.headers.getOrDefault("user-agent", "");
+        String who = describe(ua) + " at " + peer + (secure ? "" : ", not encrypted");
+        // Numbered: two tabs of one browser are two watchers, and the first
+        // one ending must not say nobody is watching.
+        final String watcher = streams.incrementAndGet() + " " + peer + " " + describe(ua);
+        // Counted before it is handed over: the stream runs on a thread of its
+        // own and can be over before host.stream returns, and its end must
+        // find it here, or the phone would say a browser is watching that is
+        // long gone.
+        if (!watchingNow(watcher)) {
+            ws.close();
+            return false;
+        }
+        // Asked again as the stream takes the desktop (Gate), from the file
+        // the Settings page signs browsers out in: seen here the moment it is.
+        // Linux's switch too: with the door kept up for Remote desktop, Linux
+        // going off does not stop the server, and a browser let in a moment
+        // before must not take the desktop after.
+        Gate gate = () -> stopped || !host.linuxOn() ? "off" : store.tokenValid(token) ? null : "unauthorized";
+        boolean taken = host.stream(ws, hello, s, who, gate, () -> notWatching(watcher));
+        if (!taken) {
+            notWatching(watcher);
+            ws.sendText("{\"t\":\"state\",\"state\":\"failed\",\"message\":\"Linux is not ready on the phone.\"}");
+            ws.closeAfterWord(LAST_WORD_MS);
+            return false;
+        }
+        return true;
+    }
+
+    /** How long a last word waits for the browser to close its end ({@link LinuxStreamSocket#closeAfterWord}). */
+    static final int LAST_WORD_MS = 1000;
+
+    /** {@code watcher}'s stream begins; false once the server has stopped. */
+    private boolean watchingNow(String watcher) {
+        synchronized (watchLock) {
+            if (stopped) return false;
+            watchers.add(watcher);
+            store.setState("watching " + port() + " " + watcher);
+        }
+        host.changed();
+        return true;
+    }
+
+    /**
+     * {@code watcher}'s stream is over. The state names whichever stream is
+     * still running, newest first, or goes back to listening: one that ended
+     * before an older one did must not say nobody is watching.
+     */
+    private void notWatching(String watcher) {
+        synchronized (watchLock) {
+            if (!watchers.remove(watcher)) return;
+            if (!stopped) {
+                String newest = null;
+                for (String w : watchers) newest = w;
+                store.setState(newest != null ? "watching " + port() + " " + newest : "listening " + port());
+            }
+        }
+        host.changed();
+    }
+
+    // ── HTTP, the little of it the page needs ──
+
+    private static final class Req {
+        final String method;
+        final String path;
+        final Map<String, String> query;
+        /** The query as it came, for a name given more than once (the Files' paths). */
+        final String rawQuery;
+        final Map<String, String> headers;
+        final long contentLength;
+
+        Req(String method, String path, Map<String, String> query, String rawQuery, Map<String, String> headers,
+            long contentLength) {
+            this.method = method;
+            this.path = path;
+            this.query = query;
+            this.rawQuery = rawQuery;
+            this.headers = headers;
+            this.contentLength = contentLength;
+        }
+    }
+
+    /** The next request's line and headers, or null when the connection is done. */
+    private static Req readHead(InputStream in) throws IOException {
+        byte[] buf = new byte[MAX_HEAD];
+        int n = 0;
+        while (true) {
+            int b;
+            try {
+                b = in.read();
+            } catch (SocketTimeoutException e) {
+                return null;
+            }
+            if (b < 0) return null;
+            if (n == buf.length) throw new IOException("request head too large");
+            buf[n++] = (byte) b;
+            if (n >= 4 && buf[n - 4] == '\r' && buf[n - 3] == '\n' && buf[n - 2] == '\r' && buf[n - 1] == '\n') break;
+        }
+        String[] lines = new String(buf, 0, n - 4, StandardCharsets.ISO_8859_1).split("\r\n");
+        String[] first = lines[0].split(" ");
+        if (first.length < 3 || !first[2].startsWith("HTTP/1.")) throw new IOException("not HTTP");
+        Map<String, String> headers = new HashMap<>();
+        for (int i = 1; i < lines.length; i++) {
+            int colon = lines[i].indexOf(':');
+            if (colon <= 0) continue;
+            headers.put(lines[i].substring(0, colon).trim().toLowerCase(Locale.ROOT), lines[i].substring(colon + 1).trim());
+        }
+        String path = first[1];
+        Map<String, String> query = new HashMap<>();
+        String rawQuery = "";
+        int q = path.indexOf('?');
+        if (q >= 0) {
+            rawQuery = path.substring(q + 1);
+            query = form(rawQuery.getBytes(StandardCharsets.ISO_8859_1));
+            path = path.substring(0, q);
+        }
+        long len;
+        try {
+            len = Long.parseLong(headers.getOrDefault("content-length", "0").trim());
+        } catch (NumberFormatException e) {
+            throw new IOException("bad length");
+        }
+        return new Req(first[0], path, query, rawQuery, headers, len);
+    }
+
+    private static byte[] readBody(InputStream in, Req r, int max) throws IOException {
+        if (r.contentLength < 0 || r.contentLength > max) throw new IOException("body too large");
+        byte[] b = new byte[(int) r.contentLength];
+        int off = 0;
+        while (off < b.length) {
+            int got = in.read(b, off, b.length - off);
+            if (got < 0) throw new EOFException();
+            off += got;
+        }
+        return b;
+    }
+
+    private static Map<String, String> form(byte[] body) {
+        Map<String, String> m = new HashMap<>();
+        for (String pair : new String(body, StandardCharsets.UTF_8).split("&")) {
+            int eq = pair.indexOf('=');
+            if (eq <= 0) continue;
+            try {
+                m.put(URLDecoder.decode(pair.substring(0, eq), "UTF-8"), URLDecoder.decode(pair.substring(eq + 1), "UTF-8"));
+            } catch (Exception ignored) {
+            }
+        }
+        return m;
+    }
+
+    private static void send(OutputStream out, int status, String reason, String type, byte[] body, boolean keep)
+            throws IOException {
+        String head = "HTTP/1.1 " + status + " " + reason + "\r\n"
+                + "Content-Type: " + type + "\r\n"
+                + "Content-Length: " + body.length + "\r\n"
+                + "Cache-Control: no-store\r\n"
+                + "X-Content-Type-Options: nosniff\r\n"
+                + "Referrer-Policy: no-referrer\r\n"
+                + "X-Frame-Options: DENY\r\n"
+                + "Cross-Origin-Opener-Policy: same-origin\r\n"
+                + "Content-Security-Policy: " + CSP + "\r\n"
+                + "Connection: " + (keep ? "keep-alive" : "close") + "\r\n\r\n";
+        out.write(head.getBytes(StandardCharsets.US_ASCII));
+        out.write(body);
+        out.flush();
+    }
+
+    /**
+     * The address in a {@code Host} header, without its port, or null when it
+     * is a name: IPv4 dotted, IPv6 in brackets, or localhost.
+     */
+    static String addressHost(String hostHeader) {
+        String h = hostHeader.trim().toLowerCase(Locale.ROOT);
+        if (h.isEmpty()) return null;
+        String bare;
+        if (h.startsWith("[")) {
+            int close = h.indexOf(']');
+            if (close < 0) return null;
+            bare = h.substring(1, close);
+            return bare.matches("[0-9a-f:.]+") ? "[" + bare + "]" : null;
+        }
+        int colon = h.lastIndexOf(':');
+        bare = colon >= 0 ? h.substring(0, colon) : h;
+        if (bare.equals("localhost")) return bare;
+        return LinuxBrowserCert.ipBytes(bare) != null ? bare : null;
+    }
+
+    /** "Chrome on Windows": enough for a person to know which browser it is. */
+    static String describe(String ua) {
+        String browser = "A browser";
+        if (ua.contains("Edg/")) browser = "Edge";
+        else if (ua.contains("OPR/") || ua.contains("Opera")) browser = "Opera";
+        else if (ua.contains("Firefox/")) browser = "Firefox";
+        else if (ua.contains("Chrome/") || ua.contains("CriOS/")) browser = "Chrome";
+        else if (ua.contains("Safari/")) browser = "Safari";
+        String os = "";
+        if (ua.contains("Windows")) os = "Windows";
+        else if (ua.contains("iPhone") || ua.contains("iPad")) os = "iOS";
+        else if (ua.contains("Mac OS X") || ua.contains("Macintosh")) os = "macOS";
+        else if (ua.contains("CrOS")) os = "ChromeOS";
+        else if (ua.contains("Android")) os = "Android";
+        else if (ua.contains("Linux")) os = "Linux";
+        return os.isEmpty() ? browser : browser + " on " + os;
+    }
+
+    static String jsonString(String s) {
+        StringBuilder sb = new StringBuilder("\"");
+        for (char c : s.toCharArray()) {
+            if (c == '"' || c == '\\') sb.append('\\').append(c);
+            else if (c < 0x20 || c == 0x2028 || c == 0x2029) sb.append(String.format(Locale.ROOT, "\\u%04x", (int) c));
+            else sb.append(c);
+        }
+        return sb.append('"').toString();
+    }
+
+    private static void closeQuietly(Closeable c) {
+        try {
+            c.close();
+        } catch (IOException ignored) {
+        }
+    }
+}

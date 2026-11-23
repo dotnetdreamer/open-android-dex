@@ -397,6 +397,101 @@ Extracted on the phone as the Linux guest's root filesystem.
 
 ---
 
+## Compiled into the postmarketOS helper
+
+`openandroiddex-pmos` is this project's own program (GPL-3.0-or-later, built
+from `openandroiddex-pmos/src/main.c`). The app carries it inside its binary and
+copies it to a postmarketOS phone. It contains the code `wayland-scanner`
+generates from the Wayland protocol definitions below (interface tables and
+request wrappers), and each of those keeps its own licence:
+
+| Protocol | From | Copyright | Licence |
+| --- | --- | --- | --- |
+| `zkde-screencast-unstable-v1` (KWin's virtual output) | plasma-wayland-protocols 1.23.0 | © 2020–2021 Aleix Pol Gonzalez | LGPL-2.1-or-later |
+| `fake-input` (KWin's fake input) | plasma-wayland-protocols 1.23.0 | © 2015 Martin Gräßlin | LGPL-2.1-or-later |
+| `xdg-output-unstable-v1` | wayland-protocols 1.49 | © 2017 Red Hat Inc. | MIT (below) |
+| `wlr-output-management-unstable-v1` | wlr-protocols (git 2025-07-02) | © 2019 Purism SPC | the permission notice below |
+| `wlr-screencopy-unstable-v1` | wlr-protocols (git 2025-07-02) | © 2018 Simon Ser, © 2019 Andri Yngvason | MIT (below) |
+| `wlr-virtual-pointer-unstable-v1` | wlr-protocols (git 2025-07-02) | © 2019 Josef Gajdusek | MIT (below) |
+| `virtual-keyboard-unstable-v1` | wlroots 0.19.0, copied to `openandroiddex-pmos/protocols/` | © 2008–2011 Kristian Høgsberg, © 2010–2013 Intel Corporation, © 2012–2013 Collabora, Ltd., © 2018 Purism SPC | MIT (below) |
+
+The LGPL-2.1 text: https://www.gnu.org/licenses/old-licenses/lgpl-2.1.html
+
+The MIT licence, as these protocol files state it:
+
+    Permission is hereby granted, free of charge, to any person obtaining a
+    copy of this software and associated documentation files (the "Software"),
+    to deal in the Software without restriction, including without limitation
+    the rights to use, copy, modify, merge, publish, distribute, sublicense,
+    and/or sell copies of the Software, and to permit persons to whom the
+    Software is furnished to do so, subject to the following conditions:
+
+    The above copyright notice and this permission notice (including the next
+    paragraph) shall be included in all copies or substantial portions of the
+    Software.
+
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
+    THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+    FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+    DEALINGS IN THE SOFTWARE.
+
+`wlr-output-management-unstable-v1`'s notice:
+
+    Copyright © 2019 Purism SPC
+
+    Permission to use, copy, modify, distribute, and sell this
+    software and its documentation for any purpose is hereby granted
+    without fee, provided that the above copyright notice appear in
+    all copies and that both that copyright notice and this permission
+    notice appear in supporting documentation, and that the name of
+    the copyright holders not be used in advertising or publicity
+    pertaining to distribution of the software without specific,
+    written prior permission.  The copyright holders make no
+    representations about the suitability of this software for any
+    purpose.  It is provided "as is" without express or implied
+    warranty.
+
+    THE COPYRIGHT HOLDERS DISCLAIM ALL WARRANTIES WITH REGARD TO THIS
+    SOFTWARE, INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY AND
+    FITNESS, IN NO EVENT SHALL THE COPYRIGHT HOLDERS BE LIABLE FOR ANY
+    SPECIAL, INDIRECT OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+    WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN
+    AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION,
+    ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF
+    THIS SOFTWARE.
+
+### virglrenderer 1.3.0 and libepoxy 1.5.10: the VirGL server
+
+virglrenderer: Copyright © the virglrenderer contributors (Red Hat, Collabora,
+Google and others; each source file names its own copyright holders), much of
+it derived from Mesa. Licensed under the **MIT licence** (the text in the Mesa
+section above). Source:
+https://gitlab.freedesktop.org/virgl/virglrenderer/-/archive/1.3.0/virglrenderer-1.3.0.tar.gz
+Its Venus part, whose Vulkan headers are Apache-2.0, and its DRM part are not
+built.
+
+libepoxy: Copyright © 2013-2014 Intel Corporation. Licensed under the **MIT
+licence** (the text in the Mesa section above). Its generated code is derived
+from Khronos's XML registry: Copyright © 2013 The Khronos Group Inc., under
+the same permission notice as the MIT licence, with "Materials" for
+"Software". Source:
+https://github.com/anholt/libepoxy/archive/refs/tags/1.5.10.tar.gz
+
+Files: `lib/arm64-v8a/libvirglserver.so` and `lib/x86_64/libvirglserver.so`,
+virglrenderer's vtest server with both linked in statically, built with the
+Android NDK by the recipe in `openandroiddex-linux/virgl/` (the sources'
+checksums are in `build-virgl.sh`), with five patches by this project (MIT)
+in `patches/`. On a 64-bit phone whose GPU has no Mesa driver above, the app
+runs it so Linux apps can draw on the phone's own graphics driver.
+
+`assets/linux/gpu/oadx-glprobe` is not virglrenderer: it is this project's
+own program (GPL-3.0-or-later), from `openandroiddex-linux/gpu-probe/oadx-glprobe.c`.
+
+---
+
 ## Downloaded at runtime, not bundled
 
 ### Alpine Linux (branch v3.22)

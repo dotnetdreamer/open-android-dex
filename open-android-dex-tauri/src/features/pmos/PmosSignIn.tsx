@@ -45,14 +45,14 @@ export function PmosSignIn({
         />
       </label>
       <label className="flex flex-col gap-1.5">
-        <span className="section-label">Password</span>
+        <span className="section-label">Password or PIN</span>
         <input
           type="password"
           value={password}
           onChange={(e) => setPassword(e.target.value)}
           autoComplete="off"
           autoFocus
-          aria-label="Password on the phone"
+          aria-label="Password or PIN on the phone"
           placeholder="The one you unlock the phone with"
           className="field"
         />
@@ -68,7 +68,7 @@ export function PmosSignIn({
         {busy ? "Signing in…" : "Sign in and open desktop"}
       </button>
       <p className="caption text-center">
-        Your password goes to the phone once and isn't kept. This computer leaves a key on the phone instead, so next
+        Your password or PIN goes to the phone once and isn't kept. This computer leaves a key on the phone instead, so next
         time the desktop just opens.
       </p>
     </form>

@@ -103,6 +103,39 @@ final class LinuxAudio {
     private static final java.util.Map<Integer, Pump> pumps = new java.util.HashMap<>();
 
     /**
+     * Taps whose sound goes somewhere else for now: a browser watching the
+     * desktop ({@link LinuxStream}) takes it, and the phone's speaker is
+     * quiet. Counted, since two watchers can overlap for a moment as one
+     * replaces the other.
+     */
+    private static final java.util.Map<Integer, Integer> held = new java.util.HashMap<>();
+
+    /**
+     * The phone's speaker gives {@code port}'s sound up ({@code on}) or takes
+     * it back. A held pump lets go of the tap altogether, so nothing reads or
+     * plays it on the phone; it connects again once nothing holds it.
+     */
+    static synchronized void hold(int port, boolean on) {
+        int n = held.getOrDefault(port, 0) + (on ? 1 : -1);
+        if (n > 0) held.put(port, n);
+        else held.remove(port);
+        if (n == (on ? 1 : 0)) {
+            DexLog.step("linux", "audio: tap " + port + (on ? " goes to a browser; the phone is quiet" : " plays on the phone again"));
+        }
+        LinuxAudio.class.notifyAll();
+    }
+
+    private static synchronized boolean isHeld(int port) {
+        return held.containsKey(port);
+    }
+
+    /** Until nothing holds {@code port}, or the pump is cancelled; false when cancelled. */
+    private static synchronized boolean awaitUnheld(Pump p) throws InterruptedException {
+        while (p.live && held.containsKey(p.port)) LinuxAudio.class.wait(1000);
+        return p.live;
+    }
+
+    /**
      * Start draining {@code port}, if nothing is draining it already.
      *
      * Safe to call before the container is up: the pump retries the connect
@@ -153,7 +186,7 @@ final class LinuxAudio {
     private static final class Pump implements Runnable {
 
         final int port;
-        private volatile boolean live = true;
+        volatile boolean live = true;
         private volatile Socket sock;
 
         Pump(int port) {
@@ -163,6 +196,9 @@ final class LinuxAudio {
         void cancel() {
             live = false;
             close(sock);
+            synchronized (LinuxAudio.class) {
+                LinuxAudio.class.notifyAll();
+            }
         }
 
         @Override
@@ -170,6 +206,13 @@ final class LinuxAudio {
             int misses = 0;
             boolean announced = false;
             while (live && misses < RETRY_BUDGET) {
+                // Held by a browser: no connection at all until it lets go.
+                try {
+                    if (!awaitUnheld(this)) return;
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    return;
+                }
                 Socket s = null;
                 try {
                     s = new Socket();
@@ -180,6 +223,7 @@ final class LinuxAudio {
                     announced = false;
                     DexLog.step("linux", "audio: playing the guest tap from " + port);
                     drain(s.getInputStream());
+                    if (isHeld(port)) continue; // let go for a browser: not a miss, and no wait
                     DexLog.step("linux", "audio: tap " + port + " closed");
                 } catch (Exception e) {
                     // Once per outage, not once per second: a container that is
@@ -217,7 +261,9 @@ final class LinuxAudio {
                 boolean playing = false;
                 long quietSince = 0;
                 LinuxAudioLag lag = new LinuxAudioLag(MAX_LAG, CHUNK, LAG_WINDOW_MS);
-                while (live) {
+                // Held: the tap's next burst (300 ms at most, it never stops)
+                // brings the pump here, and the socket goes with the return.
+                while (live && !isHeld(port)) {
                     int skip = lag.skip(in.available(), SystemClock.uptimeMillis());
                     if (skip > 0) {
                         long dropped = in.skip(skip);

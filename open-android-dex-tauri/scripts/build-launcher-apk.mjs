@@ -114,7 +114,12 @@ if (process.env.SKIP_LAUNCHER_APK === '1') {
   // its own so it outlives the desktop session (see the script's header).
   // linux-win.sh is the window session: the second X display that Linux apps
   // open on as windows of their own (doc/linux-windows.md).
-  const scripts = ['linux-setup.sh', 'linux-rt.sh', 'linux-ssh.sh', 'linux-win.sh']
+  // linux-app.sh runs one Linux app in a proot of its own, and guest/ holds
+  // oadx-run and oadx-apps-menu, which hand the desktop's app launches to it:
+  // apps in an Android process of their own (doc/linux-apps-process.md).
+  mkdirSync(join(assetsLinux, 'guest'), { recursive: true })
+  const scripts = ['linux-setup.sh', 'linux-rt.sh', 'linux-ssh.sh', 'linux-win.sh', 'linux-app.sh',
+    'guest/oadx-run', 'guest/oadx-apps-menu', 'guest/oadx-apps-dbus.conf']
   for (const name of scripts) {
     const src = join(linuxDir, name)
     if (!existsSync(src)) {

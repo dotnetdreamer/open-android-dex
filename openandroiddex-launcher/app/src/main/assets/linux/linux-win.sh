@@ -80,6 +80,24 @@ if [ -n "$SHARED" ]; then
   fi
 fi
 
+# How Chromium draws, the same file linux-rt.sh writes and for the same reasons
+# (see it there): a window of its own may be the only way someone runs Chromium,
+# with no desktop ever started to write it.
+if [ -d "$ROOT/rootfs/etc/chromium.d" ]; then
+  cat > "$ROOT/rootfs/etc/chromium.d/oadx-gpu" 2>/dev/null <<'GPUEOF'
+# Written by LinuxOnDroid each time one of its X displays starts: the desktop's
+# (linux-rt.sh) or the one for apps in windows of their own (linux-win.sh).
+# Read by /usr/bin/chromium on every launch, in that launch's environment.
+# On an Adreno phone whose session found the GPU working, Chromium draws through
+# ANGLE on Vulkan, straight on the phone's driver (Turnip), not GL through Zink:
+# with Zink under its GPU compositing, Chromium leaves full screen the moment it
+# enters it (a video's, F11's). Anywhere else this adds nothing.
+if [ "$OADX_GPU" = turnip ] && [ "$MESA_LOADER_DRIVER_OVERRIDE" = zink ]; then
+  CHROMIUM_FLAGS="$CHROMIUM_FLAGS --use-angle=vulkan --enable-features=Vulkan"
+fi
+GPUEOF
+fi
+
 # The guest side, as one single-quoted string. NO APOSTROPHES ANYWHERE IN IT,
 # prose included — see the same warning in linux-rt.sh.
 #
@@ -100,7 +118,21 @@ mkdir -p /tmp/runtime-root && chmod 700 /tmp/runtime-root
 # yes exported, after Xvnc and before the bus and every app.
 GPUPROBE=
 GPUDIR=/usr/local/lib/openandroiddex/gpu
-if [ -n "$OADX_GPU" ] && [ -x $GPUDIR/oadx-vkprobe ] && [ -f $GPUDIR/${OADX_GPU}_icd.json ]; then
+# VirGL (OADX_GPU=virgl), on a GPU no driver of ours runs: the app runs a
+# server on the Android side, on the phone own GL driver, at
+# /tmp/.virgl_test, and Mesa in here reaches it as GALLIUM_DRIVER=virpipe.
+# Its probe asks Mesa for a GL context that way and wants a VirGL renderer,
+# through EGL, or through GLX on this display where the guest has no EGL.
+if [ "$OADX_GPU" = virgl ]; then
+  if [ -S /tmp/.virgl_test ] && [ -x $GPUDIR/oadx-glprobe ]; then
+    GALLIUM_DRIVER=virpipe LIBGL_ALWAYS_SOFTWARE=1 DISPLAY=:2 XAUTHORITY=/tmp/.oadx-win.xauth \
+      timeout 15 $GPUDIR/oadx-glprobe >/tmp/.oadx-win-gpu 2>&1 &
+    GPUPROBE=$!
+  else
+    echo "no VirGL server at /tmp/.virgl_test" >/tmp/.oadx-win-gpu
+    echo "gpu: not used -- no VirGL server at /tmp/.virgl_test"
+  fi
+elif [ -n "$OADX_GPU" ] && [ -x $GPUDIR/oadx-vkprobe ] && [ -f $GPUDIR/${OADX_GPU}_icd.json ]; then
   VK_ICD_FILENAMES=$GPUDIR/${OADX_GPU}_icd.json \
     timeout 15 $GPUDIR/oadx-vkprobe >/tmp/.oadx-win-gpu 2>&1 &
   GPUPROBE=$!
@@ -111,7 +143,17 @@ Xvnc :2 -geometry GEOMETRY -depth 24 -dpi DPIVALUE -rfbport 5902 -localhost \
 XVNC=$!
 export DISPLAY=:2 XAUTHORITY=/tmp/.oadx-win.xauth
 if [ -n "$GPUPROBE" ]; then
-  if wait $GPUPROBE; then
+  wait $GPUPROBE
+  GPURC=$?
+  if [ "$OADX_GPU" = virgl ] && [ $GPURC = 0 ]; then
+    echo "gpu: VirGL, $(head -c 200 /tmp/.oadx-win-gpu)"
+    export GALLIUM_DRIVER=virpipe
+  elif [ "$OADX_GPU" = virgl ] && [ $GPURC = 2 ]; then
+    # No Mesa in this guest yet, so no GL app either: the server was
+    # checked on the Android side, and an app installed later gets it.
+    echo "gpu: VirGL, not checked in the guest -- $(head -c 200 /tmp/.oadx-win-gpu)"
+    export GALLIUM_DRIVER=virpipe
+  elif [ $GPURC = 0 ]; then
     echo "gpu: $(head -c 200 /tmp/.oadx-win-gpu)"
     export MESA_LOADER_DRIVER_OVERRIDE=zink LIBGL_KOPPER_DRI2=1 MESA_VK_WSI_DEBUG=sw
   else
@@ -173,7 +215,13 @@ while read -r verb arg; do
       cmd=$(printf %s "$arg" | base64 -d 2>/dev/null)
       [ -n "$cmd" ] || continue
       echo "run: $cmd"
-      sh -c "$cmd" </dev/null >>/tmp/oadx-win-apps.log 2>&1 &
+      # Through oadx-run where the app put it in: the app then runs in an
+      # Android process of its own, apart from this session (see oadx-run).
+      if [ -x /usr/local/bin/oadx-run ]; then
+        /usr/local/bin/oadx-run /bin/sh -c "$cmd" </dev/null >>/tmp/oadx-win-apps.log 2>&1 &
+      else
+        sh -c "$cmd" </dev/null >>/tmp/oadx-win-apps.log 2>&1 &
+      fi
       ;;
     quit)
       break
@@ -199,6 +247,7 @@ exec 3<&0
   -w /root /usr/bin/env -i HOME=/root TERM=xterm-256color \
   PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
   XDG_CONFIG_DIRS=/usr/local/etc/xdg:/etc/xdg \
+  XDG_DATA_DIRS=/usr/local/share/oadx-apps:/usr/local/share:/usr/share \
   OADX_GPU="${LINUX_GPU:-}" \
   /bin/sh -c "$SESSION" <&3 &
 PROOT_PID=$!

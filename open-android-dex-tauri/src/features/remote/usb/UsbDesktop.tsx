@@ -7,6 +7,7 @@ import { Icon } from "../../../ui/Icon";
 import { DesktopCover, type DesktopHost } from "../DesktopCards";
 import { avcC, codecString, sameBytes, splitAccessUnit } from "./h264";
 import { ALTS, isModifier, keyDown, XK_ISO_LEVEL3_SHIFT } from "./keysym";
+import { ackOf, clock, helloOf, PLAIN_ACK, readsTimes, routeChangedOf } from "./wire";
 
 /**
  * The phone's Linux desktop as video (LinuxStream.java): over adb
@@ -21,7 +22,9 @@ import { ALTS, isModifier, keyDown, XK_ISO_LEVEL3_SHIFT } from "./keysym";
  * doing, which is most of why it feels like a local desktop. Keys go as
  * keysyms (keysym.ts), and the window's size goes as the desktop's. The
  * clipboard, files dropped on the window and what Linux sends back are the
- * window's (DesktopRouter.tsx); this is only the guest's end of the clipboard.
+ * window's (DesktopRouter.tsx; a postmarketOS phone's, PmosDesktop.tsx); this
+ * is only the guest's end of the clipboard, and where a point of the window
+ * falls on the desktop.
  *
  * Nothing in the guest reaches this page's code: what comes in is video, a
  * cursor bitmap, clipboard text and a few numbers.
@@ -32,8 +35,6 @@ const MSG_VIDEO = 0x01;
 const MSG_CURSOR = 0x02;
 const IN_POINTER = 0x10;
 const IN_KEY = 0x11;
-/** "A frame arrived": the phone keeps no more than a few unacknowledged in the pipe. */
-const ACK = new Uint8Array([0x12]);
 
 /** Pixels of wheel travel that make one click of a wheel in the guest. */
 const WHEEL_STEP = 50;
@@ -84,7 +85,8 @@ const BITRATES: Record<Tier, [number, number, number]> = {
 /**
  * The stream's bitrate, by pixels and route. A desktop is mostly still, so
  * these are ceilings for motion rather than what flows; the phone goes below
- * one while the link falls behind (LinuxStream.adapt).
+ * one as soon as frames start to arrive late (LinuxStreamRate.java, from the
+ * times in the acknowledgements), and back up while they come on time.
  */
 export function bitrateFor(w: number, h: number, tier: Tier) {
   const [bpp, lo, hi] = BITRATES[tier];
@@ -96,16 +98,20 @@ export function UsbDesktop({
   route,
   tier,
   name,
+  what,
   start,
   host,
   onLost,
   smooth = false,
+  wirelessAdb = false,
 }: {
   url: string;
   /** How the window gets there, as its pill says it: USB, Wireless debugging, Wi-Fi, Remote, Remote (relay). */
   route: string;
   tier: Tier;
   name: string;
+  /** What the picture is, when it is one app of the phone's rather than its desktop: the app's name. */
+  what?: string;
   /** Start the desktop if it is not running: a window's first open, never its comebacks. */
   start: boolean;
   /** The window around this view: the clipboard, and where drops go. */
@@ -118,6 +124,8 @@ export function UsbDesktop({
    * so its pixels are shown one for one, and sharp when they are not.
    */
   smooth?: boolean;
+  /** Over adb's wireless debugging: the phone's old rule reads the link (wire.ts, readsTimes). */
+  wirelessAdb?: boolean;
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [phase, setPhase] = useState<Phase>({ kind: "connecting" });
@@ -130,6 +138,8 @@ export function UsbDesktop({
   lostRef.current = onLost;
   const tierRef = useRef(tier);
   tierRef.current = tier;
+  const wirelessRef = useRef(wirelessAdb);
+  wirelessRef.current = wirelessAdb;
 
   useEffect(() => {
     const canvas = canvasRef.current!;
@@ -188,6 +198,7 @@ export function UsbDesktop({
           host.showing(true);
           detach?.();
           detach = host.attach(toGuest);
+          host.point?.(toDesktop);
           void host.clipboard.then((c) => c.connected());
           pillShown = true;
           setPill(true);
@@ -412,6 +423,10 @@ export function UsbDesktop({
       const was = shared;
       shared = msg.share;
       if (live) setShare(msg.share);
+      // The guest is told too, so that off stops its clipboard at its end: a
+      // postmarketOS phone's helper sends nothing while it is off. The phone's
+      // Linux (LinuxStream) ignores a word it doesn't know.
+      send(JSON.stringify({ t: "clipshare", on: msg.share }));
       if (msg.share) return;
       // Off means off: the computer's text, if that is what the guest has,
       // does not stay there to be pasted. The guest's own is left alone.
@@ -426,6 +441,7 @@ export function UsbDesktop({
     const gone = () => {
       detach?.();
       detach = null;
+      host.point?.(null);
       host.showing(false);
     };
 
@@ -446,6 +462,8 @@ export function UsbDesktop({
 
     // ── the connection ──
     let pingTimer = 0;
+    /** Acknowledgements carry their times: on the local network, not over wireless debugging (wire.ts, readsTimes). */
+    let timed = readsTimes(tierRef.current, wirelessRef.current);
     const connect = (asStart: boolean) => {
       ws?.close();
       up = false;
@@ -459,9 +477,8 @@ export function UsbDesktop({
       ws = socket;
       socket.onopen = () => {
         const [w, h] = sizeFor(window.innerWidth, window.innerHeight);
-        socket.send(
-          JSON.stringify({ t: "hello", v: 1, start: asStart, w, h, bitrate: bitrateFor(w, h, tierRef.current), fps: 60, acks: true }),
-        );
+        timed = readsTimes(tierRef.current, wirelessRef.current);
+        socket.send(JSON.stringify(helloOf(asStart, w, h, bitrateFor(w, h, tierRef.current), timed)));
       };
       socket.onmessage = (ev) => {
         if (socket !== ws) return;
@@ -477,9 +494,9 @@ export function UsbDesktop({
         }
         const b = new Uint8Array(ev.data as ArrayBuffer);
         if (b[0] === MSG_VIDEO && b.length > 10) {
-          // Acknowledged on arrival, before decoding: it is the link the
-          // phone is pacing itself to.
-          if (!(b[1] & 2)) socket.send(ACK);
+          // Acknowledged on arrival, before decoding, with the time it came:
+          // it is the link the phone paces itself to and reads.
+          if (!(b[1] & 2)) socket.send(timed ? ackOf(clock()) : PLAIN_ACK);
           const v = new DataView(b.buffer, b.byteOffset, b.byteLength);
           const pts = Number(v.getBigUint64(2));
           onVideo(b[1], pts, b.subarray(10));
@@ -592,8 +609,11 @@ export function UsbDesktop({
       clipboard: () => void host.clipboard.then((c) => c.toggle()),
       // The route changed under a live stream — a relay that became a direct
       // path: what it carries is the phone's new ceiling.
+      // Off the local network or back onto it, the phone is told which rule reads the link.
       tier: (t) => {
-        if (configured && dw > 0) send(JSON.stringify({ t: "bitrate", bitrate: bitrateFor(dw, dh, t) }));
+        if (!configured || dw <= 0) return;
+        timed = readsTimes(t, wirelessRef.current);
+        send(JSON.stringify(routeChangedOf(bitrateFor(dw, dh, t), timed)));
       },
     };
     connect(start);
@@ -631,7 +651,7 @@ export function UsbDesktop({
         tabIndex={0}
         className="absolute inset-0 h-full w-full outline-none"
         style={{ objectFit: "contain", imageRendering: smooth ? "auto" : "pixelated", touchAction: "none" }}
-        aria-label={`The Linux desktop on ${name}`}
+        aria-label={what ? `${what} on ${name}` : `The Linux desktop on ${name}`}
       />
       {covered && (
         <DesktopCover
@@ -647,7 +667,13 @@ export function UsbDesktop({
         <div
           className={`pointer-events-none absolute inset-x-0 top-2 flex justify-center transition-opacity duration-200 ${pill ? "opacity-100" : "opacity-0"}`}
         >
-          <div className="toast card-raised pointer-events-auto !w-auto max-w-full !items-center !gap-1 !rounded-full !py-1 !pl-3.5 !pr-1 text-[12px]">
+          {/* Clickable only while shown: faded out, it would still eat the desktop's clicks under it
+              (title bar buttons of a window snapped to the left half sat right there) and could
+              toggle the clipboard or full screen unseen. The canvas below still gets the moves
+              that bring it down. */}
+          <div
+            className={`toast card-raised ${pill ? "pointer-events-auto" : "pointer-events-none"} !w-auto max-w-full !items-center !gap-1 !rounded-full !py-1 !pl-3.5 !pr-1 text-[12px]`}
+          >
             <span className="dot dot-ok mr-1" aria-hidden="true" />
             <span className="font-semibold">{route}</span>
             {stats && (

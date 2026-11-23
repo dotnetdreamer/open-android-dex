@@ -9,7 +9,7 @@
 # so the binary also runs on a stable postmarketOS, whose libraries are older.
 FROM alpine:edge
 
-RUN apk add --no-cache clang lld wayland-dev wayland-protocols plasma-wayland-protocols pkgconf
+RUN apk add --no-cache clang lld wayland-dev wayland-protocols plasma-wayland-protocols wlr-protocols pkgconf
 
 # gcc is there for its crt files and libgcc, which clang links with for this
 # target; nothing in the sysroot is ever run.

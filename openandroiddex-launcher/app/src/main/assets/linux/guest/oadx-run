@@ -1,0 +1,124 @@
+#!/bin/sh
+# oadx-run COMMAND [ARGUMENT...] -- start a Linux app in an Android process of
+# its own, so that when Android has to close something, it closes an app and
+# not the desktop.
+#
+# Why: Android 12 and later close the processes apps start once there are more
+# than 32 of them on the phone. Every Linux process is one. It picks its victims
+# by the Android process each one belongs to, least important first, and among
+# equals the oldest first. Everything the desktop runs belongs to LinuxOnDroid's
+# ":linux" process, so with apps there too the oldest were the desktop itself,
+# and the whole desktop went ("Process completed (signal 9)").
+#
+# An app started through this belongs to ":linuxapps" instead, which the app
+# keeps exactly one step less important than ":linux" (BIND_NOT_PERCEPTIBLE,
+# see LinuxAppsService). So Android closes apps first, the oldest app first,
+# and the desktop stays.
+#
+# How: the request is a small shell script in /tmp/.oadx-apps. The app's
+# :linuxapps process watches that folder, claims a request by renaming it, and
+# starts it in a proot of its own (linux-app.sh) with this environment, this
+# folder and these arguments. Nothing waits for the app: like a menu launch,
+# this returns as soon as the app is on its way.
+#
+# When nothing claims the request within ten seconds -- no :linuxapps (an
+# older app, Linux started some other way), or one that is stuck -- this takes
+# it back and runs the command right here, as if oadx-run were not there. The
+# rename is what makes that safe: exactly one side wins it, so an app never
+# starts twice and never not at all. OADX_RUN_HERE=1 skips straight to that.
+#
+# Written by the app into the guest at every start (/usr/local/bin/oadx-run).
+
+if [ $# -eq 0 ]; then
+  echo "usage: oadx-run COMMAND [ARGUMENT...]" >&2
+  exit 2
+fi
+
+DIR=/tmp/.oadx-apps
+
+# One argument as a single-quoted shell word, byte for byte: newlines, dollars
+# and backslashes stay as they are, and each quote becomes the four characters
+# quote, backslash, quote, quote. Plain parameter expansion, no subprocess.
+oadx_q() {
+  oadx_r=
+  oadx_s=$1
+  while :; do
+    case $oadx_s in
+      *\'*)
+        oadx_r=$oadx_r${oadx_s%%\'*}"'\\''"
+        oadx_s=${oadx_s#*\'}
+        ;;
+      *) break ;;
+    esac
+  done
+  printf "'%s%s'" "$oadx_r" "$oadx_s"
+}
+
+# Is the app process there? Its pid is in "ready" while it watches, and it is
+# this app's own user, so kill -0 can ask. A pid Android handed to someone else
+# since reads as there, and then the ten-second wait below is what catches it.
+oadx_ready() {
+  [ -z "$OADX_RUN_HERE" ] || return 1
+  [ -d "$DIR" ] && [ -s "$DIR/ready" ] || return 1
+  oadx_pid=$(cat "$DIR/ready" 2>/dev/null)
+  case $oadx_pid in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  kill -0 "$oadx_pid" 2>/dev/null
+}
+
+if oadx_ready; then
+  oadx_id=$(date +%s%N 2>/dev/null)-$$
+  case $oadx_id in
+    *N-*|-*) oadx_id=$(date +%s)-$$ ;;
+  esac
+  oadx_tmp=$DIR/.$oadx_id.tmp
+  oadx_req=$DIR/$oadx_id.req
+  oadx_run=$DIR/$oadx_id.run
+  oadx_self=$DIR/$oadx_id.self
+  # The first line is for the app, which reads it to know which X display the
+  # app is on (to close it with that session) and what to call it in its log.
+  if {
+    printf '#!/bin/sh\n'
+    printf '# oadx-run 1 display=%s name=%s\n' \
+      "$(printf %s "${DISPLAY:-}" | tr -c 'A-Za-z0-9:._-' _ | cut -c1-40)" \
+      "$(printf %s "${1##*/}" | tr -c 'A-Za-z0-9:._+-' _ | cut -c1-60)"
+    # Whoever runs this removes it first: a request is run once.
+    printf 'rm -f -- "$0"\n'
+    export -p
+    printf 'umask %s\n' "$(umask)"
+    printf 'cd -- %s 2>/dev/null || cd\n' "$(oadx_q "$PWD")"
+    printf 'exec'
+    for oadx_a in "$@"; do
+      printf ' %s' "$(oadx_q "$oadx_a")"
+    done
+    printf '\n'
+  } > "$oadx_tmp" 2>/dev/null && mv -f "$oadx_tmp" "$oadx_req" 2>/dev/null; then
+    # Started: the app claimed it (.req to .run) and the proot it started for
+    # it claimed it again (.run to .go) and is running it. Usually within a
+    # few tenths of a second; asked every tenth for ten seconds.
+    # OADX_RUN_WAIT, in tenths, is for tests (test/linux-apps-test.mjs).
+    oadx_max=${OADX_RUN_WAIT:-100}
+    case $oadx_max in
+      ''|*[!0-9]*) oadx_max=100 ;;
+    esac
+    oadx_n=0
+    while [ -e "$oadx_req" ] || [ -e "$oadx_run" ]; do
+      oadx_n=$((oadx_n + 1))
+      if [ $oadx_n -gt "$oadx_max" ]; then
+        # Not started: take it back, from whichever step it is stuck at. A
+        # rename that fails means the other side got there in that instant,
+        # and the app is starting there.
+        if mv -f "$oadx_req" "$oadx_self" 2>/dev/null || mv -f "$oadx_run" "$oadx_self" 2>/dev/null; then
+          exec /bin/sh "$oadx_self"
+        fi
+        exit 0
+      fi
+      sleep 0.1 2>/dev/null || sleep 1
+    done
+    exit 0
+  fi
+  rm -f "$oadx_tmp" 2>/dev/null
+fi
+
+exec "$@"

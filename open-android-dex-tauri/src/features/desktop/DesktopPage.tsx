@@ -6,7 +6,7 @@ import { Segmented } from "../../ui/kit";
 import { Stage, type Scene } from "../../ui/Stage";
 import { PmosSignIn } from "../pmos/PmosSignIn";
 import type { Pmos } from "../pmos/usePmos";
-import { deviceName, routeName, type AdbState, type Phase, type Progress } from "./model";
+import { deviceName, otherPhones, routeName, type AdbState, type Phase, type Progress } from "./model";
 import { UsbGuide } from "./UsbGuide";
 
 /**
@@ -70,8 +70,16 @@ export function DesktopPage(props: Props) {
   // phone sent to Wi-Fi drops off adb while adbd restarts, and a phone that
   // pairs by QR appears in the list before the pairing has answered — both
   // change what this screen says, and a panel remounted under them would lose
-  // the answer it was waiting for.
-  const wifi = !pmos && props.phase.kind === "connect" && props.method === "wifi";
+  // the answer it was waiting for. Under a postmarketOS phone's screens too
+  // when they offer the cable / Wi-Fi choice, as it is how another phone is
+  // added; they show while the Android flow is still in "boot" as well (a
+  // ready Android phone that wasn't opened keeps it there), so there too, once
+  // the remembered phones have been tried.
+  const wifi =
+    props.method === "wifi" &&
+    (pmos
+      ? !!pmos.switcher && (props.phase.kind === "connect" || (props.phase.kind === "boot" && !props.reconnecting))
+      : props.phase.kind === "connect");
 
   return (
     <div
@@ -217,6 +225,7 @@ function content(props: Props): View {
                   <p className="body whitespace-pre-wrap select-text">{more}</p>
                 </div>
               )}
+              {also(props, otherPhones(devices, ready))}
               <p className="caption text-center">
                 Every step of this attempt is in the log. If it keeps failing,{" "}
                 <button className="link text-[12px]" onClick={actions.diagnostics}>
@@ -243,7 +252,7 @@ function content(props: Props): View {
               Open desktop
             </button>
           ),
-          top: pmosAlso(props.pmos),
+          top: also(props, otherPhones(devices, ready)),
           switcher: true,
         };
       }
@@ -433,7 +442,7 @@ function content(props: Props): View {
                 onClick={actions.closeTop}
               />
             </div>
-            {pmosAlso(props.pmos)}
+            {also(props, [])}
           </div>
         ),
       };
@@ -458,7 +467,7 @@ function content(props: Props): View {
             </button>
           </>
         ),
-        top: pmosAlso(props.pmos),
+        top: also(props, otherPhones(devices, d)),
       };
     }
   }
@@ -472,7 +481,7 @@ function content(props: Props): View {
  * or to open. Never over an Android desktop that is opening or open, and the
  * Android screens are left as they are: this comes before them or not at all.
  * With an Android phone ready, open or just closed as well, that phone's
- * screen stays, and the postmarketOS phone is a card on it (PmosAlso).
+ * screen stays, and the postmarketOS phone is a card on it (Also).
  */
 function pmosContent(props: Props): View | null {
   const pm = props.pmos;
@@ -592,8 +601,13 @@ function pmosContent(props: Props): View | null {
       };
   }
 
-  // Nothing open: the phone on the cable.
+  // Nothing open: the phone on the cable. These screens keep the cable / Wi-Fi
+  // choice the Android ones have, with the Wi-Fi panel under them, so another
+  // phone can be added from here too; and the Android phones ready to open
+  // (there while this phone is the one chosen in the titlebar) are listed.
   const phone = pm.phone!;
+  const others = otherPhones(props.devices, undefined);
+  const elsewhere = others.length > 0 ? <Also phones={others} onOpen={actions.launch} /> : undefined;
   if (!phone.ssh) {
     return {
       key: "pmos-no-ssh",
@@ -602,13 +616,17 @@ function pmosContent(props: Props): View | null {
       title: "Turn on SSH on your phone",
       lede: "A postmarketOS phone is plugged in, but it isn't letting computers in. Turn on its SSH, and its desktop opens here.",
       top: (
-        <div className="card px-4 py-3.5">
-          <p className="section-label mb-2">In a terminal on the phone</p>
-          <pre className="console select-text">
-            {"sudo rc-service sshd start\n# or, on a phone with systemd:\nsudo systemctl start sshd"}
-          </pre>
+        <div className="flex flex-col gap-3">
+          <div className="card px-4 py-3.5">
+            <p className="section-label mb-2">In a terminal on the phone</p>
+            <pre className="console select-text">
+              {"sudo rc-service sshd start\n# or, on a phone with systemd:\nsudo systemctl start sshd"}
+            </pre>
+          </div>
+          {elsewhere}
         </div>
       ),
+      switcher: true,
     };
   }
   if (!phone.paired) {
@@ -617,7 +635,9 @@ function pmosContent(props: Props): View | null {
       scene: "allow",
       via: "usb",
       title: "Sign in to your phone",
-      lede: "A postmarketOS phone is plugged in. Sign in with the username and password you use on it, just this once, and its desktop opens here.",
+      lede: "A postmarketOS phone is plugged in. Sign in with the username and the password or PIN you use on it, just this once, and its desktop opens here.",
+      top: elsewhere,
+      switcher: true,
       body: <PmosSignIn busy={pm.signingIn} error={pm.signInError} onSignIn={pm.signIn} />,
     };
   }
@@ -633,31 +653,94 @@ function pmosContent(props: Props): View | null {
         Open desktop
       </button>
     ),
+    top: elsewhere,
+    switcher: true,
   };
 }
 
-/** The card for a postmarketOS phone on an Android screen, when there is a phone or a session to show. */
-function pmosAlso(pm: Pmos | undefined): ReactNode {
-  if (!pm) return undefined;
-  const s = pm.session.kind;
-  if (!pm.phone && s !== "launching" && s !== "running") return undefined;
-  return <PmosAlso pm={pm} />;
+/**
+ * The other phones, on an Android phone's screens (ready, failed, running,
+ * closed), which keep the page; nothing when there are none.
+ *
+ * `phones` are the other Android phones ready to open (otherPhones). Only one
+ * Android desktop runs at a time — the window daemon's port is forwarded to
+ * one phone (wm.rs) — so they come only where none is open, and opening one
+ * makes it the phone the page is about. The postmarketOS phone comes on all of
+ * them while there is a phone or a session to show: its desktop can be open
+ * beside the Android one, each in its own window.
+ */
+function also(props: Props, phones: DeviceInfo[]): ReactNode {
+  const pm = props.pmos;
+  const s = pm?.session.kind;
+  const withPmos = !!pm && (!!pm.phone || s === "launching" || s === "running");
+  if (!withPmos && phones.length === 0) return undefined;
+  return <Also pm={withPmos ? pm : undefined} phones={phones} onOpen={props.actions.launch} />;
+}
+
+function Also({ pm, phones, onOpen }: { pm?: Pmos; phones: DeviceInfo[]; onOpen: (d: DeviceInfo) => void }) {
+  const [asking, setAsking] = useState(false);
+  const s = pm?.session;
+  const dismiss = pm?.dismiss;
+  // The postmarketOS desktop closed on purpose while an Android screen has the
+  // page: nothing to report, the phone is simply there to open again.
+  useEffect(() => {
+    if (s?.kind === "ended" && !s.message) dismiss?.();
+  }, [s, dismiss]);
+  const pmosOpen = s?.kind === "running" || s?.kind === "launching";
+  const label =
+    phones.length === 0
+      ? pmosOpen
+        ? "Also open"
+        : "Also plugged in"
+      : phones.some((d) => d.connection === "wifi")
+        ? "Also connected"
+        : "Also plugged in";
+  const phone = pm?.phone;
+  return (
+    <div className="flex flex-col gap-3">
+      <div className="card px-4 py-3.5">
+        <p className="section-label mb-1">{label}</p>
+        <div className="rows">
+          {pm && <PmosRow pm={pm} asking={asking} onAsk={() => setAsking(true)} />}
+          {phones.map((d) => (
+            <PhoneRow
+              key={d.serial}
+              chip={<DeviceChip device={d} />}
+              action={
+                <button className="btn btn-secondary" onClick={() => onOpen(d)}>
+                  <Icon name="play" size={14} />
+                  Open its desktop
+                </button>
+              }
+            />
+          ))}
+        </div>
+      </div>
+      {pm && asking && phone?.ssh && !phone.paired && (
+        <PmosSignIn busy={pm.signingIn} error={pm.signInError} onSignIn={pm.signIn} />
+      )}
+    </div>
+  );
+}
+
+/** One phone in that card: which it is, and what can be done with it. */
+function PhoneRow({ chip, action, note }: { chip: ReactNode; action?: ReactNode; note?: ReactNode }) {
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-3 py-2.5 first:pt-1 last:pb-0">
+      <div className="min-w-0">{chip}</div>
+      {action && <div className="flex flex-wrap gap-2">{action}</div>}
+      {note && <p className="caption w-full select-text">{note}</p>}
+    </div>
+  );
 }
 
 /**
- * The postmarketOS phone on an Android phone's screens (ready, running,
- * closed), which keep the page: its desktop opens from here, after signing in
- * to it the first time, and while it is open it can be shown or closed. It
- * can be open beside the Android phone's desktop: each has its own window.
+ * The postmarketOS phone in that card: its desktop opens from here, after
+ * signing in to it the first time, and while it is open it can be shown or
+ * closed.
  */
-function PmosAlso({ pm }: { pm: Pmos }) {
-  const [asking, setAsking] = useState(false);
-  const { phone, session: s, dismiss } = pm;
-  // Closed on purpose while an Android screen has the page: nothing to report,
-  // the phone is simply there to open again.
-  useEffect(() => {
-    if (s.kind === "ended" && !s.message) dismiss();
-  }, [s, dismiss]);
+function PmosRow({ pm, asking, onAsk }: { pm: Pmos; asking: boolean; onAsk: () => void }) {
+  const { phone, session: s } = pm;
   const name = pm.name || phone?.name || "postmarketOS phone";
   const live = s.kind === "running";
   const busy = s.kind === "launching";
@@ -691,7 +774,7 @@ function PmosAlso({ pm }: { pm: Pmos }) {
     );
   } else if (phone?.ssh && !asking) {
     action = (
-      <button className="btn btn-secondary" onClick={() => setAsking(true)}>
+      <button className="btn btn-secondary" onClick={onAsk}>
         Sign in to it
       </button>
     );
@@ -703,19 +786,11 @@ function PmosAlso({ pm }: { pm: Pmos }) {
         ? s.message
         : "";
   return (
-    <div className="flex flex-col gap-3">
-      <div className="card flex flex-wrap items-center justify-between gap-3 px-4 py-3.5">
-        <div className="min-w-0">
-          <p className="section-label mb-1">{live || busy ? "Also open" : "Also plugged in"}</p>
-          <PmosChip name={name} tone={live ? "live" : busy ? "warn" : undefined} />
-        </div>
-        {action && <div className="flex flex-wrap gap-2">{action}</div>}
-        {note && <p className="caption w-full select-text">{note}</p>}
-      </div>
-      {asking && phone?.ssh && !phone.paired && (
-        <PmosSignIn busy={pm.signingIn} error={pm.signInError} onSignIn={pm.signIn} />
-      )}
-    </div>
+    <PhoneRow
+      chip={<PmosChip name={name} tone={live ? "live" : busy ? "warn" : undefined} />}
+      action={action}
+      note={note}
+    />
   );
 }
 

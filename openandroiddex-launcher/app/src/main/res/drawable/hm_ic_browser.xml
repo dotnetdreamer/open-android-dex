@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Open in a browser: a browser window with a prompt in it, which is Linux on a computer's screen. Drawn for LinuxOnDroid's Settings: white, tinted in code. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:pathData="M5,4.5 h14 a2,2 0 0,1 2,2 v11 a2,2 0 0,1 -2,2 h-14 a2,2 0 0,1 -2,-2 v-11 a2,2 0 0,1 2,-2 z"
+        android:strokeColor="#FFFFFFFF"
+        android:strokeWidth="2"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round" />
+    <path
+        android:pathData="M3.5,8.75 H20.5"
+        android:strokeColor="#FFFFFFFF"
+        android:strokeWidth="1.6"
+        android:strokeLineCap="round" />
+    <path
+        android:pathData="M6.25,6.6 m-0.85,0 a0.85,0.85 0 1,0 1.7,0 a0.85,0.85 0 1,0 -1.7,0 M8.85,6.6 m-0.85,0 a0.85,0.85 0 1,0 1.7,0 a0.85,0.85 0 1,0 -1.7,0"
+        android:fillColor="#FFFFFFFF" />
+    <path
+        android:pathData="M7.5,11.75 L9.75,13.6 L7.5,15.45"
+        android:strokeColor="#FFFFFFFF"
+        android:strokeWidth="2"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round" />
+    <path
+        android:pathData="M12,15.45 H15.5"
+        android:strokeColor="#FFFFFFFF"
+        android:strokeWidth="2"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round" />
+</vector>

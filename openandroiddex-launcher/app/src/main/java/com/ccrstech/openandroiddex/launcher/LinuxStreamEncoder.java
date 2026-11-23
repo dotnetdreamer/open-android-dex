@@ -34,9 +34,14 @@ import java.util.List;
  * instead of the compositor.
  *
  * <p>Tuned for latency over everything: no B-frames, one frame in flight in
- * the encoder ({@code KEY_LATENCY}), realtime priority, parameter sets on
- * every key frame so a decoder can join at any one, and a key frame only when
- * asked for. A desktop that stops changing is sent once more after a moment
+ * the encoder ({@code KEY_LATENCY}), realtime priority, and parameter sets on
+ * every key frame so a decoder can join at any one. A browser's stream gets a
+ * key frame only when its page asks ({@link #ONLY_WHEN_ASKED}): a key frame
+ * is many times a frame's size, so one every few seconds is a hitch every few
+ * seconds on a link near its limit, and over TCP no frame is ever lost that a
+ * key frame would mend. A computer's stream, and the app windows that share
+ * this configuration, keep one every {@link #KEY_FRAME_EVERY_S}. A desktop
+ * that stops changing is sent again a few times over the next second
  * ({@code KEY_REPEAT_PREVIOUS_FRAME_AFTER}) so the last picture sharpens, and
  * then not at all.
  *
@@ -60,7 +65,12 @@ public final class LinuxStreamEncoder {
     /** EGL_RECORDABLE_ANDROID: a config the encoder's surface will take. */
     private static final int EGL_RECORDABLE_ANDROID = 0x3142;
     /** Seconds between key frames nobody asked for — the stream asks when it needs one. */
-    private static final int KEY_FRAME_EVERY_S = 10;
+    public static final int KEY_FRAME_EVERY_S = 10;
+    /**
+     * No key frame after the first unless asked for (MediaFormat: a negative
+     * interval). A browser's page asks whenever it has to start over.
+     */
+    public static final int ONLY_WHEN_ASKED = -1;
     /** How long a desktop must stand still before its last picture goes again, sharper. */
     private static final long REPEAT_AFTER_US = 100_000;
 
@@ -136,6 +146,17 @@ public final class LinuxStreamEncoder {
      */
     static LinuxStreamEncoder create(int fbW, int fbH, int bitrate, int fps, String swizzle, Output out)
             throws IOException {
+        return create(fbW, fbH, bitrate, fps, 1.0, KEY_FRAME_EVERY_S, swizzle, out);
+    }
+
+    /**
+     * As above, the picture drawn no larger than {@code maxScale} of the
+     * desktop: a browser's Low quality, where a smaller picture is less to
+     * encode, to send and to decode, and keeps up on a slow link. A key frame
+     * every {@code keyEveryS} seconds, or {@link #ONLY_WHEN_ASKED}.
+     */
+    static LinuxStreamEncoder create(int fbW, int fbH, int bitrate, int fps, double maxScale, int keyEveryS,
+                                     String swizzle, Output out) throws IOException {
         List<String> tried = new ArrayList<>();
         for (MediaCodecInfo info : candidates()) {
             MediaCodecInfo.VideoCapabilities vc;
@@ -144,7 +165,7 @@ public final class LinuxStreamEncoder {
             } catch (Exception e) {
                 continue;
             }
-            int[] size = fit(vc, fbW, fbH, fps);
+            int[] size = fit(vc, fbW, fbH, fps, maxScale);
             if (size == null) {
                 tried.add(info.getName() + " (no size)");
                 continue;
@@ -153,7 +174,7 @@ public final class LinuxStreamEncoder {
             MediaCodec codec = null;
             try {
                 codec = MediaCodec.createByCodecName(info.getName());
-                int attempt = configure(codec, info, size[0], size[1], bitrate, fps);
+                int attempt = configure(codec, info, size[0], size[1], bitrate, fps, keyEveryS);
                 LinuxStreamEncoder enc = new LinuxStreamEncoder(codec, info.getName(), isHardware(info),
                         size[0], size[1], fbW, fbH, scaled, bitrate, fps, out);
                 enc.configAttempt = attempt;
@@ -223,11 +244,17 @@ public final class LinuxStreamEncoder {
      * otherwise the largest step down that it does. Null if none.
      */
     public static int[] fit(MediaCodecInfo.VideoCapabilities vc, int w, int h, int fps) {
+        return fit(vc, w, h, fps, 1.0);
+    }
+
+    /** As above, starting from {@code maxScale} of the desktop rather than all of it. */
+    public static int[] fit(MediaCodecInfo.VideoCapabilities vc, int w, int h, int fps, double maxScale) {
         int wa = Math.max(2, vc.getWidthAlignment());
         int ha = Math.max(2, vc.getHeightAlignment());
         double[] steps = {1.0, 0.875, 0.75, 2.0 / 3.0, 0.5};
         for (int pass = 0; pass < 2; pass++) {
             for (double s : steps) {
+                if (s > maxScale + 1e-6) continue;
                 int ew = s == 1.0 ? alignUp(w, wa) : alignDown((int) (w * s), wa);
                 int eh = s == 1.0 ? alignUp(h, ha) : alignDown((int) (h * s), ha);
                 if (ew <= 0 || eh <= 0) continue;
@@ -248,15 +275,32 @@ public final class LinuxStreamEncoder {
 
     /** @return which attempt took: 0 with every low-latency key, 1 the plain one */
     public static int configure(MediaCodec codec, MediaCodecInfo info, int w, int h, int bitrate, int fps) {
+        return configure(codec, info, w, h, bitrate, fps, KEY_FRAME_EVERY_S);
+    }
+
+    /**
+     * As above, a key frame every {@code keyEveryS} seconds, or none after the
+     * first ({@link #ONLY_WHEN_ASKED}).
+     *
+     * @return which attempt took: 0 with every low-latency key, 1 the plain
+     *         one, 2 the plain one with a key frame every
+     *         {@link #KEY_FRAME_EVERY_S} after all (an encoder that would not
+     *         take "only when asked")
+     */
+    public static int configure(MediaCodec codec, MediaCodecInfo info, int w, int h, int bitrate, int fps,
+                                int keyEveryS) {
         MediaCodecInfo.CodecCapabilities caps = info.getCapabilitiesForType(MIME);
         // Everything that makes it faster first; if the encoder will not take
-        // the lot, again with only what every encoder takes.
-        for (int attempt = 0; attempt < 2; attempt++) {
+        // the lot, again with only what every encoder takes; and last, for an
+        // encoder that refuses a key frame only when asked, the plain one
+        // with the interval every encoder takes.
+        int attempts = keyEveryS < 0 ? 3 : 2;
+        for (int attempt = 0; attempt < attempts; attempt++) {
             MediaFormat f = MediaFormat.createVideoFormat(MIME, w, h);
             f.setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface);
             f.setInteger(MediaFormat.KEY_BIT_RATE, bitrate);
             f.setInteger(MediaFormat.KEY_FRAME_RATE, fps);
-            f.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, KEY_FRAME_EVERY_S);
+            f.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, attempt == 2 ? KEY_FRAME_EVERY_S : keyEveryS);
             f.setLong(MediaFormat.KEY_REPEAT_PREVIOUS_FRAME_AFTER, REPEAT_AFTER_US);
             if (attempt == 0) {
                 MediaCodecInfo.EncoderCapabilities ec = caps.getEncoderCapabilities();
@@ -283,12 +327,13 @@ public final class LinuxStreamEncoder {
                 codec.configure(f, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE);
                 return attempt;
             } catch (RuntimeException e) {
-                if (attempt == 1) throw e;
-                DexLog.warn("stream", info.getName() + " refused the low-latency configuration: " + e);
+                if (attempt == attempts - 1) throw e;
+                DexLog.warn("stream", info.getName() + (attempt == 0 ? " refused the low-latency configuration: "
+                        : " refused key frames only when asked: ") + e);
                 codec.reset();
             }
         }
-        return 1;
+        return attempts - 1;
     }
 
     private static boolean supportsProfile(MediaCodecInfo.CodecCapabilities caps, int profile) {

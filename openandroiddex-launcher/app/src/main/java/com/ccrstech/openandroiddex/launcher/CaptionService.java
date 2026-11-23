@@ -143,7 +143,8 @@ public final class CaptionService extends AccessibilityService {
     /** Maximise ({@code on}) or restore, as the caption's ⤢ does; nothing if it is already so. */
     static void maximiseTask(int taskId, boolean on) {
         CaptionService s = live;
-        if (s == null) return;
+        // Below API 34 no bar is drawn, and RESIZE would reserve a strip for one.
+        if (s == null || s.captionsOff) return;
         WmClient.Task t = s.tasks.get(taskId);
         if (t == null) return;
         if (on != near(t, s.maxRect(t.displayId))) s.onMaximise(t);
@@ -156,7 +157,7 @@ public final class CaptionService extends AccessibilityService {
      */
     static void resizeTask(int taskId, int w, int h) {
         CaptionService s = live;
-        if (s == null || s.wm == null) return;
+        if (s == null || s.wm == null || s.captionsOff) return;
         WmClient.Task t = s.tasks.get(taskId);
         if (t == null || w <= 0 || h <= 0) return;
         final int display = t.displayId;
@@ -195,7 +196,7 @@ public final class CaptionService extends AccessibilityService {
      */
     static int[] placeTask(int taskId, int w, int h, boolean maximised) {
         CaptionService s = live;
-        if (s == null || s.wm == null) return null;
+        if (s == null || s.wm == null || s.captionsOff) return null;
         WmClient.Task t = s.tasks.get(taskId);
         if (t == null) return null;
         final int display = t.displayId;
@@ -220,8 +221,9 @@ public final class CaptionService extends AccessibilityService {
 
     /**
      * A context for {@code TYPE_ACCESSIBILITY_OVERLAY} windows on a display:
-     * above every app window and the taskbar, needing no permission — where a
-     * Linux app's menus are shown. Null while the service is not running.
+     * above every app window and application overlay, needing no permission, and not hidden
+     * when a window hides overlays — where a Linux app's menus are shown, and the desktop's
+     * taskbar. Null while the service is not running.
      */
     static android.content.Context overlayContext(int displayId) {
         CaptionService s = live;
@@ -294,6 +296,15 @@ public final class CaptionService extends AccessibilityService {
     private List<WmClient.Task> lastStack = new ArrayList<>();
 
     /**
+     * Every app on screen, topmost first: the windows above, and an app full screen too,
+     * which has no caption and so is in neither of them. What Show desktop clears.
+     */
+    private List<WmClient.Task> lastShown = new ArrayList<>();
+
+    /** WindowConfiguration.WINDOWING_MODE_FULLSCREEN, as the daemon's LIST reports it. */
+    private static final int MODE_FULLSCREEN = 1;
+
+    /**
      * taskId -> opaque strip that hides One UI's own caption until ours attaches.
      *
      * A freshly launched window shows the platform's bare title bar for the handful of
@@ -327,6 +338,11 @@ public final class CaptionService extends AccessibilityService {
     /** Volatile: written on the service's main thread, read by the Web server's. */
     private volatile int desktopDisplayId = -1;
     private boolean running;
+    /**
+     * Below API 34: no bars, strips, curtains or edges — only the windows as the daemon
+     * lists them, minimising, putting back and Show desktop. See onServiceConnected.
+     */
+    private boolean captionsOff;
     private int ticks;
 
     /**
@@ -389,11 +405,31 @@ public final class CaptionService extends AccessibilityService {
     private static final class Caption {
         SurfaceControlViewHost host;
         TextView title;
+        /**
+         * The bar's controls that make way as the window narrows, the first to go first (see
+         * {@link #fitBar}); null entries for those this bar has not got. Back and ✕ are not
+         * among them: they always stay.
+         */
+        View[] yielding;
+        /** Every control's width on the bar, title aside, with all of them shown. */
+        int fixedWidth;
+        boolean detour;
         int taskId;
         int width;
         int height;
         /** Accessibility window this is attached to; changes when the host is recreated. */
         int windowId;
+        /** Hosted on the app's own window, not on a shell caption window: see followAppWindow. */
+        boolean onApp;
+        /**
+         * How far the bar reaches down over the top of the window hosting it, px: the whole
+         * bar on an app window that starts at the task's top (One UI on Android 17, for our
+         * own tasks), nothing on a shell caption window. Our own windows keep clear of it
+         * (OwnWindows.keepClearOfBar).
+         */
+        int over;
+        /** Passes in a row that window has been missing from the accessibility list. */
+        int awayPasses;
     }
 
     /** Breadcrumb file: logcat from this uid is unreliable on One UI, a file is not. */
@@ -438,6 +474,7 @@ public final class CaptionService extends AccessibilityService {
                             && !DexCursors.isCursorKey(key)) {
                         return;
                     }
+                    closeMenu();               // drawn in the old look too
                     for (int i = 0; i < captions.size(); i++) release(captions.valueAt(i));
                     captions.clear();
                     trace("theme, shell or cursor changed — captions dropped for rebuild");
@@ -457,6 +494,9 @@ public final class CaptionService extends AccessibilityService {
         // gesture dispatch has no such floor, so the Web viewer's control
         // still works on a phone this service can draw nothing on.
         live = this;
+        // The desktop's taskbar is an accessibility overlay of this service where it can be,
+        // and the one it was on went with the last instance (LauncherActivity#attachTaskbarOverlay).
+        LauncherActivity.captionServiceChanged();
         // Ahead of the API floor below, which the cable-pulled undo does not share.
         if (unplug == null) {
             unplug = new UnplugWatch(this, () -> main.post(this::disableSelf));
@@ -464,10 +504,13 @@ public final class CaptionService extends AccessibilityService {
         }
         if (android.os.Build.VERSION.SDK_INT < 34) {
             // attachAccessibilityOverlayToWindow is API 34. Below that there is no way to
-            // get a surface into another app's window, so the service is inert rather
-            // than half-working.
-            Log.w(TAG, "needs API 34+, captions disabled");
-            return;
+            // get a surface into another app's window, so there are no bars, no strips
+            // for them, no curtains and no edges. What still runs is the half that needs
+            // none of that: the windows as the daemon lists them, minimising and putting
+            // back, and Show desktop — the taskbar's Home there (Galaxy A13, Android 12),
+            // where the desktop cannot be raised over a window (LauncherActivity#goHome).
+            Log.w(TAG, "needs API 34+, captions disabled — windows only");
+            captionsOff = true;
         }
         AccessibilityServiceInfo info = getServiceInfo();
         if (info != null) {
@@ -476,7 +519,7 @@ public final class CaptionService extends AccessibilityService {
             setServiceInfo(info);
         }
         wm = new WmClient();
-        edges = new ResizeEdges(this);
+        if (!captionsOff) edges = new ResizeEdges(this);
         running = true;
         android.content.IntentFilter f =
                 new android.content.IntentFilter(LauncherActivity.ACTION_RESTORE);
@@ -514,6 +557,8 @@ public final class CaptionService extends AccessibilityService {
     public void onDestroy() {
         running = false;
         live = null;
+        // Our overlays go with us, the desktop's taskbar among them: it moves to one that stays.
+        LauncherActivity.captionServiceChanged();
         if (unplug != null) unplug.stop();
         try {
             unregisterReceiver(restoreReceiver);
@@ -528,8 +573,15 @@ public final class CaptionService extends AccessibilityService {
         } catch (Exception ignored) {
         }
         main.removeCallbacks(reconcile);
+        closeMenu();
+        if (barWm != null) {
+            final WmClient client = barWm;
+            barWm = null;
+            client.post(client::shutdown);
+        }
         for (int i = 0; i < captions.size(); i++) release(captions.valueAt(i));
         captions.clear();
+        OwnWindows.barsOver(null);                 // no bar over any window of ours now
         for (int i = 0; i < curtains.size(); i++) {
             try {
                 View v = curtains.valueAt(i);
@@ -546,11 +598,18 @@ public final class CaptionService extends AccessibilityService {
         if (edges != null) edges.clear();
         dropAnchor();
         if (wm != null) {
-            // Leave no window permanently inset if we go away.
+            // Leave no window permanently inset if we go away. (Below API 34 none was.)
             final WmClient client = wm;
-            final Map<Integer, WmClient.Task> snapshot = new HashMap<>(tasks);
+            final Map<Integer, WmClient.Task> snapshot = captionsOff
+                    ? new HashMap<>() : new HashMap<>(tasks);
             final int display = desktopDisplayId;
+            // And no window left minimised. Hidden is a flag on the task, not on anything of
+            // ours: a task left hidden as this service goes — the session ending, the restart
+            // every reconnect makes — stays invisible wherever it goes next, the phone's own
+            // screen after Exit DeX included, with nothing left that knows to show it.
+            final List<Integer> hidden = new ArrayList<>(minimised.keySet());
             client.post(() -> {
+                for (int id : hidden) client.show(display, id);
                 for (WmClient.Task t : snapshot.values()) client.unstrip(display, t.taskId);
                 client.shutdown();
             });
@@ -585,6 +644,7 @@ public final class CaptionService extends AccessibilityService {
                     if (!running) return;
                     if (display != desktopDisplayId) {
                         trace("desktop display = " + display);
+                        closeMenu();                // it is on the old display
                         desktopDisplayId = display;
                         dropAnchor();               // the anchor belongs to the old display
                         hostWaitSince.clear();      // those task ids are on the old display
@@ -594,7 +654,7 @@ public final class CaptionService extends AccessibilityService {
                         // pass has no surface until it is laid out, so the first bar built
                         // on a fresh anchor finds no token and waits a pass for it (seen
                         // on an Android 15 emulator: ~0.45 s on the first window).
-                        Display d = display < 0 ? null
+                        Display d = display < 0 || captionsOff ? null
                                 : getSystemService(android.hardware.display.DisplayManager.class)
                                         .getDisplay(display);
                         if (d != null) anchorToken(d);
@@ -652,7 +712,11 @@ public final class CaptionService extends AccessibilityService {
      * desktop still wearing One UI's own title bar. Settings runs in its own
      * task (see its taskAffinity in the manifest), so the activity name tells
      * the two apart — and the Linux window is exempted the same way, for the
-     * same reason.
+     * same reason. Every window of ours that the taskbar lists (OwnWindows)
+     * has to be here too, or it opens with no bar, and so no Back and no ✕:
+     * Linux settings did, until it was added. So did the Web viewer, which
+     * was on neither list: on One UI 17, which gives our windows no caption
+     * of its own, it had no title bar at all.
      */
     private boolean isDesktopTask(WmClient.Task t) {
         return getPackageName().equals(t.pkg)
@@ -662,7 +726,9 @@ public final class CaptionService extends AccessibilityService {
                 && !TaskManagerActivity.class.getName().equals(t.activity)
                 && !FileTransferActivity.class.getName().equals(t.activity)
                 && !LinuxRemoteActivity.class.getName().equals(t.activity)
-                && !LinuxWindowActivity.class.getName().equals(t.activity);
+                && !LinuxSettingsActivity.class.getName().equals(t.activity)
+                && !LinuxWindowActivity.class.getName().equals(t.activity)
+                && !WebActivity.class.getName().equals(t.activity);
     }
 
     /** @return true if any caption geometry changed, i.e. windows are on the move. */
@@ -673,16 +739,23 @@ public final class CaptionService extends AccessibilityService {
         // Kept in the daemon's order — TOPMOST FIRST — because stacking depends on it.
         // The map alone cannot carry this; HashMap order is not the z-order.
         List<WmClient.Task> stack = new ArrayList<>();
+        List<WmClient.Task> shown = new ArrayList<>();
         for (WmClient.Task t : live) {
-            if (t.isFreeform() && t.visible && !isDesktopTask(t)) {
+            if (!t.visible || isDesktopTask(t)) continue;
+            if (t.isFreeform()) {
                 tasks.put(t.taskId, t);
                 stack.add(t);
+                shown.add(t);
+            } else if (t.windowingMode == MODE_FULLSCREEN) {
+                shown.add(t);
             }
         }
         // Kept because `tasks` cannot carry it — see onShowDesktop, which is
         // the one caller that has to put windows back in the order it found
         // them.
         lastStack = stack;
+        lastShown = shown;
+        closeMenuIfMoved();
 
         // A minimised task stops being minimised when it comes back, and stops existing
         // when it is really closed. Either way the taskbar should stop pinning it.
@@ -719,6 +792,10 @@ public final class CaptionService extends AccessibilityService {
             if (changed) publishMinimised();
         }
 
+        // Below API 34 the windows are tracked for minimising and Show desktop, and that is
+        // all: everything after this dresses them.
+        if (captionsOff) return false;
+
         List<AccessibilityWindowInfo> windows = windowsOnDisplay(display);
         if (windows == null) {
             if (ticks % 25 == 0) trace("no a11y windows for display " + display);
@@ -735,8 +812,13 @@ public final class CaptionService extends AccessibilityService {
             // checked on every pass even for a task already wearing an app-window bar, so
             // a caption that turns up late is adopted rather than left drawing over us.
             AccessibilityWindowInfo host = pickHost(windows, t);
+            boolean onApp = false;
             if (host == null) {
-                host = hostOnAppWindow(windows, t);   // null until the grace runs out
+                Caption has = captions.get(t.taskId);
+                host = has != null && has.onApp
+                        ? followAppWindow(windows, t, has)    // null: keep the bar it has
+                        : hostOnAppWindow(windows, t);        // null until the grace runs out
+                onApp = host != null;
             } else {
                 hostWaitSince.remove(t.taskId);
                 hostDisplays.add(display);
@@ -783,7 +865,7 @@ public final class CaptionService extends AccessibilityService {
                 if (!ok) missing++;
                 continue;
             }
-            ensureCaption(host, t);
+            ensureCaption(host, t, onApp);
         }
         if (missing > 0) {
             moved = true;          // poll fast until every task has a bar
@@ -823,7 +905,25 @@ public final class CaptionService extends AccessibilityService {
         hostWaitSince.keySet().retainAll(tasks.keySet());
         updateEdges(display, stack, windows);
         rememberGeometry(display, stack);
+        reportOwnBars();
         return moved;
+    }
+
+    /**
+     * Tell our own windows where the bar lies over them (OwnWindows.barsOver), once a pass
+     * has settled: a theme or density rebuild drops every bar between passes and puts it
+     * back in the next, and a window told in between would jump down and up again.
+     */
+    private void reportOwnBars() {
+        android.util.SparseIntArray over = new android.util.SparseIntArray();
+        for (int i = 0; i < captions.size(); i++) {
+            Caption c = captions.valueAt(i);
+            WmClient.Task t = tasks.get(captions.keyAt(i));
+            if (c.over > 0 && t != null && getPackageName().equals(t.pkg)) {
+                over.put(captions.keyAt(i), c.over);
+            }
+        }
+        OwnWindows.barsOver(over);
     }
 
     // ── resize edges (ResizeEdges) ─────────────────────────────────────────
@@ -1190,6 +1290,18 @@ public final class CaptionService extends AccessibilityService {
      */
     private AccessibilityWindowInfo appHost(List<AccessibilityWindowInfo> windows,
                                             WmClient.Task task) {
+        return appHost(windows, task, false);
+    }
+
+    /**
+     * {@link #appHost}; with {@code owned}, only a window whose content is the task's app's
+     * now, read off its root. That costs a round trip per window, so it is for the rare pass
+     * that moves a bar ({@link #followAppWindow}), where the rect alone is not enough: two
+     * windows opened at the desktop's default place have the same one, and a bar moved by
+     * the rect could land on another app's window.
+     */
+    private AccessibilityWindowInfo appHost(List<AccessibilityWindowInfo> windows,
+                                            WmClient.Task task, boolean owned) {
         AccessibilityWindowInfo app = null;
         android.graphics.Rect r = new android.graphics.Rect();
         for (AccessibilityWindowInfo w : windows) {
@@ -1199,9 +1311,22 @@ public final class CaptionService extends AccessibilityService {
             if (Math.abs(r.left - task.left) > 2 || Math.abs(r.right - task.right) > 2) continue;
             if (Math.abs(r.top - task.top) > 2) continue;
             if (r.height() <= px(CAPTION_MAX_DP)) continue;  // a caption, or one of ours
+            if (owned && (task.pkg == null || !task.pkg.equals(packageOf(w)))) continue;
             if (app == null || w.getId() < app.getId()) app = w;
         }
         return app;
+    }
+
+    /** The package whose content a window shows, or null where it cannot be read. */
+    private static String packageOf(AccessibilityWindowInfo w) {
+        try {
+            android.view.accessibility.AccessibilityNodeInfo root = w.getRoot();
+            if (root == null) return null;
+            CharSequence p = root.getPackageName();
+            return p == null ? null : p.toString();
+        } catch (RuntimeException e) {
+            return null;
+        }
     }
 
     /** One of our own bars, by the title stamped on it in {@link #params}. */
@@ -1249,6 +1374,55 @@ public final class CaptionService extends AccessibilityService {
     }
 
     /**
+     * Passes in a row a bar's app window has to be missing from the accessibility list before
+     * its coming back counts as a new surface: one pass could be a blink.
+     */
+    private static final int AWAY_PASSES = 2;
+
+    /**
+     * Where a bar already on its task's app window should be now: another window to move to,
+     * the same window to be put on again, or null to stay as it is.
+     *
+     * On a shell that draws no caption (Android 17 on the S25) the bar is part of the app's
+     * own window surface, and an app can open another of its screens over that window, in
+     * the same task: My Files opening the phone's storage settings does. The window
+     * underneath stops, leaves this list, and its surface goes, and the bar with it; nothing
+     * here used to look again, because a task that had a bar kept it (hostOnAppWindow). So
+     * the bar follows: while its window is not listed it moves to the task's app window
+     * that is. And the window that comes back from under the other one has a NEW surface,
+     * which the bar is not part of, though its id is the same one: a bar whose window was
+     * away for AWAY_PASSES passes or more is put on again, afresh.
+     */
+    private AccessibilityWindowInfo followAppWindow(List<AccessibilityWindowInfo> windows,
+                                                    WmClient.Task task, Caption has) {
+        AccessibilityWindowInfo own = null;
+        for (AccessibilityWindowInfo w : windows) {
+            if (w.getId() == has.windowId) {
+                own = w;
+                break;
+            }
+        }
+        if (own == null) {
+            has.awayPasses++;
+            // Another of the task's windows, if it has one listed: ensureCaption moves the bar
+            // there (its id differs). None: keep the bar, and look again next pass.
+            AccessibilityWindowInfo other = appHost(windows, task, true);
+            if (other != null) {
+                trace("task " + task.taskId + ": its window " + has.windowId
+                        + " has gone from view — the bar moves to window " + other.getId());
+            }
+            return other;
+        }
+        boolean back = has.awayPasses >= AWAY_PASSES;
+        has.awayPasses = 0;
+        if (!back) return null;
+        trace("task " + task.taskId + ": its window " + has.windowId
+                + " is back — the bar is put on it again");
+        has.windowId = -1;     // so ensureCaption builds it afresh on the same window
+        return own;
+    }
+
+    /**
      * Attach the bar INSIDE One UI's own caption window for this task.
      *
      * This is the whole design, and everything good about it follows from where the surface
@@ -1285,6 +1459,7 @@ public final class CaptionService extends AccessibilityService {
         int width = task.right - task.left;
         int height = captionHeight(task.taskId);
         if (c.width == width && c.height == height) return true;
+        fitBar(c, width);
         if (!relayout(c.host, width, height)) return false;   // caller rebuilds
         c.width = width;
         c.height = height;
@@ -1292,7 +1467,7 @@ public final class CaptionService extends AccessibilityService {
         return true;
     }
 
-    private void ensureCaption(AccessibilityWindowInfo host, WmClient.Task task) {
+    private void ensureCaption(AccessibilityWindowInfo host, WmClient.Task task, boolean onApp) {
         int id = host.getId();
         int width = task.right - task.left;
         int height = captionHeight(task.taskId);
@@ -1335,6 +1510,9 @@ public final class CaptionService extends AccessibilityService {
                     .setPosition(sc, 0f, dy)          // host-relative: the task moves us
                     .apply();
             made.windowId = id;
+            made.onApp = onApp;
+            // dy is the strip's share of the bar: above the host's top, over nothing.
+            made.over = onApp ? Math.max(0, height + Math.round(dy)) : 0;
             captions.put(task.taskId, made);
             // The real caption now covers the platform's — retire the launch curtain and
             // stop curtaining this task (a later host blink-out must not re-cover it).
@@ -1387,6 +1565,35 @@ public final class CaptionService extends AccessibilityService {
         // else depends on it.
         DexCursors.apply(bar, DexCursors.ROLE_GRAB);
 
+        // The widget detour's window is an alert box waiting for an answer: ✕ is all it
+        // gets (see below).
+        final boolean detour = WidgetDetourActivity.isDetourTask(task.taskId);
+
+        // Back and More at the left, then the app's icon and name: what the computer's own
+        // window for an app has at its left (apps/win/frame.rs), and Back works as it does
+        // there — to this window's app, whichever window had the keyboard (onBack). The
+        // padding goes, so Back sits in the corner as the close button does in the other.
+        View more = null;
+        if (!detour) {
+            bar.setPadding(0, 0, 0, 0);
+            bar.addView(glyphButton(ui, CaptionGlyph.BACK, getString(R.string.lx_back),
+                    v -> onBack(task)), navParams(height));
+            more = glyphButton(ui, CaptionGlyph.MORE, getString(R.string.cap_more),
+                    v -> onMore(task, v));
+            bar.addView(more, navParams(height));
+        }
+        android.graphics.drawable.Drawable icon = iconFor(task);
+        android.widget.ImageView iv = null;
+        if (icon != null) {
+            iv = new android.widget.ImageView(ui);
+            iv.setImageDrawable(icon);
+            iv.setScaleType(android.widget.ImageView.ScaleType.FIT_CENTER);
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(px(16), px(16));
+            lp.leftMargin = detour ? 0 : px(4);
+            lp.rightMargin = px(8);
+            bar.addView(iv, lp);
+        }
+
         c.title = new TextView(ui);
         c.title.setText(labelFor(task));
         c.title.setTextColor(theme.textDim);
@@ -1407,17 +1614,78 @@ public final class CaptionService extends AccessibilityService {
         // and the add would hang with an allocated widget id nobody can reach. ✕ stays,
         // because ours is a real close (wmd removeTask, not One UI's hide), which the detour
         // turns into a clean cancel.
-        if (!WidgetDetourActivity.isDetourTask(task.taskId)) {
-            bar.addView(button(ui, "◧", false, v -> onSnapLeft(task)), buttonParams(height));
-            bar.addView(button(ui, "◨", false, v -> onSnapRight(task)), buttonParams(height));
-            bar.addView(button(ui, "—", false, v -> onMinimise(task)), buttonParams(height));
-            bar.addView(button(ui, "▢", false, v -> onMaximise(task)), buttonParams(height));
+        View sound = null;
+        View snapLeft = null;
+        View snapRight = null;
+        View minimise = null;
+        View maximise = null;
+        if (!detour) {
+            // Where the phone's sound plays, before the window's own buttons, as the
+            // computer's window has it: the desktop's sound menu, under this button.
+            sound = glyphButton(ui, CaptionGlyph.SOUND, getString(R.string.cap_sound),
+                    v -> onSound(task, v));
+            bar.addView(sound, navParams(height));
+            snapLeft = button(ui, "◧", false, v -> onSnapLeft(task));
+            bar.addView(snapLeft, buttonParams(height));
+            snapRight = button(ui, "◨", false, v -> onSnapRight(task));
+            bar.addView(snapRight, buttonParams(height));
+            minimise = button(ui, "—", false, v -> onMinimise(task));
+            bar.addView(minimise, buttonParams(height));
+            maximise = button(ui, "▢", false, v -> onMaximise(task));
+            bar.addView(maximise, buttonParams(height));
         }
         bar.addView(button(ui, "✕", true, v -> onClose(task)), buttonParams(height));
         bar.setOnTouchListener(dragHandler(c, task));
 
+        // Least needed first: the icon says nothing the name does not; the snaps have the
+        // edges and a drag; the sound has the taskbar's own menu; minimise and More before
+        // maximise, which is how a narrow window is made wide again.
+        c.yielding = new View[]{iv, snapRight, snapLeft, sound, minimise, more, maximise};
+        c.detour = detour;
+        c.fixedWidth = bar.getPaddingLeft() + bar.getPaddingRight();
+        for (int i = 0; i < bar.getChildCount(); i++) {
+            View child = bar.getChildAt(i);
+            if (child == c.title) continue;
+            LinearLayout.LayoutParams lp = (LinearLayout.LayoutParams) child.getLayoutParams();
+            c.fixedWidth += lp.width + lp.leftMargin + lp.rightMargin;
+        }
+        fitBar(c, width);
+
         setView(c.host, bar, width, height);
         return c;
+    }
+
+    /** The least a bar leaves for the window's name, which is also where it is dragged by. */
+    private static final int DRAG_ROOM_DP = 48;
+
+    /**
+     * Fit the bar's controls to a window {@code width} wide. They are fixed widths, and on a
+     * narrow window — Android lets one be narrower than all eight and the icon — the last
+     * would be pushed off the bar's end, and ✕ is the last. So the least needed make way, in
+     * {@link Caption#yielding}'s order, until what is left fits with a strip to drag by;
+     * Back and ✕ always stay. Shown again as the window widens.
+     */
+    private void fitBar(Caption c, int width) {
+        if (c.yielding == null) return;
+        int[] widths = new int[c.yielding.length];
+        for (int i = 0; i < widths.length; i++) {
+            View v = c.yielding[i];
+            if (v == null) continue;
+            LinearLayout.LayoutParams lp = (LinearLayout.LayoutParams) v.getLayoutParams();
+            widths[i] = lp.width + lp.leftMargin + lp.rightMargin;
+        }
+        boolean[] shown = CaptionMath.shown(c.fixedWidth, widths, px(DRAG_ROOM_DP), width);
+        boolean iconShown = false;
+        for (int i = 0; i < c.yielding.length; i++) {
+            View v = c.yielding[i];
+            if (v == null) continue;
+            int vis = shown[i] ? View.VISIBLE : View.GONE;
+            if (v.getVisibility() != vis) v.setVisibility(vis);
+            if (i == 0) iconShown = shown[i];
+        }
+        // With no icon in front of it, the name keeps the icon's gap from More.
+        int pad = iconShown || c.detour ? 0 : px(6);
+        if (c.title.getPaddingLeft() != pad) c.title.setPadding(pad, 0, 0, 0);
     }
 
     /**
@@ -1622,6 +1890,82 @@ public final class CaptionService extends AccessibilityService {
         // 46px under the Windows 11 shell, which is the width its own caption
         // buttons are; ours is narrower because the DeX strip carries five.
         return new LinearLayout.LayoutParams(px(DexTheme.of(this).win11 ? 46 : 38), height);
+    }
+
+    /**
+     * Back, More and Sound: narrower than the window's own buttons, as the computer's
+     * window has them (40 to its 46, apps/win/frame.rs) — eight buttons have to leave a
+     * phone-sized window some room for its name.
+     */
+    private LinearLayout.LayoutParams navParams(int height) {
+        return new LinearLayout.LayoutParams(px(DexTheme.of(this).win11 ? 40 : 34), height);
+    }
+
+    /**
+     * A caption control drawn as a mark rather than set as text — Back, More, Sound (see
+     * CaptionGlyph) — with the same fills as {@link #button}. No tooltip: a tooltip is a
+     * popup window, and this bar has no window of ours to hang one from.
+     */
+    private View glyphButton(android.content.Context ui, int kind, String label,
+                             View.OnClickListener onClick) {
+        DexTheme theme = DexTheme.of(this);
+        android.widget.ImageView b = new android.widget.ImageView(ui);
+        b.setImageDrawable(new CaptionGlyph(kind, px(16), Math.max(1f, 1.4f * density),
+                theme.textDim));
+        b.setScaleType(android.widget.ImageView.ScaleType.CENTER);
+        b.setContentDescription(label);
+        b.setOnClickListener(onClick);
+        StateListDrawable bg = new StateListDrawable();
+        bg.addState(new int[]{android.R.attr.state_pressed}, new ColorDrawable(theme.hover));
+        bg.addState(new int[]{android.R.attr.state_hovered}, new ColorDrawable(theme.hover));
+        bg.addState(new int[0], new ColorDrawable(0x00000000));
+        b.setBackground(bg);
+        DexCursors.apply(b, DexCursors.ROLE_HAND);
+        return b;
+    }
+
+    /** component -> its icon, as the bars show it: an app's icon does not change while it runs. */
+    private final Map<String, android.graphics.drawable.Drawable.ConstantState> icons =
+            new HashMap<>();
+
+    /**
+     * The app's icon for its bar, where the computer's window shows it: the activity's own,
+     * else the app's; a Linux app's window, its own window's. Null when there is none to show.
+     * A fresh drawable each time — one drawable in two bars (a rebuild, the same app twice)
+     * would have two views fighting over its bounds.
+     */
+    private android.graphics.drawable.Drawable iconFor(WmClient.Task task) {
+        if (LinuxWindowActivity.class.getName().equals(task.activity)) {
+            android.graphics.Bitmap b = LinuxWindows.iconForTask(task.taskId);
+            return b == null ? null : new android.graphics.drawable.BitmapDrawable(getResources(), b);
+        }
+        if (task.pkg == null || task.pkg.isEmpty()) return null;
+        String key = task.pkg + "/" + task.activity;
+        android.graphics.drawable.Drawable.ConstantState kept = icons.get(key);
+        if (kept != null) return kept.newDrawable(getResources()).mutate();
+        if (icons.containsKey(key)) return null;      // asked before: it has none
+        android.graphics.drawable.Drawable d = null;
+        PackageManager pm = getPackageManager();
+        if (task.activity != null && !task.activity.isEmpty() && !"?".equals(task.activity)) {
+            try {
+                d = pm.getActivityIcon(new ComponentName(task.pkg, task.activity));
+            } catch (Exception ignored) {
+                // aliases and non-exported entry points can fail to resolve
+            }
+        }
+        if (d == null) {
+            try {
+                d = pm.getApplicationIcon(task.pkg);
+            } catch (Exception ignored) {
+            }
+        }
+        // One that cannot be copied is not kept: it is looked up again for the next bar.
+        if (d == null) {
+            icons.put(key, null);
+        } else if (d.getConstantState() != null) {
+            icons.put(key, d.getConstantState());
+        }
+        return d;
     }
 
     /**
@@ -1905,6 +2249,217 @@ public final class CaptionService extends AccessibilityService {
             wm.unstrip(display, id);
             wm.close(id);
         });
+    }
+
+    // ── Back, More and Sound: what the computer's window for an app has too ──
+
+    /** Ctrl, as a key held with another: the left one, which is what a keyboard sends. */
+    private static final int CTRL = android.view.KeyEvent.META_CTRL_ON
+            | android.view.KeyEvent.META_CTRL_LEFT_ON;
+
+    /**
+     * A press on a menu's own button within this long of a press outside the menu closing
+     * it is that same press: the menu hears the press go down, the button hears it come up.
+     */
+    private static final long MENU_RETOGGLE_MS = 400L;
+
+    /** The one title-bar menu open, on any bar; null when none is. */
+    private CaptionMenu menu;
+    /** Its window's rect as the menu opened, {l,t,r,b}: a window that moves takes the menu down. */
+    private int[] menuRect;
+    /** The last menu a press outside closed: when, and whose. See {@link #toggledOff}. */
+    private long menuGoneAt;
+    private int menuGoneTask = -1;
+    private int menuGoneKind;
+
+    /**
+     * The bar's own connection to the daemon, for what a press waits on: TASKKEY holds its
+     * answer while a window takes the keyboard (up to ~450 ms), and {@link #wm}'s one thread
+     * is the reconcile's and the drag's, which must not queue behind it.
+     */
+    private WmClient barWm;
+
+    private WmClient barWm() {
+        if (barWm == null) barWm = new WmClient();
+        return barWm;
+    }
+
+    /**
+     * ← Back, for this window's app: the key tap the computer's window for an app sends from
+     * its own Back (KEYCODE_BACK), aimed as it is there. There every app has a display of its
+     * own, so Back can only reach it; here the windows share one, where a key goes to
+     * whichever window has the keyboard — so the daemon gives it to this window first, as a
+     * click on the window would, and sends the key only once it has it (TASKKEY). Pressed on a
+     * window behind another, it brings the window forward, as a click on its bar does.
+     */
+    private void onBack(WmClient.Task task) {
+        sendKey(task, android.view.KeyEvent.KEYCODE_BACK, 0);
+    }
+
+    /** One key to {@code task}'s app, through the daemon; see {@link #onBack}. */
+    private void sendKey(WmClient.Task task, int code, int meta) {
+        final int display = task.displayId;
+        final int id = task.taskId;
+        final WmClient client = barWm();
+        client.post(() -> {
+            String reply = client.taskKey(display, id, code, meta);
+            // Neither a refusal nor a silence is followed by a key sent some other way: a
+            // key that cannot be aimed at this window would land in another one.
+            final String said = reply == null ? "no answer" : reply;
+            main.post(() -> trace("key " + code + (meta != 0 ? "+" + meta : "")
+                    + " for task " + id + ": " + said));
+        });
+    }
+
+    /**
+     * ☰ More: the computer's window's menu (apps/win/mod.rs, more_menu), as far as it means
+     * anything on the phone's desktop. Copy and Paste, for a window used with no keyboard
+     * (the phone as its touchpad); a phone's or a tablet's size for the app; and the phone as
+     * this desktop's touchpad. Its Full screen and its game controls stay the computer's
+     * window's own: here the desktop is one picture, and game controls are the computer's
+     * keys turned into touches on an app's own window.
+     */
+    private void onMore(WmClient.Task task, View button) {
+        if (toggledOff(task.taskId, CaptionMenu.MORE)) return;
+        List<CaptionMenu.Item> items = new ArrayList<>();
+        // A Linux app's window takes the copy and paste keys instead, which it turns into
+        // what its app takes: Ctrl+Shift+C in a terminal, where Ctrl+C is an interrupt
+        // (LinuxWinView#key). An Android app gets Ctrl+C and Ctrl+V, as from the computer's
+        // window.
+        final boolean linux = LinuxWindowActivity.class.getName().equals(task.activity);
+        items.add(CaptionMenu.item(getString(R.string.cap_copy), "Ctrl+C", false,
+                () -> sendKey(task, linux ? android.view.KeyEvent.KEYCODE_COPY
+                        : android.view.KeyEvent.KEYCODE_C, linux ? 0 : CTRL)));
+        items.add(CaptionMenu.item(getString(R.string.cap_paste), "Ctrl+V", false,
+                () -> sendKey(task, linux ? android.view.KeyEvent.KEYCODE_PASTE
+                        : android.view.KeyEvent.KEYCODE_V, linux ? 0 : CTRL)));
+        // An app's: our own windows (Settings, Linux, a Linux app's) are the size they ask for.
+        if (!getPackageName().equals(task.pkg)) {
+            boolean tablet = tabletSized(task.taskId);
+            items.add(CaptionMenu.separator());
+            items.add(CaptionMenu.item(getString(R.string.cap_phone_size), null, !tablet,
+                    () -> sizeAs(task.taskId, false)));
+            items.add(CaptionMenu.item(getString(R.string.cap_tablet_size), null, tablet,
+                    () -> sizeAs(task.taskId, true)));
+        }
+        if (LauncherActivity.touchpadOffered()) {
+            items.add(CaptionMenu.separator());
+            items.add(CaptionMenu.item(getString(R.string.cap_touchpad), null, false,
+                    LauncherActivity::openTouchpadFromCaption));
+        }
+        openMenu(task, button, CaptionMenu.MORE, items);
+    }
+
+    /**
+     * The sound button: where the phone's sound plays — the desktop's own Media output
+     * flyout, the taskbar's (LauncherActivity#mediaOutputItems), under this button. The same
+     * answers the computer's window gives (apps/sound.rs): this computer, this computer and
+     * the phone, or one of the phone's own outputs.
+     */
+    private void onSound(WmClient.Task task, View button) {
+        if (toggledOff(task.taskId, CaptionMenu.SOUND)) return;
+        List<CaptionMenu.Item> items = LauncherActivity.soundMenuItems();
+        if (items == null || items.isEmpty()) {
+            trace("sound menu: no desktop to ask");
+            return;
+        }
+        openMenu(task, button, CaptionMenu.SOUND, items);
+    }
+
+    /** Does this window's app have a tablet's room: 600 dp and more on its shorter side? */
+    private boolean tabletSized(int taskId) {
+        WmClient.Task t = tasks.get(taskId);
+        return t != null && CaptionMath.tabletSized(new int[]{t.left, t.top, t.right, t.bottom},
+                captionHeight(taskId), density);
+    }
+
+    /**
+     * More's Phone size and Tablet size: the app given a current phone's room, or a tablet's
+     * on its side, in the desktop's dp — the sizes the computer's window gives an app, fitted
+     * the same way (CaptionMath#sizeFor says how). Through RESIZE, so the size and the bar's
+     * strip land in one transition, and the window's place is remembered as any resize's is.
+     */
+    private void sizeAs(int taskId, boolean tablet) {
+        WmClient.Task t = tasks.get(taskId);
+        if (t == null) return;
+        final int display = t.displayId;
+        final int px = captionHeight(taskId);
+        final int[] max = maxRect(display);
+        final int[] r = CaptionMath.sizeFor(tablet, new int[]{t.left, t.top, t.right, t.bottom},
+                max, px, density, near(t, max));
+        if (r == null) return;
+        if (r == CaptionMath.MAXIMISE) {
+            if (!near(t, max)) onMaximise(t);
+            return;
+        }
+        // Not maximised now, and not to be restored to anything: this is its size.
+        maximized.remove(taskId);
+        restoreBounds.remove(taskId);
+        trace((tablet ? "tablet" : "phone") + " size task " + taskId + " -> "
+                + r[0] + "," + r[1] + "," + r[2] + "," + r[3]);
+        wm.post(() -> wm.resize(display, taskId, r[0], r[1], r[2], r[3], px));
+    }
+
+    /**
+     * Open {@code items} under {@code button}, one of {@code task}'s bar's buttons. One menu
+     * at a time, across every bar: another bar's goes first.
+     */
+    private void openMenu(WmClient.Task task, View button, int kind, List<CaptionMenu.Item> items) {
+        closeMenu();
+        WmClient.Task live = tasks.containsKey(task.taskId) ? tasks.get(task.taskId) : task;
+        android.content.Context ctx = overlayContext(live.displayId);
+        if (ctx == null) return;
+        int barH = captionHeight(live.taskId);
+        int left = live.left + button.getLeft();
+        int[] anchor = {left, live.top, left + button.getWidth(), live.top + barH};
+        android.graphics.Point size = displaySize(live.displayId);
+        CaptionMenu m = new CaptionMenu(ctx, live.taskId, kind, items, this::menuGone);
+        if (m.show(anchor, new int[]{size.x, size.y}, taskbarPx(live.displayId))) {
+            menu = m;
+            menuRect = new int[]{live.left, live.top, live.right, live.bottom};
+        }
+    }
+
+    private void menuGone(CaptionMenu m, boolean byOutsidePress) {
+        if (menu == m) menu = null;
+        if (byOutsidePress) {
+            menuGoneAt = SystemClock.uptimeMillis();
+            menuGoneTask = m.taskId;
+            menuGoneKind = m.kind;
+        }
+    }
+
+    /**
+     * A press on the button whose menu is open closes it, as a menu on a computer does. That
+     * press has usually closed it already, as a press outside the menu, a moment before the
+     * button hears it; a menu closed that way is not opened again by the same press.
+     */
+    private boolean toggledOff(int taskId, int kind) {
+        boolean same = CaptionMath.samePress(menuGoneTask, menuGoneKind, menuGoneAt, taskId, kind,
+                SystemClock.uptimeMillis(), MENU_RETOGGLE_MS);
+        menuGoneTask = -1;
+        if (same) return true;
+        if (menu != null && menu.taskId == taskId && menu.kind == kind) {
+            closeMenu();
+            return true;
+        }
+        return false;
+    }
+
+    private void closeMenu() {
+        CaptionMenu m = menu;
+        menu = null;
+        if (m != null) m.dismiss();
+    }
+
+    /** A menu whose window has gone, moved or changed size goes too: it would point at nothing. */
+    private void closeMenuIfMoved() {
+        if (menu == null) return;
+        WmClient.Task t = tasks.get(menu.taskId);
+        if (t == null || menuRect == null || t.left != menuRect[0] || t.top != menuRect[1]
+                || t.right != menuRect[2] || t.bottom != menuRect[3]) {
+            closeMenu();
+        }
     }
 
     /**
@@ -2213,7 +2768,11 @@ public final class CaptionService extends AccessibilityService {
     private void onShowDesktop() {
         if (wm == null) return;
         final int display = desktopDisplayId;
-        List<WmClient.Task> open = new ArrayList<>(tasks.values());
+        // An app full screen is cleared too, not only the windows. Left out, it was not
+        // hidden but covered by the desktop that Home raises right after, so it was in
+        // neither the taskbar nor this map, and Home again brought back only the windows:
+        // a video made full screen was gone for good (Galaxy A13, 2026-11-17).
+        List<WmClient.Task> open = lastShown;
         // Which way the toggle goes is decided by what is ON SCREEN, not by
         // whether anything happens to be minimised. A user who minimised one
         // window by hand and then asks for the desktop means "clear the other
@@ -2235,13 +2794,10 @@ public final class CaptionService extends AccessibilityService {
             // the taskbar from un-pinning a window mid-transition.
             return;
         }
-        // `stack` order, not the map's: `tasks` is a HashMap and `lastStack`
-        // is the daemon's topmost-first list, which is the only record of how
-        // the desktop looked before this gesture.
-        List<WmClient.Task> ordered = lastStack.isEmpty() ? open : lastStack;
-        for (int i = 0; i < ordered.size(); i++) {
-            WmClient.Task t = ordered.get(i);
-            if (!tasks.containsKey(t.taskId)) continue;
+        // The daemon's topmost-first order, which is the only record of how the
+        // desktop looked before this gesture.
+        for (int i = 0; i < open.size(); i++) {
+            WmClient.Task t = open.get(i);
             Min m = new Min(t.pkg, t.activity, SystemClock.uptimeMillis());
             m.depth = i;
             minimised.put(t.taskId, m);
@@ -2263,17 +2819,127 @@ public final class CaptionService extends AccessibilityService {
                     // windows (ours: Settings and Linux). Absent = any window
                     // of the package, the taskbar's meaning.
                     String activity = i.getStringExtra("activity");
+                    final int display = desktopDisplayId;
                     for (Map.Entry<Integer, Min> e : minimised.entrySet()) {
                         if (!pkg.equals(e.getValue().pkg)) continue;
                         if (activity != null && !activity.equals(e.getValue().activity)) continue;
                         final int taskId = e.getKey();
-                        final int display = desktopDisplayId;
-                        wm.post(() -> wm.show(display, taskId));
-                        break;
+                        // The reconcile drops it from `minimised` once it is visible again.
+                        wm.post(() -> unhide(display, taskId, pkg, 0));
+                        return;
                     }
-                    // The reconcile drops it from `minimised` once it is visible again.
+                    // Not minimised. Every sender means "show me this window": the Task
+                    // Manager's row for a window of ours, or a taskbar pin that went stale.
+                    // A window that is open behind others is shown by bringing it to the
+                    // front, as a click on it does. This used to do nothing at all, so the
+                    // Task Manager's row only ever worked on a minimised window.
+                    wm.post(() -> raise(display, pkg, activity));
                 }
             };
+
+    /**
+     * The open window of {@code pkg} (and of {@code activity}, when one is named) to the
+     * front. On the daemon's thread.
+     *
+     * A hidden one this service no longer remembers hiding (the minimised set does not
+     * survive a restart of the service) is un-hidden, since a reorder alone leaves it
+     * hidden.
+     */
+    private void raise(int display, String pkg, String activity) {
+        List<WmClient.Task> live = wm.list(display);
+        if (live == null) return;
+        for (WmClient.Task t : live) {                       // topmost first
+            if (!pkg.equals(t.pkg) || isDesktopTask(t)) continue;
+            if (activity != null && !activity.equals(t.activity)) continue;
+            if (t.visible) {
+                bringForward(display, t, pkg);
+            } else {
+                unhide(display, t.taskId, pkg, 0);
+            }
+            return;
+        }
+    }
+
+    /**
+     * A shown window to the front. On the daemon's thread.
+     *
+     * Where the daemon will not raise it (FRONT answers ERR: Android 10 has no reorder, and
+     * Android 12 ignores one across a fullscreen app), a window of ours is started again
+     * instead. Each is singleTask on a task of its own, so that brings forward the window
+     * it already has, as its taskbar tile does, and opens no second one.
+     */
+    private void bringForward(int display, WmClient.Task t, String pkg) {
+        if (wm.front(display, t.taskId)) return;
+        trace("raise: the daemon would not raise task " + t.taskId + " (" + t.activity + ")");
+        if (getPackageName().equals(pkg)) {
+            final String own = t.activity;
+            main.post(() -> startOwnWindow(own));
+        }
+    }
+
+    /** When an un-hide is read back, per try: the daemon answers before the window manager acts. */
+    private static final long[] SHOW_CHECK_MS = {600, 2000};
+
+    /**
+     * Un-hide a task, then read it back. On the daemon's thread.
+     *
+     * SHOW's answer proves little: the daemon answers once it has handed the change over,
+     * and answers OK either way. So a moment later the task is looked at again:
+     * - shown and in front: done;
+     * - shown but behind (Android 12 un-hides, then ignores a reorder across a fullscreen
+     *   app): brought forward like any window behind others ({@link #bringForward});
+     * - still hidden: asked once more, a little later (a daemon that was restarting, a
+     *   transition that was dropped);
+     * - gone: nothing left to show, and its pin and row go with it.
+     *
+     * Starting the activity again is no fallback for a task that stays hidden, unlike for
+     * one that will not come forward: it does not clear the hidden flag (measured, see
+     * LauncherActivity.launch). Only the daemon can. A task still hidden after the second
+     * try stays minimised, where its taskbar pin still offers it, and the breadcrumb says so.
+     */
+    private void unhide(int display, int taskId, String pkg, int attempt) {
+        boolean answered = wm.show(display, taskId);
+        wm.postDelayed(() -> {
+            List<WmClient.Task> live = wm.list(display);
+            WmClient.Task t = live == null ? null : byId(live, taskId);
+            if (live != null && t == null) {
+                trace("restore: task " + taskId + " is gone");
+                return;
+            }
+            if (t != null && t.visible) {
+                if (!inFront(live, t)) bringForward(display, t, pkg);
+                return;
+            }
+            if (attempt + 1 < SHOW_CHECK_MS.length) {
+                unhide(display, taskId, pkg, attempt + 1);
+                return;
+            }
+            trace("restore: task " + taskId + " is still hidden after " + SHOW_CHECK_MS.length
+                    + " tries" + (answered ? "" : "; the daemon refused or did not answer")
+                    + (live == null ? "; no window list" : ""));
+        }, SHOW_CHECK_MS[attempt]);
+    }
+
+    /** Whether {@code t} is the front window: the first shown one in the daemon's topmost-first list, the desktop aside. */
+    private boolean inFront(List<WmClient.Task> live, WmClient.Task t) {
+        for (WmClient.Task o : live) {
+            if (!o.visible || isDesktopTask(o)) continue;
+            return o.taskId == t.taskId;
+        }
+        return false;
+    }
+
+    /** One of our windows, started again to bring it forward. Main thread: OwnWindows is. */
+    private void startOwnWindow(String activity) {
+        if (!OwnWindows.list().contains(activity)) return;  // only a window of ours that is open
+        try {
+            startActivity(new android.content.Intent()
+                    .setClassName(this, activity)
+                    .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK));
+        } catch (RuntimeException e) {
+            trace("raise: could not start " + activity + ": " + e);
+        }
+    }
 
     private static WmClient.Task byId(List<WmClient.Task> tasks, int taskId) {
         for (WmClient.Task t : tasks) {

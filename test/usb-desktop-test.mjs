@@ -79,6 +79,36 @@ console.log("h264.ts");
   check("a P slice is not key", !p.key && p.sps === null && p.data.length === 7);
 }
 
+console.log("wire.ts");
+{
+  // What the phone reads the link by (LinuxStream.java): the hello says the
+  // acknowledgements carry times, and each is 0x12 then the arrival time in
+  // ms as a big-endian float64, as a browser page's are.
+  const w = await import(pathToFileURL(path.join(USB, "wire.ts")).href);
+  const hello = w.helloOf(true, 1920, 1080, 22_000_000, true);
+  check("the hello: the size, the route's bitrate, acknowledgements, and their times",
+    hello.t === "hello" && hello.v === 1 && hello.start === true && hello.w === 1920 && hello.h === 1080
+      && hello.bitrate === 22_000_000 && hello.fps === 60 && hello.acks === true && hello.ackAt === true, JSON.stringify(hello));
+  // The phone's rule takes a round trip over 400 ms for a queue: read only on the local network.
+  check("times read on the local network only: the cable and Wi-Fi yes, the internet and a relay no",
+    w.localRoute("cable") && w.localRoute("wifi") && !w.localRoute("remote") && !w.localRoute("relay"));
+  check("…off it, the hello says no times", w.helloOf(false, 1280, 720, 6_000_000, w.localRoute("relay")).ackAt === false);
+  // Over wireless debugging the new rule was no better on the S25 (2026-11-21): the old rule there.
+  check("times read on the cable and the tunnel on the same network, not over wireless debugging",
+    w.readsTimes("cable", false) && w.readsTimes("wifi", false) && !w.readsTimes("wifi", true)
+      && !w.readsTimes("remote", false) && !w.readsTimes("relay", false));
+  const moved = w.routeChangedOf(2_700_000, false);
+  check("a route changed under a live stream: its ceiling, and whether its times are read from here on",
+    moved.t === "bitrate" && moved.bitrate === 2_700_000 && moved.ackAt === false, JSON.stringify(moved));
+  check("…and the acknowledgement off it is the one byte an older phone reads", w.PLAIN_ACK.length === 1 && w.PLAIN_ACK[0] === 0x12);
+  const at = 1_795_000_000_123.25;
+  const a = w.ackOf(at);
+  check("an acknowledgement: 0x12, then when the frame arrived (ms, float64, big-endian)",
+    a.length === 9 && a[0] === 0x12 && new DataView(a.buffer, a.byteOffset, a.byteLength).getFloat64(1) === at, Array.from(a).join(","));
+  const now = Date.now();
+  check("…by this computer's clock, in ms since 1970", Math.abs(w.clock() - now) < 1000, `${w.clock()} vs ${now}`);
+}
+
 console.log("keysym.ts");
 {
   const k = await import(pathToFileURL(path.join(USB, "keysym.ts")).href);
@@ -104,6 +134,146 @@ console.log("keysym.ts");
   check("space", press({ key: " ", code: "Space" }) === 0x20);
   check("the numpad's digits", press({ key: "1", code: "Numpad1" }) === 0x31);
   check("a key the browser cannot name falls back to its place", press({ key: "Unidentified", code: "KeyZ" }) === 0x7a);
+}
+
+console.log("clipboardShare.ts");
+{
+  // Parameter properties need the transform, not just the stripping Node does by itself.
+  const js = stripTypeScriptTypes(fs.readFileSync(path.join(USB, "..", "clipboardShare.ts"), "utf8"), { mode: "transform" });
+  const file = path.join(tmp, "clipboardShare.mjs");
+  fs.writeFileSync(file, js);
+  const { ClipboardShare } = await import(pathToFileURL(file).href);
+  const window = { front: true, computer: "", writes: [], posts: [], said: [], gate: null };
+  const host = {
+    // What the clipboard held when the read went out, back when `gate` opens: a slow read is an old one.
+    read: () => {
+      const then = window.computer;
+      return window.gate ? window.gate.then(() => then) : Promise.resolve(then);
+    },
+    write: async (t) => {
+      window.writes.push(t);
+      window.computer = t;
+    },
+    post: (m) => window.posts.push(m),
+    focused: () => window.front,
+    say: (t) => window.said.push(t),
+    save: () => {},
+  };
+  const c = new ClipboardShare(host, true);
+  c.connected();
+  await sleep(20);
+  c.fromGuest("copied in front");
+  await sleep(220);
+  check("what the guest copies with the window in front lands here", window.writes.join() === "copied in front", window.writes.join());
+  // The race: copied, and the window sent to the back before the 150 ms are up.
+  c.fromGuest("copied, then away");
+  await sleep(50);
+  window.front = false;
+  await sleep(200);
+  check("the window going to the back within 150 ms keeps it off this computer's clipboard", window.writes.length === 1, window.writes.join(" | "));
+  window.front = true;
+  await c.focus();
+  check("…and it lands when the window comes back, nothing having been copied here", window.writes[1] === "copied, then away", window.writes.join(" | "));
+  c.fromGuest("copied, then away again");
+  await sleep(50);
+  window.front = false;
+  await sleep(200);
+  window.computer = "copied here meanwhile";
+  window.front = true;
+  await c.focus();
+  check(
+    "…but a newer copy here wins: it goes to the guest, and the guest's waiting one is dropped",
+    window.writes.length === 2 && window.posts.at(-1)?.paste === "copied here meanwhile",
+    JSON.stringify(window.posts.at(-1)),
+  );
+  // The newer copy wins whichever end it was made on, and however the timing falls (found in review, 2026-11-16).
+  // Each sequence starts agreed: the window in front, this computer's text given to the guest.
+  const agreed = async () => {
+    window.front = true;
+    window.computer = "agreed";
+    window.gate = null;
+    const s = new ClipboardShare(host, true);
+    await s.focus();
+    window.writes.length = 0;
+    window.posts.length = 0;
+    return s;
+  };
+  let open = () => {};
+  {
+    const s = await agreed();
+    s.fromGuest("A, copied in front");
+    await sleep(20);
+    window.front = false;
+    s.fromGuest("B, copied with the window at the back");
+    await sleep(200);
+    window.front = true;
+    await s.focus();
+    check("a copy made with the window at the back replaces one still on its way: the newer lands", window.writes.join(" | ") === "B, copied with the window at the back", window.writes.join(" | "));
+    s.dispose();
+  }
+  {
+    const s = await agreed();
+    window.front = false;
+    s.fromGuest("waiting for the window");
+    window.gate = new Promise((r) => (open = r));
+    window.front = true;
+    const reading = s.focus();
+    await sleep(10);
+    window.front = false;
+    open();
+    await reading;
+    window.gate = null;
+    check("the window gone to the back again while the clipboard is read: nothing lands while it is there", window.writes.length === 0, window.writes.join(" | "));
+    window.front = true;
+    await s.focus();
+    check("…and what waited lands once it is back", window.writes.join(" | ") === "waiting for the window", window.writes.join(" | "));
+    s.dispose();
+  }
+  {
+    const s = await agreed();
+    window.computer = "older, on this computer";
+    window.gate = new Promise((r) => (open = r));
+    const reading = s.focus();
+    s.fromGuest("the guest's, newer");
+    await sleep(200);
+    open();
+    await reading;
+    window.gate = null;
+    check(
+      "a read that went out before the guest's copy landed here gives the guest nothing older",
+      !window.posts.some((p) => p.paste === "older, on this computer") && window.computer === "the guest's, newer",
+      JSON.stringify(window.posts),
+    );
+    s.dispose();
+  }
+  {
+    const s = await agreed();
+    s.fromGuest("the guest's, on its way");
+    await sleep(20);
+    window.front = false;
+    window.computer = "copied here meanwhile";
+    window.front = true;
+    await s.focus();
+    await sleep(200);
+    check(
+      "a copy here during the guest's 150 ms wins: it goes to the guest, and the guest's never lands here",
+      window.writes.length === 0 && window.posts.at(-1)?.paste === "copied here meanwhile" && window.computer === "copied here meanwhile",
+      `${window.writes.join(" | ")} / ${JSON.stringify(window.posts.at(-1))}`,
+    );
+    s.dispose();
+  }
+  // A postmarketOS phone's window: its own words, and its own limit.
+  const phone = new ClipboardShare(host, true, { name: "the phone", max: 1024 * 1024 });
+  window.computer = "x".repeat(1024 * 1024 + 10);
+  await phone.focus();
+  check("the phone's window names the phone and its limit", window.said.at(-1) === "The clipboard is too large to share with the phone (over 1 MB).", window.said.at(-1));
+  phone.toggle();
+  check("…and says off the phone's way", window.said.at(-1) === "Clipboard not shared with the phone." && window.posts.at(-1)?.share === false);
+  window.computer = "y".repeat(300 * 1024);
+  await new ClipboardShare(host, true).focus();
+  check("Linux keeps Xvnc's 256 KB", window.said.at(-1) === "The clipboard is too large to share with Linux (over 256 KB).", window.said.at(-1));
+  c.dispose();
+  phone.dispose();
 }
 
 // ── the launcher's pure-Java parts, on this JVM ──────────────────────────

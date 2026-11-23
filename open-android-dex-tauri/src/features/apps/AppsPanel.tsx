@@ -350,7 +350,7 @@ export function AppsPanel({
   );
 }
 
-function Centered({
+export function Centered({
   icon,
   spinner,
   title,

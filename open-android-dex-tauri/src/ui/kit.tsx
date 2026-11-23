@@ -241,6 +241,7 @@ export function MenuItem({
   disabled,
   danger,
   hint,
+  checked,
 }: {
   icon?: IconName;
   children: ReactNode;
@@ -248,12 +249,22 @@ export function MenuItem({
   disabled?: boolean;
   danger?: boolean;
   hint?: string;
+  /** One choice of several: whether it is the one chosen, ticked at the end. */
+  checked?: boolean;
 }) {
   return (
-    <button type="button" role="menuitem" className={`menu-item ${danger ? "danger" : ""}`} onClick={onSelect} disabled={disabled}>
+    <button
+      type="button"
+      role={checked === undefined ? "menuitem" : "menuitemradio"}
+      aria-checked={checked}
+      className={`menu-item ${danger ? "danger" : ""}`}
+      onClick={onSelect}
+      disabled={disabled}
+    >
       {icon && <Icon name={icon} size={16} />}
       <span className="flex-1">{children}</span>
       {hint && <span className="text-[11.5px] font-normal opacity-60">{hint}</span>}
+      {checked !== undefined && <Icon name="check" size={14} className={checked ? "" : "invisible"} />}
     </button>
   );
 }

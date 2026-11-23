@@ -20,7 +20,8 @@
 //! buttons, either of which can be pinned.
 //!
 //! The bar's Sound button opens a menu of where the phone's sound plays
-//! (sound.rs), Windows' own popup menu; a file dropped from Explorer goes to
+//! (sound.rs), Windows' own popup menu, with Mute at its top — the button's
+//! speaker is crossed out while it is on; a file dropped from Explorer goes to
 //! the phone (drops.rs). How either went is a note in a strip under the bar,
 //! for a few seconds.
 //!
@@ -189,6 +190,13 @@ impl Window {
     /// A short note in the strip under its title bar (Surface::note).
     pub fn note(&self, text: Option<String>, busy: bool) {
         Surface::note(&*self.shared, text, busy);
+    }
+
+    /// Its phone's Mute on or off (sound.rs): the bar's speaker crossed out, or not.
+    pub fn show_muted(&self, on: bool) {
+        if self.shared.muted.swap(on, Ordering::SeqCst) != on {
+            self.shared.repaint();
+        }
     }
 
     /// A line in the middle of the window while it has no picture; None takes it away.
@@ -476,6 +484,8 @@ struct Shared {
     top_bar_leaving: AtomicBool,
     /// More's menu or the sound menu is open: the full-screen bar stays until it closes.
     menu_open: AtomicBool,
+    /// Its phone's Mute is on (sound.rs): the bar's speaker is crossed out.
+    muted: AtomicBool,
     /// The app has a drag under way that may leave the window (link.rs, `dragging`).
     phone_drag: AtomicBool,
     /// What the phone says a drag it handed over carries, for the window's own thread.
@@ -984,6 +994,7 @@ fn ui_thread(spec: Spec, host: Arc<dyn Host>, opened: Sender<Result<Arc<Window>,
         top_bar_down: AtomicBool::new(false),
         top_bar_leaving: AtomicBool::new(false),
         menu_open: AtomicBool::new(false),
+        muted: AtomicBool::new(false),
         phone_drag: AtomicBool::new(false),
         dragged: Mutex::new(None),
         game: spec.game.clone(),
@@ -3319,6 +3330,7 @@ fn render_thread(shared: Arc<Shared>, rx: Receiver<RenderMsg>, icon: Option<Vec<
                 note: note.as_deref(),
                 full_screen: shared.full_screen.load(Ordering::SeqCst),
                 top_bar: shared.top_bar.load(Ordering::SeqCst) as f32 / 100.0,
+                muted: shared.muted.load(Ordering::SeqCst),
             };
             let drawn = r.draw(&look);
             if let Err(e) = &drawn {

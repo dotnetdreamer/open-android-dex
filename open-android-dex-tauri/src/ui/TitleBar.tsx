@@ -20,12 +20,15 @@ export function TitleBar({
   tab,
   onTab,
   menu,
+  phone,
   notifications,
   desktopBusy,
 }: {
   tab: Tab;
   onTab: (t: Tab) => void;
   menu: ReactNode;
+  /** Which phone the tabs are about, when there is more than one (PhoneSwitcher): on every tab, since they all follow it. */
+  phone?: ReactNode;
   /** The phone's notifications' bell, beside the help menu: on every tab, since they are. */
   notifications?: ReactNode;
   /** A desktop is being set up: said on its tab, for someone looking at the other one. */
@@ -37,6 +40,7 @@ export function TitleBar({
       <div className={`pointer-events-none flex min-w-0 flex-1 items-center gap-2 ${TITLEBAR_LEAD}`}>
         <img src="/logo.svg" alt="" width={16} height={16} className="shrink-0" draggable={false} />
         <span className="titlebar-name truncate">Open Android DeX</span>
+        {phone && <div className="pointer-events-auto flex min-w-0">{phone}</div>}
       </div>
       <Segmented
         label="Sections"

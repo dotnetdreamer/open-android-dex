@@ -1084,9 +1084,9 @@ open on it.
 
 Every window has a speaker in its title bar — beside minimise on Windows, at
 the bar's right end on a Mac — and it opens the desktop's media-output flyout
-as a menu (`apps/sound.rs`): the same answers, in the same words, and the same
-one setting behind them, the `audio` and `audiodup` this computer keeps for
-the desktop.
+as a menu (`apps/sound.rs`), under a Mute of its own ("Mute", below): the same
+answers, in the same words, and the same one setting behind them, the `audio`
+and `audiodup` this computer keeps for the desktop.
 
 - **Computer only** — the companion moves the phone's sound here.
 - **Computer and phone** — it copies it here and the phone plays too: Android
@@ -1133,6 +1133,99 @@ How a pick went is said for a few seconds in a strip under the title bar —
 On a Mac that strip is the window's own, as on Windows: the subtitle, where it
 used to go, has room for a word or two in a window the shape of a phone, and
 none at all in full screen.
+
+### Mute
+
+At the top of the same menu, **Mute**: the sound nowhere, and nothing spent
+carrying it. The companion stops, so the phone captures and encodes no sound
+(scrcpy's audio is a JVM of its own there, and an Opus encoder), the cable or
+the Wi‑Fi carries none, and this computer decodes and plays none; a window
+opened while it is on starts no companion either. Every window of that phone
+shows its speaker crossed out (Segoe's Mute glyph on Windows,
+`speaker.slash` on a Mac) and Mute checked in the menu. Picking Mute again
+turns it off, and so does picking a place for the sound, which stays checked
+through the mute: where the sound goes when it ends. How much faster the rest
+gets for it has not been measured. Under "Phone only" there is no companion to
+stop, and Mute only silences the phone.
+
+**The phone first, both ways.** Without a companion the phone would play the
+sound itself, so its media is muted first — the music stream's `ADJUST_MUTE`,
+as the volume keys mute it: the phone's volume panel shows it, and turning the
+volume up there undoes it — and the companion stops only once the phone has
+said so. Nothing is taken as done that the phone has not said is: it says yes
+to the Mute only once it reads the stream muted. One it will not read back is
+refused, as is one asked while it will not say whether its media was muted
+already — that decides what ending the Mute may undo, and a guess could undo
+a mute the phone had of its own. A refused mute that may have taken (a call
+that muted and then threw, or one never read back) is undone at once, and
+its mark stays until the phone reads the media playing.
+Media is all the companion captures: a ringtone, an alarm or a notification
+still sounds on the phone, as it does while the sound plays here. A capture
+that is running follows the mute: on a Galaxy S25 Ultra, a tone played into
+one went silent within 200 ms of it, once what was already on its way had
+come (read 100 ms at a time; an earlier reading that took the peak right
+after the mute, that audio included, had it wrongly at full level). So this
+computer goes quiet with the phone, and the companion's going saves what it
+would still spend: capturing, encoding, sending and playing silence.
+
+Turning it off, the phone is told first again. Where the companion takes the
+sound away from the phone's speaker ("Computer only"), the phone holds its
+media silent until a capture of its output is running, so nothing plays on the
+phone in between, and only then unmutes it; the companion starts meanwhile.
+Running is the audio policy's word (`AudioSystem.isSourceActive` for
+`REMOTE_SUBMIX`, which takes no permission), else where media is routed (the
+submix, while one runs) — not AudioManager's list of recordings, which leaves
+that source out as a system-only one: the S25 listed nothing while one ran.
+Six seconds at most, and that long too where the phone cannot say; then the
+phone plays the sound itself rather than wait for a capture that is not
+coming, and that is a moment it can be heard there. The phone says yes to an
+unmute only once it reads the stream playing, or holds it; one that does not
+take, or that it cannot read back, is refused, and the Mute stays on. A hold
+that ends that way — or in anything that throws — turns the Mute on again
+and says so to this computer: it is never left off with the media silent and
+nobody told.
+
+**It is the windows'.** The phone lifts it when its last window here closes,
+whether this computer is there to say so or not, and when its server stops;
+the media plays again, unless it was muted on the phone already when the Mute
+came on — that stays as the phone had it. A mute of the Mute's own is marked
+(`/data/local/tmp/oadx-apps-muted`), naming the server whose it is, from
+before the stream is muted until an unmute is confirmed: a server killed
+while it held, or one whose unmute did not take, leaves the mark, and the
+next server undoes the mute as it starts. That server owns the phone's sound
+from then on — a computer that started again makes a new one while the old
+one still waits half a minute for it — and the old one, ending, undoes
+nothing the mark no longer says is its own — not even after its own mark
+once could not be written: that lets it take an empty place as its own, never
+a newer server's mark. Ending, it also undoes anything of its own still marked
+(a mute it refused that may have taken). Reading the mark and changing the
+stream are one step against every other server: they take turns on a lock
+file beside the mark (`….lock`, a file lock, which the system lets go of with
+a server that dies, and which is never deleted, since a server may be holding
+it), so one started meanwhile waits rather than having its new mute undone in
+between. With no turn to be had, nothing is changed: a mute or an unmute is
+refused, and an end or a start leaves the mark for later. (Two computers'
+servers on one phone at once is the case this gives up: the later one's start
+undoes the earlier one's Mute.) The rules are `AppMute`'s, with the platform's
+calls kept apart, so `test/apps-mute-test.mjs` runs them on a computer,
+failures and a replaced server included, then on a phone; and with
+`--mutants` puts each defect the audits found back into a copy of `AppMute`,
+which the rules must then fail.
+
+This computer goes by what the phone says of the Mute: in its answer, and in
+its word of the sound, which carries it (`muted`). Only the control
+connection's reader takes either in, in the order the phone said them — the
+thread that asked never writes its own answer in afterwards, which could set
+back a lift the phone said since — and a change starts or stops the companion
+here and crosses the speakers out or not, whether the menu asked for it, the
+phone lifted it by itself, or a control connection made again found it on.
+The phone makes and sends those words one at a time, so an older one cannot
+arrive after a newer one and turn it back.
+
+While it is on, a desktop of the same phone is silent too: one companion
+carries both, and the phone's media is muted. Turning the phone's volume up by
+hand unmutes the phone but not the Mute here: with no companion, the sound
+plays on the phone until the Mute is turned off in a window.
 
 ## Dropping files
 
@@ -1631,6 +1724,77 @@ one's), Windows 11, 2026-11-02 — the pin made, and clicked, by the person:
 - UI Automation could not press a taskbar button (no Invoke on Windows 11's
   taskbar, and injected clicks were not taken), so the person's own hands did.
 
+The windows' Mute (2026-11-17, after three audits), `node test/apps-mute-test.mjs
+<serial>`: its rules on a computer's JVM (69 checks, `AppMute` with a
+stand-in phone; among them a newer server starting and muting in the middle
+of an older one's unmute, which now waits its turn; a second JVM process
+holding the lock, which a mute waited 500 ms and more for; a lock that cannot
+be had, which changes nothing; a mark once lost meeting a newer server's; a
+mute that took and threw; reads that throw before and after a mute), and on a
+Galaxy S25 Ultra (Android 17, over Wi‑Fi) through two of the app servers
+themselves on the wire (17; 86 of 86 with the rules): the audio policy saying a capture of the phone's output runs
+(`REMOTE_SUBMIX`, as the companion records it) while AudioManager listed none;
+on refused with no window, then muted, the mark naming the server; off for a
+capture held silent until one ran — it began 1124 ms after the unmute, the
+test's wait and its helper's start — then playing; off for none, played after
+6.5 s; a new server undoing the old one's mute as it started, muting it as its
+own, the old one's last window then leaving it alone; the last window closing
+lifting it, and the phone saying so; both servers taking the lock with no
+error; the phone as it was at the end (playing, volume 6). That the lock keeps
+two processes apart was seen on the computer's JVM, not under a race on the
+phone, where fcntl's locks are the same. The defects the audits found, each
+put back into a copy of what was fixed (`--mutants`, 11 of 11), fail checks
+that are there for them: no owner check; the mark dropped when an unmute is
+not confirmed; a phone that cannot say taken as capturing; no turn between
+servers (and, with only the file lock gone, the other process's check alone);
+the read-back after an unmute left unguarded with the hold's thread not
+catching (it left "told 0, on false"); a mark once lost taken over a newer
+server's; a change made with no turn; a mute not read back taken as done; a
+state unread before muting taken as sound on; a failed mute's mark dropped
+without reading the phone. And in Rust (`apps::host::tests`), by hand: the
+asking thread writing its answer's Mute fails
+`an_answer_heard_late_does_not_undo_a_lift_said_since`.
+A steady reading on the same phone: a tone played into a running capture
+peaked at 4096 before the mute, read 4096 in the first 100 ms after it (what
+was already on its way) and 0 in every 100 ms of the next 1.9 s and steadily
+after, and 4096 again once unmuted. The computer's half: its tests (the menu,
+scrcpy's floors, the answer's race), clippy on Windows, type-checked (not
+built) for a Mac and for Linux before the second round's changes.
+
+The Mute in the app (2026-11-17, Windows 11, built from bf2ffcd): picked from a
+window's menu, which showed Mute, then "Computer only", "Computer and phone" and
+"Phone speaker" (on Android 11, "Computer and phone (needs Android 13)" greyed
+and "Phone only"). The menu was opened and picked from with messages posted to
+the window (a click on its Sound button, then keys), not with the mouse. The
+sound was a quiet 1 kHz tone the shell played into media, and nobody listened:
+this computer's side was read from the peak meter of scrcpy's audio session,
+the phone's from its music stream, read every 25 ms. On a Galaxy S25 Ultra
+(Android 17, over Wi‑Fi), with a desktop of the same phone open:
+
+- Mute: the companion gone within 0.25 s (the desktop's sound with it), the
+  media muted and marked, the three lines logged, the window's speaker crossed
+  out (one window was open);
+- off in "Computer only": the media held silent until the companion's capture
+  began, 783 and 840 ms after the unmute, and the sound back here 1.36 and
+  1.41 s after the pick;
+- Mute, then "Phone speaker": the phone played again at once, and nothing here;
+  under the phone's output, Mute silenced only the phone;
+- "Computer and phone": no hold, the sound back here after 1.42 s;
+- Mute, then the last window closed (its "Close Calculator?" answered): the
+  phone played again ("the last window has closed"), and the desktop's
+  companion started again;
+- the app killed while muted: the phone played again 29.4 to 30.4 s later (its
+  stream read once a second), its mark gone.
+
+On a Redmi 9A (Android 11, MIUI 12, USB), off in "Computer only": the capture
+began 1747 ms after the unmute, and the sound came back here after 2.2 s. The
+device test then gave 86 of 86 on a Galaxy A13 (Android 12) and on the Redmi.
+On the Redmi that needed two changes to the test: its helper now records as
+scrcpy does on Android 11 (with the shell's HeapDumpActivity in front while
+the recording starts; before, Android refused it), and each hold's line is
+read from that hold's own start (before, "no capture began" passed for
+"capture began", and the next step took the line of the one before).
+
 Not yet:
 
 - **A window that gave up, clicked**: the phone never went for the 30 s that
@@ -1739,3 +1903,9 @@ Not yet:
   there.
 - Windows of this app's own on a Linux computer (it gets scrcpy's).
 - The compositor's refresh of latency: presenting to a hardware overlay.
+- **The Mute in the app** on a Mac, and on a phone whose audio policy will not
+  say when a capture runs (both phones tried said so). Nor seen: two windows of
+  one phone crossed out at once, or a Mute lifted by the app starting again
+  rather than after 30 s. Nor measured: what the rest gains while the sound is
+  not carried, over the cable or over Wi‑Fi. The device test's putting back a
+  phone whose media was muted before it ran is written, not run.

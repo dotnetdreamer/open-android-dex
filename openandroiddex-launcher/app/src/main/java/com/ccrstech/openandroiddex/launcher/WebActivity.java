@@ -80,6 +80,10 @@ public class WebActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        // Our own package has no taskbar icon, so this window's only presence
+        // there is the tile OwnWindows drives. That also keeps the page below
+        // the bar CaptionService draws over this window.
+        OwnWindows.opened(this);
         theme = DexTheme.of(this);
         // The WINDOW's own background as well as the content view's. A window
         // whose only opaque surface is a child view shows black for any frame
@@ -122,6 +126,12 @@ public class WebActivity extends Activity {
             unregisterReceiver(stateReceiver);
         } catch (Exception ignored) {
         }
+    }
+
+    @Override
+    protected void onDestroy() {
+        super.onDestroy();
+        OwnWindows.closed(this);
     }
 
     // ── the whole window, rebuilt on every state change ──

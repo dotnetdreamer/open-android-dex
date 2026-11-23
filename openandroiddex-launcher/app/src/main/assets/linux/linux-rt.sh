@@ -22,6 +22,9 @@
 #               tcp 6081 — the raw s16le/48k/stereo tap the APP reads and plays
 #               through AudioTrack. There is no audio device in the guest; see
 #               /etc/pulse/dex.pa, written by linux-setup.sh.
+#               /tmp/.oadx-mic — a pipe the APP writes a browser's microphone
+#               into, read as the source "Browser microphone" (.oadx-desk.pa,
+#               written below).
 #   websockify  tcp 6080 — serves the noVNC web root; the launcher's WebView
 #               loads OUR page from it, staged in there by LinuxService:
 #               http://127.0.0.1:6080/dex.html?password=<vncpass>&v=<rtpid>
@@ -381,6 +384,54 @@ def main():
 main()
 PYEOF
 
+# How Chromium draws, written into the guest at every start for the reason the
+# dock's keeper is: a guest built by an older setup gets it with no setup pass.
+# Ubuntu's /usr/bin/chromium empties CHROMIUM_FLAGS and then reads every file in
+# /etc/chromium.d, so a flag for every launch goes there; the session's own
+# environment never reaches it. The file decides at each launch, from that
+# launch's environment: on an Adreno phone whose GPU probe passed (OADX_GPU is
+# turnip and GL points at Zink, below), ANGLE on Vulkan, straight on Turnip;
+# anywhere else, nothing, and dex-chromium's own choice stands. Measured on the
+# S25 against GL through Zink (doc/linux-gpu.md): CSS animations, canvas 2D and
+# scrolling 60 frames a second where Zink held them near 45, a 1080p60 video
+# with no frame dropped where Zink dropped 29 to 30%, and full screen that
+# stays, where Chromium on Zink left it the moment it entered it; WebGL 16%
+# slower. Only where Chromium is installed (the directory is its package's).
+if [ -d "$ROOT/rootfs/etc/chromium.d" ]; then
+  cat > "$ROOT/rootfs/etc/chromium.d/oadx-gpu" 2>/dev/null <<'GPUEOF'
+# Written by LinuxOnDroid each time one of its X displays starts: the desktop's
+# (linux-rt.sh) or the one for apps in windows of their own (linux-win.sh).
+# Read by /usr/bin/chromium on every launch, in that launch's environment.
+# On an Adreno phone whose session found the GPU working, Chromium draws through
+# ANGLE on Vulkan, straight on the phone's driver (Turnip), not GL through Zink:
+# with Zink under its GPU compositing, Chromium leaves full screen the moment it
+# enters it (a video's, F11's). Anywhere else this adds nothing.
+if [ "$OADX_GPU" = turnip ] && [ "$MESA_LOADER_DRIVER_OVERRIDE" = zink ]; then
+  CHROMIUM_FLAGS="$CHROMIUM_FLAGS --use-angle=vulkan --enable-features=Vulkan"
+fi
+GPUEOF
+fi
+
+# A browser's microphone, into Linux (LinuxStreamMic.java): the app writes the
+# computer's sound into a pipe in the guest's /tmp, and PulseAudio reads it as
+# a source of its own, the default one, so that whatever records in Linux hears
+# the computer. module-pipe-source makes the pipe itself (the session removes
+# a killed one's first, since the module refuses one already there) and holds
+# it open both ways, so the app can open it without waiting and never sees it
+# end. Beside dex.pa rather than in it: linux-setup.sh writes dex.pa once, and
+# this has to reach guests that already exist, so it is written at every start,
+# into /tmp (the guest's, which is $ROOT/tmp here). .nofail: a daemon that
+# could not make the pipe still has its sound card and its tap, which dex.pa
+# keeps fatal.
+mkdir -p "$ROOT/tmp" 2>/dev/null
+cat > "$ROOT/tmp/.oadx-desk.pa" 2>/dev/null <<'PAEOF'
+# Written by LinuxOnDroid's linux-rt.sh at every start of the desktop.
+.include /etc/pulse/dex.pa
+.nofail
+load-module module-pipe-source source_name=browser_mic file=/tmp/.oadx-mic format=s16le rate=48000 channels=1 source_properties="device.description='Browser microphone'"
+set-default-source browser_mic
+PAEOF
+
 # The guest session, as one string so the quoting stays in one place.
 #
 # A stale X lock from a killed session would stop Xvnc starting again, hence
@@ -405,12 +456,27 @@ SESSION='rm -f /tmp/.X1-lock /tmp/.X11-unix/X1 /tmp/.oadx-bus
 mkdir -p /tmp/runtime-root && chmod 700 /tmp/runtime-root
 # The GPU (doc/linux-gpu.md). OADX_GPU names the driver the app copied into
 # this guest: turnip on an Adreno phone, xclipse (RADV) on an Exynos with an
-# Xclipse GPU, nothing anywhere else. Whether it really runs here is the probe
+# Xclipse GPU, virgl on any other 64-bit phone, nothing on a phone whose GPU
+# check said no. Whether it really runs here is the probe
 # to say, which opens the GPU the way an app would, through that driver alone.
 # It runs beside the Xvnc start, so it costs the session next to nothing.
 GPUPROBE=
 GPUDIR=/usr/local/lib/openandroiddex/gpu
-if [ -n "$OADX_GPU" ] && [ -x $GPUDIR/oadx-vkprobe ] && [ -f $GPUDIR/${OADX_GPU}_icd.json ]; then
+# VirGL (OADX_GPU=virgl), on a GPU no driver of ours runs: the app runs a
+# server on the Android side, on the phone own GL driver, at
+# /tmp/.virgl_test, and Mesa in here reaches it as GALLIUM_DRIVER=virpipe.
+# Its probe asks Mesa for a GL context that way and wants a VirGL renderer,
+# through EGL, or through GLX on this display where the guest has no EGL.
+if [ "$OADX_GPU" = virgl ]; then
+  if [ -S /tmp/.virgl_test ] && [ -x $GPUDIR/oadx-glprobe ]; then
+    GALLIUM_DRIVER=virpipe LIBGL_ALWAYS_SOFTWARE=1 DISPLAY=:1 \
+      timeout 15 $GPUDIR/oadx-glprobe >/tmp/.oadx-gpu 2>&1 &
+    GPUPROBE=$!
+  else
+    echo "no VirGL server at /tmp/.virgl_test" >/tmp/.oadx-gpu
+    echo "gpu: not used -- no VirGL server at /tmp/.virgl_test"
+  fi
+elif [ -n "$OADX_GPU" ] && [ -x $GPUDIR/oadx-vkprobe ] && [ -f $GPUDIR/${OADX_GPU}_icd.json ]; then
   VK_ICD_FILENAMES=$GPUDIR/${OADX_GPU}_icd.json \
     timeout 15 $GPUDIR/oadx-vkprobe >/tmp/.oadx-gpu 2>&1 &
   GPUPROBE=$!
@@ -429,7 +495,17 @@ XVNC=$!
 # GALLIUM_DRIVER=zink: that puts Zink under the software GL path, where it
 # renders and never shows a frame -- measured, a black window at 1600 FPS.
 if [ -n "$GPUPROBE" ]; then
-  if wait $GPUPROBE; then
+  wait $GPUPROBE
+  GPURC=$?
+  if [ "$OADX_GPU" = virgl ] && [ $GPURC = 0 ]; then
+    echo "gpu: VirGL, $(head -c 200 /tmp/.oadx-gpu)"
+    export GALLIUM_DRIVER=virpipe
+  elif [ "$OADX_GPU" = virgl ] && [ $GPURC = 2 ]; then
+    # No Mesa in this guest yet, so no GL app either: the server was
+    # checked on the Android side, and an app installed later gets it.
+    echo "gpu: VirGL, not checked in the guest -- $(head -c 200 /tmp/.oadx-gpu)"
+    export GALLIUM_DRIVER=virpipe
+  elif [ $GPURC = 0 ]; then
     echo "gpu: $(head -c 200 /tmp/.oadx-gpu)"
     export MESA_LOADER_DRIVER_OVERRIDE=zink LIBGL_KOPPER_DRI2=1 MESA_VK_WSI_DEBUG=sw
   else
@@ -471,10 +547,17 @@ DBUS=$!
 # somebody else -- at which point the next daemon refuses to start, saying one
 # is already running. Nothing in that directory is worth keeping: with no unix
 # socket and no cookie in this configuration, it holds only the pid file.
+#
+# Started on /tmp/.oadx-desk.pa where the host wrote it: dex.pa, and the
+# browser microphone beside it (see above, outside this string). The pipe of a
+# killed session goes first, or the module would refuse to make its own.
 PULSE=
 if [ -x /usr/bin/pulseaudio ] && [ -f /etc/pulse/dex.pa ]; then
   rm -rf /tmp/runtime-root/pulse
-  XDG_RUNTIME_DIR=/tmp/runtime-root pulseaudio -n --file=/etc/pulse/dex.pa \
+  rm -f /tmp/.oadx-mic
+  PA=/etc/pulse/dex.pa
+  [ -f /tmp/.oadx-desk.pa ] && PA=/tmp/.oadx-desk.pa
+  XDG_RUNTIME_DIR=/tmp/runtime-root pulseaudio -n --file=$PA \
     --exit-idle-time=-1 --disallow-exit=1 --disable-shm=1 &
   PULSE=$!
 fi
@@ -517,6 +600,17 @@ if [ -f /usr/local/share/openandroiddex/theme.py ] && \
   python3 /usr/local/share/openandroiddex/theme.py >/dev/null 2>&1 &
   THEME=$!
 fi
+# Apps the desktop starts run in an Android process of their own, so that when
+# the phone has too many processes Android closes an app and not the desktop
+# (see oadx-run, and doc/linux-apps-process.md). This points the Applications
+# menu at them, beside Xvnc like the two above; the dock waits for dock.py,
+# below. Only where the app put oadx-apps-menu in: Android 12 and later, which
+# is where that limit is.
+APPSMENU=
+if [ -x /usr/local/bin/oadx-apps-menu ]; then
+  /usr/local/bin/oadx-apps-menu --menu-only >/dev/null 2>&1 &
+  APPSMENU=$!
+fi
 # Now the waits, each one asking the thing itself. The display: Xvnc answers
 # a client once it is up, and xset is the client linux-win.sh asks with too.
 # Thirty seconds at most, and no more polls once Xvnc has died -- XFCE then
@@ -553,6 +647,13 @@ done
 # Both config edits on disk before xfce4-panel and xfconfd first read them.
 [ -n "$DOCK" ] && wait $DOCK
 [ -n "$THEME" ] && wait $THEME
+# The dock and the desktop icons through oadx-run too: after dock.py, which may
+# have just added launchers, and before the panel reads them -- the panel writes
+# its launchers back out when it exits, so an edit under a live one is lost.
+if [ -n "$APPSMENU" ]; then
+  /usr/local/bin/oadx-apps-menu --launchers-only >/dev/null 2>&1
+  wait $APPSMENU
+fi
 # Sound: the volume plugin and every app that starts with the session pick
 # their audio output once, at start, so they get the server or nothing -- the
 # reason linux-win.sh waits for its own. A few seconds at most.
@@ -604,6 +705,11 @@ SESSION=$(echo "$SESSION" | sed "s/GEOMETRY/$GEO/")
 # NOT exec'd: proot runs as a child so this script outlives it by exactly long
 # enough to clear rt.pid, which is how the app learns the session is over.
 #
+# XDG_DATA_DIRS puts oadx-apps-menu's copies of the menu entries in front of
+# the packages' own, which is how a menu launch reaches oadx-run; the rest is
+# the freedesktop default. Here for the reason XDG_CONFIG_DIRS is, below:
+# Thunar and other bus-activated apps get the bus's environment.
+#
 # XDG_CONFIG_DIRS is what puts our theme defaults in front of the distro's.
 # linux-setup.sh writes them to /usr/local/etc/xdg rather than /etc/xdg,
 # because three of those channel files are dpkg conffiles owned by
@@ -622,6 +728,7 @@ SESSION=$(echo "$SESSION" | sed "s/GEOMETRY/$GEO/")
   -w /root /usr/bin/env -i HOME=/root TERM=xterm-256color DEBIAN_FRONTEND=noninteractive \
   PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
   XDG_CONFIG_DIRS=/usr/local/etc/xdg:/etc/xdg \
+  XDG_DATA_DIRS=/usr/local/share/oadx-apps:/usr/local/share:/usr/share \
   OADX_GPU="${LINUX_GPU:-}" \
   /bin/sh -c "$SESSION" &
 PROOT_PID=$!

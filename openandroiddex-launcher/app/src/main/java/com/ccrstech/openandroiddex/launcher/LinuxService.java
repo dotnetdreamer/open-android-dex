@@ -65,6 +65,8 @@ public class LinuxService extends Service {
     static final String ACTION_REMOTE_PAIR_CANCEL = "com.ccrstech.openandroiddex.launcher.linux.REMOTE_PAIR_CANCEL";
     /** A computer on the cable is about to open the desktop as video: be up to answer. See {@link LinuxStream}. */
     static final String ACTION_STREAM = "com.ccrstech.openandroiddex.launcher.linux.STREAM";
+    /** The page a browser is served, in the APK's assets: never the guest's, which root in Linux can rewrite. */
+    static final String BROWSER_ASSETS = "linux/browser/";
     /**
      * Start a Linux app as a window of its own (doc/linux-windows.md): the
      * window session first, if it is not running, then the app in it.
@@ -72,6 +74,20 @@ public class LinuxService extends Service {
     static final String ACTION_WIN_RUN = "com.ccrstech.openandroiddex.launcher.linux.WIN_RUN";
     /** End the window session, and every app in it. */
     static final String ACTION_WIN_STOP = "com.ccrstech.openandroiddex.launcher.linux.WIN_STOP";
+    /**
+     * Start the desktop with no window: "Start Linux with the phone" (see
+     * {@link LinuxBoot}), at the size it last had and with its sound off.
+     */
+    static final String ACTION_BOOT_START = "com.ccrstech.openandroiddex.launcher.linux.BOOT_START";
+    /**
+     * "Open in a browser" (LinuxOnDroid's Settings): listen for a browser on the
+     * phone's network, and keep listening while the switch is on. Also what
+     * brings it back after a boot or an update. See {@link LinuxBrowserServer}.
+     */
+    static final String ACTION_BROWSER_ON = "com.ccrstech.openandroiddex.launcher.linux.BROWSER_ON";
+    static final String ACTION_BROWSER_OFF = "com.ccrstech.openandroiddex.launcher.linux.BROWSER_OFF";
+    /** Every browser was signed out on the phone: one watching now is ended, and told. */
+    static final String ACTION_BROWSER_SIGNOUT = "com.ccrstech.openandroiddex.launcher.linux.BROWSER_SIGNOUT";
     static final String EXTRA_W = "w";
     static final String EXTRA_H = "h";
     static final String EXTRA_CODE = "code";
@@ -79,6 +95,8 @@ public class LinuxService extends Service {
     static final String EXTRA_DPI = "dpi";
     /** On REMOTE_OFF: it came from the notification's Turn off. */
     private static final String EXTRA_FROM_NOTIFICATION = "from_notification";
+    /** On BROWSER_ON: the switch was just turned on, on screen; start the desktop too. */
+    private static final String EXTRA_PRESTART = "prestart";
 
     private static final String CHANNEL = "linux";
     private static final int NOTIF_ID = 0x1D;
@@ -95,6 +113,12 @@ public class LinuxService extends Service {
 
     private final ExecutorService io = Executors.newSingleThreadExecutor();
     private final android.os.Handler mainHandler = new android.os.Handler(android.os.Looper.getMainLooper());
+    /**
+     * ":linuxapps", where the apps a session starts run (LinuxAppsService):
+     * held while a desktop or a window session is up, so that Android, short
+     * of processes, closes an app before the session itself.
+     */
+    private final LinuxAppsLink appsProcess = new LinuxAppsLink(this);
     /** Remote access, while it is on. Never null after onCreate. */
     private RemoteHost remote;
     /** What the notification said last, so a remote change can repost it. */
@@ -132,6 +156,19 @@ public class LinuxService extends Service {
     private volatile boolean runtimeUp;
     /** elapsedRealtime of the last spawn; see idleStop. */
     private volatile long runtimeSpawnedAt;
+    /**
+     * Wipes (a reset or an uninstall) sent to io and not yet finished.
+     *
+     * A wipe is queued like everything else, and io is a single thread, so
+     * without this one sent during an install waited out the whole install,
+     * which can be most of an hour, and only then deleted what it had just
+     * built. While this is above zero an install in flight is stopped
+     * (onStartCommand, runSetup, the download loop), a provision queued ahead
+     * of the wipe stands aside, and idleStop leaves the service up: the work
+     * still queued behind it would go with the service.
+     */
+    private final java.util.concurrent.atomic.AtomicInteger wipesQueued =
+            new java.util.concurrent.atomic.AtomicInteger();
     /** Newest start we have seen, so idleStop cannot cancel a start in flight. */
     private volatile int lastStartId;
 
@@ -151,6 +188,20 @@ public class LinuxService extends Service {
     static void provision(Context ctx) {
         final Context app = ctx.getApplicationContext();
         new Thread(() -> {
+            // An uninstall that was asked for and is not done: the process
+            // died in the middle of the wipe, or the start that asked for it
+            // never landed. Every way the app opens comes through here (the
+            // desktop 3 s into its start, the Linux window, the home screen),
+            // and nothing else would come back for it: the removing marker
+            // holds provisioning off, and the uninstall turned remote access,
+            // the one thing that restarts the service by itself, off first.
+            // So it is finished from here. A removal that is running already
+            // ignores the second ask (queueWipe).
+            if (Linux.isRemoving(app)) {
+                DexLog.step("linux", "an uninstall is not finished; asking the service to finish it");
+                send(app, ACTION_UNINSTALL, 0, 0);
+                return;
+            }
             // Linux.needsProvision answers false while the chooser has not been
             // through, which is what keeps the desktop's provision-on-launch
             // from starting a 1.5 GB download behind a question nobody has been
@@ -183,8 +234,31 @@ public class LinuxService extends Service {
         return send(ctx, ACTION_PROVISION, 0, 0);
     }
 
+    /**
+     * Finish an uninstall that was cut off: what RemoteResumeReceiver does on
+     * a boot, an update or the end of a desktop session, synchronously for the
+     * same reason {@link #resumeInstall} is.
+     *
+     * @return false when Android refused the start from where we are
+     */
+    static boolean finishRemoval(Context ctx) {
+        return send(ctx, ACTION_UNINSTALL, 0, 0);
+    }
+
     static void start(Context ctx, int w, int h) {
         send(ctx, ACTION_START, w, h);
+    }
+
+    /**
+     * The desktop, started at boot with nobody looking (LinuxBoot): no window
+     * to give it a size, so the size it last had, and no sound until a window
+     * opens. Synchronous, like {@link #resumeInstall}, because it is called
+     * from inside a broadcast.
+     *
+     * @return false when Android refused the start from where we are
+     */
+    static boolean bootStart(Context ctx) {
+        return send(ctx, ACTION_BOOT_START, 0, 0);
     }
 
     static void stop(Context ctx) {
@@ -196,9 +270,82 @@ public class LinuxService extends Service {
         send(ctx, ACTION_RESET, 0, 0);
     }
 
-    /** Throw the container away and leave the storage free. Not reversible. */
+    /**
+     * Try again, for an install that failed, as both screens send it: an
+     * install, except after a Reinstall that could not clear the old
+     * container, where it is the Reinstall again; an install there would build
+     * on the old guest.
+     */
+    static void retry(Context ctx) {
+        if ("reset-failed".equals(Linux.readStatus(ctx).msg)) {
+            reset(ctx);
+        } else {
+            provision(ctx);
+        }
+    }
+
+    /**
+     * Throw the container away and leave the storage free. Not reversible.
+     *
+     * The removing marker goes down here, before the intent, so that anything
+     * reading the container from now on sees an uninstall under way rather
+     * than whatever it was before. It stays until the wipe is done, and a
+     * start that could not be delivered is not lost: the next start of the
+     * service, for anything, finishes it (see onStartCommand).
+     */
     static void uninstall(Context ctx) {
+        Linux.setRemoving(ctx, true);
         send(ctx, ACTION_UNINSTALL, 0, 0);
+    }
+
+    /** "Open in a browser"'s files: the switch, the code, the browsers let in, the certificate. */
+    static LinuxBrowser browser(Context ctx) {
+        return new LinuxBrowser(new File(ctx.getFilesDir(), "browser"));
+    }
+
+    /**
+     * Let browsers on the phone's network in, and remember that it is on.
+     *
+     * @return false when Android refused to start the service from where the
+     *         caller is; it is still on, and comes up at the next start
+     */
+    static boolean browserOn(Context ctx) {
+        browser(ctx).setOn(true);
+        // The desktop starts now too, if it can, while the page that turned
+        // this on is in front: see ACTION_BROWSER_ON's handler for why.
+        return start(ctx, new Intent(ctx, LinuxService.class).setAction(ACTION_BROWSER_ON)
+                .putExtra(EXTRA_PRESTART, true));
+    }
+
+    /** Stop listening, and stay so. A browser watching now loses its picture. */
+    static void browserOff(Context ctx) {
+        LinuxBrowser b = browser(ctx);
+        b.setOn(false);
+        // A code works only while the switch is on and the card shows it.
+        b.closePairing();
+        send(ctx, ACTION_BROWSER_OFF, 0, 0);
+    }
+
+    /**
+     * Every browser out, as the card's "Sign them out" says: the tokens and the
+     * code here, and in {@code :linux} the one watching now, which a token
+     * checked when it began would otherwise keep, and every connection that
+     * has not yet become a stream.
+     */
+    static void browserSignOut(Context ctx) {
+        browser(ctx).signOutAll();
+        send(ctx, ACTION_BROWSER_SIGNOUT, 0, 0);
+    }
+
+    /**
+     * Listening again after a boot or an update, if the switch was left on;
+     * nothing at all otherwise. Synchronous, from inside a broadcast.
+     *
+     * @return false when Android refused the start from where we are
+     */
+    static boolean browserResume(Context ctx) {
+        if (!browser(ctx).isOn() || Linux.isRemoving(ctx)) return true;
+        return send(ctx, ACTION_BROWSER_ON, 0, 0);
     }
 
     /**
@@ -259,13 +406,27 @@ public class LinuxService extends Service {
      *         the user to tap something, which is always allowed to.
      */
     static boolean remoteResume(Context ctx) {
-        if (!LinuxRemote.isEnabled(ctx) || !LinuxRemote.available(ctx)) return true;
+        if (!LinuxRemote.tunnelOn(ctx) || !LinuxRemote.available(ctx)) return true;
         return send(ctx, ACTION_REMOTE_RESUME, 0, 0);
     }
 
-    /** Open "Add a computer" for {@code code}; turns remote access on if it was off. */
+    /**
+     * Remote desktop was switched on or off: the tunnel it reaches computers
+     * through comes up with it, and goes with it unless Linux's remote access
+     * still wants it.
+     */
+    static void phoneRemoteChanged(Context ctx) {
+        if (!LinuxRemote.available(ctx)) return;
+        send(ctx, LinuxRemote.tunnelOn(ctx) ? ACTION_REMOTE_RESUME : ACTION_REMOTE_OFF, 0, 0);
+    }
+
+    /**
+     * Open "Add a computer" for {@code code}; turns remote access on if it was
+     * off. Not with Remote desktop on: the tunnel is up for it already, and a
+     * computer added for the phone's screen must not open Linux's SSH too.
+     */
     static void remotePair(Context ctx, String code) {
-        LinuxRemote.setEnabled(ctx, true);
+        if (!PhoneRemote.isEnabled(ctx)) LinuxRemote.setEnabled(ctx, true);
         Intent i = new Intent(ctx, LinuxService.class).setAction(ACTION_REMOTE_PAIR)
                 .putExtra(EXTRA_CODE, code);
         start(ctx, i);
@@ -309,7 +470,15 @@ public class LinuxService extends Service {
 
     private static boolean start(Context ctx, Intent i) {
         try {
-            ctx.startForegroundService(i);
+            // null is a refusal too, and the quiet kind: ActiveServices drops
+            // a start of an app the user restricted in the background
+            // without an exception ("Background start not allowed"), and an
+            // answer of "started" would leave its caller waiting for a
+            // service that never comes, with nothing offered instead.
+            if (ctx.startForegroundService(i) == null) {
+                DexLog.warn("linux", "Android dropped the start of the service for " + i.getAction());
+                return false;
+            }
             return true;
         } catch (Exception e) {
             // Background-start restrictions can refuse this outright. Losing a
@@ -345,7 +514,7 @@ public class LinuxService extends Service {
                     // The host stops itself when it finds remote access switched
                     // off behind its back; with it gone this service may have
                     // nothing left to be foreground for.
-                    if (!remote.running() && !LinuxRemote.isEnabled(LinuxService.this)) {
+                    if (!remote.running() && !LinuxRemote.tunnelOn(LinuxService.this)) {
                         SamsungSlowdown.sync(LinuxService.this, false);
                         idleStopQueued();
                     }
@@ -389,6 +558,12 @@ public class LinuxService extends Service {
             @Override
             public void streaming(boolean on) {
                 streamAwake(on);
+                // The notification says when a browser has the picture ("Linux
+                // is open in a browser"), and this is the moment it does: the
+                // server's own word comes before LinuxStream has the stream,
+                // too soon for that line, which stayed "Open … in a browser"
+                // all through a session on the S25.
+                mainHandler.post(LinuxService.this::refreshForeground);
                 // A session that ended may have been the last reason to be up.
                 if (!on) idleStopQueued();
             }
@@ -406,6 +581,34 @@ public class LinuxService extends Service {
             }
         });
         goForeground(getString(R.string.ln_installing));
+        dropStaleRuntime();
+    }
+
+    /**
+     * Forget a runtime that an earlier {@code :linux} process started.
+     *
+     * A runtime dies with the process that spawned it ({@link #runtimeAlive}),
+     * but its rt.pid stays on disk when that death was a kill: nothing gets to
+     * run the clean-up. Read by anyone after this process came up, that file
+     * says a desktop is running that is not.
+     *
+     * There is only ever one {@code :linux} process, so a service starting in
+     * one with no runtime of its own up or on its way knows every rt.pid it
+     * finds is a leftover. No pid is compared: the old rt.owner named the
+     * spawning process by pid, and a new process given the same number kept
+     * the leftover. The check and the drop run under RuntimeLock's guard, so
+     * a spawn by an earlier instance of this service in the same process (its
+     * io thread can outlive it) either counts as this process's runtime or
+     * writes its rt.pid after the drop, never before it.
+     */
+    private void dropStaleRuntime() {
+        final File dir = Linux.root(this);
+        RuntimeLock.unlessHeldHere(() -> {
+            boolean hadPid = new File(dir, "rt.pid").delete();
+            // rt.owner was written by a build between rt.pid and the lock.
+            new File(dir, "rt.owner").delete();
+            if (hadPid) DexLog.step("linux", "rt.pid of a runtime this process never started dropped");
+        });
     }
 
     @Override
@@ -414,26 +617,38 @@ public class LinuxService extends Service {
         // call, and a start that arrives after an idleStop dropped us out of the
         // foreground has its own five seconds to satisfy.
         lastStartId = startId;
+        String action = intent != null ? intent.getAction() : null;
         // What it said last, not "Installing…" every time: a start that is
         // about nothing the text describes (remote access going off with the
-        // desktop up, say) must not leave it claiming an install.
-        goForeground(foregroundText != null ? foregroundText : getString(R.string.ln_installing));
-        String action = intent != null ? intent.getAction() : null;
+        // desktop up, say) must not leave it claiming an install. A desktop
+        // started with the phone says "Linux" from its first moment.
+        goForeground(foregroundText != null ? foregroundText
+                : getString(ACTION_BOOT_START.equals(action) ? R.string.ln_label : R.string.ln_installing));
         // A null intent is Android restarting us after killing the process —
         // which only happens because the return below said START_STICKY, which
         // it only says while remote access is on. So: bring that back.
         if (intent == null) action = ACTION_REMOTE_RESUME;
+        // An uninstall that was asked for and is not done: the process died in
+        // the middle of the wipe, or the start that asked for it never landed.
+        // It is finished before anything else this start wants, because the
+        // user asked for the storage back and the marker holds every install
+        // off until it is (Linux.needsProvision).
+        if (!ACTION_UNINSTALL.equals(action) && Linux.isRemoving(this) && !removalQueued.get()) {
+            DexLog.step("linux", "an uninstall was left unfinished; finishing it");
+            queueWipe(true);
+        }
         // Not only on the null intent, though: Android re-creates a sticky
         // service with whatever start was pending when it died, and only
         // falls back to null when there was none — closing the Linux window
         // can be that start. So every start that is not the one switching
         // remote access off brings it up when it is on. start() is a no-op
         // while it is running.
-        boolean remoteWanted = LinuxRemote.isEnabled(this) && LinuxRemote.available(this);
+        boolean remoteWanted = LinuxRemote.tunnelOn(this) && LinuxRemote.available(this);
         // Ahead of remote.start(), so the sshd it starts is born on the big
         // cores too. Every switch of remote access comes through here.
         SamsungSlowdown.sync(this, remoteWanted);
-        if (remoteWanted && !ACTION_REMOTE_OFF.equals(action) && !ACTION_UNINSTALL.equals(action)) {
+        if (remoteWanted && !ACTION_REMOTE_OFF.equals(action) && !ACTION_UNINSTALL.equals(action)
+                && !Linux.isRemoving(this)) {
             remote.start();
             // RemoteResumeReceiver's "paused — tap to resume", if one is up:
             // whatever brought remote access back, it is not paused now.
@@ -441,6 +656,79 @@ public class LinuxService extends Service {
                 getSystemService(NotificationManager.class).cancel(0x1E);
             } catch (Exception ignored) {
             }
+        }
+        // "Open in a browser", the same way: listening after every start while
+        // the switch is on (a sticky restart, a boot, the window opening), and
+        // not while Linux is being removed. Only the notification's Turn off
+        // clears the switch here; Settings cleared it before it sent the Off.
+        if (ACTION_BROWSER_OFF.equals(action) && intent.getBooleanExtra(EXTRA_FROM_NOTIFICATION, false)) {
+            browser(this).setOn(false);
+        }
+        // The door also lets a browser see the phone's own screen (Remote
+        // desktop): up for either switch. With only Remote desktop on, it
+        // offers nothing of Linux's (LinuxBrowserServer.Host#linuxOn), and
+        // Linux being removed leaves it up for the phone's screen alone.
+        boolean linuxDoor = linuxDoorWanted() && !ACTION_UNINSTALL.equals(action);
+        boolean browserWanted = linuxDoor || PhoneRemote.isEnabled(this);
+        if (browserWanted) {
+            startBrowserServer();
+            // Linux's switch went off (or Linux is going) with the door kept
+            // up for Remote desktop: Linux's picture and files end as they do
+            // when the door stops.
+            if (!linuxDoor) linuxDoorClosed();
+        } else {
+            stopBrowserServer();
+        }
+        // And from anywhere: Remote desktop's Cloudflare tunnel to the same
+        // door, while its switch is on (PhoneTunnel).
+        PhoneTunnel.of(this).want(browserWanted && PhoneRemote.isEnabled(this) && PhoneTunnel.switchedOn(this)
+                && PhoneTunnel.available(this), LinuxBrowser.PORT);
+        // And Remote desktop's stream, listening in the app's own process
+        // whenever the switch is on, so that a computer let in finds it even
+        // with neither control nor screen sharing there to hold it: after
+        // the app was stopped, as a Xiaomi phone's Clear all does.
+        if (PhoneRemote.isEnabled(this)) PhoneListenService.ensure(this);
+        // "Email me when an address changes" (EmailNotice): every switch comes
+        // through here, and every start of this process. Off this thread, and
+        // never at Linux's expense.
+        EmailNotice.fromService(this, intent == null, browserWanted);
+        if (ACTION_BROWSER_ON.equals(action) && browserWanted) {
+            if (!provisioning.get()) goForeground(getString(R.string.ln_label));
+            // Switched on just now, in Settings: the desktop starts at once,
+            // at the size it last had and with its sound off, as a computer's
+            // does. Then, rather than when a browser first asks: the browser
+            // finds it ready, and on Samsung's phones it is born on the big
+            // cores. One UI moves an app with no window on screen to the small
+            // ones about 12 s after its last one went, and a desktop started
+            // there stays there (see coreGroupForLinux); a browser's first
+            // connection comes minutes after the page that has the address.
+            // Not after a boot or an update (no extra): "Start Linux with the
+            // phone" decides that.
+            if (intent.getBooleanExtra(EXTRA_PRESTART, false)) {
+                io.execute(() -> {
+                    Linux.Status st = Linux.readStatus(this);
+                    if (!"ready".equals(st.phase) || st.running || Linux.needsProvision(this)) return;
+                    int[] size = lastGeometry();
+                    DexLog.step("browser", "starting the desktop for a browser, at " + size[0] + "x" + size[1]);
+                    startRuntimeForComputer(size[0], size[1]);
+                });
+            }
+            return stickiness();
+        }
+        if (ACTION_BROWSER_SIGNOUT.equals(action)) {
+            // The tokens are gone already (browserSignOut); what they let in goes now.
+            endBrowserSafely("unauthorized");
+            LinuxBrowserServer s;
+            synchronized (browserLock) {
+                s = browserServer;
+            }
+            if (s != null) s.dropOpen();
+            if (!browserWanted) idleStopQueued();
+            return stickiness();
+        }
+        if (ACTION_BROWSER_ON.equals(action) || ACTION_BROWSER_OFF.equals(action)) {
+            if (!browserWanted) idleStopQueued();
+            return stickiness();
         }
         if (ACTION_REMOTE_ON.equals(action) || ACTION_REMOTE_RESUME.equals(action)) {
             if (remoteWanted) {
@@ -459,7 +747,13 @@ public class LinuxService extends Service {
             }
             // Again, now that the notification's Off has landed — unless an On
             // overtook it.
-            SamsungSlowdown.sync(this, LinuxRemote.isEnabled(this) && LinuxRemote.available(this));
+            SamsungSlowdown.sync(this, LinuxRemote.tunnelOn(this) && LinuxRemote.available(this));
+            if (LinuxRemote.tunnelOn(this)) {
+                // Remote desktop still needs the tunnel: only Linux's part
+                // goes (sshd, the desktop), at the host's next tick.
+                remote.start();
+                return stickiness();
+            }
             remote.stop();
             // stop() is asynchronous; idle once it has had its moment.
             mainHandler.postDelayed(this::idleStopQueued, 5000);
@@ -504,6 +798,21 @@ public class LinuxService extends Service {
             final int w = intent.getIntExtra(EXTRA_W, 1280);
             final int h = intent.getIntExtra(EXTRA_H, 800);
             io.execute(() -> startRuntime(w, h, true));
+        } else if (ACTION_BOOT_START.equals(action)) {
+            // "Linux", not the "Installing…" every first start begins with:
+            // nothing is being installed. The window that opens later sends
+            // its own START, which finds this desktop up, brings the sound on
+            // and has the guest take the window's size (the viewer asks).
+            if (!provisioning.get()) goForeground(getString(R.string.ln_label));
+            io.execute(() -> {
+                int[] size = lastGeometry();
+                DexLog.step("linux", "starting the desktop with the phone at "
+                        + size[0] + "x" + size[1]);
+                startRuntime(size[0], size[1], false);
+                // Nothing started (not ready after all, or the spawn failed):
+                // nothing else would take the service down.
+                idleStop();
+            });
         } else if (ACTION_STOP.equals(action)) {
             io.execute(() -> {
                 stopRuntime();
@@ -522,15 +831,9 @@ public class LinuxService extends Service {
                 idleStop();
             });
         } else if (ACTION_RESET.equals(action)) {
-            io.execute(() -> {
-                reset();
-                provision();
-            });
+            queueWipe(false);
         } else if (ACTION_UNINSTALL.equals(action)) {
-            io.execute(() -> {
-                uninstall();
-                idleStop(); // nothing left to be foreground for
-            });
+            queueWipe(true);
         } else if (ACTION_RERUN.equals(action)) {
             // NOT on io: io is the thread blocked in runSetup on the very run
             // this replaces. The flag goes up before the kill, so provision()
@@ -549,18 +852,378 @@ public class LinuxService extends Service {
     }
 
     /**
+     * Queue a wipe: a reset, which installs a fresh container after it, or an
+     * uninstall, which leaves the storage free. An install in flight is
+     * stopped first rather than waited out (see {@link #wipesQueued}); the
+     * next run, if there is one, repairs whatever dpkg was in the middle of,
+     * and here there is nothing left for it to repair.
+     */
+    private void queueWipe(boolean remove) {
+        // One removal on its way is enough: the window's own STOP can land
+        // around the uninstall, and every start finishes a removal it finds.
+        if (remove && !removalQueued.compareAndSet(false, true)) return;
+        wipesQueued.incrementAndGet();
+        if (remove) goForeground(getString(R.string.hm_removing_title));
+        if (provisioning.get()) {
+            DexLog.step("linux", "stopping the install in flight for "
+                    + (remove ? "an uninstall" : "a reinstall"));
+            final File dir = Linux.root(this);
+            // Off io, which is the thread blocked in runSetup on that very run.
+            new Thread(() -> stopSetup(dir), "linux-setup-stop").start();
+        }
+        io.execute(() -> {
+            boolean build = false;
+            try {
+                if (remove) uninstall(); else build = reset();
+            } finally {
+                if (remove) removalQueued.set(false);
+                wipesQueued.decrementAndGet();
+            }
+            if (build) {
+                provision();
+            } else {
+                idleStop(); // nothing left to be foreground for
+            }
+        });
+    }
+
+    /** An uninstall is queued and not yet done; see {@link #queueWipe}. */
+    private final AtomicBoolean removalQueued = new AtomicBoolean(false);
+
+    /**
      * Sticky only while remote access is on. A container the user is looking
      * at is theirs to restart; one they asked to keep reachable has to come
      * back by itself if Android reclaims the process, or "reachable from
      * anywhere" would quietly stop being true the first time memory ran low.
      */
     private int stickiness() {
-        return LinuxRemote.isEnabled(this) ? START_STICKY : START_NOT_STICKY;
+        return LinuxRemote.tunnelOn(this) || browser(this).isOn() ? START_STICKY : START_NOT_STICKY;
+    }
+
+    // ── "Open in a browser" ──
+
+    private final Object browserLock = new Object();
+    /** Listening, while the switch is on. Under {@link #browserLock}. */
+    private LinuxBrowserServer browserServer;
+    private boolean browserStarting;
+    private volatile boolean destroyed;
+    private final Map<String, byte[]> browserAssets = new java.util.concurrent.ConcurrentHashMap<>();
+
+    /**
+     * Linux's files for a browser's Files: the rootfs as it is on this
+     * phone's storage, with proot's binds where linux-rt.sh puts them, read
+     * and written by this process directly, so Linux need not be running. A
+     * transfer keeps the CPU awake as a stream does (streamAwake): a phone in
+     * a pocket with its screen off would otherwise doze half way through a
+     * folder.
+     */
+    private final LinuxFiles browserFiles = new LinuxFiles(new LinuxFiles.Layout() {
+        @Override
+        public File rootfs() {
+            if (Linux.isRemoving(LinuxService.this)) return null;
+            File rootfs = new File(Linux.root(LinuxService.this), "rootfs");
+            if (!new File(rootfs, "root").isDirectory()) return null;
+            // Still being unpacked: half a tree, and the installer's to write.
+            String phase = Linux.readStatus(LinuxService.this).phase;
+            if ("pushing".equals(phase) || "extracting".equals(phase)) return null;
+            return rootfs;
+        }
+
+        @Override
+        public String state() {
+            if (Linux.isRemoving(LinuxService.this)) return "missing";
+            if (Linux.isInstallPhase(Linux.readStatus(LinuxService.this).phase)) return "installing";
+            return new File(new File(Linux.root(LinuxService.this), "rootfs"), "root").isDirectory() ? "ready" : "missing";
+        }
+
+        @Override
+        public java.util.List<LinuxFiles.Mount> mounts() {
+            // As linux-rt.sh binds them: /tmp, the app's storage at ~/storage,
+            // and the shared folder in ~/Desktop where this build has it.
+            java.util.List<LinuxFiles.Mount> m = new java.util.ArrayList<>();
+            File tmp = new File(Linux.root(LinuxService.this), "tmp");
+            if (tmp.isDirectory()) m.add(new LinuxFiles.Mount("/tmp", tmp, ""));
+            File storage = getExternalFilesDir(null);
+            if (storage != null && storage.canRead()) m.add(new LinuxFiles.Mount("/root/storage", storage, ""));
+            if (Linux.sharedFolderOffered(LinuxService.this) && Linux.hasAllFiles()) {
+                File shared = Linux.sharedDir();
+                if (shared.isDirectory() && shared.canWrite()) {
+                    m.add(new LinuxFiles.Mount("/root/Desktop/" + Linux.SHARED_NAME, shared, "shared"));
+                }
+            }
+            return m;
+        }
+    }, new LinuxFilesThumbs(), on -> streamAwake(on));
+
+    /**
+     * The phone's own files, for Remote desktop's Files in a browser (the
+     * door's /pfs/): its shared storage, read and written by this process
+     * with "All files access", the way LinuxFiles reads Linux's. A build
+     * without that permission (Google Play's), or Android 10 and older, where
+     * the app has no way to it, has none to give ("unavailable": the page
+     * shows no Files); one where it is not allowed yet says so ("noaccess"),
+     * and Remote desktop's card in Settings has the way to allow it.
+     */
+    private final LinuxFiles phoneFiles = new LinuxFiles(new LinuxFiles.Layout() {
+        @Override
+        public File rootfs() {
+            return "ready".equals(state()) ? android.os.Environment.getExternalStorageDirectory() : null;
+        }
+
+        @Override
+        public String state() {
+            if (!WebFiles.phoneFilesOffered(LinuxService.this)) return "unavailable";
+            if (!WebFiles.phoneFilesAllowed(LinuxService.this)) return "noaccess";
+            File storage = android.os.Environment.getExternalStorageDirectory();
+            return storage != null && storage.isDirectory() && storage.canRead() ? "ready" : "noaccess";
+        }
+
+        @Override
+        public java.util.List<LinuxFiles.Mount> mounts() {
+            return java.util.Collections.emptyList();
+        }
+    }, new LinuxFilesThumbs(LinuxService.this), on -> streamAwake(on), LinuxFiles.Kind.PHONE);
+
+    /** Remote desktop's stream on its socket, or null when nothing listens there. */
+    private static android.net.LocalSocket connectPhone(Context c) {
+        android.net.LocalSocket s = new android.net.LocalSocket();
+        try {
+            s.connect(new android.net.LocalSocketAddress(PhoneRemote.socketName(c)));
+            return s;
+        } catch (java.io.IOException e) {
+            try {
+                s.close();
+            } catch (java.io.IOException ignored) {
+            }
+            return null;
+        }
+    }
+
+    /** Whether this APK has Remote desktop (PhoneRemote.offered); the manifest does not change under a running process. */
+    private volatile Boolean phoneOffered;
+
+    private boolean phoneOffered() {
+        Boolean known = phoneOffered;
+        if (known == null) phoneOffered = known = PhoneRemote.offered(this);
+        return known;
+    }
+
+    private final LinuxBrowserServer.Host browserHost = new LinuxBrowserServer.Host() {
+        @Override
+        public boolean stream(LinuxStreamSocket ws, String hello, java.io.Closeable sock, String who,
+                              LinuxBrowserServer.Gate gate, Runnable ended) {
+            try {
+                return LinuxStream.serve(ws, new org.json.JSONObject(hello), sock, who, gate, ended);
+            } catch (org.json.JSONException e) {
+                return false;
+            }
+        }
+
+        @Override
+        public String phoneName() {
+            return LinuxRemote.phoneName(LinuxService.this);
+        }
+
+        @Override
+        public boolean linuxOn() {
+            return linuxDoorWanted();
+        }
+
+        @Override
+        public LinuxBrowserServer.PhoneLine phoneLine() throws java.io.IOException {
+            Context c = LinuxService.this;
+            if (!PhoneRemote.offered(c) || !PhoneRemote.isEnabled(c)) return null;
+            android.net.LocalSocket line = connectPhone(c);
+            if (line == null) {
+                // Nothing listening (the app's process was stopped since this
+                // service last asked): asked for once more, given two seconds.
+                PhoneListenService.ensure(c);
+                for (int i = 0; i < 20 && line == null; i++) {
+                    android.os.SystemClock.sleep(100);
+                    line = connectPhone(c);
+                }
+                if (line == null) throw new java.io.IOException("nothing listens on @" + PhoneRemote.socketName(c));
+            }
+            final android.net.LocalSocket s = line;
+            return new LinuxBrowserServer.PhoneLine() {
+                @Override
+                public InputStream in() throws java.io.IOException {
+                    return s.getInputStream();
+                }
+
+                @Override
+                public java.io.OutputStream out() throws java.io.IOException {
+                    return s.getOutputStream();
+                }
+
+                @Override
+                public void close() throws java.io.IOException {
+                    // Both ways shut first: a thread blocked reading wakes now.
+                    try {
+                        s.shutdownInput();
+                    } catch (java.io.IOException ignored) {
+                    }
+                    try {
+                        s.shutdownOutput();
+                    } catch (java.io.IOException ignored) {
+                    }
+                    s.close();
+                }
+            };
+        }
+
+        @Override
+        public byte[] asset(String name) {
+            byte[] b = browserAssets.get(name);
+            if (b != null) return b;
+            try (InputStream in = getAssets().open(BROWSER_ASSETS + name)) {
+                java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+                byte[] buf = new byte[16 * 1024];
+                for (int n; (n = in.read(buf)) > 0; ) out.write(buf, 0, n);
+                b = out.toByteArray();
+                browserAssets.put(name, b);
+                return b;
+            } catch (java.io.IOException e) {
+                return null;
+            }
+        }
+
+        @Override
+        public void changed() {
+            mainHandler.post(LinuxService.this::refreshForeground);
+        }
+
+        @Override
+        public LinuxFiles files() {
+            return browserFiles;
+        }
+
+        @Override
+        public LinuxFiles phoneFiles() {
+            // As the phone's screen: only while Remote desktop is on, in the APK that has it.
+            // Asked at every request, and by the door's reaper while a transfer runs.
+            return phoneOffered() && PhoneRemote.isEnabled(LinuxService.this) ? phoneFiles : null;
+        }
+    };
+
+    /**
+     * Listen, on a thread of its own: the first start makes a key and a
+     * certificate, which is no work for the main thread, and the io thread
+     * may be an hour into an install.
+     */
+    private void startBrowserServer() {
+        synchronized (browserLock) {
+            if (browserServer != null || browserStarting || destroyed) return;
+            browserStarting = true;
+        }
+        new Thread(() -> {
+            LinuxBrowser store = browser(this);
+            LinuxBrowserServer s = null;
+            try {
+                LinuxBrowserCert cert = LinuxBrowserCert.loadOrMake(store.dir(), LinuxBrowserServer.ips(),
+                        System.currentTimeMillis());
+                s = LinuxBrowserServer.start(store, cert, browserHost, new LinuxBrowserPeek(), LinuxBrowser.PORT);
+            } catch (LinuxBrowserServer.PortTaken e) {
+                // Said by the server ("failed port 7443"), for the card's own words.
+                DexLog.warn("browser", "cannot listen for browsers: " + e.getMessage());
+            } catch (Exception e) {
+                DexLog.warn("browser", "cannot listen for browsers", e);
+                store.setState("failed " + e.getMessage());
+            }
+            boolean keep;
+            synchronized (browserLock) {
+                browserStarting = false;
+                // Both switches went off, or the service away, while this
+                // started. Either switch keeps it: the door is Remote
+                // desktop's too (for the phone's own screen), and with only
+                // that one on it gives nothing of Linux's.
+                keep = s != null && (store.isOn() || PhoneRemote.isEnabled(this)) && !destroyed;
+                if (keep) browserServer = s;
+            }
+            if (s != null && !keep) s.stop();
+            mainHandler.post(this::refreshForeground);
+        }, "linux-browser-start").start();
+    }
+
+    /**
+     * A browser's picture ends, told why. Never at Linux's expense: this runs
+     * in :linux, beside the desktop, and an exception thrown out of
+     * onStartCommand takes the process and every Linux app with it (seen on
+     * the S25 when it wrote to the network from the main thread).
+     */
+    private static void endBrowserSafely(String why) {
+        try {
+            LinuxStream.endBrowser(why);
+        } catch (RuntimeException e) {
+            DexLog.warn("browser", "ending the browser's session (" + why + "): " + e);
+        }
+    }
+
+    /** Linux is offered in a browser: its switch is on, and Linux is not being removed. */
+    private boolean linuxDoorWanted() {
+        return browser(this).isOn() && !Linux.isRemoving(this);
+    }
+
+    /**
+     * Linux's part of the door ends while the door stays up for Remote
+     * desktop: a browser's picture of Linux, told the switch went off, and
+     * Linux's file transfers. What a browser asks of Linux after this is
+     * refused (Host#linuxOn).
+     */
+    private void linuxDoorClosed() {
+        LinuxBrowserServer s;
+        synchronized (browserLock) {
+            s = browserServer;
+        }
+        endBrowserSafely("off");
+        if (s != null) s.dropLinux();
+    }
+
+    /** Stop listening, and end a browser's picture if one is watching: the switch is off. */
+    private void stopBrowserServer() {
+        LinuxBrowserServer s;
+        synchronized (browserLock) {
+            s = browserServer;
+            browserServer = null;
+        }
+        if (s == null) {
+            // It never listened (the port was another app's): switched on
+            // again, the card starts from nothing, not from that failure.
+            LinuxBrowser store = browser(this);
+            if (store.state().startsWith("failed")) store.setState("off");
+            return;
+        }
+        // Closed first: every connection not yet a stream goes, none of them
+        // to finish a request now, and a browser being let in this moment is
+        // turned away as it takes the desktop (its Gate sees the server
+        // stopped). Then the browser watching, told the switch went off. The
+        // other way round, one let in between the two would watch on.
+        s.stop();
+        endBrowserSafely("off");
+        DexLog.step("browser", "stopped listening");
+        // Not from onDestroy: a notification posted there outlives the service.
+        if (!destroyed) refreshForeground();
+    }
+
+    /**
+     * Where a browser opens Linux now, as a person types it ("" with no
+     * network to offer), or null while nothing is listening.
+     */
+    private String browserUrl() {
+        LinuxBrowserServer s;
+        synchronized (browserLock) {
+            s = browserServer;
+        }
+        if (s == null) return null;
+        java.util.List<LinuxBrowser.Address> where = LinuxBrowser.addresses();
+        return where.isEmpty() ? "" : where.get(0).typed(s.port());
     }
 
     @Override
     public void onDestroy() {
         super.onDestroy();
+        destroyed = true;
+        stopBrowserServer();
         // Its stdin is this process's: closed, the session ends, and proot takes
         // the apps with it.
         closeWinInput();
@@ -574,11 +1237,32 @@ public class LinuxService extends Service {
         // The pumps are daemon threads, so the process usually takes them with
         // it. This is for the case where the service goes and the process does not.
         LinuxAudio.stopAll();
+        // Unbound, the apps process's service goes, and every app it runs.
+        appsProcess.release();
+        LinuxGpu.stopVirgl(this);
+    }
+
+    /**
+     * Neither Linux session is running any more: the VirGL server, if one was
+     * started for them (LinuxGpu.startVirgl), goes too, so it is not a child
+     * process held for nothing. Any thread.
+     */
+    private void virglIfIdle() {
+        Process rt = liveRuntime;
+        Process win = liveWin;
+        if ((rt == null || !rt.isAlive()) && (win == null || !win.isAlive())) LinuxGpu.stopVirgl(this);
     }
 
     // ── provisioning ──
 
     private void provision() {
+        // A reset or an uninstall is queued behind this: it goes first, and a
+        // reset's own provision follows it. Nothing to idle out either: that
+        // work is still to come (idleStop says the same).
+        if (wipesQueued.get() > 0) {
+            DexLog.step("linux", "a wipe is queued; not provisioning ahead of it");
+            return;
+        }
         // Re-checked HERE and not only in the static provision(): that one
         // decides on its own thread and then sends an intent, so an uninstall
         // landing in between would be undone by a decision taken before it.
@@ -638,19 +1322,34 @@ public class LinuxService extends Service {
             copyAsset("linux/linux-setup.sh", Linux.setupScript(this));
             copyAsset("linux/linux-rt.sh", Linux.rtScript(this));
             if (!ensureRootfs()) {
-                writeError("download-failed");
+                // Stopped for a wipe is not a failed download: the container
+                // this would describe is about to be deleted. Nor is one cut
+                // off because this service is going (onDestroy interrupts io):
+                // its phase stays on the way, as a killed process leaves it,
+                // and RemoteResumeReceiver picks it up again.
+                if (wipesQueued.get() == 0 && !Thread.currentThread().isInterrupted()) {
+                    writeError("download-failed");
+                }
                 return;
             }
+            if (wipesQueued.get() > 0) return;
             runSetup(); // blocks here until the script exits
         } catch (Exception e) {
             DexLog.step("linux", "provision error: " + e);
-            writeError("provision-failed");
+            if (wipesQueued.get() == 0) writeError("provision-failed");
         } finally {
             provisioning.set(false);
-            // Skip or Restart stopped the run above so a fresh one could take
-            // over: straight into it, and not by way of idleStop, which could
-            // stop the service in between the two.
-            if (rerun.getAndSet(false)) {
+            boolean again = rerun.getAndSet(false);
+            if (wipesQueued.get() > 0) {
+                // A wipe stopped this run, or arrived during it. It is next on
+                // io, so nothing is queued and nothing is idled out here: a
+                // rerun would build what the wipe is about to delete, and an
+                // idleStop could take the service, and the wipe, with it.
+                DexLog.step("linux", "install stopped for a wipe");
+            } else if (again) {
+                // Skip or Restart stopped the run above so a fresh one could take
+                // over: straight into it, and not by way of idleStop, which could
+                // stop the service in between the two.
                 try {
                     io.execute(this::provision);
                 } catch (java.util.concurrent.RejectedExecutionException destroyed) {
@@ -665,14 +1364,29 @@ public class LinuxService extends Service {
     /**
      * Delete the container outright: the rootfs, every phase stamp, the state
      * file and the downloaded tarball. The caller follows this with a
-     * provision, so the next thing the user sees is a fresh install running.
+     * provision when it says so, so the next thing the user sees is a fresh
+     * install running.
+     *
+     * @return false when the old container is still where it was: an error
+     *         says so, and no install may follow
      */
-    private void reset() {
+    private boolean reset() {
         DexLog.step("linux", "reset — wiping the container");
-        wipe();
+        TreeDelete.Result left = wipe(false);
+        if (Linux.root(this).exists()) {
+            // Not even moved aside (wipe() deletes nothing in place for a
+            // reset): building on it would be building on the old guest.
+            // It is whole, and Retry runs the reset again.
+            DexLog.step("linux", "reset — the container could not be moved aside: " + left);
+            writeError("reset-failed");
+            return false;
+        }
         Linux.root(this).mkdirs();
         writeState("pushing", 0, "resetting");
-        DexLog.step("linux", "reset — container removed");
+        // What an earlier container left is in the trash, apart from the new
+        // one, and the next wipe tries it again. Nothing of it is built on.
+        DexLog.step("linux", "reset — container removed" + (left.clean() ? "" : "; " + left));
+        return true;
     }
 
     /**
@@ -694,28 +1408,75 @@ public class LinuxService extends Service {
      */
     private void uninstall() {
         DexLog.step("linux", "uninstall — wiping the container");
+        // This attempt's own verdict replaces the last one's: until it has
+        // one, the screens say Removing, not "could not remove".
+        Linux.clearRemoveFailure(this);
+        cancelRemoveFailedNote();
         // Remote access is SSH into this container, so it goes off with it —
         // otherwise a tunnel would keep the phone awake and online to answer
         // "Linux is not installed" for ever. The paired computers are KEPT
         // (files/linux-remote is outside the container): reinstalling and
         // switching remote access back on brings every one of them back.
         LinuxRemote.setEnabled(this, false);
-        SamsungSlowdown.sync(this, false);
-        remote.stop();
-        wipe();
+        // Remote desktop (the phone's own screen) is not in the container:
+        // its tunnel stays up, and from now on offers nothing of Linux's
+        // (RemoteHost#evaluate stops sshd and says "off").
+        boolean tunnel = LinuxRemote.tunnelOn(this) && LinuxRemote.available(this);
+        SamsungSlowdown.sync(this, tunnel);
+        if (!tunnel) remote.stop();
+        // "Open in a browser" likewise: a page answering "not installed" to
+        // the network for ever is no use to anyone. The browsers let in stay
+        // (files/browser is outside the container), as computers do above.
+        // The door itself stays for Remote desktop, Linux's part of it closed.
+        browser(this).setOn(false);
+        mainHandler.post(() -> {
+            if (PhoneRemote.isEnabled(this)) {
+                linuxDoorClosed();
+            } else {
+                stopBrowserServer();
+            }
+        });
+        TreeDelete.Result left = wipe(true);
+        // Uninstalled whether or not every file went: what is left is not a
+        // container any more, and nothing is ever built on it (wipe()).
         Linux.setUninstalled(this, true);
-        DexLog.step("linux", "uninstall — container removed, provisioning off");
+        if (!left.clean()) {
+            // NOT done, so not said to be: the removing marker stays down,
+            // which keeps the screens on this removal (with what it left and
+            // a Try again), holds provisioning off, and has the next start of
+            // this service, for anything at all, try again.
+            Linux.setRemoveFailure(this, left.bytesLeft, left.left, left.firstError);
+            DexLog.step("linux", "uninstall — NOT finished: " + left);
+            noteRemoveFailed(left.bytesLeft);
+            return;
+        }
+        // Last, after the uninstall marker: between the two, a reader would
+        // see neither and take the container for one waiting to be installed.
+        Linux.setRemoving(this, false);
+        DexLog.step("linux", "uninstall — container removed, nothing left, provisioning off");
     }
 
+    /** Folders a container is moved into to be deleted: linux-deleting, and linux-deleting-&lt;time&gt;. */
+    private static final String TRASH = "linux-deleting";
+
     /**
-     * Stop the runtime and delete the container tree.
+     * Stop the runtime and delete the container tree, and everything an
+     * earlier wipe could not.
      *
-     * The runtime is stopped FIRST and the directory is renamed out of the way
+     * The runtime is stopped FIRST and the directory is moved out of the way
      * before it is walked: a live guest writing into a tree being deleted
      * underneath it leaves a half-rootfs behind, and a half-rootfs looks
-     * provisioned to the setup script's stamps.
+     * provisioned to the setup script's stamps. It is moved to a name no
+     * earlier wipe can have used, because a rename onto a folder that still
+     * has something in it fails, and the old code then deleted the live tree
+     * in place. Here nothing is ever deleted in place for a reset (it is left
+     * whole, and reset() says so); for an uninstall, which builds nothing
+     * after it, in place is what is left.
+     *
+     * @param leaveNothing an uninstall: delete in place when the move fails
+     * @return what is left, in the container and in the trash; empty when nothing is
      */
-    private void wipe() {
+    private TreeDelete.Result wipe(boolean leaveNothing) {
         stopRuntime();
         // The window session's apps run in this same rootfs.
         stopWin();
@@ -729,47 +1490,111 @@ public class LinuxService extends Service {
         remote.holdSsh();
         try {
             File dir = Linux.root(this);
-            File doomed = new File(dir.getParentFile(), "linux-deleting");
-            deleteTree(doomed);
-            if (dir.exists() && !dir.renameTo(doomed)) {
-                doomed = dir; // rename refused; delete in place rather than not at all
+            File files = dir.getParentFile();
+            TreeDelete.Result left = new TreeDelete.Result();
+            if (dir.exists()) {
+                long stamp = System.currentTimeMillis();
+                File trash = new File(files, TRASH + "-" + stamp);
+                while (trash.exists()) trash = new File(files, TRASH + "-" + (++stamp));
+                if (!dir.renameTo(trash)) {
+                    DexLog.step("linux", "wipe — the container could not be moved aside");
+                    if (leaveNothing) {
+                        left.add(deleteAll(dir));
+                    } else {
+                        left.add(TreeDelete.measure(dir));
+                        left.note(dir, "could not be moved aside");
+                    }
+                }
             }
-            deleteTree(doomed);
+            File[] trash = files.listFiles((d, name) -> name.equals(TRASH) || name.startsWith(TRASH + "-"));
+            if (trash != null) for (File t : trash) left.add(deleteAll(t));
+            return left;
         } finally {
             remote.releaseSsh();
         }
     }
 
-    private static void deleteTree(File f) {
-        if (f == null || !f.exists()) return;
-        // Iterative: a rootfs is deep enough that recursion is a real risk, and
-        // symlinks must be unlinked, never followed — the guest is full of them
-        // and one pointing at /data would take the app's own storage with it.
-        java.util.ArrayDeque<File> stack = new java.util.ArrayDeque<>();
-        stack.push(f);
-        java.util.ArrayDeque<File> dirs = new java.util.ArrayDeque<>();
-        while (!stack.isEmpty()) {
-            File cur = stack.pop();
-            File[] kids = isLink(cur) ? null : cur.listFiles();
-            if (kids == null) {
-                cur.delete();
-                continue;
-            }
-            dirs.push(cur);
-            for (File kid : kids) stack.push(kid);
-        }
-        while (!dirs.isEmpty()) dirs.pop().delete();
-    }
-
-    private static boolean isLink(File f) {
+    /**
+     * {@link TreeDelete}, and toybox's rm after it for whatever that left: rm
+     * walks relative to each directory (openat), so it reaches paths longer
+     * than the 4096 bytes an absolute path may have. It follows no links
+     * either. What both leave is the answer.
+     */
+    private static TreeDelete.Result deleteAll(File t) {
+        TreeDelete.Result left = TreeDelete.delete(t);
+        if (left.clean() || !new File("/system/bin/rm").exists()) return left;
         try {
-            return !f.getCanonicalPath().equals(f.getAbsolutePath());
+            new ProcessBuilder("/system/bin/rm", "-rf", t.getAbsolutePath())
+                    .redirectErrorStream(true).start().waitFor();
         } catch (Exception e) {
-            return true; // cannot tell — treat as a link and never descend
+            DexLog.step("linux", "rm -rf error: " + e);
+        }
+        TreeDelete.Result after = TreeDelete.measure(t);
+        after.firstError = after.clean() ? null : left.firstError;
+        return after;
+    }
+
+    private static final int NOTE_REMOVE_FAILED = 0x1F;
+
+    /**
+     * "Linux was not fully removed": the one word from an uninstall that did
+     * not finish, wherever the user is. The desktop has no screen watching the
+     * removal (its menu toasts that it began), and the home screen may be
+     * closed. Tapping it, or its Try again, runs the removal again.
+     */
+    private void noteRemoveFailed(long bytes) {
+        try {
+            NotificationManager nm = getSystemService(NotificationManager.class);
+            if (nm == null) return;
+            if (nm.getNotificationChannel(CHANNEL) == null) {
+                NotificationChannel ch = new NotificationChannel(
+                        CHANNEL, getString(R.string.ln_label), NotificationManager.IMPORTANCE_LOW);
+                ch.setShowBadge(false);
+                nm.createNotificationChannel(ch);
+            }
+            PendingIntent again = PendingIntent.getForegroundService(this, 4,
+                    new Intent(this, LinuxService.class).setAction(ACTION_UNINSTALL),
+                    PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
+            String text = getString(R.string.ln_remove_failed_sub,
+                    android.text.format.Formatter.formatShortFileSize(this, bytes));
+            Notification n = new Notification.Builder(this, CHANNEL)
+                    .setSmallIcon(android.R.drawable.ic_menu_manage)
+                    .setContentTitle(getString(R.string.ln_remove_failed_title))
+                    .setContentText(text)
+                    .setStyle(new Notification.BigTextStyle().bigText(text))
+                    .setContentIntent(again)
+                    .addAction(new Notification.Action.Builder(null,
+                            getString(R.string.ln_remove_again), again).build())
+                    .setAutoCancel(true)
+                    .build();
+            nm.notify(NOTE_REMOVE_FAILED, n);
+        } catch (Exception e) {
+            DexLog.warn("linux", "cannot post the removal failure", e);
         }
     }
 
-    /** Download + verify the rootfs tarball unless a good copy is already here. */
+    private void cancelRemoveFailedNote() {
+        try {
+            NotificationManager nm = getSystemService(NotificationManager.class);
+            if (nm != null) nm.cancel(NOTE_REMOVE_FAILED);
+        } catch (Exception ignored) {
+        }
+    }
+
+    /**
+     * Download + verify the rootfs tarball unless a good copy is already here.
+     *
+     * The network is read on a thread of the download's own, and io only
+     * waits for it, a quarter second at a time, looking for a wipe in between.
+     * A read blocks for as long as the network gives nothing, up to the 60 s
+     * read timeout (plus the 30 s connect timeout before it), and a wipe is
+     * queued on io behind this: when the read was on io, a reset or an
+     * uninstall sent during a stalled download waited all of that out. Now it
+     * waits a quarter second. The abandoned download is cut off (its
+     * connection disconnected, its file closed) and touches nothing after
+     * that: the .part file was opened here, before the thread started, so all
+     * it can ever write is the file it was given.
+     */
     private boolean ensureRootfs() {
         File out = Linux.rootfsTarball(this);
         String want = Linux.rootfsSha256();
@@ -780,51 +1605,147 @@ public class LinuxService extends Service {
         if (url == null || want == null) return false;
         writeState("pushing", 0, "downloading-ubuntu");
         File part = new File(out.getAbsolutePath() + ".part");
-        HttpURLConnection conn = null;
+        Download d;
         try {
-            conn = (HttpURLConnection) new URL(url).openConnection();
-            conn.setInstanceFollowRedirects(true);
-            conn.setConnectTimeout(30000);
-            conn.setReadTimeout(60000);
-            if (conn.getResponseCode() / 100 != 2) {
-                DexLog.step("linux", "rootfs http " + conn.getResponseCode());
-                return false;
-            }
-            long total = conn.getContentLengthLong();
-            MessageDigest md = MessageDigest.getInstance("SHA-256");
-            long seen = 0;
-            int lastPct = -1;
-            try (InputStream in = conn.getInputStream();
-                 OutputStream fout = new FileOutputStream(part)) {
-                byte[] buf = new byte[1 << 16];
-                int n;
-                while ((n = in.read(buf)) > 0) {
-                    fout.write(buf, 0, n);
-                    md.update(buf, 0, n);
-                    seen += n;
-                    if (total > 0) {
-                        int pct = (int) (seen * 25 / total); // download spans 0..25%
-                        if (pct != lastPct) {
-                            lastPct = pct;
-                            writeState("pushing", pct, "downloading-ubuntu");
-                        }
+            d = new Download(url, new FileOutputStream(part).getChannel());
+        } catch (Exception e) {
+            DexLog.step("linux", "rootfs download error: " + e);
+            return false;
+        }
+        Thread t = new Thread(d, "linux-rootfs-download");
+        t.setDaemon(true);
+        t.start();
+        int lastPct = -1;
+        try {
+            while (!d.finished.await(250, java.util.concurrent.TimeUnit.MILLISECONDS)) {
+                // A reset or an uninstall is waiting: this download is for a
+                // container that is about to go. See wipesQueued.
+                if (wipesQueued.get() > 0) {
+                    d.abandon();
+                    DexLog.step("linux", "rootfs download abandoned for a wipe at " + d.seen + " bytes");
+                    return false;
+                }
+                long total = d.total;
+                if (total > 0) {
+                    int pct = (int) (d.seen * 25 / total); // download spans 0..25%
+                    if (pct != lastPct) {
+                        lastPct = pct;
+                        writeState("pushing", pct, "downloading-ubuntu");
                     }
                 }
             }
-            String got = hex(md.digest());
-            if (!want.equalsIgnoreCase(got)) {
-                DexLog.step("linux", "rootfs sha mismatch");
-                part.delete();
-                return false;
-            }
-            out.delete();
-            return part.renameTo(out);
-        } catch (Exception e) {
-            DexLog.step("linux", "rootfs download error: " + e);
+        } catch (InterruptedException e) {
+            // onDestroy's shutdownNow: nobody is left to wait for it.
+            d.abandon();
+            Thread.currentThread().interrupt();
+            return false;
+        }
+        if (d.error != null) {
+            DexLog.step("linux", "rootfs download error: " + d.error);
             part.delete();
             return false;
-        } finally {
-            if (conn != null) conn.disconnect();
+        }
+        if (!want.equalsIgnoreCase(d.sha)) {
+            DexLog.step("linux", "rootfs sha mismatch");
+            part.delete();
+            return false;
+        }
+        out.delete();
+        return part.renameTo(out);
+    }
+
+    /** One rootfs download, run on a thread of its own; see {@link #ensureRootfs}. */
+    private static final class Download implements Runnable {
+        private final String url;
+        /**
+         * A channel and not a stream, because abandon() closes it from another
+         * thread: a channel's close waits for a write in progress to leave the
+         * descriptor first, where a stream's can close it under one, and the
+         * write lands in whatever file is opened on that number next.
+         */
+        private final java.nio.channels.FileChannel file;
+        final java.util.concurrent.CountDownLatch finished = new java.util.concurrent.CountDownLatch(1);
+        volatile long total = -1;
+        volatile long seen;
+        /** SHA-256 of what was read, when all of it was. */
+        volatile String sha;
+        volatile Exception error;
+        private volatile boolean abandoned;
+        private volatile HttpURLConnection conn;
+
+        Download(String url, java.nio.channels.FileChannel file) {
+            this.url = url;
+            this.file = file;
+        }
+
+        @Override
+        public void run() {
+            HttpURLConnection c = null;
+            try {
+                c = (HttpURLConnection) new URL(url).openConnection();
+                conn = c;
+                // abandon() reads conn: one side or the other sees the other.
+                if (abandoned) return;
+                c.setInstanceFollowRedirects(true);
+                c.setConnectTimeout(30000);
+                c.setReadTimeout(60000);
+                int code = c.getResponseCode();
+                if (code / 100 != 2) throw new java.io.IOException("http " + code);
+                total = c.getContentLengthLong();
+                MessageDigest md = MessageDigest.getInstance("SHA-256");
+                try (InputStream in = c.getInputStream()) {
+                    byte[] buf = new byte[1 << 16];
+                    int n;
+                    while ((n = in.read(buf)) > 0) {
+                        if (abandoned) return;
+                        java.nio.ByteBuffer chunk = java.nio.ByteBuffer.wrap(buf, 0, n);
+                        while (chunk.hasRemaining()) file.write(chunk);
+                        md.update(buf, 0, n);
+                        seen += n;
+                    }
+                }
+                if (!abandoned) sha = hex(md.digest());
+            } catch (Exception e) {
+                if (!abandoned) error = e;
+            } finally {
+                try {
+                    file.close();
+                } catch (Exception ignored) {
+                }
+                if (c != null) {
+                    try {
+                        c.disconnect();
+                    } catch (Throwable ignored) {
+                    }
+                }
+                finished.countDown();
+            }
+        }
+
+        /**
+         * Stop waiting for this download and cut it off. The file is closed
+         * here (a local close, so a phone can delete it and Windows, in the
+         * tests, can too); the connection on a thread of its own, because
+         * closing a TLS socket writes to the network, which Android refuses
+         * on the main thread, and some HTTP stacks hold a disconnect back
+         * behind the read it is meant to end.
+         */
+        void abandon() {
+            abandoned = true;
+            try {
+                file.close();
+            } catch (Exception ignored) {
+            }
+            final HttpURLConnection c = conn;
+            if (c == null) return;
+            Thread cut = new Thread(() -> {
+                try {
+                    c.disconnect();
+                } catch (Throwable ignored) {
+                }
+            }, "linux-rootfs-cut");
+            cut.setDaemon(true);
+            cut.start();
         }
     }
 
@@ -858,6 +1779,11 @@ public class LinuxService extends Service {
             wake = setupWake();
             Process p = pb.start();
             setupProc = p;
+            // A wipe that arrived after provision() last looked, and before
+            // the line above, found no run to stop: stopSetup reads setupProc.
+            // Looked at again from this side, after setupProc is set, so one
+            // side or the other always sees the other.
+            if (wipesQueued.get() > 0) stopSetup(dir);
             rc = p.waitFor();
         } finally {
             setupProc = null;
@@ -912,7 +1838,7 @@ public class LinuxService extends Service {
             p.destroyForcibly();
         } catch (Throwable ignored) {
         }
-        DexLog.step("linux", "setup run stopped, to be replaced");
+        DexLog.step("linux", "setup run stopped");
     }
 
     // ── runtime ──
@@ -927,6 +1853,27 @@ public class LinuxService extends Service {
         long sinceSpawn = android.os.SystemClock.elapsedRealtime() - runtimeSpawnedAt;
         if (runtimeUp && sinceSpawn < 15_000) return;
         startRuntime(w, h, false);
+    }
+
+    /**
+     * The size the desktop was last started at, from the geometry file
+     * startRuntime writes; 1280x800, START's own default, when there is none
+     * or it does not read. Only a first guess: the viewer that connects asks
+     * the guest for its own size.
+     */
+    private int[] lastGeometry() {
+        String g = Linux.readFile(new File(Linux.root(this), "geometry")).trim();
+        int x = g.indexOf('x');
+        if (x > 0) {
+            try {
+                int w = Integer.parseInt(g.substring(0, x));
+                int h = Integer.parseInt(g.substring(x + 1));
+                if (w > 0 && h > 0) return new int[]{w, h};
+            } catch (NumberFormatException ignored) {
+                // the default, below
+            }
+        }
+        return new int[]{1280, 800};
     }
 
     /**
@@ -988,6 +1935,11 @@ public class LinuxService extends Service {
                 // The copy the last provision left still starts the desktop.
                 DexLog.step("linux", "runtime script refresh failed: " + e);
             }
+            // The apps the desktop starts run in an Android process of their
+            // own (LinuxAppsService): its guest half in place, and the process
+            // bound before XFCE can start anything.
+            appsProcess.stage();
+            appsProcess.hold();
             // The ceiling is the daemon's too: a computer's screen may ask for
             // a desktop, and every pixel of it is drawn by this phone's CPU.
             // The floor only keeps out nonsense. Every window floors its own
@@ -1012,9 +1964,22 @@ public class LinuxService extends Service {
             // force-stop (DeX session end) tears the whole container down; the
             // service staying foreground is what keeps it alive until then.
             String cores = coreGroupForLinux("the desktop");
+            // The runtime's lock, taken before the spawn and held until the
+            // runtime has exited: what any other process asks to know whether
+            // a desktop is up (RuntimeLock). rt.pid outlives a runtime killed
+            // with this process; the kernel drops the lock with it.
+            if (!RuntimeLock.beforeSpawn(Linux.rtLock(this))) {
+                DexLog.step("linux", "runtime lock not taken; the home screen will not see this desktop");
+            }
             runtimeUp = true;
             runtimeSpawnedAt = android.os.SystemClock.elapsedRealtime();
-            runtimeProc = pb.start();
+            try {
+                runtimeProc = pb.start();
+            } catch (Exception e) {
+                RuntimeLock.spawnFailed();
+                throw e;
+            }
+            RuntimeLock.spawned(runtimeProc);
             liveRuntime = runtimeProc;
             watchRuntime(runtimeProc);
             LinuxGpu.reportVerdict(pb.environment(), new File(dir, "rt.log"));
@@ -1029,6 +1994,8 @@ public class LinuxService extends Service {
         } catch (Exception e) {
             runtimeUp = false;
             DexLog.step("linux", "runtime start error: " + e);
+            // Bound before the spawn that failed: with no session, let it go.
+            appsIdle();
         }
     }
 
@@ -1054,6 +2021,9 @@ public class LinuxService extends Service {
         // Before the kill, so the pump's socket dies with the guest that feeds
         // it rather than a second later, on a read of a container that is gone.
         LinuxAudio.stop(LinuxAudio.DESKTOP);
+        // The desktop's apps run in the apps process, not under its proot, so
+        // the group kill below does not reach them: they are closed there.
+        appsProcess.stopDisplay(LinuxAppsLink.DESKTOP);
         File dir = Linux.root(this);
         // /system/bin/kill, not the builtin: toybox sh's own kill rejects a
         // negative pid outright ("arguments must be jobs or process IDs"), so
@@ -1095,7 +2065,17 @@ public class LinuxService extends Service {
         runtimeProc = null;
         liveRuntime = null;
         runtimeUp = false;
+        // Again, now that it is dead: an app it asked for between the first
+        // stop and the kill would have counted as newer.
+        appsProcess.stopDisplay(LinuxAppsLink.DESKTOP);
+        appsIdle();
         DexLog.step("linux", "runtime stopped");
+        virglIfIdle();
+    }
+
+    /** Neither a desktop nor a window session left: the apps process can go. */
+    private void appsIdle() {
+        if (!runtimeUp && !winAlive()) appsProcess.release();
     }
 
     /**
@@ -1108,8 +2088,13 @@ public class LinuxService extends Service {
             try {
                 code = p.waitFor();
             } catch (InterruptedException e) {
+                // Not seen to exit, so the lock stays: a desktop that might be
+                // up is never reported as down. This thread is never interrupted.
                 return;
             }
+            // Gone, however it went (ended, stopped, killed): the lock goes
+            // with it, here rather than in runtimeEnded, which a stop skips.
+            RuntimeLock.exited(p);
             try {
                 io.execute(() -> runtimeEnded(p, code));
             } catch (java.util.concurrent.RejectedExecutionException destroyed) {
@@ -1147,6 +2132,9 @@ public class LinuxService extends Service {
         runtimeUp = false;
         // The sound pump is the desktop's; it would retry against a guest that is gone.
         LinuxAudio.stop(LinuxAudio.DESKTOP);
+        // And its apps, in the apps process: under one proot, they always went with it.
+        appsProcess.stopDisplay(LinuxAppsLink.DESKTOP);
+        appsIdle();
         File dir = Linux.root(this);
         File pidFile = new File(dir, "rt.pid");
         String pid = Linux.readFile(pidFile).trim();
@@ -1174,6 +2162,7 @@ public class LinuxService extends Service {
                 + (verdict.isEmpty() ? "none" : verdict)
                 + (scriptKilled ? ", script killed before it could clean up" : "")
                 + (killed ? " (SIGKILL: Android's child-process limit is " + limit + ")" : ""));
+        virglIfIdle();
         idleStop();
     }
 
@@ -1260,6 +2249,9 @@ public class LinuxService extends Service {
             stopWin();
             File dir = Linux.root(this);
             copyAsset("linux/linux-win.sh", Linux.winScript(this));
+            // Its apps run in the apps process too, as the desktop's do.
+            appsProcess.stage();
+            appsProcess.hold();
             writeFile(new File(dir, "win-geometry"),
                     Math.min(Math.max(w, 640), 7680) + "x" + Math.min(Math.max(h, 400), 4320));
             writeFile(new File(dir, "win-dpi"), String.valueOf(Math.min(Math.max(dpi, 48), 384)));
@@ -1278,6 +2270,7 @@ public class LinuxService extends Service {
             Process p = pb.start();
             winInput = p.getOutputStream();
             liveWin = p;
+            watchWin(p);
             LinuxGpu.reportVerdict(pb.environment(), new File(dir, "win.log"));
             LinuxAudio.start(LinuxAudio.WINDOWS);
             goForeground(getString(R.string.ln_label));
@@ -1285,8 +2278,53 @@ public class LinuxService extends Service {
             return true;
         } catch (Exception e) {
             DexLog.step("linux", "window session start error: " + e);
+            // Bound before the spawn that failed: with no session, let it go.
+            appsIdle();
             return false;
         }
+    }
+
+    /**
+     * Wait on the window session just spawned, on a thread of its own, and
+     * settle what it leaves behind if it ends without being asked to
+     * ({@link #winEnded}) -- as {@link #watchRuntime} does for the desktop.
+     */
+    private void watchWin(Process p) {
+        Thread t = new Thread(() -> {
+            try {
+                p.waitFor();
+            } catch (InterruptedException e) {
+                return; // never interrupted
+            }
+            try {
+                io.execute(() -> winEnded(p));
+            } catch (java.util.concurrent.RejectedExecutionException destroyed) {
+                // onDestroy has run, and closed everything already.
+            }
+        }, "linux-win-watch");
+        t.setDaemon(true);
+        t.start();
+    }
+
+    /**
+     * The window session ended, and not through {@link #stopWin}: Xvnc :2
+     * died, proot was killed, the script was. Its apps run in the apps process,
+     * out of reach of anything that happened to it, and they went with it as
+     * long as they shared its proot: so they are closed now, its sound pump
+     * stops retrying, what of its group outlived it goes, and with no desktop
+     * either, the apps process is let go. That is stopWin from its first line,
+     * on a session already gone. io thread.
+     */
+    private void winEnded(Process p) {
+        if (liveWin != p) return; // stopWin got here first, or a newer session replaced it
+        int code;
+        try {
+            code = p.exitValue();
+        } catch (IllegalThreadStateException e) {
+            code = -1;
+        }
+        DexLog.step("linux", "window session ended by itself, exit " + code);
+        stopWin();
     }
 
     /** End the window session: asked first, then the group kill — linux-rt.sh's rule. io thread. */
@@ -1295,9 +2333,14 @@ public class LinuxService extends Service {
         // Ahead of the test below too, because a session that ended by itself
         // leaves its pump retrying.
         LinuxAudio.stop(LinuxAudio.WINDOWS);
+        // Its apps are in the apps process, out of reach of the group kill below.
+        appsProcess.stopDisplay(LinuxAppsLink.WINDOWS);
         Process p = liveWin;
         File dir = Linux.root(this);
-        if (p == null && !new File(dir, "win.pid").exists()) return;
+        if (p == null && !new File(dir, "win.pid").exists()) {
+            appsIdle();
+            return;
+        }
         try {
             if (winInput != null) {
                 winInput.write("quit\n".getBytes(java.nio.charset.StandardCharsets.US_ASCII));
@@ -1332,7 +2375,11 @@ public class LinuxService extends Service {
             }
         }
         liveWin = null;
+        // Again, now that it is dead: see stopRuntime.
+        appsProcess.stopDisplay(LinuxAppsLink.WINDOWS);
+        appsIdle();
         DexLog.step("linux", "window session stopped");
+        virglIfIdle();
     }
 
     private void closeWinInput() {
@@ -1485,17 +2532,41 @@ public class LinuxService extends Service {
             // over the install/runtime text, and the way to close the door is
             // right there on it.
             String remoteLine = remote != null ? remote.summary() : null;
+            // "Open in a browser" is a door too, and says where it is: the
+            // address a person types on the computer. With remote access on as
+            // well, both doors are named, and each keeps a way to its switch.
+            String url = browserUrl();
+            String browserLine = null;
+            if (url != null) {
+                browserLine = LinuxStream.browserWatching() ? getString(R.string.bw_note_watching)
+                        : url.isEmpty() ? getString(R.string.bw_note_no_network)
+                        : getString(R.string.bw_note_listening, url);
+            }
+            String line = remoteLine != null ? remoteLine : browserLine != null ? browserLine : text;
             Notification.Builder b = new Notification.Builder(this, CHANNEL)
                     .setSmallIcon(android.R.drawable.ic_menu_manage)
                     .setContentTitle(getString(R.string.ln_label))
-                    .setContentText(remoteLine != null ? remoteLine : text)
+                    .setContentText(line)
                     .setContentIntent(openWindow())
                     .setOngoing(true);
+            if (remoteLine != null && browserLine != null) {
+                b.setStyle(new Notification.BigTextStyle().bigText(remoteLine + "\n" + browserLine));
+            }
             if (remoteLine != null) {
                 b.addAction(new Notification.Action.Builder(null,
                         getString(R.string.rm_note_settings), openRemote()).build());
                 b.addAction(new Notification.Action.Builder(null,
                         getString(R.string.rm_note_turn_off), remoteOffIntent()).build());
+                // The browser's switch is on the page this opens.
+                if (browserLine != null) {
+                    b.addAction(new Notification.Action.Builder(null,
+                            getString(R.string.bw_note_code), openBrowserSettings()).build());
+                }
+            } else if (browserLine != null) {
+                b.addAction(new Notification.Action.Builder(null,
+                        getString(R.string.bw_note_code), openBrowserSettings()).build());
+                b.addAction(new Notification.Action.Builder(null,
+                        getString(R.string.rm_note_turn_off), browserOffIntent()).build());
             }
             Notification n = b.build();
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
@@ -1549,6 +2620,21 @@ public class LinuxService extends Service {
                 PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
     }
 
+    /** "Open in a browser"'s Turn off, as remote access's: the handler clears the switch. */
+    private PendingIntent browserOffIntent() {
+        return PendingIntent.getForegroundService(this, 7,
+                new Intent(this, LinuxService.class).setAction(ACTION_BROWSER_OFF)
+                        .putExtra(EXTRA_FROM_NOTIFICATION, true),
+                PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
+    }
+
+    /** Settings, where the address and the code are. */
+    private PendingIntent openBrowserSettings() {
+        return PendingIntent.getActivity(this, 8,
+                new Intent(this, LinuxSettingsActivity.class).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
+    }
+
     /**
      * Drop foreground + stop when neither provisioning nor a runtime is up.
      *
@@ -1560,6 +2646,10 @@ public class LinuxService extends Service {
      */
     private void idleStop() {
         if (provisioning.get()) return;
+        // A wipe still queued behind whatever called this: stopping now would
+        // take it with the service (onDestroy shuts io down), and an uninstall
+        // or a reinstall the user confirmed would simply never happen.
+        if (wipesQueued.get() > 0) return;
         // A desktop start in flight: runtimeUp goes true before linux-rt.sh has
         // written the rt.pid that readStatus looks for. Only for a moment after
         // the spawn, though — a session that has since ended by itself leaves
@@ -1580,11 +2670,15 @@ public class LinuxService extends Service {
         // is even sent, so a provisioning run finishing in the instant before
         // the host's thread gets going cannot idle the service out from under it.
         if (remote != null && remote.running()) return;
-        if (LinuxRemote.isEnabled(this) && LinuxRemote.available(this)) return;
+        if (LinuxRemote.tunnelOn(this) && LinuxRemote.available(this)) return;
         // A computer on the cable is watching the desktop, or about to.
         if (LinuxStream.active()) return;
+        // "Open in a browser" is on: listening is the reason to be up, as with
+        // remote access. The marker, for the same reason as remote access's.
+        if (browser(this).isOn() && !Linux.isRemoving(this)) return;
         if (stopSelfResult(lastStartId)) {
             stopForeground(STOP_FOREGROUND_REMOVE);
+            appsProcess.release();
         }
     }
 

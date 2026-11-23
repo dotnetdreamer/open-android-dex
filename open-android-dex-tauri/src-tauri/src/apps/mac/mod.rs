@@ -17,7 +17,8 @@
 //! side button. Beside Back is More (☰), the window's own menu: a phone's or
 //! a tablet's size for the app — the window made that shape (shape.rs) — and
 //! full screen. At the bar's other end, a speaker: where the phone's sound plays
-//! (sound.rs), as a menu. A Mac pins apps to the Dock, not windows, so the
+//! (sound.rs), as a menu, Mute at its top — the speaker is crossed out while it
+//! is on. A Mac pins apps to the Dock, not windows, so the
 //! windows are this app's, listed under its Dock icon and in its Window menu.
 //! Files dropped on one from Finder go to the phone (drops.rs), and a note
 //! in a strip under the title bar says how it went, as on Windows.
@@ -171,6 +172,11 @@ impl Window {
     /// A short note in the strip under its title bar (Surface::note).
     pub fn note(&self, text: Option<String>, busy: bool) {
         self.shared.note(text, busy);
+    }
+
+    /// Its phone's Mute on or off (sound.rs): the speakers crossed out, or not.
+    pub fn show_muted(&self, on: bool) {
+        with_window(self.id, move |_, v| v.show_muted(on));
     }
 
     /// A line over its picture, which is dimmed under it; None takes it away.
@@ -866,6 +872,7 @@ fn add_sound_button(mtm: MainThreadMarker, window: &NSWindow, view: &AppView) {
     button.setBordered(false);
     button.setToolTip(Some(ns_string!("Where the sound plays")));
     button.setFrame(NSRect::new(NSPoint::new(4.0, 0.0), NSSize::new(28.0, 28.0)));
+    view.ivars().sound_buttons.borrow_mut().push(button.clone());
     let holder = NSView::initWithFrame(NSView::alloc(mtm), NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(36.0, 28.0)));
     holder.addSubview(&button);
     let accessory = NSTitlebarAccessoryViewController::new(mtm);
@@ -953,6 +960,9 @@ fn make_bar(mtm: MainThreadMarker, view: &AppView, label: &str) -> Bar {
     for (x, symbol, name, tip, action) in buttons {
         if let Some(button) = symbol_button(mtm, symbol, name, tip, action, target) {
             button.setFrame(NSRect::new(NSPoint::new(x, (BAR_H - 24.0) / 2.0), NSSize::new(28.0, 24.0)));
+            if action == sel!(soundMenu:) {
+                view.ivars().sound_buttons.borrow_mut().push(button.clone());
+            }
             bar.addSubview(&button);
         }
     }
@@ -1045,6 +1055,9 @@ struct Ui {
     tracking: RefCell<Option<Retained<NSTrackingArea>>>,
     /// The sound menu as last shown: its items' tags index it.
     sound: RefCell<Vec<sound::Item>>,
+    /// The speakers that open it, the title bar's and the full-screen bar's:
+    /// crossed out while the phone's sound is muted.
+    sound_buttons: RefCell<Vec<Retained<NSButton>>>,
     /// Full screen, from the moment the window starts to go there.
     full_screen: Cell<bool>,
     /// The content's size as the window last held still neither zoomed nor
@@ -1693,6 +1706,7 @@ impl AppView {
             note: RefCell::new(None),
             tracking: RefCell::new(None),
             sound: RefCell::new(Vec::new()),
+            sound_buttons: RefCell::new(Vec::new()),
             full_screen: Cell::new(false),
             windowed: Cell::new(frame.size),
             zoomed_before: Cell::new(false),
@@ -1724,6 +1738,25 @@ impl AppView {
         }
         view.registerForDraggedTypes(&NSArray::from_slice(&[unsafe { NSPasteboardTypeFileURL }]));
         view
+    }
+
+    /// The speakers that open the sound menu, crossed out while the phone's
+    /// sound is muted, and saying so to VoiceOver and in their tooltips.
+    fn show_muted(&self, on: bool) {
+        let (symbol, name, tip) = if on {
+            ("speaker.slash", "Sound, muted", "Where the sound plays (muted)")
+        } else {
+            ("speaker.wave.2", "Sound", "Where the sound plays")
+        };
+        let Some(image) =
+            NSImage::imageWithSystemSymbolName_accessibilityDescription(&NSString::from_str(symbol), Some(&NSString::from_str(name)))
+        else {
+            return;
+        };
+        for button in self.ivars().sound_buttons.borrow().iter() {
+            button.setImage(Some(&image));
+            button.setToolTip(Some(&NSString::from_str(tip)));
+        }
     }
 
     /// The sound menu, under the button that asked for it: where the phone's

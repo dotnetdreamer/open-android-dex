@@ -149,27 +149,40 @@ final class WmClient {
      * minimised window, on a poll that runs several times a second.
      */
     List<Task> list(int displayId) {
-        List<Task> tasks = new ArrayList<>();
         synchronized (this) {
-            if (!connect()) return null;
-            try {
-                out.println("LIST " + displayId);
-                String line;
-                boolean sawEnd = false;
-                while ((line = in.readLine()) != null) {
-                    if ("END".equals(line)) { sawEnd = true; break; }
-                    if (line.startsWith("ERR")) break;
-                    Task t = parse(line);
-                    if (t != null) tasks.add(t);
-                }
-                if (!sawEnd) {
-                    close();              // EOF mid-list: the daemon went away
-                    return null;
-                }
-            } catch (Exception e) {
-                close();
+            // request()'s single retry, for the same reason: a connection to a daemon that
+            // has since restarted looks open until it is used, and then reads EOF at once.
+            // Without it, the first list after every restart came back null — the taskbar's
+            // ◁ then fell back to a Back for the whole display (Galaxy A13, 2026-11-17). Only
+            // when a connection was there to go stale: with none, the daemon is just down.
+            boolean had = socket != null;
+            List<Task> tasks = listOnce(displayId);
+            if (tasks == null && had) tasks = listOnce(displayId);
+            return tasks;
+        }
+    }
+
+    /** One LIST on the connection as it is, or a new one; null if that fails. Under the lock. */
+    private List<Task> listOnce(int displayId) {
+        List<Task> tasks = new ArrayList<>();
+        if (!connect()) return null;
+        try {
+            out.println("LIST " + displayId);
+            String line;
+            boolean sawEnd = false;
+            while ((line = in.readLine()) != null) {
+                if ("END".equals(line)) { sawEnd = true; break; }
+                if (line.startsWith("ERR")) break;
+                Task t = parse(line);
+                if (t != null) tasks.add(t);
+            }
+            if (!sawEnd) {
+                close();              // EOF mid-list: the daemon went away
                 return null;
             }
+        } catch (Exception e) {
+            close();
+            return null;
         }
         return tasks;
     }
@@ -504,6 +517,18 @@ final class WmClient {
     /** One key, pressed and let go, for whatever on {@code displayId} has the keyboard. */
     boolean key(int displayId, int keyCode) {
         return ok(request("KEY " + displayId + " " + keyCode));
+    }
+
+    /**
+     * One key for one window, {@code taskId} on {@code displayId}: given the keyboard first,
+     * as a click on it would, and the key sent only once it has it. A title bar's Back, and
+     * its menu's Copy and Paste ({@code meta}: KeyEvent.META_CTRL_ON with its left half).
+     *
+     * @return the daemon's answer ("OK &lt;ms waited&gt;" or "ERR &lt;why&gt;"), or null when it
+     *         did not answer
+     */
+    String taskKey(int displayId, int taskId, int keyCode, int meta) {
+        return request("TASKKEY " + displayId + " " + taskId + " " + keyCode + " " + meta);
     }
 
     /** Hand {@code displayId} the keyboard back, if the phone's own screen has taken it. */

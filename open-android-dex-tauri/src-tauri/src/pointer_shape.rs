@@ -93,7 +93,9 @@ fn run(
     mut stdin: ChildStdin,
     listening: &AtomicBool,
 ) {
-    let wm = crate::wm::WmClient::new();
+    // The session's key is "<serial>|desktop": this phone's daemon, not the one
+    // connected last.
+    let wm = crate::wm::WmClient::for_serial(key.split('|').next().unwrap_or(key));
     // From the display, not from the spawn: the client starts listening as its window
     // opens, which on a first start can be many seconds after it was spawned.
     let mut displayed: Option<Instant> = None;

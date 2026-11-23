@@ -45,13 +45,17 @@ on:
   workflow_dispatch:
     inputs:
       apps:
+        # linuxondroid by default: it is the one app on Play. The launcher
+        # still targets API 35 and Play has refused new apps and updates below
+        # API 36 since 31 August 2026, so "both" would fail at the launcher's
+        # Play upload, which runs first, before LinuxOnDroid's ever starts.
         description: "Which app(s) to build"
         type: choice
         options:
           - both
           - launcher
           - linuxondroid
-        default: both
+        default: linuxondroid
       version:
         description: "Version (e.g. 0.3.19) — blank uses what app/build.gradle already says"
         type: string
@@ -260,7 +264,7 @@ jobs:
           case "${APPS}" in
             both|linuxondroid)
               check linuxapp/build/outputs/apk/release/linuxapp-release.apk \
-                    com.ccrstech.linuxondroid ;;
+                    com.dotnetdreamer.linuxondroid ;;
           esac
 
       - name: Stage artifacts under their download names
@@ -336,7 +340,7 @@ jobs:
         uses: r0adkll/upload-google-play@e738b9dd8f2476ea806d921b64aacd24f34515a5
         with:
           serviceAccountJsonPlainText: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON }}
-          packageName: com.ccrstech.linuxondroid
+          packageName: com.dotnetdreamer.linuxondroid
           releaseFiles: dist/LinuxOnDroid-v${{ steps.v.outputs.version }}.aab
           track: ${{ inputs.play_track }}
           status: ${{ inputs.play_status }}
@@ -353,7 +357,7 @@ jobs:
             echo "| App | Package | Play |"
             echo "| --- | --- | --- |"
             echo "| Open Android DeX (launcher) | \`com.ccrstech.openandroiddex.launcher\` | ${{ steps.gate.outputs.play == 'yes' && inputs.apps != 'linuxondroid' && inputs.play_track || '—' }} |"
-            echo "| LinuxOnDroid | \`com.ccrstech.linuxondroid\` | ${{ steps.gate.outputs.play == 'yes' && inputs.apps != 'launcher' && inputs.play_track || '—' }} |"
+            echo "| LinuxOnDroid | \`com.dotnetdreamer.linuxondroid\` | ${{ steps.gate.outputs.play == 'yes' && inputs.apps != 'launcher' && inputs.play_track || '—' }} |"
             echo
             echo "Signed .aab and .apk for both are attached to this run as \`android-play-v$V\`."
           } >> "$GITHUB_STEP_SUMMARY"

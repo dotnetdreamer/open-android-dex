@@ -92,6 +92,8 @@ pub struct Look<'a> {
     pub full_screen: bool,
     /// How far down the full-screen bar is, 0 to 1.
     pub top_bar: f32,
+    /// The phone's sound is muted: the speakers in the bars are crossed out.
+    pub muted: bool,
 }
 
 /// One decoded picture, held until the next replaces it — the window is
@@ -191,6 +193,7 @@ struct BarKey {
     hover: Hit,
     pressed: Hit,
     dark: bool,
+    muted: bool,
 }
 
 impl BarKey {
@@ -206,6 +209,7 @@ impl BarKey {
             hover: look.hover,
             pressed: look.pressed,
             dark: look.dark,
+            muted: look.muted,
         }
     }
 }
@@ -980,7 +984,7 @@ impl Renderer {
             };
             glyph(Hit::Back, 0xE72B, bar.back)?;
             glyph(Hit::More, 0xE700, bar.more)?;
-            glyph(Hit::Sound, 0xE767, bar.sound)?;
+            glyph(Hit::Sound, sound_glyph(look.muted), bar.sound)?;
             glyph(Hit::Min, 0xE921, bar.min)?;
             glyph(Hit::Max, if look.maximized { 0xE923 } else { 0xE922 }, bar.max)?;
             glyph(Hit::Close, 0xE8BB, bar.close)?;
@@ -1027,7 +1031,7 @@ impl Renderer {
             let buttons: [(Hit, u16, RECT); 6] = [
                 (Hit::Back, 0xE72B, top.back),
                 (Hit::More, 0xE700, top.more),
-                (Hit::Sound, 0xE767, top.sound),
+                (Hit::Sound, sound_glyph(look.muted), top.sound),
                 (Hit::Min, 0xE921, top.min),
                 (Hit::Windowed, 0xE73F, top.windowed),
                 (Hit::Close, 0xE8BB, top.close),
@@ -1137,6 +1141,15 @@ impl Theme {
         } else {
             Theme { bar: 0xF3F3F3, edge: 0xC8C8C8, empty: 0xFAFAFA, ink: 0x1A1A1A, ink_inactive: 0x8A8A8A, ink_dim: 0x707070, hover: 0xE5E5E5, pressed: 0xCCCCCC, note: 0xE8E8E8 }
         }
+    }
+}
+
+/// The Sound button's glyph: Segoe's Volume, or its Mute — the speaker crossed out.
+fn sound_glyph(muted: bool) -> u16 {
+    if muted {
+        0xE74F
+    } else {
+        0xE767
     }
 }
 

@@ -93,6 +93,16 @@ final class DesktopPointer implements PadTarget {
         if (p != null) p.setRole(role);
     }
 
+    /**
+     * The taskbar has just gone up as an accessibility overlay as well — re-seated by
+     * LauncherActivity#attachTaskbarOverlay — and of two such windows the later is on top.
+     * Put the arrow back above it. Main thread.
+     */
+    static void raise() {
+        DesktopPointer p = showing;
+        if (p != null && p.arrow != null) p.restyle();
+    }
+
     /** The DexCursors role drawn now. */
     private int role = DexCursors.ROLE_ARROW;
 

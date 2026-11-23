@@ -205,6 +205,57 @@ newer Pixel images; name an activity with one, and its first text field
 stands in for search's. Last, it drops a file where nothing takes it, which
 lands in Download byte for byte, without clicking the app on the way.
 
+The windows' Mute (`doc/apps-on-pc.md`, "Mute") has its rules checked on the
+computer, with a JDK, and given a serial on a phone too, with the Android SDK:
+
+```sh
+node test/apps-mute-test.mjs [serial]
+node test/apps-mute-test.mjs --mutants
+```
+
+The rules are `AppMute`'s, run on the computer's JVM against a stand-in
+phone: on and off; an unmute held for the computer's capture, which begins,
+never comes, or which the phone cannot say anything of; a Mute ended by its
+last window or its server stopping; a mute the phone had of its own; unmutes
+that do not take, refused and kept marked for the next server; a phone whose
+reads throw, before a mute, after it and in a hold's wait; a mute that took
+and threw; no turn among the servers to be had; a mark once lost meeting a
+newer server's; and a server replaced by a newer one, which owns the phone's
+sound from then on — one that starts and mutes in the middle of the older
+one's unmute waiting its turn, and a second process holding the servers' lock
+being waited for. `--mutants` then puts each defect the reviews found back
+into a copy of `AppMute.java`, one at a time, and the rules must fail for
+every one. On the phone it runs the app
+server as the app does, two of them at once, with the window daemon's dex
+(build it first), speaks the wire to them, and opens Settings in windows of
+its own to have one open, beside a helper (`test/apps-mute/MuteHelper.java`)
+that reads the music stream and captures the phone's output as the audio
+companion does (on Android 11 as scrcpy does there too: the shell's own
+HeapDumpActivity is put in front of the phone's screen while the recording
+starts, or Android refuses it). It mutes the phone's media for seconds at a time. It will not
+start while a Mute is on (that server's mark would be undone by its own);
+media muted before it is unmuted for the run and muted again after; by the
+end the phone is as it was, and nothing it pushed is left. It removes a mark
+only if one of its own servers, by name, left it, and leaves the servers'
+lock file be: the app's servers make it, and share it. Give it the running
+app's adb (`ADB=…`), so its adb server is not restarted under the app.
+
+The desktop's taskbar under a window that hides overlays (a permission prompt,
+an app lock's PIN screen; issue #11) is checked by hand, on a phone with a
+desktop session running, with a probe taken at each step:
+
+```powershell
+.\test\overlay-probe.ps1 -Serial <serial> -Label <step> -Adb <the running app's adb.exe>
+```
+
+Each probe saves the raw window dump, the launcher's log and a screenshot of
+each virtual display the phone lists for capture (none on Android 12 and
+older, where the desktop's window is captured on the computer instead), then
+lists the windows that ask
+Android to hide overlays and the launcher's overlay windows, with a HIDDEN line
+for any that Android keeps off the screen. It reads the hide flag whether a
+build prints it by name or as hex, as One UI does.
+
 The phone's notifications on the computer (`doc/phone-notifications.md`) have
 their phone's half checked the same way:
 
@@ -373,6 +424,26 @@ another app's activity on top of it in its own task; never on the phone's own
 screen; never the launcher's Settings on another display; and in the gap an APK
 install makes, the display the desktop was last seen on while that display holds a
 task, then none at all — not the other display's app.
+
+A desktop window's title bar has a Back, a ☰ and a sound button since 2026-11-17
+(`doc/custom-titlebar-v2.md`, "Back, More and Sound"). Its arithmetic is checked on
+a computer's JVM, with a JDK:
+
+```sh
+node test/caption-bar-test.mjs
+```
+
+It compiles the launcher's own `CaptionMath`: where ☰'s Phone size and Tablet size
+put a window (a phone's 412 × 915 dp and a tablet's 1280 × 800 dp, fitted under the
+taskbar, kept where its top-left is, centred from maximised, the same size in dp on
+a 2x desktop; a tablet's size that comes out under 600 dp maximised where the whole
+room is a tablet's, the most there is where it is not), which of the two a window
+is now, where a bar's menu opens (under its button, inside the display, upwards
+where the taskbar is in the way), that the press closing a menu does not open it
+again from its own button, and which buttons make way on a narrow window (the icon,
+then the snaps, the speaker, minimise, ☰ and maximise, keeping 48 px to drag by)
+so that ✕ is never pushed off the bar at any width from 72 to 1000 px. Back reaching the window it was pressed on, the menus as
+windows and the buttons themselves need a phone on Android 14 or newer.
 
 The window daemon's answer to `HZ` — which of the phone panel's modes holds the
 desktop's refresh rate (`doc/refresh-rate.md`) — is checked the same way:

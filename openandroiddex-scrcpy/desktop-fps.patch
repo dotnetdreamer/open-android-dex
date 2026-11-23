@@ -117,12 +117,12 @@ index 0000000..716fb5c
 +    }
 +}
 diff --git a/server/src/main/java/com/genymobile/scrcpy/video/NewDisplayCapture.java b/server/src/main/java/com/genymobile/scrcpy/video/NewDisplayCapture.java
-index 37ba5ab..9495d44 100644
+index f758aa8..8d422bb 100644
 --- a/server/src/main/java/com/genymobile/scrcpy/video/NewDisplayCapture.java
 +++ b/server/src/main/java/com/genymobile/scrcpy/video/NewDisplayCapture.java
-@@ -257,6 +257,7 @@ public class NewDisplayCapture extends SurfaceCapture {
-             // Before the line below: the computer starts using the display when it reads it
+@@ -272,6 +272,7 @@ public class NewDisplayCapture extends SurfaceCapture {
              clearForcedDensity(virtualDisplayId, "left by an earlier display");
+             releaseRotationHold(virtualDisplayId, "left by an earlier display");
              Ln.i("New display: " + displaySize.getWidth() + "x" + displaySize.getHeight() + "/" + dpi + " (id=" + virtualDisplayId + ")");
 +            DesktopFps.start(virtualDisplayId);
  

@@ -114,8 +114,9 @@ one in line:
 
 - **The encoder** may hold at most two frames.
 - **The link** may hold as many frames as fill its round trip, plus the one on
-  the wire. The window acknowledges every frame as it arrives (`0x12`); the
-  phone measures each frame's round trip and keeps the median of the last 32.
+  the wire. The window acknowledges every frame as it arrives (`0x12`, and
+  since 2026-11-21 the time it arrived: a float64 of ms, `wire.ts`); the phone
+  measures each frame's round trip and keeps the median of the last 32.
 
 A write returns once adbd has the bytes, not once the computer does, and on
 wireless debugging adb will hold a second of video in its buffers. Measured on
@@ -160,12 +161,84 @@ under a live stream — hole punching gets past the relay a few seconds after a
 connect — the window sends the new ceiling (`{"t":"bitrate"}`), and the encoder
 takes it from its next frame (`PARAMETER_KEY_VIDEO_BITRATE`).
 
-**Below the ceiling, the link decides.** Once a second the phone looks at how
-much of that second the pump spent waiting for acknowledgements. Over a fifth
-is a link taking frames slower than they come: the bitrate drops by 30 %. Three
-seconds of motion with almost no waiting climb back by 25 %, up to the
-ceiling, never below 0.5 Mb/s. Fewer bits per frame is how a slow link keeps
-its frame rate; the pacing above already keeps it from piling up latency.
+**Below the ceiling, the link decides**, from how late frames arrive
+(`LinuxStreamRate`, the same rule as a browser's: doc/linux-browser.md, "The
+bitrate from how late frames arrive"), since 2026-11-21, on the local network
+(below). The window's hello says `"ackAt":true` and each acknowledgement
+carries when its frame arrived;
+against when the phone had it ready, the shortest of the last ten seconds is
+the link's own delay, and the shortest of the last 200 ms over it is a queue.
+A queue that stands is cut at once, by 15 % (30 % for a large one); a second
+and a half with the queue under half the target climbs back 8 % each half
+second, up to the ceiling, never below 0.5 Mb/s. Fewer bits per frame is how a
+slow link keeps its frame rate; the pacing above already keeps it from piling
+up latency.
+
+The rule before it stays, for a window that says only that a frame arrived (an
+app older than 2026-11-21) and as the backstop of the new one: once a second
+the phone looks at how much of that second the pump spent waiting for
+acknowledgements; over a fifth, the bitrate drops by 30 %, and three seconds of
+motion with almost no waiting climb back by 25 %.
+
+Measured on the S25 (2026-11-21, `test/linux-browser-test.mjs --device`: the
+phone's own stream classes under app_process, a client acknowledging every
+frame on arrival with the app's own `wire.ts`, four rounds turn about, the
+stand-in desktop changing every pixel of every frame), over wireless
+debugging, the only way this phone is on adb:
+
+- a window saying `ackAt` gets the new rule, and one that does not keeps the
+  old, in all three runs;
+- both come down from the ceiling to the floor, the new one as soon or
+  sooner (the phone's log: from 8 Mb/s in 2 to 7 s against 9 to 10; from
+  4 Mb/s in 4 and 8 s against 6 and 7), and then both stay at the floor: the
+  stand-in's picture makes about 1 Mb/s even there, about what this link
+  carried (0.6 to 1.3 Mb/s), at 1920×1080 and at 640×400 alike. Held at the
+  floor, the two rules make the same choice every second, so these runs
+  cannot say which is the better on this route;
+- which cut held the bitrate there these runs cannot say. The phone's log
+  shows all three of the new rule's (a queue read from the arrival times, the
+  full link, a frame held past the round trip), the stats then counted only
+  two of them together, and the full link's cut is already held back when a
+  fresh reading of the queue is small, so late acknowledgements alone do not
+  make it. The round trip's median was 58 to 223 ms with the phone awake, the
+  queue the new rule read 3 to 82 ms. The stats count each kind apart now, and
+  the comparison prints them for every round;
+- round trips moved with the link from round to round (as it was: the new
+  rule 68 and 171 ms at the median, the old 74 and 143, in the last run).
+  Through a relay of 1.5 Mb/s, the new rule's 90th percentile was the lower in
+  all three runs (226 against 496 ms, 260 against 673, 330 against 369); its
+  median was not (114 against 120, 155 against 146, 147 against 183).
+
+**On the local network only.** The new rule takes a round trip over 400 ms
+for a queue, whatever its own reading says (`LinuxStreamRate.LAN_RTT_NS`): on
+the network a browser reaches the phone by, one that long is always a queue,
+and a queue there from the first frame is otherwise taken for the link's own
+delay. The internet and a relay can be that far with nothing queued: in an
+audit's check of the rule alone (2026-11-21), a steady 401 ms with no queue
+took the bitrate from 4 Mb/s to the floor, and 399 ms left it at 4. So the
+window says `ackAt` on the cable and on Wi-Fi only (`wire.ts`, `localRoute`),
+and the internet and relays keep the old rule. A route that leaves the local
+network under a live stream, or comes back to it, says so with its new
+ceiling (`{"t":"bitrate","bitrate":…,"ackAt":false}`): the phone stops
+reading the times, or starts again, and the acknowledgements change with it.
+A live tunnel is not tried yet.
+
+**Not over wireless debugging.** There the window keeps the old rule too
+(`readsTimes`). In six runs on the S25 comparing the two turn about (runs 10 to
+15 of `test/linux-browser-test.mjs --device`, 2026-11-21), the new rule's
+median round trip was the longer in five: as the link was, the rounds'
+averages were 174 against 154 ms, 106 against 74, 119 against 108, 303
+against 17, 99 against 197 and 129 against 100. Both rules sat at the floor
+nearly throughout, and the cuts the stats now count apart say what kept the
+new one there: frames not acknowledged 300 ms past the link's own round trip
+made the most of its cuts (in run 15, 14 of its 27, against 9 by a full link
+and 4 by the queue), so acknowledgements held up on their way through adb.
+Those comparisons are measured from now on, not counted.
+
+Not yet: a desktop that moves as desktops do, not every pixel at once, which
+would leave the rules room above the floor; a cable (no phone with Linux here
+is on one); a live tunnel; the tunnel on the same network measured as the
+desktop app's own route (the browser's own Wi-Fi is what it rests on).
 
 ## The window
 
@@ -264,6 +337,13 @@ pc::Desktop (127.0.0.1:<tunnel port>/stream/<token>, checked) ──▶ the wind
 `· Wi-Fi`, `· Remote` or `· Remote (relay)`, and the pill the same words —
 following the path as it changes, as the bitrate does.
 
+**The pill takes clicks only while it shows.** It shows for 2.5 s when the
+picture comes up and again while the pointer rests at the top edge. Faded
+out, it used to stay clickable: until 2026-11-15 it ate the desktop's clicks
+in the top middle of the window, and could switch the clipboard or full
+screen unseen. On a Galaxy S24's Plasma, the title bar buttons of a window
+snapped to the left half sat exactly there and did nothing.
+
 ## Coming and going
 
 The window opens over adb when the phone is on it; otherwise as video through
@@ -333,8 +413,14 @@ app's page through to LinuxStream's socket, handed `/stream` with the page's
 `Origin`, 1 MB both ways intact; and a phone without it refusing the op in a
 sentence, and a computer asking first told the app is too old.
 
-Off the phone (`node test/usb-desktop-test.mjs`, 63 checks): the window's H.264
-handling and key mapping; the launcher's own `LinuxStreamRfb` against a stand-in
+Off the phone (`node test/usb-desktop-test.mjs`, 75 checks): the window's H.264
+handling and key mapping; the window's clipboard rules (`clipboardShare.ts`:
+the guest's text lands only with the window still in front 150 ms later, and
+otherwise waits for it; the newer copy wins whichever end it was made on,
+including a guest copy made while an earlier one waited out its 150 ms, a
+copy here during them, and a read of this computer's clipboard that comes back
+after the guest's copy landed or after the window went to the back again);
+the launcher's own `LinuxStreamRfb` against a stand-in
 Xvnc — VncAuth against OpenSSL's DES, a wrong password refused, shared, raw and
 the four pseudo-encodings asked for and nothing else, Xvnc's format kept, every
 sampled pixel right, the cursor's shape and mask, a resize and the pictures

@@ -1,8 +1,13 @@
 package com.ccrstech.openandroiddex.launcher;
 
+import android.content.ComponentName;
 import android.content.Context;
+import android.content.Intent;
+import android.content.pm.ResolveInfo;
+import android.net.Uri;
 import android.os.Build;
 import android.os.Environment;
+import android.provider.DocumentsContract;
 
 import java.io.File;
 import java.util.HashMap;
@@ -178,6 +183,17 @@ final class Linux {
                     .append(here ? "yes" : (wantsApp(ctx, app[0]) ? "NO" : "off"));
         }
         return sb.toString();
+    }
+
+    /**
+     * Is this optional app in the guest? The same test {@link #installedApps}
+     * reports, one app at a time, for the home screen's list of what is inside.
+     */
+    static boolean hasApp(Context ctx, String id) {
+        for (String[] app : GUEST_APPS) {
+            if (app[0].equals(id)) return new File(root(ctx), "rootfs/" + app[1]).exists();
+        }
+        return false;
     }
 
     // ── which optional apps the user asked for ──
@@ -405,6 +421,61 @@ final class Linux {
     }
 
     /**
+     * The shared folder in an Android file manager, ready to start, or null when
+     * nothing on this phone will open it. The desktop's tile and LinuxOnDroid's
+     * home screen both open it through here; each adds only how its own window
+     * is placed.
+     *
+     * Named through ExternalStorageProvider rather than as a {@code file://}
+     * path: the app holds no storage permission by default (the folder
+     * deliberately needs none to be opened), so a file URI would open a manager
+     * that then shows nothing.
+     *
+     * The handler is RESOLVED rather than left implicit, for the reason
+     * TransferHud records: more than one app answers this on a Samsung phone,
+     * and the system chooser, launched into a freeform window on a secondary
+     * display, opens and closes again without ever showing anything. With no
+     * concrete handler the caller says where the folder is instead of firing an
+     * intent that would vanish. (LinuxOnDroid can see these handlers at all
+     * only through the {@code <queries>} entry in its manifest.)
+     */
+    static Intent sharedFolderIntent(Context ctx) {
+        Uri uri = DocumentsContract.buildDocumentUri(
+                "com.android.externalstorage.documents", "primary:" + SHARED_NAME);
+        Intent intent = new Intent(Intent.ACTION_VIEW)
+                .setDataAndType(uri, DocumentsContract.Document.MIME_TYPE_DIR)
+                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION
+                        | Intent.FLAG_ACTIVITY_NEW_TASK);
+        ComponentName target = null;
+        try {
+            ComponentName fallback = null;
+            for (ResolveInfo ri : ctx.getPackageManager().queryIntentActivities(intent, 0)) {
+                if (ri.activityInfo == null) continue;
+                String pkg = ri.activityInfo.packageName;
+                if ("android".equals(pkg)) continue;
+                ComponentName cn = new ComponentName(pkg, ri.activityInfo.name);
+                // NOT the head of the list, unlike TransferHud's version of
+                // this: that intent carries no URI, and this one carries a
+                // document URI that MANAGE_DOCUMENTS protects. We cannot grant
+                // read on a URI we do not own, so handing it to whichever app
+                // happens to answer first opens a window onto nothing. The
+                // documents UI and Samsung's My Files are the two that hold it.
+                if (pkg.contains("documentsui") || pkg.contains("myfiles")) {
+                    target = cn;
+                    break;
+                }
+                if (fallback == null) fallback = cn;
+            }
+            if (target == null) target = fallback;
+        } catch (Exception e) {
+            DexLog.warn("linux", "cannot resolve a file manager for the shared folder", e);
+        }
+        DexLog.step("linux", "open shared folder " + sharedDir() + " → "
+                + (target != null ? target.flattenToShortString() : "no handler"));
+        return target == null ? null : intent.setComponent(target);
+    }
+
+    /**
      * Tell MediaStore about the shared folder.
      *
      * Not decoration: Android's USB/MTP object list and the Files index are
@@ -460,6 +531,56 @@ final class Linux {
                 || Environment.isExternalStorageManager();
     }
 
+    /** {@link #sharedFolderOffered}'s answer; the manifest cannot change under a live process. */
+    private static volatile Boolean sharedOffered;
+
+    /**
+     * Does this build offer the shared folder at all?
+     *
+     * Not every build does. LinuxOnDroid's Play build ships WITHOUT
+     * MANAGE_EXTERNAL_STORAGE (linuxapp/src/release/AndroidManifest.xml removes
+     * it): Play allows "All files access" only for apps whose core purpose is
+     * file management, backup, antivirus and the like, and a Linux container is
+     * none of them. Without that permission the folder can never even be
+     * created (see {@link #sharedDir()}), so a build that does not request it
+     * must not offer it: no tile that leads to a grant Settings cannot show, no
+     * "Your files, both ways" on the home screen, and no bind into the guest of
+     * a folder another app made and this one cannot write.
+     *
+     * Read from this APK's own merged manifest, so the answer follows whatever
+     * the build put in it and nothing has to be kept in step by hand. Any
+     * build that declares the permission behaves exactly as before.
+     *
+     * Offered only when the manifest has been read and says so. A lookup that
+     * fails (it should not, for our own package) answers no, and is not
+     * remembered, so the next call reads again: a no that is wrong costs a
+     * build that has the folder its tile until then, where a yes that is
+     * wrong would send a Play build's user to a grant Settings cannot show.
+     */
+    static boolean sharedFolderOffered(Context ctx) {
+        Boolean known = sharedOffered;
+        if (known != null) return known;
+        String[] asked;
+        try {
+            asked = ctx.getPackageManager().getPackageInfo(ctx.getPackageName(),
+                    android.content.pm.PackageManager.GET_PERMISSIONS).requestedPermissions;
+        } catch (Exception e) {
+            DexLog.warn("linux", "cannot read this package's permissions; no shared folder for now", e);
+            return false;
+        }
+        boolean offered = false;
+        if (asked != null) {
+            for (String p : asked) {
+                if ("android.permission.MANAGE_EXTERNAL_STORAGE".equals(p)) {
+                    offered = true;
+                    break;
+                }
+            }
+        }
+        sharedOffered = offered;
+        return offered;
+    }
+
     /** noVNC over websockify; the guest binds it on loopback only. */
     static final int VNC_PORT = 6080;
 
@@ -509,6 +630,104 @@ final class Linux {
     }
 
     /**
+     * Set from the moment an uninstall is asked for until its wipe is done
+     * ({@link LinuxService#uninstall(Context)} sets it, the service clears it
+     * once the uninstall marker is down). A sibling of the container like the
+     * uninstall marker, for the same reason.
+     *
+     * The wipe is queued behind whatever the service is doing, and an install
+     * has to be stopped before it can begin, so "asked" and "done" can be a
+     * while apart. This is how a screen tells them apart, across its own
+     * restarts too, instead of saying the storage is free the moment it asked.
+     * It also holds provisioning off ({@link #needsProvision}), and a service
+     * that starts with it set finishes the removal before anything else: an
+     * uninstall the process died in the middle of is still an uninstall.
+     */
+    private static File removingMarker(Context ctx) {
+        return new File(ctx.getFilesDir(), "linux-removing");
+    }
+
+    static boolean isRemoving(Context ctx) {
+        return removingMarker(ctx).exists();
+    }
+
+    static void setRemoving(Context ctx, boolean on) {
+        File f = removingMarker(ctx);
+        if (!on) {
+            f.delete();
+            return;
+        }
+        try {
+            f.createNewFile();
+        } catch (Exception e) {
+            DexLog.warn("linux", "removing marker: " + e);
+        }
+    }
+
+    /**
+     * What the last removal could not delete, while the removing marker is
+     * still down for it: "&lt;bytes&gt; &lt;entries&gt; &lt;first error&gt;". The marker
+     * clears only once a wipe has left nothing, so a removal that fails stays
+     * a removal, and this is what tells the screens it is not still under way
+     * but stopped, and how much it left. Cleared as the next attempt begins.
+     */
+    private static File removeFailedMarker(Context ctx) {
+        return new File(ctx.getFilesDir(), "linux-remove-failed");
+    }
+
+    /** A removal that stopped with things left; null when the last one did not. */
+    static final class RemoveFailure {
+        long bytes;
+        int entries;
+        String why = "";
+    }
+
+    static RemoveFailure removeFailure(Context ctx) {
+        String s = readText(removeFailedMarker(ctx)).trim();
+        if (s.isEmpty()) return null;
+        String[] p = s.split(" ", 3);
+        RemoveFailure f = new RemoveFailure();
+        try {
+            f.bytes = Long.parseLong(p[0]);
+            f.entries = p.length > 1 ? Integer.parseInt(p[1]) : 0;
+        } catch (NumberFormatException e) {
+            // still a failure, of unknown size
+        }
+        if (p.length > 2) f.why = p[2];
+        return f;
+    }
+
+    static void setRemoveFailure(Context ctx, long bytes, int entries, String why) {
+        try (java.io.FileOutputStream out = new java.io.FileOutputStream(removeFailedMarker(ctx))) {
+            out.write((bytes + " " + entries + " " + (why == null ? "" : why.replace('\n', ' ')))
+                    .getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        } catch (Exception e) {
+            DexLog.warn("linux", "remove-failed marker: " + e);
+        }
+    }
+
+    static void clearRemoveFailure(Context ctx) {
+        removeFailedMarker(ctx).delete();
+    }
+
+    /**
+     * This build is LinuxOnDroid, the app that opens on its own home screen,
+     * and not the desktop. What decides how a screen shared by both points the
+     * user somewhere: "right-click Linux" means nothing on a phone with no
+     * desktop. Asked of the manifest, which is the one file that makes the two
+     * apps different (linuxapp/build.gradle).
+     */
+    static boolean hasHomeScreen(Context ctx) {
+        try {
+            ctx.getPackageManager().getActivityInfo(
+                    new android.content.ComponentName(ctx, LinuxHomeActivity.class), 0);
+            return true;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    /**
      * Is there a container to remove? What the Uninstall offer keys off.
      *
      * The directory is the honest test rather than {@code state.env}: a wiped
@@ -539,6 +758,11 @@ final class Linux {
     /** The window session's runtime: Linux apps as windows of their own (doc/linux-windows.md). */
     static File winScript(Context ctx) {
         return new File(root(ctx), "linux-win.sh");
+    }
+
+    /** One Linux app in a proot of its own, for LinuxAppsService (doc/linux-apps-process.md). */
+    static File appScript(Context ctx) {
+        return new File(root(ctx), "linux-app.sh");
     }
 
     static File rootfsTarball(Context ctx) {
@@ -594,6 +818,12 @@ final class Linux {
         String nd = nativeDir(ctx);
         Map<String, String> env = new HashMap<>();
         env.put("LINUX_ROOT", root(ctx).getAbsolutePath());
+        // Where the phone's own shell keeps a here-document while it runs. With
+        // none set, Android 10's mksh writes to /data/local, which an app may
+        // not: on a Redmi Note 7 setup stopped at once ("can't create temporary
+        // file /data/local/shm….tmp", FAILED: configure, 2026-11-22). The
+        // guest never sees it: proot starts the guest with env -i.
+        env.put("TMPDIR", ctx.getCacheDir().getAbsolutePath());
         env.put("LINUX_PROOT", nd + "/libproot.so");
         env.put("PROOT_LOADER", nd + "/libloader.so");
         env.put("PROOT_LOADER_32", nd + "/libloader32.so");
@@ -603,8 +833,20 @@ final class Linux {
         // linux-rt.sh treats an unset LINUX_SHARED as "no shared folder" and
         // skips the bind, which matters because proot fails FATALLY on a bad
         // -b source — an unusable path here would stop the container starting
-        // rather than cost it a folder.
-        if (ensureSharedDir()) env.put("LINUX_SHARED", sharedDir().getAbsolutePath());
+        // rather than cost it a folder. Never in a build that offers no shared
+        // folder (sharedFolderOffered): the folder may still exist, made by the
+        // desktop build, and binding one this app cannot write would hand the
+        // guest a folder that fails on every save.
+        boolean offered = sharedFolderOffered(ctx);
+        if (offered && ensureSharedDir()) {
+            env.put("LINUX_SHARED", sharedDir().getAbsolutePath());
+        }
+        // Whether this build has the folder at all, which LINUX_SHARED cannot
+        // say: it is also unset in a build that has one but not yet the grant.
+        // linux-setup.sh writes the file manager's bookmark to the folder only
+        // where it can ever be there (setup_share), and takes it out where it
+        // cannot. Always set, so an unset value keeps meaning a bare shell run.
+        env.put("LINUX_SHARED_OFFERED", offered ? "1" : "0");
         // The chooser's tick list. ALWAYS set, and never to the empty string:
         // the script treats an UNSET LINUX_APPS as DEFAULT_APPS so that a bare
         // shell run still builds the guest this app always built, and an empty
@@ -674,6 +916,9 @@ final class Linux {
         // the storage back; provision-on-launch would otherwise hand them the
         // download again three seconds after the next desktop start.
         if (isUninstalled(ctx)) return false;
+        // Nor while one is on its way: the wipe is queued, and an install
+        // started now would be built only to be deleted.
+        if (isRemoving(ctx)) return false;
         // Nothing may be provisioned until the user has said what to install.
         // The desktop kicks this three seconds into every launch, so without
         // the gate the download would start behind a question that has not
@@ -793,6 +1038,36 @@ final class Linux {
     /** Marker linux-rt.sh drops when a session ends by itself; see Status. */
     static File rtExit(Context ctx) {
         return new File(root(ctx), "rt.exit");
+    }
+
+    /**
+     * The runtime's lock file ({@link RuntimeLock}): held by the {@code :linux}
+     * process for exactly as long as a desktop it spawned is alive, and dropped
+     * by the kernel the moment that process dies.
+     *
+     * rt.pid alone cannot say whether a desktop is up. A runtime killed along
+     * with its process (an update, a force-stop, Android reclaiming memory)
+     * leaves rt.pid behind, and any later start of the service (remote access
+     * coming back, say) brings a {@code :linux} process up again, possibly
+     * with the very same pid. The lock is the one answer that cannot outlive
+     * the runtime. Beside the container rather than in it: a wipe must not
+     * delete the file a live holder has locked.
+     */
+    static File rtLock(Context ctx) {
+        return new File(ctx.getFilesDir(), "linux-rt.lock");
+    }
+
+    /**
+     * A desktop is running: rt.pid is there and the runtime's lock is held by
+     * the process that spawned it. For other processes only; {@code :linux}
+     * knows its own runtime ({@link LinuxService#runtimeAlive}) and must never
+     * open the lock file (see RuntimeLock).
+     *
+     * @return null when the lock cannot be asked about
+     */
+    static Boolean desktopRunning(Context ctx, Status st) {
+        if (!st.running) return false;
+        return RuntimeLock.heldElsewhere(rtLock(ctx));
     }
 
     /**

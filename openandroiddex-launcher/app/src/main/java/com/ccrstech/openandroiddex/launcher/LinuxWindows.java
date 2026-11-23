@@ -792,6 +792,16 @@ final class LinuxWindows implements LinuxWm.Host {
         return w == null ? null : w.titles.get(taskId);
     }
 
+    /** The caption's icon for one of our tasks: its Linux window's own, or null. Main thread. */
+    static Bitmap iconForTask(int taskId) {
+        LinuxWindows w = instance;
+        if (w == null) return null;
+        for (Entry e : w.entries.values()) {
+            if (e.taskId == taskId) return e.icon;
+        }
+        return null;
+    }
+
     /** Where a Linux window's place is remembered: by its app, not by the activity they all share. */
     static String memoryKeyForTask(int taskId) {
         LinuxWindows w = instance;

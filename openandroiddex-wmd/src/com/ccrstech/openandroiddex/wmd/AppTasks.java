@@ -258,4 +258,39 @@ final class AppTasks {
             return -1;
         }
     }
+
+    /** What {@link #focusOn} found. */
+    static final int FOCUS_UNKNOWN = -1;
+    static final int FOCUS_ELSEWHERE = 0;
+    static final int FOCUS_HERE = 1;
+
+    /**
+     * Whether {@code taskId} on {@code displayId} is the focused task — the one the keyboard
+     * goes to now — or a task inside the focused root task; FOCUS_UNKNOWN where the platform
+     * will not say. The window manager's answer: the input side follows it a frame or two
+     * later (the focus rides the next SurfaceFlinger transaction to the input dispatcher).
+     */
+    static int focusOn(int displayId, int taskId) {
+        Object atm = Wm.atm();
+        String name = Build.VERSION.SDK_INT >= 31 ? "getFocusedRootTaskInfo" : "getFocusedStackInfo";
+        Object info;
+        try {
+            info = Refl.callSig(atm, name, new Class<?>[]{});
+        } catch (Refl.WmError e) {
+            return FOCUS_UNKNOWN;
+        }
+        if (info == null) return FOCUS_ELSEWHERE;
+        Object d = fieldOr(info, "displayId", -1);
+        if (!(d instanceof Integer) || (Integer) d != displayId) return FOCUS_ELSEWHERE;
+        Object id = fieldOr(info, "taskId", null);
+        if (id == null) id = fieldOr(info, "stackId", -1);
+        if (id instanceof Integer && (Integer) id == taskId) return FOCUS_HERE;
+        Object children = fieldOr(info, Build.VERSION.SDK_INT >= 31 ? "childTaskIds" : "taskIds", null);
+        if (children instanceof int[]) {
+            for (int child : (int[]) children) {
+                if (child == taskId) return FOCUS_HERE;
+            }
+        }
+        return FOCUS_ELSEWHERE;
+    }
 }

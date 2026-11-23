@@ -685,7 +685,7 @@ fn first_online_device(app: &AppHandle) -> Option<String> {
             // At the tab: a serial named after an mDNS service can have a
             // space in it (see adb::split_device_line).
             let (serial, state) = l.split_once('\t')?;
-            (state.trim() == "device").then(|| serial.to_string())
+            (state.trim() == "device" && adb::phone_allowed(serial)).then(|| serial.to_string())
         })
         .next()
 }

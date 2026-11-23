@@ -50,9 +50,10 @@ const MACHINE = Object.freeze({
   failed: 'Authentication Failed',
 });
 
-/* Everything the user actually reads. English, in one place, so the i18n this
-   page does not yet have is a single object swap rather than a hunt. */
-const TEXT = Object.freeze({
+/* Everything the user reads that this script writes. English here; the words
+   in the window's language replace these at boot (loadText), with the
+   markup's own words, which carry their keys in data-t attributes. */
+const TEXT = {
   starting: 'Starting…',
   connecting: 'Connecting…',
   connected: 'Connected',
@@ -79,7 +80,103 @@ const TEXT = Object.freeze({
   fullOff: 'Fullscreen',
   clipOn: 'Clipboard shared with this computer',
   clipOff: 'Clipboard not shared',
-});
+  /* What a screen reader says for each key of the keys row (dex-keys.js); the
+     keycaps themselves stay as keyboards print them. */
+  keyEsc: 'Escape',
+  keyTab: 'Tab',
+  keyCtrl: 'Control',
+  keyAlt: 'Alt',
+  keySuper: 'Super',
+  keyShift: 'Shift',
+  keyLeft: 'Left arrow',
+  keyUp: 'Up arrow',
+  keyDown: 'Down arrow',
+  keyRight: 'Right arrow',
+  keyHome: 'Home',
+  keyEnd: 'End',
+  keyPgUp: 'Page up',
+  keyPgDn: 'Page down',
+  keyDel: 'Delete',
+  keyCad: 'Control Alt Delete',
+};
+
+/* ── the window's language ──────────────────────────────────────────────── */
+
+/*
+ * The Linux window says which language it is in (?lang=, LinuxActivity) and
+ * writes the words for it beside this page, from the app's own translations,
+ * as dex-text-<lang>.json (LinuxViewerText). They are loaded before boot, so
+ * nothing is ever drawn in English first. No lang, as on a computer's page or
+ * under an app that predates this, or a file that does not come: the English
+ * above and in the markup, unchanged. Never #status: that is the Activity's
+ * contract, and stays English (MACHINE).
+ *
+ * The bar stays left to right in every language: it is a row of pictures, and
+ * the bubble and the keys row are placed by coordinates. The parts that are
+ * words (the sheet, the tips) follow a right-to-left language.
+ */
+const RTL = ['ar', 'fa', 'he', 'ur'];
+const TEXT_WAIT_MS = 2000;   // a file that is slower than this is not waited for
+
+function loadText() {
+  const params = new URLSearchParams(location.search);
+  const lang = params.get('lang') || '';
+  if (!/^[a-z]{2,3}$/.test(lang) || lang === 'en') return Promise.resolve();
+  const file = 'dex-text-' + lang + '.json?v=' + encodeURIComponent(params.get('v') || '');
+  const got = fetch(file, { cache: 'no-store' })
+    .then((r) => (r.ok ? r.json() : null))
+    .then((words) => {
+      if (!words || typeof words !== 'object') return;
+      document.documentElement.lang = lang;
+      applyText(words, RTL.includes(lang));
+    })
+    .catch(() => { /* English, as written */ });
+  return Promise.race([got, new Promise((done) => setTimeout(done, TEXT_WAIT_MS))]);
+}
+
+function applyText(words, rtl) {
+  const say = (k) => (typeof words[k] === 'string' && words[k] ? words[k] : null);
+  for (const k of Object.keys(TEXT)) {
+    const s = say(k);
+    if (s) TEXT[k] = s;
+  }
+  document.querySelectorAll('[data-t]').forEach((el) => {
+    const s = say(el.dataset.t);
+    if (s) el.textContent = s;
+  });
+  document.querySelectorAll('[data-t-title]').forEach((el) => {
+    const s = say(el.dataset.tTitle);
+    if (s) el.title = s;
+  });
+  document.querySelectorAll('[data-t-aria]').forEach((el) => {
+    const s = say(el.dataset.tAria);
+    if (s) el.setAttribute('aria-label', s);
+  });
+  if (rtl) {
+    for (const id of ['sheet', 'coach', 'toast']) $(id).dir = 'rtl';
+  }
+  /* Words that come after boot (slower than TEXT_WAIT_MS): the loops above
+     have just put the markup's words back on labels the script keeps up to
+     date (the status word, the method, the keyboard, ...), so those are
+     painted again from what is true now, in the new words. */
+  if (booted) relabel();
+}
+
+/* Every label the script changes as things happen, painted from the state it
+   describes. Boot paints them as it goes; this is for words that change under
+   a running page. */
+function relabel() {
+  label.textContent = TEXT[labelKey];
+  paintMode();
+  paintKb();
+  paintFull();
+  paintShare();
+  paintZoomValue();
+  paintFoot();
+  document.querySelectorAll('#keys-row [data-say]').forEach((b) => {
+    if (TEXT[b.dataset.say]) b.setAttribute('aria-label', TEXT[b.dataset.say]);
+  });
+}
 
 /* ── constants ──────────────────────────────────────────────────────────── */
 
@@ -223,15 +320,24 @@ function setShare(on) {
     el.hidden = false;
     el.classList.toggle('on', on);
     el.setAttribute('aria-pressed', String(on));
-    el.setAttribute('aria-label', on ? TEXT.clipOn : TEXT.clipOff);
-    el.title = on ? TEXT.clipOn : TEXT.clipOff;
   }
+  paintShare();
   if (on) return;
   pasteWaiting = null;
   /* Off means off: the computer's text, if that is what the guest has, does
      not stay there to be pasted. The guest's own clipboard is left alone. */
   if (was && fromHost && rfb && !ui.down) rfb.clipboardPasteFrom('');
   fromHost = false;
+}
+
+/* What the clipboard button says, once the window has said which way it is;
+   until then it keeps the markup's plain "Clipboard". */
+function paintShare() {
+  if (share === null) return;
+  for (const id of ['clip', 'p-clip']) {
+    $(id).setAttribute('aria-label', share ? TEXT.clipOn : TEXT.clipOff);
+    $(id).title = share ? TEXT.clipOn : TEXT.clipOff;
+  }
 }
 
 /*
@@ -310,10 +416,8 @@ function toggleFullscreen() {
 let chromeBeforeFull = null;
 
 function setFullscreenChrome(on) {
-  for (const id of ['full', 'p-full']) {
-    $(id).classList.toggle('on', on);
-    $(id).setAttribute('aria-label', on ? TEXT.fullOn : TEXT.fullOff);
-  }
+  for (const id of ['full', 'p-full']) $(id).classList.toggle('on', on);
+  paintFull();
   if (on && chromeBeforeFull === null) {
     chromeBeforeFull = ui.chrome === 'docked' ? 'docked' : 'bubble';
     if (ui.chrome === 'docked') setChrome('bubble', false);
@@ -322,6 +426,11 @@ function setFullscreenChrome(on) {
     chromeBeforeFull = null;
     if (back === 'docked' && ui.chrome !== 'docked') setChrome('docked', false);
   }
+}
+
+function paintFull() {
+  const on = $('full').classList.contains('on');
+  for (const id of ['full', 'p-full']) $(id).setAttribute('aria-label', on ? TEXT.fullOn : TEXT.fullOff);
 }
 
 /* ── state ──────────────────────────────────────────────────────────────── */
@@ -363,6 +472,10 @@ const sheet = $('sheet');
 const scrim = $('scrim');
 const statusEl = $('status');
 const label = $('label');
+/* Which of TEXT's words the label shows, so new words can say the same thing. */
+let labelKey = 'connecting';
+/* boot() has begun: words that come now come late (applyText, relabel). */
+let booted = false;
 const dot = $('dot');
 const coachEl = $('coach');
 const toastEl = $('toast');
@@ -377,7 +490,7 @@ function connect() {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   const url = proto + '://' + location.host + '/websockify';
 
-  setStatus('connecting', TEXT.connecting, '');
+  setStatus('connecting', 'connecting', '');
 
   rfb = new RFB(screenEl, url, { credentials: { password } });
 
@@ -400,7 +513,7 @@ function connect() {
 
   rfb.addEventListener('connect', () => {
     connectedAt = Date.now();
-    setStatus('connected', TEXT.connecting, '');
+    setStatus('connected', 'connecting', '');
     canvas = canvas || screenEl.querySelector('canvas');
     watchFramebuffer();
     /* A computer's keyboard types into the desktop from the first key, with
@@ -464,6 +577,7 @@ function onFramebuffer() {
        on one yet. Enabling it first makes noVNC scale to nothing for a frame. */
     layout();
     rfb.scaleViewport = true;
+    labelKey = 'connected';
     label.textContent = TEXT.connected;
     dot.classList.add('live');
     dot.classList.remove('bad');
@@ -500,7 +614,7 @@ function down(kind) {
   ui.down = true;
   clearTimeout(followTimer);
   document.body.classList.add('is-down');
-  setStatus(kind, TEXT.reconnecting, 'bad');
+  setStatus(kind, 'reconnecting', 'bad');
   if (input) input.releaseAll();
   if (keys) keys.clearLatches();
   setKb(false);
@@ -514,12 +628,14 @@ function down(kind) {
  * own load retries. A second loop in here would race it, burn that budget
  * invisibly, and put two sockets on one Xvnc.
  */
-function setStatus(machineKey, visible, dotClass) {
+/* textKey: which of TEXT's words the label shows (labelKey, relabel). */
+function setStatus(machineKey, textKey, dotClass) {
   statusEl.textContent = MACHINE[machineKey];
   /* The app's window reconnects on a computer, the way LinuxActivity's retry
      ladder does on the phone, and this is the only way it can tell. */
   tellHost({ status: machineKey });
-  label.textContent = visible;
+  labelKey = textKey;
+  label.textContent = TEXT[textKey];
   label.classList.remove('quiet');
   dot.classList.remove('live', 'bad');
   if (dotClass) dot.classList.add(dotClass);
@@ -1106,11 +1222,15 @@ function setKb(on) {
   document.body.classList.toggle('kb', ui.kb);
   $('kb').classList.toggle('on', ui.kb);
   $('p-kb').classList.toggle('on', ui.kb);
+  paintKb();
+  if (ui.kb) { keys.showKeyboard(); setKeys(true, true); }
+  else { keys.hideKeyboard(); setKeys(store.get('keys', '0') === '1', true); }
+}
+
+function paintKb() {
   const aria = ui.kb ? TEXT.kbHide : TEXT.kbShow;
   $('kb').setAttribute('aria-label', aria);
   $('p-kb').setAttribute('aria-label', aria);
-  if (ui.kb) { keys.showKeyboard(); setKeys(true, true); }
-  else { keys.hideKeyboard(); setKeys(store.get('keys', '0') === '1', true); }
 }
 
 function setKeys(on, transient) {
@@ -1416,8 +1536,13 @@ const api = {
 function setDesktopChrome(on) {
   if (document.body.classList.contains('is-desktop') === on) return;
   document.body.classList.toggle('is-desktop', on);
-  $('sheet-foot').textContent = on ? TEXT.footDesktop : TEXT.footTouch;
+  paintFoot();
   layout();
+}
+
+function paintFoot() {
+  $('sheet-foot').textContent = document.body.classList.contains('is-desktop')
+    ? TEXT.footDesktop : TEXT.footTouch;
 }
 
 /*
@@ -1445,6 +1570,7 @@ window.dexContext = function (next) {
 };
 
 function boot() {
+  booted = true;
   ctx = readCtx();
   if (ctx === 'pc') {
     document.body.classList.add('is-pc');
@@ -1470,4 +1596,5 @@ function boot() {
   connect();
 }
 
-boot();
+/* The words first (they never fail: English is the fallback), then the rest. */
+loadText().then(boot);

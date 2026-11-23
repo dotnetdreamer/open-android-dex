@@ -98,4 +98,23 @@ final class DexLocale {
         config.setLayoutDirection(locale);
         return base.createConfigurationContext(config);
     }
+
+    /**
+     * Set a TextView's words the way its screen is laid out, not by their own
+     * first letter: on an Arabic screen "Firefox" or "LinuxOnDroid" belongs on
+     * the right with everything else, where by its letters it would sit on the
+     * left. Only where the app lays out right to left at all (LinuxOnDroid
+     * declares supportsRtl; the desktop build does not), and decided from the
+     * view's own configuration: TEXT_DIRECTION_LOCALE would go by the process's
+     * default Locale, which {@link #wrap} resets to the {@link #SYSTEM} it
+     * captured, so it can name another language than the screen is in.
+     */
+    static void followLayout(android.widget.TextView t) {
+        Context c = t.getContext();
+        if ((c.getApplicationInfo().flags & android.content.pm.ApplicationInfo.FLAG_SUPPORTS_RTL) != 0
+                && c.getResources().getConfiguration().getLayoutDirection()
+                == android.view.View.LAYOUT_DIRECTION_RTL) {
+            t.setTextDirection(android.view.View.TEXT_DIRECTION_RTL);
+        }
+    }
 }

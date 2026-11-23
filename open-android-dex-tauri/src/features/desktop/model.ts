@@ -48,3 +48,35 @@ export function deviceName(d: DeviceInfo): string {
 export function routeName(d: DeviceInfo): string {
   return d.connection === "wifi" ? "Wi‑Fi" : "USB cable";
 }
+
+/**
+ * Whether two of adb's entries are one phone: the same serial, or the same
+ * phone on the cable and on Wi-Fi at once, which adb lists twice under one
+ * ro.serialno. Two entries on the cable are always two phones, whatever they
+ * report: every emulator gives the same ro.serialno, and so do some phones.
+ */
+export function samePhone(a: DeviceInfo, b: DeviceInfo): boolean {
+  if (a.serial === b.serial) return true;
+  if (a.connection === "usb" && b.connection === "usb") return false;
+  return !!a.hardwareSerial && a.hardwareSerial === b.hardwareSerial;
+}
+
+/**
+ * The phones ready to use, once each. One on the cable and on Wi-Fi at once
+ * is offered on the cable, the quicker of the two.
+ */
+export function readyPhones(devices: DeviceInfo[]): DeviceInfo[] {
+  const phones: DeviceInfo[] = [];
+  for (const d of devices) {
+    if (d.state !== "device") continue;
+    const seen = phones.findIndex((p) => samePhone(p, d));
+    if (seen < 0) phones.push(d);
+    else if (d.connection === "usb") phones[seen] = d;
+  }
+  return phones;
+}
+
+/** The phones ready to use besides `main`, once each. */
+export function otherPhones(devices: DeviceInfo[], main: DeviceInfo | undefined): DeviceInfo[] {
+  return readyPhones(devices).filter((d) => !main || !samePhone(d, main));
+}

@@ -1,15 +1,17 @@
 //! A phone running postmarketOS, on the Desktop tab: a screen of its own on
-//! the phone, made by its desktop (KDE Plasma), in a window here, the way DeX
-//! gives an Android phone's.
+//! the phone, made by its desktop (KDE Plasma or Phosh), in a window here, the
+//! way DeX gives an Android phone's.
 //!
 //! There is no adb. postmarketOS puts a network on the USB cable instead, on
 //! which the phone is always 172.16.42.1, with SSH. Over that SSH this computer
 //! signs in once with the phone's own password, leaves a key of its own in its
 //! authorized_keys, and from then on needs nothing typed: it puts its helper
 //! on the phone (openandroiddex-pmos, built in that folder and embedded here),
-//! starts it, and talks to it on its stdin and stdout. The helper asks KWin for
-//! a virtual output the size of this computer's screen, which Plasma fills
-//! with a desktop as it would a monitor plugged in, and sends it as H.264; the
+//! starts it, and talks to it on its stdin and stdout. On Plasma the helper
+//! asks KWin for a virtual output the size of this computer's screen, which
+//! Plasma fills with a desktop as it would a monitor plugged in; on Phosh it
+//! sizes wlroots' headless output and makes it Phosh's primary screen (see the
+//! helper's "Phosh" section). Either way it sends the screen as H.264, and the
 //! window sends the mouse and keyboard back.
 //!
 //! The window is the one the phone's Linux uses over adb (UsbDesktop.tsx),
@@ -22,6 +24,12 @@
 //!
 //! One phone at a time: every postmarketOS phone is 172.16.42.1 on its cable.
 //! Which one is plugged in is told by its SSH host key, which pairing pins.
+//!
+//! The clipboard rides the window's socket as `clip` messages, which the
+//! helper puts on the phone's clipboard and takes from it. Files dropped on the
+//! window go over a second channel of the same SSH connection, to the helper's
+//! `receive`, into the phone's Downloads; then the helper drops them on the app
+//! where they were let go of (`pmos_put`).
 
 use std::net::{Ipv4Addr, SocketAddr, UdpSocket};
 use std::path::PathBuf;
@@ -29,17 +37,19 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
+use dexremote::sftp::{self, CancellationToken};
 use russh::client::{self, Handle};
 use russh::keys::ssh_key::private::Ed25519Keypair;
 use russh::keys::{HashAlg, PrivateKey, PrivateKeyWithHashAlg, PublicKeyOrCertificate};
 use russh::ChannelMsg;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use tauri::ipc::Channel;
 use tauri::webview::NewWindowResponse;
 use tauri::{AppHandle, Emitter, Manager, Url, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{mpsc, oneshot, watch};
 
 /// The phone's end of postmarketOS's USB network. Every phone is this address
 /// on its own cable; the computer's end is given an address beside it.
@@ -60,6 +70,24 @@ fn wifi_address() -> Option<&'static str> {
         a
     })
     .as_deref()
+}
+
+/// A test of a desktop other than the phone's own session (a nested KWin on
+/// the phone, say): `OADX_PMOS_ENV` names a shell file on the phone that the
+/// helper's commands source first, setting its Wayland socket, session bus
+/// and folders. What it returns goes in front of each command run there.
+fn test_env() -> &'static str {
+    static ENV: OnceLock<String> = OnceLock::new();
+    ENV.get_or_init(|| {
+        let file = std::env::var("OADX_PMOS_ENV").ok().map(|f| f.trim().to_string()).filter(|f| !f.is_empty());
+        match file {
+            Some(f) if !f.contains('\'') => {
+                log::info!("pmos: the helper's commands source {f} on the phone first (OADX_PMOS_ENV)");
+                format!(". '{f}'; ")
+            }
+            _ => String::new(),
+        }
+    })
 }
 
 /// Which network the phone is looked for on, for the log.
@@ -364,6 +392,11 @@ pub struct PmosPhone {
 /// per plug-in; after that this is a routing-table lookup.
 #[tauri::command]
 pub async fn pmos_status(app: AppHandle) -> Option<PmosPhone> {
+    // A test run that names its phones (OADX_ONLY_PHONES) leaves a
+    // postmarketOS phone alone unless `pmos` is one of them.
+    if !crate::adb::pmos_allowed() {
+        return None;
+    }
     if !link_up() {
         *seen().lock().unwrap() = None;
         return None;
@@ -430,7 +463,7 @@ fn field<'a>(text: &'a str, key: &str) -> &'a str {
 pub async fn pmos_pair(app: AppHandle, user: String, password: String) -> Result<PmosPhone, String> {
     let user = user.trim().to_string();
     if user.is_empty() || password.is_empty() {
-        return Err("Enter the username and password you use on the phone.".into());
+        return Err("Enter the username and the password or PIN you use on the phone.".into());
     }
     let (mut ssh, host_key) = connect(None).await?;
     let answer = ssh
@@ -439,7 +472,7 @@ pub async fn pmos_pair(app: AppHandle, user: String, password: String) -> Result
         .map_err(|e| format!("SSH to the phone failed: {e}"))?;
     if !answer.success() {
         hang_up(&ssh).await;
-        return Err("That username or password didn't work on the phone.".into());
+        return Err("That username and password or PIN didn't work on the phone.".into());
     }
     let about = run(&ssh, ABOUT, None, Duration::from_secs(10)).await?.out;
     let arch = field(&about, "arch");
@@ -503,6 +536,12 @@ struct Session {
     label: String,
     port: u16,
     token: String,
+    /// The phone's SSH: the helper's channel, and a channel for each drop's files beside it.
+    ssh: Arc<Handle<Pin>>,
+    /// What the phone's desktop lets the helper do, as it said when the screen was up:
+    /// the clipboard (Wayland's data-control), and dropping files on the app under them.
+    clipboard: bool,
+    carry: bool,
     /// Framed messages for the helper's stdin.
     to_helper: mpsc::UnboundedSender<Vec<u8>>,
     /// The window's socket while one is open, by its number: a new one takes over.
@@ -511,9 +550,38 @@ struct Session {
     end: watch::Sender<Option<String>>,
     /// The helper's output has ended: it has exited, or the link has gone.
     gone: watch::Sender<bool>,
+    /// The copy of a drop under way, to stop.
+    copy: Mutex<Option<CancellationToken>>,
+    /// Waiting for the helper to say whether the app under a drop took it.
+    dropped: Mutex<Option<oneshot::Sender<serde_json::Value>>>,
+    /// One of the phone's apps in a window of its own (`serve --app`); None, the phone's desktop.
+    app: Option<AppOf>,
+    /// The helper ended it as it should end ("stopped": an app closed on the phone), not for a failure.
+    stopped: AtomicBool,
+    /// For what the helper says of an app's window: its title.
+    handle: AppHandle,
+}
+
+/// What an app's window is (the Apps page's "Open").
+#[derive(Clone, Debug)]
+struct AppOf {
+    /// Its desktop file, without .desktop: what the helper starts.
+    id: String,
+    /// Its name, which the window is called until the app's own window says.
+    name: String,
+    /// Which of the screens kept for apps it has: OADX-App-<slot> on the phone, pmos-app-<slot> here.
+    slot: u8,
 }
 
 impl Session {
+    /// Which window this is, for the log: the desktop's, or an app's.
+    fn window_name(&self) -> String {
+        match &self.app {
+            Some(a) => format!("{}'s window", a.name),
+            None => "the desktop's window".into(),
+        }
+    }
+
     fn finish(&self, why: &str) {
         self.end.send_if_modified(|v| {
             if v.is_none() {
@@ -547,6 +615,31 @@ fn session() -> &'static Mutex<Option<Arc<Session>>> {
 
 fn current() -> Option<Arc<Session>> {
     session().lock().unwrap().clone().filter(|s| !s.ended())
+}
+
+/// The phone's apps in windows of their own, beside the desktop: one session each.
+fn app_sessions() -> &'static Mutex<Vec<Arc<Session>>> {
+    static APPS: OnceLock<Mutex<Vec<Arc<Session>>>> = OnceLock::new();
+    APPS.get_or_init(Default::default)
+}
+
+/// The session a window here belongs to: the desktop's, or an app's.
+fn by_label(label: &str) -> Option<Arc<Session>> {
+    if let Some(s) = current().filter(|s| s.label == label) {
+        return Some(s);
+    }
+    app_sessions().lock().unwrap().iter().find(|s| s.label == label && !s.ended()).cloned()
+}
+
+/// A session that has ended is no one's any more.
+fn unregister(s: &Arc<Session>) {
+    {
+        let mut slot = session().lock().unwrap();
+        if slot.as_ref().is_some_and(|c| Arc::ptr_eq(c, s)) {
+            *slot = None;
+        }
+    }
+    app_sessions().lock().unwrap().retain(|c| !Arc::ptr_eq(c, s));
 }
 
 /// A launch under way: one at a time, and the auto-open and a click do not both start one.
@@ -741,15 +834,46 @@ async fn launch(app: &AppHandle, phone: &Paired) -> Result<(), String> {
 
     let fit = fit(app);
     let command = format!(
-        "exec \"{HELPER_PATH}\" serve --width {} --height {} --scale {:.4} --cap {CAP}",
-        fit.width, fit.height, fit.scale
+        "{}exec \"{HELPER_PATH}\" serve --width {} --height {} --scale {:.4} --cap {CAP}",
+        test_env(),
+        fit.width,
+        fit.height,
+        fit.scale
     );
     log::info!("pmos: asking for a {}x{} screen at scale {:.3}", fit.width, fit.height, fit.scale);
+    let (read, write, buf, ready) = start_helper(&ssh, command, "the desktop").await?;
+    log::info!("pmos: the phone's screen is up: {ready}");
+    tell(app, &phone.id, &phone.name, "launching", Some(2), None);
+
+    let s = begin(app, phone, ssh, read, write, buf, &ready, None).await?;
+    if let Err(e) = open_window(app, &s, &fit) {
+        // Undone here rather than by wind_down, which would call it closed
+        // over the failure the Desktop tab is about to be told.
+        s.finish("");
+        unregister(&s);
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        hang_up(&s.ssh).await;
+        return Err(format!("Couldn't open the desktop's window: {e}"));
+    }
+    tauri::async_runtime::spawn(wind_down(app.clone(), s.clone()));
+    tell(app, &s.id, &s.name, "running", Some(3), None);
+    Ok(())
+}
+
+type HelperRead = russh::ChannelReadHalf;
+type HelperWrite = russh::ChannelWriteHalf<client::Msg>;
+
+/// The helper started with `command`, up to its first word: ready, with what
+/// it says of the screen (and what came after it, still to read), or why not.
+/// `what` is what it was starting, for those words: "the desktop", an app's name.
+async fn start_helper(
+    ssh: &Handle<Pin>,
+    command: String,
+    what: &str,
+) -> Result<(HelperRead, HelperWrite, Vec<u8>, serde_json::Value), String> {
     let channel = ssh.channel_open_session().await.map_err(|e| e.to_string())?;
     channel.exec(true, command).await.map_err(|e| e.to_string())?;
     let (mut read, write) = channel.split();
-
-    // Up to its first word: ready, or why not.
     let mut buf = Vec::new();
     let ready = tokio::time::timeout(Duration::from_secs(30), async {
         let mut why = String::new();
@@ -765,7 +889,10 @@ async fn launch(app: &AppHandle, phone: &Paired) -> Result<(), String> {
                         match msg["t"].as_str() {
                             Some("ready") => return Ok(msg),
                             Some("state") if msg["state"] != "running" && msg["state"] != "starting" => {
-                                return Err(msg["message"].as_str().unwrap_or("The phone couldn't start the desktop.").to_string())
+                                return Err(msg["message"]
+                                    .as_str()
+                                    .map(str::to_string)
+                                    .unwrap_or_else(|| format!("The phone couldn't start {what}.")))
                             }
                             _ => {}
                         }
@@ -781,22 +908,35 @@ async fn launch(app: &AppHandle, phone: &Paired) -> Result<(), String> {
                 Some(_) => {}
                 None => {
                     return Err(if why.is_empty() {
-                        "The phone's helper stopped before the desktop was up.".to_string()
+                        format!("The phone's helper stopped before {what} was up.")
                     } else {
-                        format!("The phone couldn't start the desktop: {why}")
+                        format!("The phone couldn't start {what}: {why}")
                     })
                 }
             }
         }
     })
     .await
-    .map_err(|_| "The phone took too long to make the desktop's screen.".to_string())??;
-    log::info!("pmos: the phone's screen is up: {ready}");
-    tell(app, &phone.id, &phone.name, "launching", Some(2), None);
+    .map_err(|_| format!("The phone took too long to make {what}'s screen."))??;
+    Ok((read, write, buf, ready))
+}
 
+/// A session, its helper up: the window's port and its token, the helper's
+/// two directions, the heartbeat. The desktop's, or an app's (`app`).
+#[allow(clippy::too_many_arguments)]
+async fn begin(
+    app: &AppHandle,
+    phone: &Paired,
+    ssh: Handle<Pin>,
+    read: HelperRead,
+    write: HelperWrite,
+    buf: Vec<u8>,
+    ready: &serde_json::Value,
+    app_of: Option<AppOf>,
+) -> Result<Arc<Session>, String> {
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
         .await
-        .map_err(|e| format!("cannot open a local port for the desktop: {e}"))?;
+        .map_err(|e| format!("cannot open a local port for the window: {e}"))?;
     let port = listener.local_addr().map_err(|e| e.to_string())?.port();
     let mut token = [0u8; 16];
     if !crate::wireless::fill_random(&mut token) {
@@ -805,37 +945,41 @@ async fn launch(app: &AppHandle, phone: &Paired) -> Result<(), String> {
     let (to_helper, helper_rx) = mpsc::unbounded_channel();
     let (end, _) = watch::channel(None);
     let (gone, _) = watch::channel(false);
+    let label = match &app_of {
+        Some(a) => app_label_for(a.slot),
+        None => label_for(&phone.id),
+    };
     let s = Arc::new(Session {
         id: phone.id.clone(),
         name: phone.name.clone(),
-        label: label_for(&phone.id),
+        label,
         port,
         token: token.iter().map(|b| format!("{b:02x}")).collect(),
+        ssh: Arc::new(ssh),
+        clipboard: ready["clipboard"].as_bool().unwrap_or(false),
+        carry: ready["carry"].as_bool().unwrap_or(false),
         to_helper,
         window: Mutex::new(None),
         end,
         gone,
+        copy: Mutex::new(None),
+        dropped: Mutex::new(None),
+        app: app_of,
+        stopped: AtomicBool::new(false),
+        handle: app.clone(),
     });
-    *session().lock().unwrap() = Some(s.clone());
+    if s.app.is_some() {
+        app_sessions().lock().unwrap().push(s.clone());
+    } else {
+        *session().lock().unwrap() = Some(s.clone());
+    }
 
     tauri::async_runtime::spawn(write_helper(write, helper_rx, s.clone()));
     tauri::async_runtime::spawn(read_helper(read, buf, s.clone()));
     tauri::async_runtime::spawn(heartbeat(s.clone()));
     let dev = if tauri::is_dev() { app.config().build.dev_url.clone().map(|u| u.origin().ascii_serialization()) } else { None };
     tauri::async_runtime::spawn(serve(listener, s.clone(), dev));
-
-    if let Err(e) = open_window(app, &s, &fit) {
-        // Undone here rather than by wind_down, which would call it closed
-        // over the failure the Desktop tab is about to be told.
-        s.finish("");
-        *session().lock().unwrap() = None;
-        tokio::time::sleep(Duration::from_millis(300)).await;
-        hang_up(&ssh).await;
-        return Err(format!("Couldn't open the desktop's window: {e}"));
-    }
-    tauri::async_runtime::spawn(wind_down(app.clone(), s.clone(), ssh));
-    tell(app, &s.id, &s.name, "running", Some(3), None);
-    Ok(())
+    Ok(s)
 }
 
 /// The helper's stderr, line by line, without GStreamer's noise about a
@@ -880,6 +1024,22 @@ async fn read_helper(mut read: russh::ChannelReadHalf, mut buf: Vec<u8>, s: Arc<
                 if msg["state"] == "stopped" || msg["state"] == "failed" {
                     *why = msg["message"].as_str().unwrap_or_default().to_string();
                 }
+                if msg["state"] == "stopped" {
+                    s.stopped.store(true, Ordering::SeqCst);
+                }
+            }
+            // The answer to a drop is pmos_put's, not the window's.
+            if kind == 0 && payload.starts_with(br#"{"t":"dropped""#) {
+                if let Some(waiting) = s.dropped.lock().unwrap().take() {
+                    let _ = waiting.send(serde_json::from_slice(&payload).unwrap_or_default());
+                }
+                continue;
+            }
+            // An app's window is called what the app's own window in front is.
+            if kind == 0 && payload.starts_with(br#"{"t":"title""#) {
+                let msg: serde_json::Value = serde_json::from_slice(&payload).unwrap_or_default();
+                retitle(&s, msg["title"].as_str().unwrap_or_default());
+                continue;
             }
             s.to_window(kind, payload);
         }
@@ -918,7 +1078,7 @@ async fn heartbeat(s: Arc<Session>) {
 
 /// Once the session ends, however it does: the phone let go of, the window
 /// closed, and the Desktop tab told why.
-async fn wind_down(app: AppHandle, s: Arc<Session>, ssh: Handle<Pin>) {
+async fn wind_down(app: AppHandle, s: Arc<Session>) {
     let mut end = s.end.subscribe();
     while end.borrow().is_none() {
         if end.changed().await.is_err() {
@@ -926,22 +1086,29 @@ async fn wind_down(app: AppHandle, s: Arc<Session>, ssh: Handle<Pin>) {
         }
     }
     let why = end.borrow().clone().unwrap_or_default();
+    // A copy under way stops: what it was in the middle of is taken back on the phone.
+    if let Some(copy) = s.copy.lock().unwrap().as_ref() {
+        copy.cancel();
+    }
     // The helper's stop, written by write_helper, and then its end: before it
     // closes the screen it puts the screen's first mode back and takes its
     // custom modes away (kscreen-doctor, a second or so), and says so. A
     // hang-up before that loses its word; with the link gone it is at once.
     let mut gone = s.gone.subscribe();
     let _ = tokio::time::timeout(Duration::from_secs(4), gone.wait_for(|g| *g)).await;
-    hang_up(&ssh).await;
-    {
-        let mut slot = session().lock().unwrap();
-        if slot.as_ref().is_some_and(|c| Arc::ptr_eq(c, &s)) {
-            *slot = None;
-        }
-    }
+    hang_up(&s.ssh).await;
+    unregister(&s);
     s.window.lock().unwrap().take();
     if let Some(w) = app.get_webview_window(&s.label) {
         let _ = w.close();
+    }
+    if let Some(a) = &s.app {
+        // An app's window: the Apps page hears it went, and why when it wasn't asked to.
+        log::info!("pmos: {} on {} ended{}", a.name, s.name, if why.is_empty() { String::new() } else { format!(": {why}") });
+        // Closed on the phone, or here: nothing to say. Anything else is why it went.
+        let message = if s.stopped.load(Ordering::SeqCst) { String::new() } else { why };
+        apps_changed(&app, Some(AppEnded { phone: s.id.clone(), app: a.id.clone(), name: a.name.clone(), message }));
+        return;
     }
     log::info!("pmos: the desktop of {} ended{}", s.name, if why.is_empty() { String::new() } else { format!(": {why}") });
     tell(&app, &s.id, &s.name, "ended", None, (!why.is_empty()).then_some(why));
@@ -955,9 +1122,9 @@ pub fn pmos_close() {
     }
 }
 
-/// The phone's desktop window has gone: so has its session.
+/// A window of a phone's (its desktop's, one of its apps') has gone: so has its session.
 pub fn window_closed(label: &str) {
-    if let Some(s) = current().filter(|s| s.label == label) {
+    if let Some(s) = by_label(label) {
         s.finish("");
     }
 }
@@ -965,6 +1132,9 @@ pub fn window_closed(label: &str) {
 /// The app is quitting.
 pub fn close_all() {
     if let Some(s) = current() {
+        s.finish("");
+    }
+    for s in app_sessions().lock().unwrap().iter() {
         s.finish("");
     }
 }
@@ -1005,17 +1175,764 @@ fn may_navigate(dev: Option<&Url>, url: &Url) -> bool {
 pub struct PmosLink {
     url: String,
     name: String,
+    /// The phone can share its clipboard: the window shows the switch for it.
+    clipboard: bool,
+    /// Files dropped on the window can be dropped on the app under them, not only saved in Downloads.
+    carry: bool,
+    /// The app's name, for an app's window; none for the desktop's.
+    app: Option<String>,
 }
 
 /// From the phone's desktop window: the WebSocket to open. A window gets its
 /// own phone's and no other.
 #[tauri::command]
 pub fn pmos_window_link(window: WebviewWindow, id: String) -> Result<PmosLink, String> {
-    let s = current().ok_or("The phone's desktop has closed.")?;
-    if window.label() != s.label || s.id != id {
+    let s = by_label(window.label()).ok_or("This window's connection to the phone has closed.")?;
+    if s.id != id {
         return Err("this window belongs to another phone".into());
     }
-    Ok(PmosLink { url: format!("ws://127.0.0.1:{}/stream/{}", s.port, s.token), name: s.name.clone() })
+    Ok(PmosLink {
+        url: format!("ws://127.0.0.1:{}/stream/{}", s.port, s.token),
+        name: s.name.clone(),
+        clipboard: s.clipboard,
+        carry: s.carry,
+        app: s.app.as_ref().map(|a| a.name.clone()),
+    })
+}
+
+// ── the phone's apps, each in a window of its own ───────────────────────
+
+// The Apps page lists a postmarketOS phone's apps beside an Android phone's,
+// and opens each in a window of its own, as it does an Android app or a Linux
+// app of an Android phone's (apps-on-pc.md). On the phone that is the
+// helper's `serve --app` (main.c, "One app's window"): a screen of its own,
+// made and streamed as the desktop's is, the size of the window here, with the
+// app's windows on it full screen; closing the window here puts the app back
+// on the phone's own screen. The window is the desktop's (PmosDesktop.tsx,
+// UsbDesktop.tsx), and so are its clipboard and its drops; it is called what
+// the app's window in front is called.
+
+/// The apps' screens: OADX-App-<n> on the phone. Not "OpenAndroidDeX…": the
+/// desktop's helper finds its own screen by that name.
+const APP_SLOTS: u8 = 8;
+
+fn app_label_for(slot: u8) -> String {
+    format!("pmos-app-{slot}")
+}
+
+/// One login at a time for the Apps page, listing or opening: each costs the
+/// phone's sshd a PAM run, and a pile of them once soft-locked a phone (see
+/// pmos-desktop.md).
+fn apps_lock() -> &'static tokio::sync::Mutex<()> {
+    static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(Default::default)
+}
+
+fn paired(app: &AppHandle, id: &str) -> Result<Paired, String> {
+    paired_all(app)
+        .into_iter()
+        .find(|p| p.id == id)
+        .ok_or_else(|| "This computer hasn't signed in to that phone. Plug it in and sign in again.".to_string())
+}
+
+/// Signed in to the phone with this computer's key, and the helper there.
+async fn reach(app: &AppHandle, phone: &Paired) -> Result<Handle<Pin>, String> {
+    let (mut ssh, _) = connect(Some(&phone.host_key)).await?;
+    let seed = client_seed(app)?;
+    login(&mut ssh, &phone.user, &seed).await?;
+    deploy(&ssh).await?;
+    Ok(ssh)
+}
+
+/// One of the phone's apps, as its launcher lists it.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PmosApp {
+    /// Its desktop file, without .desktop.
+    id: String,
+    name: String,
+    /// Its icon as a data URL, SVG or PNG; none when the phone has none for it.
+    icon: Option<String>,
+}
+
+/// The apps of a phone this computer has signed in to, for the Apps page: what
+/// its own launcher lists, with their icons (the helper's `apps`).
+#[tauri::command]
+pub async fn pmos_apps(app: AppHandle, id: String) -> Result<Vec<PmosApp>, String> {
+    let phone = paired(&app, &id)?;
+    let _one = apps_lock().lock().await;
+    let ssh = reach(&app, &phone).await?;
+    let ran = run(&ssh, &format!("{}exec \"{HELPER_PATH}\" apps", test_env()), None, Duration::from_secs(30)).await;
+    hang_up(&ssh).await;
+    let ran = ran?;
+    for line in phone_lines(&ran.err) {
+        log::info!("pmos: phone: {line}");
+    }
+    let v: serde_json::Value =
+        serde_json::from_str(&ran.out).map_err(|e| format!("The phone's list of apps didn't come through: {e}"))?;
+    let mut apps: Vec<PmosApp> = v["apps"]
+        .as_array()
+        .map(|all| {
+            all.iter()
+                .filter_map(|a| {
+                    let id = a["id"].as_str()?.to_string();
+                    let kind = if a["type"] == "svg" { "svg+xml" } else { "png" };
+                    Some(PmosApp {
+                        name: a["name"].as_str().unwrap_or(&id).to_string(),
+                        icon: a["icon"].as_str().map(|b64| format!("data:image/{kind};base64,{b64}")),
+                        id,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    apps.sort_by_key(|a| a.name.to_lowercase());
+    log::info!("pmos: {} apps on {}", apps.len(), phone.name);
+    Ok(apps)
+}
+
+/// An app's window on the Apps page: which phone's, which app.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenApp {
+    phone: String,
+    app: String,
+}
+
+/// An app's window that went, and why when it wasn't asked to (the app closed
+/// on the phone, or never opened).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AppEnded {
+    phone: String,
+    app: String,
+    name: String,
+    message: String,
+}
+
+fn open_apps() -> Vec<OpenApp> {
+    app_sessions()
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|s| !s.ended())
+        .filter_map(|s| s.app.as_ref().map(|a| OpenApp { phone: s.id.clone(), app: a.id.clone() }))
+        .collect()
+}
+
+fn apps_changed(app: &AppHandle, ended: Option<AppEnded>) {
+    let _ = app.emit("pmos:apps", serde_json::json!({ "open": open_apps(), "ended": ended }));
+}
+
+/// The phone's apps in windows of their own now, for an Apps page just opened.
+#[tauri::command]
+pub fn pmos_app_windows() -> Vec<OpenApp> {
+    open_apps()
+}
+
+/// Apps being opened, by phone and app: a second click waits for the first.
+fn opening() -> &'static Mutex<std::collections::HashSet<(String, String)>> {
+    static OPENING: OnceLock<Mutex<std::collections::HashSet<(String, String)>>> = OnceLock::new();
+    OPENING.get_or_init(Default::default)
+}
+
+/// Open one of the phone's apps in a window of its own, or bring its window to
+/// the front if it has one. `icon` is the app's icon as a PNG, for the
+/// window's own (the Apps page draws it, SVG or not). Returns once the window is.
+#[tauri::command]
+pub async fn pmos_open_app(
+    app: AppHandle,
+    id: String,
+    app_id: String,
+    name: String,
+    icon: Option<Vec<u8>>,
+) -> Result<(), String> {
+    // As the helper takes it: a desktop file's name, nothing that could be a path or a word for the shell.
+    if app_id.is_empty()
+        || app_id.starts_with('.')
+        || app_id.len() > 200
+        || !app_id.chars().all(|c| c.is_ascii_alphanumeric() || ".-_".contains(c))
+    {
+        return Err("That isn't one of the phone's apps.".into());
+    }
+    let open = app_sessions()
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|s| s.id == id && !s.ended() && s.app.as_ref().is_some_and(|a| a.id == app_id))
+        .cloned();
+    if let Some(s) = open {
+        if let Some(w) = app.get_webview_window(&s.label) {
+            let _ = w.unminimize();
+            let _ = w.set_focus();
+        }
+        return Ok(());
+    }
+    let phone = paired(&app, &id)?;
+    if !opening().lock().unwrap().insert((id.clone(), app_id.clone())) {
+        return Ok(());
+    }
+    let result = open_app(&app, &phone, &app_id, &name, icon.as_deref()).await;
+    opening().lock().unwrap().remove(&(id.clone(), app_id.clone()));
+    match &result {
+        Ok(()) => apps_changed(&app, None),
+        Err(e) => log::warn!("pmos: {name} didn't open: {e}"),
+    }
+    result
+}
+
+async fn open_app(app: &AppHandle, phone: &Paired, app_id: &str, name: &str, icon: Option<&[u8]>) -> Result<(), String> {
+    // One opening at a time: so two don't take the same screen, and the phone's sshd one login at a time.
+    let _one = apps_lock().lock().await;
+    let slot = (1..=APP_SLOTS)
+        .find(|n| !app_sessions().lock().unwrap().iter().any(|s| s.app.as_ref().is_some_and(|a| a.slot == *n)))
+        .ok_or("Eight of the phone's apps are open on this computer already. Close one first.")?;
+    log::info!("pmos: opening {name} ({app_id}) from {} in a window of its own", phone.name);
+    let ssh = reach(app, phone).await?;
+    let fit = app_fit(app);
+    let command = format!(
+        "{}exec \"{HELPER_PATH}\" serve --app {app_id} --name OADX-App-{slot} --width {} --height {} --scale {:.4} --cap {CAP}",
+        test_env(),
+        fit.width,
+        fit.height,
+        fit.scale
+    );
+    let (read, write, buf, ready) = start_helper(&ssh, command, name).await?;
+    log::info!("pmos: {name}'s screen is up: {ready}");
+    let of = AppOf { id: app_id.to_string(), name: name.to_string(), slot };
+    let s = begin(app, phone, ssh, read, write, buf, &ready, Some(of)).await?;
+    if let Err(e) = open_app_window(app, &s, &fit, icon) {
+        s.finish("");
+        unregister(&s);
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        hang_up(&s.ssh).await;
+        return Err(format!("Couldn't open {name}'s window: {e}"));
+    }
+    tauri::async_runtime::spawn(wind_down(app.clone(), s));
+    Ok(())
+}
+
+/// An app's screen: 1024 × 720 of this screen's points, as a Linux app's
+/// window opens (apps/mod.rs's open_linux), in pixels at this screen's scale.
+/// It follows the window from there, as the desktop's does.
+fn app_fit(app: &AppHandle) -> Fit {
+    let scale = crate::display::screen_for_desktop(app).map(|s| s.scale).unwrap_or(1.0).clamp(1.0, 4.0);
+    let window = (1024.0, 720.0);
+    let (width, height) = screen_for(window, scale);
+    Fit { width, height, scale, window }
+}
+
+fn open_app_window(app: &AppHandle, s: &Session, fit: &Fit, icon: Option<&[u8]>) -> Result<(), String> {
+    let a = s.app.as_ref().ok_or("not an app's window")?;
+    if let Some(w) = app.get_webview_window(&s.label) {
+        let _ = w.close();
+    }
+    let dev = if tauri::is_dev() { app.config().build.dev_url.clone() } else { None };
+    let w = WebviewWindowBuilder::new(app, &s.label, WebviewUrl::App(format!("index.html#pmos={}", s.id).into()))
+        .title(app_title(&a.name, &s.name))
+        .inner_size(fit.window.0, fit.window.1)
+        .min_inner_size(640.0, 400.0)
+        .center()
+        .background_color(tauri::window::Color(9, 11, 16, 255))
+        .incognito(true)
+        .on_navigation(move |url| may_navigate(dev.as_ref(), url))
+        .on_new_window(|_, _| NewWindowResponse::Deny)
+        .build()
+        .map_err(|e| e.to_string())?;
+    if let Some(png) = icon {
+        set_window_icon(&w, png);
+    }
+    Ok(())
+}
+
+/// "Calculator — Galaxy S24": the app's, then the phone's, as an Android app's window is called.
+fn app_title(title: &str, phone: &str) -> String {
+    format!("{title} — {phone}")
+}
+
+/// What the app's window in front is called now, for its window here; its name when it says nothing.
+fn retitle(s: &Session, title: &str) {
+    let Some(a) = &s.app else { return };
+    if let Some(w) = s.handle.get_webview_window(&s.label) {
+        let _ = w.set_title(&app_title(if title.trim().is_empty() { &a.name } else { title.trim() }, &s.name));
+    }
+}
+
+/// The window's icon, big and small, from the app's own (a PNG), as an Android app's window has (apps/win's set_icons).
+#[cfg(windows)]
+fn set_window_icon(w: &WebviewWindow, png: &[u8]) {
+    use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        CreateIconFromResourceEx, SendMessageW, ICON_BIG, ICON_SMALL, LR_DEFAULTCOLOR, WM_SETICON,
+    };
+    let Ok(raw) = w.hwnd() else { return };
+    let hwnd = HWND(raw.0 as _);
+    unsafe {
+        for which in [ICON_BIG, ICON_SMALL] {
+            if let Ok(icon) = CreateIconFromResourceEx(png, true, 0x0003_0000, 0, 0, LR_DEFAULTCOLOR) {
+                SendMessageW(hwnd, WM_SETICON, Some(WPARAM(which as usize)), Some(LPARAM(icon.0 as isize)));
+            }
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn set_window_icon(_w: &WebviewWindow, _png: &[u8]) {}
+
+// ── files dropped on the window ──────────────────────────────────────────
+
+/// How a drop went: the copy into the phone's Downloads, in the report the
+/// Linux desktop's window reads (dexremote::sftp::Report), and whether the app
+/// it was dropped on took it.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PmosPut {
+    #[serde(flatten)]
+    report: sftp::Report,
+    /// Taken by the app under the drop; false when nothing there takes files;
+    /// null when it wasn't tried (nothing landed, or no place to drop it).
+    taken: Option<bool>,
+}
+
+/// One frame's worth of a file's bytes: about what SSH's window lets through at once.
+const CHUNK: usize = 256 * 1024;
+
+/// Files dropped on the phone's desktop window: into its Downloads, through
+/// the helper's `receive` on a channel of the session's own SSH connection
+/// (no second login, nothing listening, no SFTP server needed on the phone),
+/// then, given `at` (the drop's place in the picture's pixels), dropped on the
+/// app under it by the helper (main.c, "Files dropped on the window").
+/// `events` hears the copy's progress ten times a second. One copy per window
+/// at a time: the window queues the drops that come during one.
+#[tauri::command]
+pub async fn pmos_put(
+    window: WebviewWindow,
+    id: String,
+    paths: Vec<String>,
+    at: Option<[u32; 2]>,
+    events: Channel<sftp::Progress>,
+) -> Result<PmosPut, String> {
+    let s = by_label(window.label()).ok_or("This window's connection to the phone has closed.")?;
+    if s.id != id {
+        return Err("this window belongs to another phone".into());
+    }
+    let cancel = CancellationToken::new();
+    {
+        let mut copy = s.copy.lock().unwrap();
+        if copy.is_some() {
+            return Err("a copy is already running in this window".into());
+        }
+        *copy = Some(cancel.clone());
+    }
+    let paths: Vec<PathBuf> = paths.into_iter().map(PathBuf::from).collect();
+    log::info!("pmos: copying {} dropped item(s) to {}", paths.len(), s.name);
+    let result = put(&s, &paths, &events, &cancel).await;
+    s.copy.lock().unwrap().take();
+    let (report, uris) = result.inspect_err(|e| log::warn!("pmos: the copy failed: {e}"))?;
+    log::info!(
+        "pmos: {} {} file(s), {} bytes, to {}{}",
+        if report.cancelled { "stopped after" } else { "copied" },
+        report.files,
+        report.bytes,
+        report.dir,
+        if report.links + report.unreadable > 0 {
+            format!(" ({} links, {} unreadable, left out)", report.links, report.unreadable)
+        } else {
+            String::new()
+        }
+    );
+    let taken = match at {
+        Some([x, y]) if s.carry && !uris.is_empty() && !report.cancelled && !s.ended() => drop_on_app(&s, x, y, &uris).await,
+        _ => None,
+    };
+    Ok(PmosPut { report, taken })
+}
+
+/// Stop the copy a window has under way. What it was in the middle of is
+/// taken back on the phone; what had landed stays.
+#[tauri::command]
+pub fn pmos_put_cancel(window: WebviewWindow) {
+    if let Some(s) = by_label(window.label()) {
+        if let Some(copy) = s.copy.lock().unwrap().as_ref() {
+            copy.cancel();
+        }
+    }
+}
+
+/// A file's 'F' frame for `receive` (main.c): its size, its time, its permissions, its path in the item.
+fn file_head(f: &sftp::LocalFile) -> Vec<u8> {
+    let mut head = Vec::with_capacity(20 + f.rel.len());
+    head.extend_from_slice(&f.size.to_be_bytes());
+    head.extend_from_slice(&i64::from(f.mtime.unwrap_or(0)).to_be_bytes());
+    head.extend_from_slice(&f.mode.to_be_bytes());
+    head.extend_from_slice(f.rel.as_bytes());
+    head
+}
+
+/// Files of this size (4 MiB, 4,194,304 bytes) or more go over several channels
+/// of the session's one SSH connection at once. The phone's SSH server
+/// (dropbear) gives each channel a window of 24 KB: on the Galaxy S24's cable
+/// one channel carried about 8.7 MiB/s, two 22.6, four 30.8, eight 38.5
+/// (2026-11-16). Four, opened at the first big file of a drop and kept for the
+/// rest of it.
+const PART_MIN: u64 = 4 << 20;
+const PARTS: u64 = 4;
+
+/// A channel to the helper's `receive` (or `receive --part`): frames out, its JSON words back.
+struct Receiver {
+    write: russh::ChannelWriteHalf<client::Msg>,
+    answers: mpsc::UnboundedReceiver<serde_json::Value>,
+}
+
+impl Receiver {
+    async fn open(s: &Session, part: bool) -> Result<Self, String> {
+        let channel = s.ssh.channel_open_session().await.map_err(|e| format!("The phone didn't take the files: {e}"))?;
+        let command = format!("{}exec \"{HELPER_PATH}\" receive{}", test_env(), if part { " --part" } else { "" });
+        channel.exec(true, command).await.map_err(|e| format!("The phone didn't take the files: {e}"))?;
+        let (mut read, write) = channel.split();
+        let (tx, answers) = mpsc::unbounded_channel();
+        tauri::async_runtime::spawn(async move {
+            let mut buf = Vec::new();
+            while let Some(msg) = read.wait().await {
+                match msg {
+                    ChannelMsg::Data { data } => {
+                        buf.extend_from_slice(&data);
+                        while let Some((kind, payload)) = take_frame(&mut buf) {
+                            if kind == 0 {
+                                let _ = tx.send(serde_json::from_slice(&payload).unwrap_or_default());
+                            }
+                        }
+                    }
+                    ChannelMsg::ExtendedData { data, .. } => {
+                        for line in phone_lines(&String::from_utf8_lossy(&data)) {
+                            log::info!("pmos: phone: {line}");
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        });
+        Ok(Receiver { write, answers })
+    }
+
+    /// One whole frame. Never cut short: the phone would read the rest as another.
+    async fn send(&self, kind: u8, payload: &[u8]) -> Result<(), String> {
+        self.write.data(&frame(kind, payload)[..]).await.map_err(|_| "The phone stopped taking the files.".to_string())
+    }
+
+    async fn next(&mut self, limit: Duration) -> Result<serde_json::Value, String> {
+        match tokio::time::timeout(limit, self.answers.recv()).await {
+            Ok(Some(m)) if m["t"] == "error" => {
+                Err(m["message"].as_str().unwrap_or("The phone couldn't save the files.").to_string())
+            }
+            Ok(Some(m)) => Ok(m),
+            Ok(None) => Err("The phone stopped taking the files.".into()),
+            Err(_) => Err("The phone took too long to answer.".into()),
+        }
+    }
+
+    /// The next word that is `t`, past any others.
+    async fn wait_for(&mut self, t: &str, limit: Duration) -> Result<serde_json::Value, String> {
+        loop {
+            let m = self.next(limit).await?;
+            if m["t"] == t {
+                return Ok(m);
+            }
+        }
+    }
+
+    /// An error the phone has already said, without waiting for one.
+    fn failed(&mut self) -> Option<String> {
+        while let Ok(m) = self.answers.try_recv() {
+            if m["t"] == "error" {
+                return Some(m["message"].as_str().unwrap_or("The phone couldn't save the files.").to_string());
+            }
+        }
+        None
+    }
+
+    /// Done with it: "that was all", then the channel's end.
+    async fn close(mut self) {
+        if self.send(b'Q', &[]).await.is_ok() {
+            let _ = self.wait_for("bye", Duration::from_secs(5)).await;
+        }
+        let _ = self.write.eof().await;
+    }
+}
+
+fn read_error(name: &str, e: impl std::fmt::Display) -> String {
+    sftp::PutError::Read { name: name.to_string(), why: e.to_string() }.to_string()
+}
+
+/// One share of a big file, `len` bytes from `start`, over a `receive --part`
+/// channel into `remote` (its path under the phone's Downloads). Hands the
+/// channel back with how it went.
+#[allow(clippy::too_many_arguments)]
+async fn send_share(
+    mut chan: Receiver,
+    local: PathBuf,
+    name: String,
+    remote: String,
+    start: u64,
+    len: u64,
+    done: Arc<AtomicU64>,
+    stop: CancellationToken,
+) -> (Receiver, Result<(), String>) {
+    let result = async {
+        let mut file = tokio::fs::File::open(&local).await.map_err(|e| read_error(&name, e))?;
+        tokio::io::AsyncSeekExt::seek(&mut file, std::io::SeekFrom::Start(start)).await.map_err(|e| read_error(&name, e))?;
+        chan.send(b'O', remote.as_bytes()).await?;
+        let mut reader = file.take(len);
+        let mut payload = vec![0u8; 8 + CHUNK];
+        let mut at = start;
+        while at < start + len {
+            let n = reader.read(&mut payload[8..]).await.map_err(|e| read_error(&name, e))?;
+            if n == 0 {
+                return Err(read_error(&name, "it got shorter while it was being copied"));
+            }
+            payload[..8].copy_from_slice(&at.to_be_bytes());
+            chan.send(b'P', &payload[..8 + n]).await?;
+            at += n as u64;
+            done.fetch_add(n as u64, Ordering::Relaxed);
+            if stop.is_cancelled() {
+                return Err(String::new());
+            }
+            if let Some(why) = chan.failed() {
+                return Err(why);
+            }
+        }
+        chan.send(b'C', &[]).await?;
+        chan.wait_for("done", Duration::from_secs(60)).await.map(|_| ())
+    }
+    .await;
+    (chan, result)
+}
+
+/// The copy itself: what landed, and each landed item's file:// URI on the phone.
+async fn put(
+    s: &Session,
+    paths: &[PathBuf],
+    events: &Channel<sftp::Progress>,
+    cancel: &CancellationToken,
+) -> Result<(sftp::Report, Vec<String>), String> {
+    let owned = paths.to_vec();
+    let plan = tokio::task::spawn_blocking(move || sftp::plan(&owned))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())?;
+    let mut main = Receiver::open(s, false).await?;
+    let ready = main.next(Duration::from_secs(15)).await?;
+    let dir = ready["dir"].as_str().unwrap_or("Downloads").to_string();
+    let free = ready["free"].as_u64().unwrap_or(0);
+    if free > 0 && plan.bytes > free {
+        main.close().await;
+        return Err(sftp::PutError::NoRoom { needed: plan.bytes, free }.to_string());
+    }
+    let mut report = sftp::Report { dir, links: plan.links, unreadable: plan.unreadable, ..Default::default() };
+    let mut uris = Vec::new();
+    let mut progress = sftp::Progress { files_total: plan.files, bytes_total: plan.bytes, ..Default::default() };
+    let mut told = Instant::now();
+    let _ = events.send(progress.clone());
+    // The channels for big files' shares, once there is one.
+    let mut pool: Vec<Receiver> = Vec::new();
+
+    let outcome: Result<(), String> = async {
+        for item in &plan.items {
+            // A single file this computer won't open is counted and left, as before it was ever claimed there.
+            let mut first = None;
+            if !item.is_dir {
+                match tokio::fs::File::open(&item.files[0].path).await {
+                    Ok(f) => first = Some(f),
+                    Err(_) => {
+                        report.unreadable += 1;
+                        progress.files_done += 1;
+                        progress.bytes_done += item.files[0].size;
+                        continue;
+                    }
+                }
+            }
+            let mut head = vec![u8::from(item.is_dir)];
+            head.extend_from_slice(item.name.as_bytes());
+            main.send(b'I', &head).await?;
+            // Its name there, for the shares of a big file in it.
+            let claimed = if item.files.iter().any(|f| f.size >= PART_MIN) {
+                let m = main.wait_for("claimed", Duration::from_secs(30)).await?;
+                m["name"].as_str().unwrap_or_default().to_string()
+            } else {
+                String::new()
+            };
+            for d in &item.dirs {
+                main.send(b'D', d.rel.as_bytes()).await?;
+            }
+            let (mut files, mut bytes) = (0u64, 0u64);
+            for f in &item.files {
+                let local = match first.take() {
+                    Some(opened) => opened,
+                    None => match tokio::fs::File::open(&f.path).await {
+                        Ok(opened) => opened,
+                        Err(_) => {
+                            report.unreadable += 1;
+                            progress.files_done += 1;
+                            progress.bytes_done += f.size;
+                            continue;
+                        }
+                    },
+                };
+                progress.current = f.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                let in_shares = f.size >= PART_MIN && !claimed.is_empty();
+                // A file that goes in shares is made first ('G' answers "opened"): the shares'
+                // channels are separate from this one, and nothing orders them, so a share could
+                // otherwise reach the phone before the file it writes into exists.
+                main.send(if in_shares { b'G' } else { b'F' }, &file_head(f)).await?;
+                if in_shares {
+                    main.wait_for("opened", Duration::from_secs(30)).await?;
+                    // Its bytes in shares, over the pool's channels at once; then "they are there".
+                    drop(local);
+                    while (pool.len() as u64) < PARTS {
+                        let mut part = Receiver::open(s, true).await?;
+                        part.wait_for("ready", Duration::from_secs(15)).await?;
+                        pool.push(part);
+                    }
+                    let remote = if item.is_dir { format!("{claimed}/{}", f.rel) } else { claimed.clone() };
+                    let done = Arc::new(AtomicU64::new(0));
+                    let stop = cancel.child_token();
+                    let share = f.size.div_ceil(PARTS);
+                    let mut shares = tokio::task::JoinSet::new();
+                    for (i, chan) in pool.drain(..).enumerate() {
+                        let start = i as u64 * share;
+                        let len = share.min(f.size.saturating_sub(start));
+                        let name = progress.current.clone();
+                        shares.spawn(send_share(chan, f.path.clone(), name, remote.clone(), start, len, done.clone(), stop.clone()));
+                    }
+                    let before = progress.bytes_done;
+                    let mut failure: Option<String> = None;
+                    let mut tick = tokio::time::interval(Duration::from_millis(100));
+                    loop {
+                        tokio::select! {
+                            joined = shares.join_next() => match joined {
+                                None => break,
+                                Some(Ok((chan, result))) => {
+                                    pool.push(chan);
+                                    if let Err(why) = result {
+                                        stop.cancel();
+                                        failure.get_or_insert(why);
+                                    }
+                                }
+                                Some(Err(e)) => {
+                                    stop.cancel();
+                                    failure.get_or_insert(e.to_string());
+                                }
+                            },
+                            _ = tick.tick() => {
+                                progress.bytes_done = before + done.load(Ordering::Relaxed);
+                                let _ = events.send(progress.clone());
+                            }
+                        }
+                    }
+                    progress.bytes_done = before + done.load(Ordering::Relaxed);
+                    // Stopped or failed: the pool's channels are still closed below (only whole frames
+                    // ever went on them), so no `receive --part` is left waiting on the phone.
+                    if let Some(why) = failure {
+                        return Err(why);
+                    }
+                    if cancel.is_cancelled() {
+                        return Err(String::new());
+                    }
+                    main.send(b'S', &[]).await?;
+                    files += 1;
+                    bytes += f.size;
+                    progress.files_done += 1;
+                    continue;
+                }
+                // Exactly the size announced: a file that changes under the copy is caught, not half sent.
+                let mut reader = local.take(f.size);
+                let mut sent = 0u64;
+                let mut chunk = vec![0u8; CHUNK];
+                while sent < f.size {
+                    let n = tokio::select! {
+                        n = reader.read(&mut chunk) => n.map_err(|e| read_error(&progress.current, e))?,
+                        _ = cancel.cancelled() => return Err(String::new()),
+                    };
+                    if n == 0 {
+                        return Err(read_error(&progress.current, "it got shorter while it was being copied"));
+                    }
+                    // Whole frames only: a write cut short would leave the phone reading half of one.
+                    main.send(b'B', &chunk[..n]).await?;
+                    if cancel.is_cancelled() {
+                        return Err(String::new());
+                    }
+                    sent += n as u64;
+                    progress.bytes_done += n as u64;
+                    if told.elapsed() >= Duration::from_millis(100) {
+                        told = Instant::now();
+                        let _ = events.send(progress.clone());
+                        if let Some(why) = main.failed() {
+                            return Err(why);
+                        }
+                    }
+                }
+                files += 1;
+                bytes += sent;
+                progress.files_done += 1;
+            }
+            main.send(b'E', &i64::from(item.mtime.unwrap_or(0)).to_be_bytes()).await?;
+            let landed = main.wait_for("landed", Duration::from_secs(30)).await?;
+            report.landed.push(landed["name"].as_str().unwrap_or(&item.name).to_string());
+            if let Some(uri) = landed["uri"].as_str().filter(|u| !u.is_empty()) {
+                uris.push(uri.to_string());
+            }
+            report.files += files;
+            report.bytes += bytes;
+            let _ = events.send(progress.clone());
+            if cancel.is_cancelled() {
+                return Err(String::new());
+            }
+        }
+        Ok(())
+    }
+    .await;
+
+    for part in pool {
+        part.close().await;
+    }
+    if let Err(why) = outcome {
+        // Cancelled (no words), or failed: the item under way is taken back on the phone.
+        if main.send(b'X', &[]).await.is_ok() {
+            let _ = main.wait_for("undone", Duration::from_secs(5)).await;
+        }
+        main.close().await;
+        if !why.is_empty() {
+            return Err(why);
+        }
+        report.cancelled = true;
+        return Ok((report, uris));
+    }
+    main.close().await;
+    Ok((report, uris))
+}
+
+/// The landed files, dropped by the helper where the window had them dropped.
+async fn drop_on_app(s: &Session, x: u32, y: u32, uris: &[String]) -> Option<bool> {
+    let (tx, rx) = oneshot::channel();
+    *s.dropped.lock().unwrap() = Some(tx);
+    let list: String = uris.iter().map(|u| format!("{u}\r\n")).collect();
+    let ask = serde_json::json!({ "t": "drop", "x": x, "y": y, "uris": list });
+    s.to_helper(0, ask.to_string().as_bytes());
+    match tokio::time::timeout(Duration::from_secs(8), rx).await {
+        Ok(Ok(answer)) => {
+            let taken = answer["taken"].as_bool();
+            match answer["why"].as_str() {
+                Some(why) if taken != Some(true) => log::info!("pmos: the drop stayed in Downloads: {why}"),
+                _ => log::info!("pmos: the app under the drop took it"),
+            }
+            taken
+        }
+        _ => {
+            s.dropped.lock().unwrap().take();
+            log::info!("pmos: the phone didn't say whether the app under the drop took it");
+            None
+        }
+    }
 }
 
 /// The window's WebSocket: one at a time, a new one taking over from the old.
@@ -1062,7 +1979,7 @@ async fn socket(mut tcp: TcpStream, s: Arc<Session>, dev: Option<String>) {
     let (tx, mut rx) = mpsc::unbounded_channel::<Out>();
     let number = SOCKETS.fetch_add(1, Ordering::Relaxed);
     *s.window.lock().unwrap() = Some((number, tx.clone()));
-    log::info!("pmos: the desktop's window connected");
+    log::info!("pmos: {} connected", s.window_name());
 
     let writer = tauri::async_runtime::spawn(async move {
         while let Some((opcode, payload)) = rx.recv().await {
@@ -1117,7 +2034,7 @@ async fn socket(mut tcp: TcpStream, s: Arc<Session>, dev: Option<String>) {
     };
     if mine {
         s.to_helper(0, br#"{"t":"bye"}"#);
-        log::info!("pmos: the desktop's window disconnected");
+        log::info!("pmos: {} disconnected", s.window_name());
     }
     drop(tx);
     let _ = writer.await;
@@ -1259,6 +2176,25 @@ mod tests {
     fn noise_is_left_out_of_the_log() {
         let text = "\n(openandroiddex-pmos:1): GStreamer-CRITICAL **: x\nopenandroiddex-pmos: video: x264enc\n";
         assert_eq!(phone_lines(text).collect::<Vec<_>>(), vec!["video: x264enc"]);
+    }
+
+    #[test]
+    fn a_files_header_is_what_receive_reads() {
+        // main.c's rx_frame: [u64 size][i64 mtime][u32 mode][path], big-endian.
+        let f = sftp::LocalFile {
+            rel: "photos/ünï.jpg".into(),
+            path: PathBuf::from("x"),
+            size: 0x0102_0304_0506,
+            mtime: Some(1_700_000_000),
+            mode: 0o644,
+        };
+        let h = file_head(&f);
+        assert_eq!(&h[..8], &[0, 0, 1, 2, 3, 4, 5, 6]);
+        assert_eq!(&h[8..16], &1_700_000_000i64.to_be_bytes());
+        assert_eq!(&h[16..20], &[0, 0, 1, 0xa4]);
+        assert_eq!(&h[20..], "photos/ünï.jpg".as_bytes());
+        // A file with no time: 0, which the phone leaves as the time it was written.
+        assert_eq!(&file_head(&sftp::LocalFile { mtime: None, ..f })[8..16], &[0; 8]);
     }
 
     #[test]

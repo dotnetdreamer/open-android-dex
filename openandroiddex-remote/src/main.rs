@@ -36,6 +36,9 @@ On a computer:
                                      --no-start only joins one that is; --video-origin ORIGIN
                                      also prints the address of its video (a WebSocket) for
                                      pages from ORIGIN, when the phone has it
+  dexremote phone <NAME> [ADDR]      the phone's own screen (Remote desktop) as video, for
+                                     pages from --origin ORIGIN: prints the WebSocket address
+                                     to open (default 127.0.0.1, any free port)
   dexremote put <NAME> <PATH>…       copy files and folders onto its Linux desktop (--to DIR
                                      for another folder of its home); nothing there is ever
                                      replaced: a name in use gets Thunar's \"(copy 1)\"
@@ -48,7 +51,7 @@ On a computer:
 
 On the phone (run by the app):
   dexremote serve --dir DIR --ssh-port PORT --name NAME [--dns IP,…] [--relay URL]
-                  [--desktop-port PORT] [--stream-socket @NAME|PATH]
+                  [--desktop-port PORT] [--stream-socket @NAME|PATH] [--phone-socket @NAME|PATH]
   dexremote init --dir DIR
 
   --state DIR overrides where a computer keeps its identity and phone list.
@@ -71,6 +74,7 @@ fn main() -> ExitCode {
         "probe" => probe(rest),
         "forward" => forward(rest),
         "desktop" => desktop(rest),
+        "phone" => phone_screen(rest),
         "put" => put(rest),
         "get" => get(rest),
         "proxy" => return proxy(rest),
@@ -136,7 +140,18 @@ fn serve(args: &[String]) -> anyhow::Result<()> {
     let desktop_port = flag(args, "--desktop-port").map(str::parse).transpose()?.unwrap_or(phone::DESKTOP_WEB_PORT);
     // LinuxStream's socket: `@` and its abstract name on the phone.
     let stream_socket = flag(args, "--stream-socket").map(phone::StreamSocket::parse);
-    runtime()?.block_on(phone::serve(phone::Config { dir, ssh_port, desktop_port, name, dns, relay, stream_socket }))
+    // Remote desktop's PhoneStream: the phone's own screen, where the app has it.
+    let phone_socket = flag(args, "--phone-socket").map(phone::StreamSocket::parse);
+    runtime()?.block_on(phone::serve(phone::Config {
+        dir,
+        ssh_port,
+        desktop_port,
+        name,
+        dns,
+        relay,
+        stream_socket,
+        phone_socket,
+    }))
 }
 
 /// Make the identity if it is not there, and print `<endpoint id> <host key>`.
@@ -273,12 +288,13 @@ fn probe(args: &[String]) -> anyhow::Result<()> {
         state => format!(", desktop {state}"),
     };
     println!(
-        "{}: reachable, {} ({} ms), SSH server {}{desktop}, {} session(s) open",
+        "{}: reachable, {} ({} ms), SSH server {}{desktop}, {} session(s) open, offers: {}",
         probe.status.name,
         if probe.direct { "direct" } else { "relayed" },
         probe.rtt_ms,
         probe.status.ssh,
-        probe.status.sessions
+        probe.status.sessions,
+        if probe.status.features.is_empty() { "nothing".to_string() } else { probe.status.features.join(", ") }
     );
     Ok(())
 }
@@ -365,6 +381,47 @@ fn desktop(args: &[String]) -> anyhow::Result<()> {
         .await;
         // Said, not left to time out — refused or finished: the phone counts
         // the connection as someone looking, and stays awake for them.
+        desktop.close();
+        client.close().await;
+        result
+    })
+}
+
+/// The phone's own screen (Remote desktop), through the tunnel, on a port of
+/// this computer: what the desktop app's window for it connects to. Nothing of
+/// Linux's is opened; only a page from `--origin` gets the WebSocket, under
+/// the same rules as the desktop's video (see pc::Desktop::serve).
+fn phone_screen(args: &[String]) -> anyhow::Result<()> {
+    dexremote::init_logging("warn,dexremote=info");
+    let c = computer(args)?;
+    let pos = positional(args);
+    let wanted = pos.first().copied().ok_or_else(|| anyhow::anyhow!("which phone?"))?;
+    let phone = find_phone(&c, wanted)?;
+    let id: EndpointId = phone.id.parse()?;
+    let origin = flag(args, "--origin")
+        .map(str::to_string)
+        .ok_or_else(|| anyhow::anyhow!("--origin: the page that may open the screen, like http://127.0.0.1:8080"))?;
+    let listen: Option<SocketAddr> = pos.get(1).map(|a| a.parse()).transpose()?;
+    if listen.is_some_and(|a| !a.ip().is_loopback()) {
+        anyhow::bail!("the screen is only served on this computer: give a 127.0.0.1 address");
+    }
+    let key = c.endpoint_key()?;
+    runtime()?.block_on(async {
+        let listener = match listen {
+            Some(addr) => tokio::net::TcpListener::bind(addr).await.with_context(|| format!("cannot listen on {addr}"))?,
+            None => tokio::net::TcpListener::bind(("127.0.0.1", 0)).await?,
+        };
+        let port = listener.local_addr()?.port();
+        let client = std::sync::Arc::new(pc::Client::bind(key).await?);
+        let desktop = pc::Desktop::new(client.clone(), id);
+        let token = desktop.allow_stream(vec![origin]);
+        println!("ws://127.0.0.1:{port}/phone/{token}");
+        eprintln!("The screen of {} for that page. Ctrl+C here closes it.", phone.name);
+        tokio::spawn(desktop.clone().keep_alive());
+        let result = tokio::select! {
+            served = desktop.clone().serve(listener) => served.map_err(anyhow::Error::from),
+            _ = tokio::signal::ctrl_c() => Ok(()),
+        };
         desktop.close();
         client.close().await;
         result

@@ -353,6 +353,10 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
     private float drawerRawX, drawerRawY;
     private View taskbarView;
     private boolean taskbarOverlay = false;
+    /** What added the taskbar's window, and so what moves and removes it. */
+    private WindowManager taskbarWm;
+    /** The caption service whose accessibility overlay the taskbar is, or null. */
+    private CaptionService taskbarService;
     /** The phone dock's Mouse button, so it can show the touchpad's state. */
     private TextView padButton;
     /** The phone's touchpad and pointer; null until asked for. See {@link DexPointer}. */
@@ -604,6 +608,14 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
                     // the same broadcast: raised there, it would be what the
                     // pad's watch takes as the phone in use, and close it.
                     if (!onPhone()) goHome();
+                    break;
+                // The desktop window's own ◁ and ▢ on the computer (deskbar.rs): the
+                // taskbar's buttons, from up there, for when an app covers the taskbar.
+                case "back":
+                    if (!onPhone()) taskbarBack();
+                    break;
+                case "recents":
+                    if (!onPhone()) recentApps();
                     break;
                 case "close":
                     // Not a gesture: the computer's "Close the front app", when
@@ -981,7 +993,7 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
                 (android.hardware.display.DisplayManager) getSystemService(DISPLAY_SERVICE);
         dm.registerDisplayListener(displayListener, handler);
         DexLog.step("launcher", "desktop ready — " + allApps.size() + " apps, taskbar "
-                + (taskbarOverlay ? "as an overlay window" : "inside the activity"));
+                + taskbarWhere());
         maybeOfferTouchpad();
     }
 
@@ -1213,12 +1225,7 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
             TouchpadNotice.hide(this);
             Touchpad.closeAll();
         }
-        if (taskbarOverlay && taskbarView != null) {
-            try {
-                getWindowManager().removeViewImmediate(taskbarView);
-            } catch (Exception ignored) {
-            }
-        }
+        if (taskbarOverlay) detachTaskbar();
     }
 
     @Override
@@ -1423,17 +1430,7 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
             shotHud.detach();
             shotHud = null;
         }
-        if (taskbarView != null) {
-            if (taskbarOverlay) {
-                try {
-                    getWindowManager().removeViewImmediate(taskbarView);
-                } catch (Exception ignored) {
-                }
-                taskbarOverlay = false;
-            } else if (rootFrame != null) {
-                rootFrame.removeView(taskbarView);
-            }
-        }
+        detachTaskbar();
         buildUi();
         setupTaskbar();
         // The pad and the pointer are windows of their own — buildUi cannot
@@ -1685,10 +1682,11 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
     }
 
     /**
-     * Taskbar as a TYPE_APPLICATION_OVERLAY window: floats above the app
-     * windows, so it is usable while apps are maximized. Falls back to an
-     * in-activity bar without the overlay permission (granted by the PC
-     * via appops).
+     * Taskbar as a window of its own: floats above the app windows, so it is
+     * usable while apps are maximized — an accessibility overlay of the
+     * caption service where it can be, a TYPE_APPLICATION_OVERLAY otherwise
+     * (see attachTaskbarOverlay). Falls back to an in-activity bar with
+     * neither (the overlay permission is granted by the PC via appops).
      */
     private void setupTaskbar() {
         // Survives a density rebuild: the CPU figure is a delta between two
@@ -1699,7 +1697,7 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
         sysStats.setFpsDisplay(displayId() > 0 ? displayId() : -1);
         setupPerfGauge();
         taskbarView = buildTaskbar();
-        // Its own TYPE_APPLICATION_OVERLAY window, so the activity's pointers
+        // Its own window, an overlay of either kind, so the activity's pointers
         // do not reach it — a PointerIcon resolves inside one ViewRootImpl and
         // no further. Done here rather than after attachTaskbarOverlay so the
         // in-activity fallback is covered by the same line.
@@ -1770,22 +1768,104 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
                 && (display.getFlags() & DISPLAY_FLAG_TRUSTED) == 0;
     }
 
-    /** Add the taskbar as an always-on-top overlay window; false if not permitted. */
+    /**
+     * Add the taskbar as an always-on-top window of its own; false if no such
+     * window can be had.
+     *
+     * On a desktop display that is an accessibility overlay of the caption
+     * service, and an application overlay only while the service is down.
+     * Android hides every application overlay, on every display, for as long
+     * as any window that asks it to is showing — a permission prompt, an app
+     * lock's PIN screen (HIDE_NON_SYSTEM_OVERLAY_WINDOWS). Those open on the
+     * phone's own screen, out of sight of the computer, and the bar was gone
+     * from the desktop until the phone was answered (issue #11: an app lock
+     * asking for its PIN each time the gallery opened). Accessibility overlays
+     * are not hidden — the touchpad's arrow stands on the same exemption — and
+     * need no overlay permission either. The service is restarted on every
+     * connect and its overlays go with it, so {@link #retakeTaskbarWindow}
+     * moves the bar each time.
+     *
+     * That puts the bar above the input method too, where it would cover the
+     * keyboard's bottom row — if one ever opened on this display. It does not:
+     * with our shell the PC leaves force_desktop_mode_on_external_displays off
+     * (adb_prepare_desktop), and the keyboard goes to the phone.
+     *
+     * The phone's own dock stays an application overlay on purpose: there the
+     * prompt is on the same screen, and hiding what could cover it is the
+     * point of the rule.
+     */
     private boolean attachTaskbarOverlay() {
         if (overlaysBuried()) {
             DexLog.step("taskbar", "overlays draw under apps on this display (Samsung, "
                     + "untrusted) — the taskbar goes inside the desktop instead");
             return false;
         }
+        if (!onPhone() && addTaskbarToCaptionService()) return true;
         if (!android.provider.Settings.canDrawOverlays(this)) {
             DexLog.warn("taskbar", "no overlay permission yet — app windows will cover the bar");
             return false;
         }
+        try {
+            getWindowManager().addView(taskbarView,
+                    taskbarParams(WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY));
+        } catch (Exception e) {
+            DexLog.warn("taskbar", "overlay window rejected", e);
+            return false;
+        }
+        taskbarWm = getWindowManager();
+        taskbarService = null;
+        taskbarOverlay = true;
+        return true;
+    }
+
+    /**
+     * The taskbar as an accessibility overlay of {@link CaptionService}, on this
+     * desktop's display; false while the service is down or will not host it.
+     *
+     * The touchpad arrow's two hosts, in its order (DesktopPointer#addArrow):
+     * the service's window context, which Android 14 and later take, then its
+     * display context, which carries the service's overlay token for the
+     * display below that. Android 11 and later only, as Activity#getDisplay
+     * and window contexts are.
+     */
+    private boolean addTaskbarToCaptionService() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return false;
+        CaptionService service = CaptionService.live();
+        Display display = getDisplay();
+        if (service == null || display == null) return false;
+        return addTaskbarTo(CaptionService.overlayContext(display.getDisplayId()), service)
+                || addTaskbarTo(service.createDisplayContext(display), service);
+    }
+
+    private boolean addTaskbarTo(Context host, CaptionService service) {
+        if (host == null) return false;
+        WindowManager wm = host.getSystemService(WindowManager.class);
+        try {
+            // Fresh params for each try: a refused addView has already stamped
+            // the host's token on the ones it was handed.
+            wm.addView(taskbarView,
+                    taskbarParams(WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY));
+        } catch (RuntimeException e) {
+            DexLog.step("taskbar", "refused as an accessibility overlay ("
+                    + e.getMessage() + ") — trying the next way");
+            return false;
+        }
+        taskbarWm = wm;
+        taskbarService = service;
+        taskbarOverlay = true;
+        // Of two accessibility overlays the later is on top, and the arrow
+        // has to stay above the bar it is pointing at.
+        DesktopPointer.raise();
+        return true;
+    }
+
+    /** The taskbar's window: the full-width strip on a desktop, the floating dock on the phone. */
+    private WindowManager.LayoutParams taskbarParams(int type) {
         boolean dock = onPhone();
-        WindowManager.LayoutParams barLp = new WindowManager.LayoutParams(
+        WindowManager.LayoutParams lp = new WindowManager.LayoutParams(
                 dock ? ViewGroup.LayoutParams.WRAP_CONTENT : ViewGroup.LayoutParams.MATCH_PARENT,
                 dp(dock ? DOCK_DP : TASKBAR_DP),
-                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                type,
                 WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
                 PixelFormat.TRANSLUCENT);
         // No y offset for the gesture pill here, unlike addTaskbarToActivity:
@@ -1793,16 +1873,57 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
         // bottomSystemInset), and offsetting it again lifts the bar off the
         // bottom edge by the height of the pill. The dock's own offset is a
         // different thing — it is the touchpad underneath it, not an inset.
-        barLp.gravity = dock ? (Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL) : Gravity.BOTTOM;
-        barLp.y = dockLift();
-        try {
-            getWindowManager().addView(taskbarView, barLp);
-        } catch (Exception e) {
-            DexLog.warn("taskbar", "overlay window rejected", e);
-            return false;
+        lp.gravity = dock ? (Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL) : Gravity.BOTTOM;
+        lp.y = dockLift();
+        return lp;
+    }
+
+    /** Take the taskbar off whichever window holds it: one of its own, or the activity's. */
+    private void detachTaskbar() {
+        if (taskbarView == null) return;
+        if (taskbarOverlay) {
+            try {
+                taskbarWm.removeViewImmediate(taskbarView);
+            } catch (Exception ignored) {
+            }
+        } else if (taskbarView.getParent() instanceof ViewGroup) {
+            ((ViewGroup) taskbarView.getParent()).removeView(taskbarView);
         }
-        taskbarOverlay = true;
-        return true;
+        taskbarOverlay = false;
+        taskbarWm = null;
+        taskbarService = null;
+    }
+
+    /**
+     * The caption service came up or went away; it says so from both ends, and
+     * the PC restarts it on every connect. An accessibility overlay goes with
+     * the service that holds it, so the taskbar moves now rather than vanish.
+     */
+    static void captionServiceChanged() {
+        LauncherActivity desktop = liveDesktop();
+        if (desktop != null) desktop.handler.post(desktop::retakeTaskbarWindow);
+    }
+
+    private void retakeTaskbarWindow() {
+        if (isFinishing() || isDestroyed() || taskbarView == null || onPhone()) return;
+        CaptionService service = CaptionService.live();
+        // Settled on the service that is up now — by instance: a restart can
+        // land both of its ends before this runs — or, with none up, on no
+        // service at all.
+        boolean settled = taskbarOverlay
+                ? taskbarService == service
+                : service == null || overlaysBuried();
+        if (settled) return;
+        detachTaskbar();
+        if (!attachTaskbarOverlay()) addTaskbarToActivity();
+        DexLog.step("taskbar", "caption service " + (service != null ? "up" : "gone")
+                + " — taskbar re-seated " + taskbarWhere());
+    }
+
+    /** Where the taskbar is, for the log. */
+    private String taskbarWhere() {
+        if (!taskbarOverlay) return "inside the activity";
+        return taskbarService != null ? "as an accessibility overlay" : "as an overlay window";
     }
 
     /**
@@ -1879,7 +2000,7 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
                 WindowManager.LayoutParams lp =
                         (WindowManager.LayoutParams) taskbarView.getLayoutParams();
                 lp.y = dockLift();
-                getWindowManager().updateViewLayout(taskbarView, lp);
+                taskbarWm.updateViewLayout(taskbarView, lp);
             } else if (taskbarView.getLayoutParams() instanceof FrameLayout.LayoutParams) {
                 FrameLayout.LayoutParams lp =
                         (FrameLayout.LayoutParams) taskbarView.getLayoutParams();
@@ -3266,15 +3387,11 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
         if (LinuxRemote.available(this)) {
             menu.getMenu().add(0, 7, 3, getString(R.string.ln_remote_menu));
         }
-        // GL on the phone's GPU (doc/linux-gpu.md). Only where it can work,
-        // an Adreno or an Xclipse: anywhere else there is nothing to switch,
-        // and a box that did nothing would be a lie. On by default; this is
-        // the way out for an app that draws wrongly on it.
-        if (LinuxGpu.available()) {
-            menu.getMenu().add(0, 8, 3, getString(R.string.ln_gpu_menu))
-                    .setCheckable(true)
-                    .setChecked(LinuxGpu.enabled(this));
-        }
+        // The same Settings page LinuxOnDroid has: Start Linux with the
+        // phone, and Use the GPU, which used to be a tick in this menu. The
+        // GPU switch shows on every phone there, greyed with the reason where
+        // there is no GPU we drive.
+        menu.getMenu().add(0, 9, 3, getString(R.string.ln_settings_menu));
         menu.getMenu().add(0, 4, 4, getString(R.string.ln_reinstall));
         // Only while there is something to remove. Offering "Uninstall" over a
         // container that is already gone is an action that would do nothing,
@@ -3301,17 +3418,36 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
                 chooseLinuxApps();
             } else if (id == 7) {
                 openLinuxRemote();
-            } else if (id == 8) {
-                // Read at every start, so a session already up keeps what it
-                // started with; the note says when the change lands.
-                boolean on = !LinuxGpu.enabled(this);
-                LinuxGpu.setEnabled(this, on);
-                Toast.makeText(this, getString(on ? R.string.ln_gpu_on : R.string.ln_gpu_off),
-                        Toast.LENGTH_LONG).show();
+            } else if (id == 9) {
+                openLinuxSettings();
             }
             return true;
         });
         menu.show();
+    }
+
+    /** Linux settings, freeform on this display like the Remote access window. */
+    private void openLinuxSettings() {
+        hideDrawer();
+        dismissPopups();
+        if (minimisedActivities.contains(LinuxSettingsActivity.class.getName())) {
+            sendBroadcast(new Intent(ACTION_RESTORE)
+                    .setPackage(getPackageName())
+                    .putExtra("pkg", getPackageName())
+                    .putExtra("activity", LinuxSettingsActivity.class.getName()));
+            return;
+        }
+        Intent intent = new Intent(this, LinuxSettingsActivity.class)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        ActivityOptions opts = shapeForDesktop(
+                ActivityOptions.makeBasic(),
+                desktopWindowRect(LinuxSettingsActivity.class, dp(520), dp(640)));
+        try {
+            startActivity(intent, opts.toBundle());
+        } catch (Exception e) {
+            DexLog.warn("linux", "cannot open the Linux settings window", e);
+            Toast.makeText(this, getString(R.string.ln_cannot_open), Toast.LENGTH_SHORT).show();
+        }
     }
 
     /**
@@ -3381,19 +3517,9 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
 
     /**
      * The shared folder, in an Android file manager, as a freeform window on
-     * this display like everything else the desktop launches.
-     *
-     * Named through ExternalStorageProvider rather than as a {@code file://}
-     * path: the launcher holds no storage permission by default (the folder
-     * deliberately needs none), so a file URI would open a manager that then
-     * shows nothing.
-     *
-     * The handler is RESOLVED rather than left implicit, for the reason
-     * TransferHud records: more than one app answers this on a Samsung phone,
-     * and the system chooser — launched into a freeform window on a secondary
-     * display — opens and closes again without ever showing anything. With no
-     * concrete handler we say where the folder is instead of firing an intent
-     * that would vanish.
+     * this display like everything else the desktop launches. Which file
+     * manager, and why it is chosen rather than left to the system, is
+     * {@link Linux#sharedFolderIntent}'s business; placing the window is ours.
      */
     private void openSharedFolder() {
         dismissPopups();
@@ -3406,40 +3532,8 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
             requestAllFilesAccess();
             return;
         }
-        Uri uri = DocumentsContract.buildDocumentUri(
-                "com.android.externalstorage.documents", "primary:" + Linux.SHARED_NAME);
-        Intent intent = new Intent(Intent.ACTION_VIEW)
-                .setDataAndType(uri, DocumentsContract.Document.MIME_TYPE_DIR)
-                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION
-                        | Intent.FLAG_ACTIVITY_NEW_TASK);
-        ComponentName target = null;
-        try {
-            ComponentName fallback = null;
-            for (ResolveInfo ri : getPackageManager().queryIntentActivities(intent, 0)) {
-                if (ri.activityInfo == null) continue;
-                String pkg = ri.activityInfo.packageName;
-                if ("android".equals(pkg)) continue;
-                ComponentName cn = new ComponentName(pkg, ri.activityInfo.name);
-                // NOT the head of the list, unlike TransferHud's version of
-                // this: that intent carries no URI, and this one carries a
-                // document URI that MANAGE_DOCUMENTS protects. We cannot grant
-                // read on a URI we do not own, so handing it to whichever app
-                // happens to answer first opens a window onto nothing. The
-                // documents UI and Samsung's My Files are the two that hold it.
-                if (pkg.contains("documentsui") || pkg.contains("myfiles")) {
-                    target = cn;
-                    break;
-                }
-                if (fallback == null) fallback = cn;
-            }
-            if (target == null) target = fallback;
-        } catch (Exception e) {
-            DexLog.warn("linux", "cannot resolve a file manager for the shared folder", e);
-        }
-        DexLog.step("linux", "open shared folder " + dir + " → "
-                + (target != null ? target.flattenToShortString() : "no handler"));
-        if (target != null) {
-            intent.setComponent(target);
+        Intent intent = Linux.sharedFolderIntent(this);
+        if (intent != null) {
             ActivityOptions opts = shapeForDesktop(
                     ActivityOptions.makeBasic(), desktopWindowRect(dp(900), dp(640)));
             try {
@@ -3510,7 +3604,9 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
                 .setNegativeButton(getString(R.string.st_cancel), null)
                 .setPositiveButton(getString(R.string.ln_uninstall_go), (d, w) -> {
                     LinuxService.uninstall(this);
-                    Toast.makeText(this, getString(R.string.ln_uninstall_done),
+                    // Started, not done: the wipe waits its turn on the
+                    // service's queue, and an install has to stop first.
+                    Toast.makeText(this, getString(R.string.ln_uninstall_started),
                             Toast.LENGTH_LONG).show();
                 })
                 .show();
@@ -3975,13 +4071,13 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
         LinearLayout.LayoutParams navLp = new LinearLayout.LayoutParams(
                 dp(compact ? 33 : 40), dp(compact ? 34 : 38));
         navLp.setMargins(dp(compact ? 1 : 2), 0, dp(compact ? 1 : 2), 0);
-        // back is executed by the PC (adb key inject) via the request queue
+        // Back goes to the window in front, through the window daemon (taskbarBack)
         left.addView(navButton("◁", getString(R.string.lx_back),
-                v -> RequestProvider.enqueue("key", "back")), navLp);
+                v -> taskbarBack()), navLp);
         left.addView(navButton("○", getString(R.string.lx_home), v -> goHome()),
                 new LinearLayout.LayoutParams(navLp));
         left.addView(navButton("▢", getString(R.string.lx_recent_apps),
-                v -> toggleRecentsPopup()), new LinearLayout.LayoutParams(navLp));
+                v -> recentApps()), new LinearLayout.LayoutParams(navLp));
         return left;
     }
 
@@ -4046,9 +4142,9 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
         left.setOrientation(LinearLayout.HORIZONTAL);
         left.setGravity(Gravity.CENTER_VERTICAL);
         left.setPadding(dp(compact ? 4 : 8), 0, 0, 0);
-        // executed by the PC (adb key inject) via the request queue
+        // Back goes to the window in front, through the window daemon (taskbarBack)
         left.addView(win11BarButton(barGlyph("◁"), getString(R.string.lx_back),
-                v -> RequestProvider.enqueue("key", "back")));
+                v -> taskbarBack()));
         return left;
     }
 
@@ -4074,7 +4170,7 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
         center.addView(win11BarButton(barGlyph("🔍"), getString(R.string.w11_search),
                 v -> showStartSearching()));
         center.addView(win11BarButton(barGlyph("▢"), getString(R.string.w11_task_view),
-                v -> toggleRecentsPopup()));
+                v -> recentApps()));
         center.addView(win11BarButton(barGlyph("▭"), getString(R.string.w11_desktop),
                 v -> goHome()));
 
@@ -4375,7 +4471,107 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
     private void goHome() {
         dismissPopups();
         hideDrawer();
+        // The desktop cannot be raised over a window: the windows stay above the desktop's
+        // own task whatever reorder it is given (Galaxy A13, Android 12, and Galaxy S25
+        // Ultra, Android 17, 2026-11-17), so Home did nothing at all with an app open.
+        // Home clears the windows off the desktop instead, as DeX's Home does —
+        // CaptionService's Show desktop, which below Android 14 runs without its bars:
+        // every window and full-screen app minimised, Home again putting them back, a
+        // taskbar icon bringing back its own.
+        sendBroadcast(new Intent(ACTION_SHOW_DESKTOP).setPackage(getPackageName()));
         bringDesktopForward();
+    }
+
+    /**
+     * The taskbar's Back: for the window in front, whatever has the keyboard.
+     *
+     * A click on the taskbar is a click on the desktop where the taskbar is part of it
+     * (inside this activity, on a display that buries overlays: the Galaxy A13), and the
+     * click hands the desktop the keyboard. A Back sent to the display — the computer's
+     * key, which this button used to ask for — then went to the desktop and not to the
+     * app in front, so the button did nothing there, and plainly so with an app filling
+     * the desktop. So the key is aimed, as a title bar's Back is: the window in front is
+     * given the keyboard and then the key (the daemon's TASKKEY). An open drawer or flyout
+     * is what Back closes first, as on a phone. With no daemon to aim through, the
+     * computer's Back to the display, as before.
+     */
+    private void taskbarBack() {
+        if (drawerShown || popupShowing()) {
+            dismissPopups();
+            hideDrawer();
+            return;
+        }
+        final int display = displayId();
+        if (qsWm == null) qsWm = new WmClient();
+        final WmClient client = qsWm;
+        client.post(() -> {
+            List<WmClient.Task> list = display >= 0 ? client.list(display) : null;
+            if (list == null) {
+                RequestProvider.enqueue("key", "back");
+                return;
+            }
+            WmClient.Task front = null;
+            for (WmClient.Task t : list) {
+                if (t.visible && !isDesktopShell(t)) {
+                    front = t;
+                    break;
+                }
+            }
+            if (front == null) return;      // nothing open: nothing to go back in
+            String reply = client.taskKey(display, front.taskId, KeyEvent.KEYCODE_BACK, 0);
+            DexLog.step("taskbar", "back for " + front.pkg + " (task " + front.taskId + "): "
+                    + (reply == null ? "no answer" : reply));
+        });
+    }
+
+    /**
+     * The taskbar's ▢: the open apps, in the flyout above it. Where that flyout is drawn
+     * under the windows (overlaysBuried: the taskbar is inside the desktop, and the
+     * windows are above the desktop) it cannot be seen with an app open, so there ▢ brings
+     * the window at the back to the front instead — each press the next one, as switching
+     * apps does on a phone. With nothing open, the flyout, which nothing then covers.
+     */
+    private void recentApps() {
+        if (!overlaysBuried()) {
+            toggleRecentsPopup();
+            return;
+        }
+        dismissPopups();
+        hideDrawer();
+        final int display = displayId();
+        if (qsWm == null) qsWm = new WmClient();
+        final WmClient client = qsWm;
+        client.post(() -> {
+            List<WmClient.Task> list = display >= 0 ? client.list(display) : null;
+            WmClient.Task last = null;
+            if (list != null) {
+                for (WmClient.Task t : list) {
+                    if (t.visible && !isDesktopShell(t)) last = t;   // topmost first: the last is at the back
+                }
+            }
+            if (last == null) {
+                runOnUiThread(this::toggleRecentsPopup);
+                return;
+            }
+            boolean raised = client.front(display, last.taskId);
+            DexLog.step("taskbar", "recent apps: " + last.pkg + " (task " + last.taskId + ") to the front"
+                    + (raised ? "" : " — refused"));
+        });
+    }
+
+    /** This desktop's own task: not a window, and never what Back or ▢ is for. */
+    private boolean isDesktopShell(WmClient.Task t) {
+        return getPackageName().equals(t.pkg) && LauncherActivity.class.getName().equals(t.activity);
+    }
+
+    /** Whether any of the taskbar's flyouts is open. */
+    private boolean popupShowing() {
+        PopupWindow[] all = {recentsPopup, calendarPopup, batteryPopup, qsPopup, notifPopup,
+                exitPopup, widgetPicker, mediaPopup, padPopup, homePopup};
+        for (PopupWindow p : all) {
+            if (p != null && p.isShowing()) return true;
+        }
+        return false;
     }
 
     private void toggleDrawer() {
@@ -5359,15 +5555,30 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
         header.setPadding(dp(10), dp(4), dp(10), dp(6));
         panel.addView(header);
 
+        for (CaptionMenu.Item it : mediaOutputItems()) {
+            panel.addView(it.separator() ? mediaDivider() : mediaRow(it.label, it.checked, it.action));
+        }
+
+        mediaPopup = makePopup(panel);
+        showTrayPopup(mediaPopup, Gravity.END);
+    }
+
+    /**
+     * The flyout's choices: the computer, the computer and the phone, each of
+     * the phone's own outputs, and the phone's own picker. Kept as items so a
+     * window's sound button (CaptionService#onSound) offers exactly these, and
+     * picking one there does exactly what it does here.
+     */
+    private List<CaptionMenu.Item> mediaOutputItems() {
+        List<CaptionMenu.Item> items = new ArrayList<>();
         String mode = DexMedia.audioMode(this);
-        panel.addView(mediaRow(getString(R.string.lx_audio_computer),
+        items.add(CaptionMenu.item(getString(R.string.lx_audio_computer), null,
                 DexMedia.AUDIO_COMPUTER.equals(mode),
                 () -> pickForwarding(DexMedia.AUDIO_COMPUTER)));
-        panel.addView(mediaRow(getString(R.string.lx_audio_both),
+        items.add(CaptionMenu.item(getString(R.string.lx_audio_both), null,
                 DexMedia.AUDIO_BOTH.equals(mode),
                 () -> pickForwarding(DexMedia.AUDIO_BOTH)));
-
-        panel.addView(mediaDivider());
+        items.add(CaptionMenu.separator());
 
         // The phone's own outputs. Which row is lit: only meaningful while
         // sound stays on the phone, and then it is the remembered pick when
@@ -5390,15 +5601,31 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
         }
         for (int ix = 0; ix < outputs.size(); ix++) {
             final DexMedia.Output out = outputs.get(ix);
-            panel.addView(mediaRow(out.name, ix == lit, () -> routeToPhoneOutput(out)));
+            items.add(CaptionMenu.item(out.name, null, ix == lit, () -> routeToPhoneOutput(out)));
         }
 
-        panel.addView(mediaDivider());
-        panel.addView(mediaRow(getString(R.string.lx_output_more), false,
+        items.add(CaptionMenu.separator());
+        items.add(CaptionMenu.item(getString(R.string.lx_output_more), null, false,
                 this::openPhoneOutputPicker));
+        return items;
+    }
 
-        mediaPopup = makePopup(panel);
-        showTrayPopup(mediaPopup, Gravity.END);
+    /** The flyout's choices for a window's sound button (CaptionService); null with no desktop. */
+    static List<CaptionMenu.Item> soundMenuItems() {
+        LauncherActivity desktop = liveDesktop();
+        return desktop == null ? null : desktop.mediaOutputItems();
+    }
+
+    /** Whether quick settings offers the phone as this desktop's touchpad now. */
+    static boolean touchpadOffered() {
+        LauncherActivity desktop = liveDesktop();
+        return desktop != null && desktop.touchpadUsable();
+    }
+
+    /** A window's More menu: the phone as this desktop's touchpad, as quick settings opens it. */
+    static void openTouchpadFromCaption() {
+        LauncherActivity desktop = liveDesktop();
+        if (desktop != null && desktop.touchpadUsable()) desktop.openTouchpad();
     }
 
     /** One flyout row: a check column and a name. The check is the state. */
@@ -6358,6 +6585,12 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
             } else if (LinuxRemoteActivity.class.getName().equals(activity)) {
                 label = getString(R.string.rm_label);
                 glyph = "📡";
+            } else if (LinuxSettingsActivity.class.getName().equals(activity)) {
+                label = getString(R.string.ln_settings_title);
+                glyph = "⚙"; // gear
+            } else if (WebActivity.class.getName().equals(activity)) {
+                label = getString(R.string.wb_label);
+                glyph = "🌐"; // the drawer's own tile for it
             } else {
                 continue;
             }
@@ -6384,6 +6617,10 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
                     launchFileTransfer();
                 } else if (LinuxRemoteActivity.class.getName().equals(target)) {
                     openLinuxRemote();
+                } else if (LinuxSettingsActivity.class.getName().equals(target)) {
+                    openLinuxSettings();
+                } else if (WebActivity.class.getName().equals(target)) {
+                    launchWeb();
                 } else {
                     launchSettings();
                 }

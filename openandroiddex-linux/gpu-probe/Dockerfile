@@ -1,28 +1,32 @@
-# Reproducible build of oadx-vkprobe, the check a Linux session runs before it
-# points GL at the GPU, for both drivers the guest can get: Turnip (../turnip)
-# on Adreno phones and RADV (../radv-xclipse) on Exynos phones with Xclipse
-# GPUs. See doc/linux-gpu.md.
+# Reproducible build of the checks a Linux session runs before it points GL at
+# the GPU: oadx-vkprobe for both Vulkan drivers the guest can get, Turnip
+# (../turnip) on Adreno phones and RADV (../radv-xclipse) on Exynos phones
+# with Xclipse GPUs, and oadx-glprobe for VirGL (../virgl), the way through
+# Android's own driver on every other GPU. See doc/linux-gpu.md.
 #
-# Ubuntu 24.04, the guest's own release, so the probe asks for no newer glibc
-# than the guest has. It opens the Vulkan loader at run time, so only the
-# Vulkan headers are needed here, and no arm64 library.
+# Ubuntu 24.04, the guest's own release, so the probes ask for no newer glibc
+# than the guest has. They open their library at run time (the Vulkan loader,
+# Mesa's libEGL), so only headers are needed here, and no arm64 library.
 FROM ubuntu:noble-20261024.1
 
 ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-      gcc-aarch64-linux-gnu libc6-dev-arm64-cross libvulkan-dev file \
+      gcc-aarch64-linux-gnu libc6-dev-arm64-cross libvulkan-dev libegl-dev libx11-dev libgl-dev file \
  && rm -rf /var/lib/apt/lists/*
 
-# -idirafter: the Vulkan headers from /usr/include, searched after the arm64
-# C library's own, so nothing of the host's libc can be picked up.
-COPY oadx-vkprobe.c /build/oadx-vkprobe.c
+# -idirafter: the Vulkan, EGL, GLX and Xlib headers from /usr/include, searched
+# after the arm64 C library's own, so nothing of the host's libc can be picked up.
+COPY oadx-vkprobe.c oadx-glprobe.c /build/
 RUN mkdir -p /build/out \
- && aarch64-linux-gnu-gcc -O2 -Wall -Werror -idirafter /usr/include \
-      -o /build/out/oadx-vkprobe /build/oadx-vkprobe.c -ldl \
- && aarch64-linux-gnu-strip /build/out/oadx-vkprobe \
- && file /build/out/oadx-vkprobe \
- && aarch64-linux-gnu-objdump -T /build/out/oadx-vkprobe | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1
+ && for p in oadx-vkprobe oadx-glprobe; do \
+      aarch64-linux-gnu-gcc -O2 -Wall -Werror -idirafter /usr/include \
+        -o /build/out/$p /build/$p.c -ldl \
+      && aarch64-linux-gnu-strip /build/out/$p \
+      && file /build/out/$p \
+      && aarch64-linux-gnu-objdump -T /build/out/$p | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1 \
+      || exit 1; \
+    done
 
-# The artifact lands in /build/out/oadx-vkprobe.
+# The artifacts land in /build/out/oadx-vkprobe and /build/out/oadx-glprobe.

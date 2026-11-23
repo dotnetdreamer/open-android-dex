@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<title>Phone screen</title>
+<link rel="icon" href="icon.svg">
+<link rel="stylesheet" href="phone.css">
+<link rel="stylesheet" href="phone-files.css">
+<link rel="stylesheet" href="files.css">
+</head>
+<body>
+  <div class="bar" role="toolbar" aria-label="The phone's keys">
+    <button id="k-back" title="Back" aria-label="Back"><svg viewBox="0 0 24 24"><path d="M14.5 5.75L8.25 12l6.25 6.25"/></svg></button>
+    <button id="k-home" title="Home" aria-label="Home"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="6.5"/></svg></button>
+    <button id="k-recents" title="Recent apps" aria-label="Recent apps"><svg viewBox="0 0 24 24"><rect x="4.75" y="8.25" width="11.5" height="11.5" rx="2"/><path d="M8.25 4.75h9a2 2 0 0 1 2 2v9"/></svg></button>
+    <button id="k-notifications" title="Notifications" aria-label="Notifications"><svg viewBox="0 0 24 24"><path d="M6.75 16.75V11a5.25 5.25 0 0 1 10.5 0v5.75l1.5 1.5H5.25zM10 20.25h4"/></svg></button>
+    <span class="gap"></span>
+    <button id="panel-btn" class="unavailable" aria-pressed="false" title="Turning off the phone’s screen needs a helper on the phone: click to see how"><svg viewBox="0 0 24 24"><rect x="7.25" y="3.75" width="9.5" height="16.5" rx="2"/><path d="M4.75 4.75l14.5 14.5"/></svg><span>Screen off</span></button>
+    <button id="files-btn" title="The phone’s files: download files to this computer, or add files from this computer" hidden><svg viewBox="0 0 24 24"><path d="M3.75 7.25a2 2 0 0 1 2-2h4l2 2h6.5a2 2 0 0 1 2 2v8.5a2 2 0 0 1-2 2H5.75a2 2 0 0 1-2-2z"/><path d="M3.75 10h16.5"/></svg><span>Files</span></button>
+    <button id="q-low" title="Low: fastest">Low</button>
+    <button id="q-medium" title="Medium">Medium</button>
+    <button id="q-high" title="High: sharpest">High</button>
+    <select id="size" title="Picture size: a smaller picture comes sooner when much of the screen changes, and uses less data" aria-label="Picture size">
+      <option value="1">Full size</option>
+      <option value="0.75">Three quarters</option>
+      <option value="0.5">Half size</option>
+      <option value="0.333">A third</option>
+    </select>
+    <select id="sound" title="Where the phone’s sound plays. Sound off, or sound on the phone only, sends nothing more, so the picture has the whole connection." aria-label="Sound">
+      <option value="phone">Sound on phone</option>
+      <option value="here">Sound in browser</option>
+      <option value="both">Sound on both</option>
+      <option value="off">Sound off</option>
+    </select>
+  </div>
+  <div class="stage" id="stage">
+    <canvas id="screen" tabindex="0" aria-label="The phone's screen"></canvas>
+    <div class="lockpad" id="lockpad" hidden></div>
+    <div class="lock-note" id="lock-note" hidden></div>
+    <div class="protect-note" id="protect-note" role="status" hidden><span id="protect-words"></span><button id="protect-how">How</button></div>
+    <div class="panel-note" id="panel-note" role="dialog" aria-label="The phone’s helper" hidden>
+      <div id="panel-words"></div>
+      <div class="panel-cmd"><code id="panel-cmd"></code><button id="panel-copy">Copy</button></div>
+      <div id="panel-then"></div>
+      <button id="panel-close">Close</button>
+    </div>
+    <div class="cover" id="cover">
+      <div class="title" id="cover-title">Phone screen</div>
+      <div class="words" id="cover-words">Opening the phone's screen…</div>
+      <form id="pair" hidden>
+        <input class="code" id="code" inputmode="numeric" autocomplete="one-time-code" maxlength="6" aria-label="The code on the phone">
+        <div class="error" id="pair-error"></div>
+        <button type="submit" id="pair-go">Open</button>
+      </form>
+      <button id="ask" hidden>Ask the phone again</button>
+    </div>
+  </div>
+  <div class="status"><span id="status"></span><button id="share" hidden title="Ask the phone for screen sharing: someone at the phone taps Start">Full speed</button></div>
+  <script type="module" src="phone.js"></script>
+</body>
+</html>
