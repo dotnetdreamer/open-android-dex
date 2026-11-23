@@ -195,12 +195,16 @@ public class LinuxRemoteActivity extends Activity {
         s.enabled = LinuxRemote.isEnabled(this);
         s.status = LinuxRemote.readStatus(this);
         s.pairing = LinuxRemote.readPairing(this);
-        // A code means nothing with remote access off — nothing is listening
+        // A code means nothing with the tunnel down — nothing is listening
         // for it — and one can be left behind by a process that died with it
         // on screen. The host clears the file at its next stop; until then it
-        // is simply not shown.
+        // is simply not shown. The tunnel runs for Linux's remote access or
+        // for Remote desktop (LinuxRemote.tunnelOn): Remote desktop's card
+        // sends a person here to add a computer, and pairing then leaves
+        // Linux's remote access off (LinuxService.remotePair), so the switch
+        // on this page alone cannot say whether a code is listened for.
         boolean pairingOpen = "open".equals(s.pairing.state) || "starting".equals(s.pairing.state);
-        if (!s.enabled && pairingOpen) s.pairing = new LinuxRemote.Pairing();
+        if (!LinuxRemote.tunnelOn(this) && pairingOpen) s.pairing = new LinuxRemote.Pairing();
         s.peers = LinuxRemote.peers(this);
         s.linuxInstalled = Linux.isInstalled(this);
         Linux.Status st = Linux.readStatus(this);
