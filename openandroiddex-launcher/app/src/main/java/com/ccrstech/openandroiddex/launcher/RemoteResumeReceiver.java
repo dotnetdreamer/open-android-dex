@@ -50,6 +50,11 @@ public class RemoteResumeReceiver extends BroadcastReceiver {
         // set going; the email itself waits until the new address is there.
         EmailNotice.poke(ctx, Intent.ACTION_BOOT_COMPLETED.equals(action) ? "boot"
                 : Intent.ACTION_MY_PACKAGE_REPLACED.equals(action) ? "update" : "stopped");
+        // Wireless debugging the app switched on for Screen off's helper: off
+        // again when its time comes. Each of the three ends the process that
+        // was waiting for it, and the restart and the force-stop end Android's
+        // alarm too.
+        PhoneHelperStart.resume(ctx);
         // Remote desktop, started with the phone: Android asks for screen
         // sharing once per session, so the question comes up now (the user
         // has just unlocked the phone: BOOT_COMPLETED waits for that). A

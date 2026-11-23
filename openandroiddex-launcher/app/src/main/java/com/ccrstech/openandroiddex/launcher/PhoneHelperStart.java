@@ -1,6 +1,7 @@
 package com.ccrstech.openandroiddex.launcher;
 
 import android.Manifest;
+import android.app.AlarmManager;
 import android.app.Notification;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
@@ -18,6 +19,7 @@ import android.net.nsd.NsdServiceInfo;
 import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.SystemClock;
 import android.provider.Settings;
 
 import java.io.File;
@@ -60,9 +62,12 @@ import java.util.concurrent.TimeUnit;
  * only). On a Wi-Fi Android was never allowed on, Android puts the switch
  * back and asks on the phone; a start the computer did not ask for is not
  * tried again there until the phone joins another network. Switched off again
- * two minutes after the last computer leaves, but only when the app switched
- * it on: a person's own Wireless debugging (and the computers on it) are left
- * alone.
+ * two minutes after the last computer leaves, or after a start no computer
+ * watches, but only when the app switched it on: a person's own Wireless
+ * debugging (and the computers on it) are left alone. That switch-off is kept
+ * on disk and in an alarm Android keeps ({@link #switchOffLater}), so this
+ * process dying first, or the phone sleeping, does not leave Wireless
+ * debugging on.
  *
  * <p><b>The helper's life.</b> As adbd's: an adbd that stops (Developer
  * options or Wireless debugging off, with USB debugging off too, or a restart)
@@ -98,8 +103,14 @@ final class PhoneHelperStart {
     private static final String PAIRING_SERVICE = "_adb-tls-pairing._tcp";
     private static final String ADB_WIFI_ENABLED = "adb_wifi_enabled";
     private static final long SWITCH_OFF_MS = 120_000;
+    /**
+     * While a computer watches, how often the switch-off looks again: an
+     * alarm stays set, for a process that dies mid-session.
+     */
+    private static final long WATCHED_LOOK_MS = 10 * 60_000;
     private static final int NOTIF_PAIR = 0x65;
     static final String ACTION_CODE = "com.ccrstech.openandroiddex.launcher.helper.CODE";
+    static final String ACTION_SWITCH_OFF = "com.ccrstech.openandroiddex.launcher.helper.SWITCH_OFF";
     static final String CODE_KEY = "code";
 
     private static final ExecutorService WORK = Executors.newSingleThreadExecutor(r -> {
@@ -155,6 +166,11 @@ final class PhoneHelperStart {
     /** The app switched Wireless debugging on, so the app may switch it off. */
     private static File switchedFile(Context ctx) {
         return new File(dir(ctx), "switched-on");
+    }
+
+    /** When that switch-off is due (the wall clock, ms): kept, for a process that dies before then. */
+    private static File switchOffFile(Context ctx) {
+        return new File(dir(ctx), "switch-off-at");
     }
 
     static boolean supported() {
@@ -402,11 +418,21 @@ final class PhoneHelperStart {
             return false;
         }
         DexLog.step("phone", "switched Wireless debugging on for the phone's helper");
+        // Off again whatever comes next: a start no computer watches (Settings' "Try again"), a
+        // computer that left while this start still ran, this process dying. A computer that
+        // watches puts it off until two minutes after it leaves (computersGone).
+        Context app = ctx.getApplicationContext();
+        synchronized (SWITCH_LOCK) {
+            switchOffLater(app, System.currentTimeMillis() + SWITCH_OFF_MS);
+        }
         // Android puts it back within half a second on a network it was never allowed on.
         for (int i = 0; i < 10; i++) {
             sleep(250);
             if (Boolean.FALSE.equals(wirelessOn(ctx))) {
-                switchedFile(ctx).delete();
+                synchronized (SWITCH_LOCK) {
+                    switchedFile(ctx).delete();
+                    forgetSwitchOff(app);
+                }
                 DexLog.step("phone", "Android asks on the phone about Wireless debugging on this Wi-Fi");
                 return false;
             }
@@ -421,24 +447,171 @@ final class PhoneHelperStart {
      */
     static void computersGone(Context ctx) {
         Context app = ctx.getApplicationContext();
+        synchronized (SWITCH_LOCK) {
+            // Under the lock: a look that saw a computer still watching (its ten minutes) is
+            // either done before this, or sees no computer after it; it never writes over these two.
+            if (!switchedFile(app).isFile()) return;
+            switchOffLater(app, System.currentTimeMillis() + SWITCH_OFF_MS);
+        }
+    }
+
+    /**
+     * The app's process started again (the phone restarted, the app was
+     * updated, or the desktop app's clean-up stopped it): a switch-off its last
+     * process left pending is looked at again, and done if it is due.
+     * Nothing happens unless the app switched Wireless debugging on.
+     */
+    static void resume(Context ctx) {
+        Context app = ctx.getApplicationContext();
         if (!switchedFile(app).isFile()) return;
+        WORK.execute(() -> switchOffIfDue(app));
+    }
+
+    /**
+     * Wireless debugging off at {@code at} (the wall clock), if the app
+     * switched it on and no computer watches then. Kept three ways: on disk;
+     * as a message on this process's main thread, on time while the process
+     * lives; and as an alarm Android keeps, for when the process died first
+     * (the main thread's message dies with it) or the phone slept (the main
+     * thread's clock stops in deep sleep; the alarm's does not).
+     */
+    private static void switchOffLater(Context app, long at) {
+        try {
+            write(switchOffFile(app), String.valueOf(at));
+        } catch (IOException e) {
+            DexLog.warn("phone", "the switch-off of Wireless debugging could not be kept: " + e);
+        }
         MAIN.removeCallbacksAndMessages(SWITCH_OFF_TOKEN);
-        MAIN.postAtTime(() -> WORK.execute(() -> {
-            if (PhoneHelperLink.watched() || !switchedFile(app).isFile()) return;
-            try {
-                if (Boolean.TRUE.equals(wirelessOn(app)) && canSwitch(app)) {
-                    Settings.Global.putInt(app.getContentResolver(), ADB_WIFI_ENABLED, 0);
-                    DexLog.step("phone", "switched Wireless debugging off again: no computer for two minutes");
-                }
-            } catch (SecurityException e) {
-                DexLog.warn("phone", "Wireless debugging could not be switched off: " + e);
+        long in = Math.max(0, at - System.currentTimeMillis());
+        MAIN.postAtTime(() -> WORK.execute(() -> switchOffIfDue(app)), SWITCH_OFF_TOKEN, SystemClock.uptimeMillis() + in);
+        AlarmManager am = app.getSystemService(AlarmManager.class);
+        if (am == null) return;
+        try {
+            am.setAndAllowWhileIdle(AlarmManager.RTC, at, switchOffIntent(app));
+        } catch (RuntimeException e) {
+            DexLog.warn("phone", "no alarm for the switch-off of Wireless debugging: " + e);
+        }
+    }
+
+    private static PendingIntent switchOffIntent(Context app) {
+        Intent i = new Intent(ACTION_SWITCH_OFF).setClass(app, SwitchOffReceiver.class).setPackage(app.getPackageName());
+        return PendingIntent.getBroadcast(app, 9, i, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+    }
+
+    /** No switch-off pending any more: the kept time, the main thread's message and the alarm. */
+    private static void forgetSwitchOff(Context app) {
+        MAIN.removeCallbacksAndMessages(SWITCH_OFF_TOKEN);
+        switchOffFile(app).delete();
+        AlarmManager am = app.getSystemService(AlarmManager.class);
+        if (am == null) return;
+        try {
+            am.cancel(switchOffIntent(app));
+        } catch (RuntimeException ignored) {
+            // nothing set
+        }
+    }
+
+    /**
+     * The switch-off's time came (the main thread's message, Android's alarm,
+     * or the app's start): Wireless debugging off if the app switched it on,
+     * the time is due, and no computer watches; looked at again later
+     * otherwise. A switch-off that does not take (no WRITE_SECURE_SETTINGS any
+     * more, the switch still on after it) keeps the mark and is tried again in
+     * ten minutes: the helper's next start grants the permission again. On
+     * WORK, so never in the middle of a start. Package-private for the tests.
+     */
+    static void switchOffIfDue(Context app) {
+        synchronized (SWITCH_LOCK) {
+            if (!switchedFile(app).isFile()) {
+                // Switched off already, or a person's own switch: nothing to do, nothing kept.
+                forgetSwitchOff(app);
+                return;
             }
+            long now = System.currentTimeMillis();
+            if (PhoneHelperLink.watched()) {
+                // The computer's leaving sets two minutes again (computersGone).
+                switchOffLater(app, now + WATCHED_LOOK_MS);
+                return;
+            }
+            long at = parseLong(read(switchOffFile(app)));
+            // None kept (written by an earlier version), or one the clock went back past: two minutes from now.
+            if (at <= 0 || at - now > WATCHED_LOOK_MS) {
+                switchOffLater(app, now + SWITCH_OFF_MS);
+                return;
+            }
+            if (now < at) {
+                // Early: Android's alarm may come before its time, and the main thread's after a restart.
+                switchOffLater(app, at);
+                return;
+            }
+            Boolean on = wirelessOn(app);
+            if (!Boolean.FALSE.equals(on)) {
+                String why = switchOff(app);
+                if (why != null) {
+                    DexLog.warn("phone", "Wireless debugging is still on (" + why + "): tried again in ten minutes");
+                    switchOffLater(app, now + WATCHED_LOOK_MS);
+                    return;
+                }
+                DexLog.step("phone", "switched Wireless debugging off again: no computer for two minutes");
+            }
+            // Off: by the app now, or by a person meanwhile.
             switchedFile(app).delete();
-            tell();
-        }), SWITCH_OFF_TOKEN, android.os.SystemClock.uptimeMillis() + SWITCH_OFF_MS);
+            forgetSwitchOff(app);
+        }
+        tell();
+    }
+
+    /** Wireless debugging's switch off, and read back: null once it is off, else why not. */
+    private static String switchOff(Context app) {
+        if (!canSwitch(app)) return "no permission to switch it";
+        try {
+            if (!Settings.Global.putInt(app.getContentResolver(), ADB_WIFI_ENABLED, 0)) return "Android did not take the switch";
+        } catch (SecurityException e) {
+            return String.valueOf(e.getMessage());
+        }
+        return Boolean.FALSE.equals(wirelessOn(app)) ? null : "the switch reads on after it";
+    }
+
+    private static long parseLong(String s) {
+        try {
+            return Long.parseLong(s);
+        } catch (NumberFormatException e) {
+            return -1;
+        }
     }
 
     private static final Object SWITCH_OFF_TOKEN = new Object();
+    /**
+     * The mark and the kept time change under this: a look that finds a
+     * computer watching, and that computer's leaving, never write over each
+     * other's time.
+     */
+    private static final Object SWITCH_LOCK = new Object();
+
+    /** The tests' stand-in for this process dying: the switch-off waiting on its main thread goes with it. */
+    static void processDiedForTest() {
+        MAIN.removeCallbacksAndMessages(SWITCH_OFF_TOKEN);
+    }
+
+    /**
+     * Android's alarm for the switch-off ({@link #switchOffLater}): it comes
+     * even when the app's process died in between, and starts it again.
+     */
+    public static final class SwitchOffReceiver extends BroadcastReceiver {
+        @Override
+        public void onReceive(Context ctx, Intent intent) {
+            if (intent == null || !ACTION_SWITCH_OFF.equals(intent.getAction())) return;
+            Context app = ctx.getApplicationContext();
+            PendingResult pr = goAsync();
+            WORK.execute(() -> {
+                try {
+                    switchOffIfDue(app);
+                } finally {
+                    if (pr != null) pr.finish();
+                }
+            });
+        }
+    }
 
     // ── pairing ──
 

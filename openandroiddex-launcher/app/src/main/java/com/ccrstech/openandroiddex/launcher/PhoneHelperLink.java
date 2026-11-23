@@ -42,6 +42,9 @@ import java.util.concurrent.TimeUnit;
  * the phone pressing its power button gets the screen back with that one press
  * (the helper wakes the phone it fell asleep), and the computer's wish for a
  * dark screen is dropped until the computer asks again ({@code asleep}).
+ * The window's own Screen on asks the helper for {@code on}; a session's end
+ * asks for {@code restore}, which leaves dark a panel another tool had made
+ * dark before (PhoneHelper, "Someone else's dark screen").
  *
  * <p><b>Input.</b> {@link PhoneInput} gives the helper the computer's fingers,
  * wheel and keys while it is linked ({@link #input}), and uses its
@@ -69,6 +72,12 @@ final class PhoneHelperLink {
     /** sleepComing's asks, and how many the worker has passed on. Under LOCK. */
     private static long forgetAsked;
     private static long forgetDone;
+    /**
+     * A live session's own Screen on (its wish went from dark to lit), not a
+     * session's end: the helper is asked for {@code on}, not {@code restore}.
+     * Under LOCK.
+     */
+    private static boolean personAskedOn;
 
     private PhoneHelperLink() {
     }
@@ -87,6 +96,8 @@ final class PhoneHelperLink {
         synchronized (LOCK) {
             if (app == null) app = ctx.getApplicationContext();
             Boolean was = live ? SESSIONS.put(who, wantDark) : SESSIONS.remove(who);
+            if (live && wantDark) personAskedOn = false;
+            else if (live && Boolean.TRUE.equals(was)) personAskedOn = true;
             if (!SESSIONS.isEmpty() && worker == null) startWorker();
             if (was == null || was != wantDark || !live) kick();
         }
@@ -386,12 +397,21 @@ final class PhoneHelperLink {
                         set(state);
                     }
                 } else if (!want && dark) {
-                    String r = l.ask("on");
+                    boolean asked;
+                    synchronized (LOCK) {
+                        asked = personAskedOn;
+                    }
+                    // The person's Screen on lights it; a session's end leaves another tool's dark screen dark.
+                    String r = relight(l, asked);
                     if (r == null) {
                         l = lost(l);
                         continue;
                     }
                     if ("on".equals(r)) {
+                        // Kept until it worked: a retry of the person's Screen on is still theirs.
+                        synchronized (LOCK) {
+                            personAskedOn = false;
+                        }
                         dark = false;
                         onRefused = null;
                         set("on");
@@ -417,9 +437,9 @@ final class PhoneHelperLink {
                 }
             }
         } finally {
-            // Nobody watches: the panel lit again (the helper also does so when this connection ends).
+            // Nobody watches: the panel as it was found (the helper also does so when this connection ends).
             if (l != null) {
-                if (dark) l.ask("on");
+                if (dark) relight(l, false);
                 l.close();
             }
             dark = false;
@@ -427,6 +447,7 @@ final class PhoneHelperLink {
             synchronized (LOCK) {
                 link = null;
                 worker = null;
+                personAskedOn = false;
                 again = !SESSIONS.isEmpty();
                 if (again) startWorker();
                 LOCK.notifyAll();
@@ -439,10 +460,23 @@ final class PhoneHelperLink {
         }
     }
 
+    /**
+     * The panel lit again: {@code on} when the person at the computer asked
+     * for the screen, {@code restore} when a session ended. Never {@code on}
+     * for a session's end: a helper from before {@code restore} is never
+     * linked ({@link Link#open} tells it to go), since its {@code on} would
+     * light another tool's dark screen. The helper's answer, or null if it went.
+     */
+    private static String relight(Link l, boolean personAsked) {
+        return l.ask(personAsked ? "on" : "restore");
+    }
+
     private static Link lost(Link l) {
         l.close();
         synchronized (LOCK) {
             if (link == l) link = null;
+            // The helper puts the panel back as the connection ends: nothing left to ask.
+            personAskedOn = false;
             LOCK.notifyAll();
         }
         DexLog.warn("phone", "the phone's helper went away");

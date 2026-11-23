@@ -39,7 +39,26 @@ public class PhoneHelperTest {
         volatile boolean awake = true;
         volatile boolean lit = true;
         volatile boolean failNext;
+        /** SurfaceFlinger answers (its dump read); false: the helper cannot tell. */
+        volatile boolean readable = true;
+        /** This boot's mark: a helper of this app made the panel dark and none lit it since. */
+        volatile boolean mark;
         final List<String> calls = java.util.Collections.synchronizedList(new ArrayList<>());
+
+        @Override
+        public Boolean lit() {
+            return readable ? lit : null;
+        }
+
+        @Override
+        public boolean markedDark() {
+            return mark;
+        }
+
+        @Override
+        public void markDark(boolean dark) {
+            mark = dark;
+        }
 
         @Override
         public void set(boolean on) throws Exception {
@@ -283,6 +302,128 @@ public class PhoneHelperTest {
         assertEquals(MotionEvent.ACTION_UP, ((MotionEvent) input.events.get(input.events.size() - 1)).getActionMasked());
     }
 
+    // ── a panel another tool made dark (a DeX desktop's or scrcpy's screen off) ──
+
+    /**
+     * Another tool had the panel dark before the computer asked: the session's
+     * end (here the app's connection ending) leaves it dark, so the other
+     * tool's screen off stands. Before: lit, whoever had made it dark.
+     */
+    @Test
+    public void aPanelAnotherToolMadeDarkStaysDarkWhenTheConnectionEnds() {
+        power.lit = false;
+        FakeConn c = new FakeConn();
+        assertEquals("off", helper.handle(c, "off"));
+        assertTrue("dark, as the computer asked", helper.isDark());
+        helper.ended(c);
+        assertFalse("left dark: the other tool's screen off", power.lit);
+        assertFalse(power.calls.contains("on"));
+        assertFalse(helper.isDark());
+    }
+
+    /** The app's own word for a session's end ({@code restore}): the same. */
+    @Test
+    public void restoreLeavesAPanelAnotherToolMadeDarkAsItWas() {
+        power.lit = false;
+        FakeConn c = new FakeConn();
+        helper.handle(c, "off");
+        assertEquals("on", helper.handle(c, "restore"));
+        assertFalse(power.lit);
+        assertFalse(power.calls.contains("on"));
+        assertFalse(helper.isDark());
+    }
+
+    /** The helper going (an app with a newer one) leaves it dark too. */
+    @Test
+    public void quitLeavesAPanelAnotherToolMadeDarkAsItWas() {
+        power.lit = false;
+        FakeConn c = new FakeConn();
+        helper.handle(c, "off");
+        assertEquals("bye", helper.handle(c, "quit"));
+        assertFalse(power.lit);
+        assertFalse(power.calls.contains("on"));
+    }
+
+    /** The person at the computer pressing Screen on ({@code on}) asks for the screen: lit, whoever made it dark. */
+    @Test
+    public void thePersonsScreenOnLightsEvenAPanelAnotherToolMadeDark() {
+        power.lit = false;
+        FakeConn c = new FakeConn();
+        helper.handle(c, "off");
+        assertEquals("on", helper.handle(c, "on"));
+        assertTrue(power.lit);
+        assertEquals(List.of("on"), power.calls);
+    }
+
+    /** A panel the helper made dark itself: lit again at the session's end, as ever, and its mark kept meanwhile. */
+    @Test
+    public void restoreLightsAPanelTheHelperMadeDark() {
+        FakeConn c = new FakeConn();
+        helper.handle(c, "off");
+        assertTrue("marked: a helper of this app made it dark", power.mark);
+        assertEquals("on", helper.handle(c, "restore"));
+        assertTrue(power.lit);
+        assertFalse(power.mark);
+        assertEquals(List.of("off", "on"), power.calls);
+    }
+
+    /**
+     * Dark because a helper of this app died before lighting it again (its
+     * mark is there): not another tool's, so lit at the session's end as
+     * before.
+     */
+    @Test
+    public void aPanelAnEarlierHelperLeftDarkIsLitAgainAsBefore() {
+        power.lit = false;
+        power.mark = true;
+        FakeConn c = new FakeConn();
+        helper.handle(c, "off");
+        helper.ended(c);
+        assertTrue(power.lit);
+        assertFalse(power.mark);
+    }
+
+    /** SurfaceFlinger cannot be read: taken as lit, and the helper does as it always did. */
+    @Test
+    public void aPanelWhoseStateCannotBeReadIsTakenAsLit() {
+        power.readable = false;
+        FakeConn c = new FakeConn();
+        helper.handle(c, "off");
+        helper.ended(c);
+        assertEquals(List.of("off", "on"), power.calls);
+    }
+
+    /** The next session starts afresh: a panel lit since is darkened and lit again by it. */
+    @Test
+    public void foundDarkIsForThatSessionOnly() {
+        power.lit = false;
+        FakeConn first = new FakeConn();
+        helper.handle(first, "off");
+        helper.ended(first);
+        // The other tool lit it meanwhile.
+        power.lit = true;
+        FakeConn next = new FakeConn();
+        helper.handle(next, "off");
+        assertFalse(power.lit);
+        helper.ended(next);
+        assertTrue(power.lit);
+        assertEquals(List.of("off", "on"), power.calls);
+    }
+
+    /** Asleep while marked: the panel is Android's, and the mark goes. */
+    @Test
+    public void theMarkGoesWhenThePhoneSleeps() {
+        FakeConn c = new FakeConn();
+        helper.handle(c, "off");
+        assertTrue(power.mark);
+        power.awake = false;
+        helper.lookAwake();
+        assertFalse(power.mark);
+        helper.handle(c, "off");
+        assertEquals("forget", "on", helper.handle(c, "forget"));
+        assertFalse(power.mark);
+    }
+
     @Test
     public void anythingElseIsRefused() {
         FakeConn c = new FakeConn();
@@ -524,6 +665,136 @@ public class PhoneHelperTest {
         } finally {
             PhoneHelperLink.session(app, page, false, false);
             PhoneHelperLink.session(app, another, false, false);
+            until(() -> "none".equals(PhoneHelperLink.state()), 8000);
+            server.close();
+        }
+    }
+
+    /** The worker linked to this test's helper (the worker keeps the first context it was given: a static, so this test's). */
+    private java.net.ServerSocket linkedHelper(android.content.Context app, String key) throws Exception {
+        java.lang.reflect.Field kept = PhoneHelperLink.class.getDeclaredField("app");
+        kept.setAccessible(true);
+        kept.set(null, null);
+        org.robolectric.Shadows.shadowOf(app.getSystemService(android.os.PowerManager.class)).setIsInteractive(true);
+        java.net.ServerSocket server = serveHelper(new PhoneHelper(app.getPackageName(), power, input),
+                key.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        assertTrue(PhoneHelperLink.adopt(app, String.valueOf(server.getLocalPort()), key));
+        return server;
+    }
+
+    /**
+     * The computer's window closes while another tool (an Open Android DeX
+     * desktop, scrcpy) has the phone's panel dark: the app's worker and the
+     * helper leave it dark. Before, the window's close lit it, undoing the
+     * other tool's screen off.
+     */
+    @Test
+    public void aWindowClosingLeavesAPanelAnotherToolMadeDarkAsItWas() throws Exception {
+        android.content.Context app = org.robolectric.RuntimeEnvironment.getApplication();
+        power.lit = false;
+        java.net.ServerSocket server = linkedHelper(app, "6b".repeat(32));
+        Object page = new Object();
+        try {
+            PhoneHelperLink.session(app, page, true, true);
+            assertTrue("the window's Screen off", until(() -> "off".equals(PhoneHelperLink.state()), 8000));
+            // The window closes: its session ends.
+            PhoneHelperLink.session(app, page, false, false);
+            assertTrue(until(() -> "none".equals(PhoneHelperLink.state()), 8000));
+            assertFalse("left dark: the other tool's screen off", power.lit);
+            assertFalse(power.calls.contains("on"));
+        } finally {
+            PhoneHelperLink.session(app, page, false, false);
+            until(() -> "none".equals(PhoneHelperLink.state()), 8000);
+            server.close();
+        }
+    }
+
+    /** The window's own Screen on still lights it: the person asked for the screen. */
+    @Test
+    public void theWindowsScreenOnLightsAPanelAnotherToolMadeDark() throws Exception {
+        android.content.Context app = org.robolectric.RuntimeEnvironment.getApplication();
+        power.lit = false;
+        java.net.ServerSocket server = linkedHelper(app, "7c".repeat(32));
+        Object page = new Object();
+        try {
+            PhoneHelperLink.session(app, page, true, true);
+            assertTrue(until(() -> "off".equals(PhoneHelperLink.state()), 8000));
+            PhoneHelperLink.session(app, page, true, false);
+            assertTrue("lit by the person's Screen on", until(() -> "on".equals(PhoneHelperLink.state()) && power.lit, 8000));
+            assertEquals(List.of("on"), power.calls);
+        } finally {
+            PhoneHelperLink.session(app, page, false, false);
+            until(() -> "none".equals(PhoneHelperLink.state()), 8000);
+            server.close();
+        }
+    }
+
+    /**
+     * A helper an update left running, of the protocol before {@code restore}
+     * (1): its {@code on} would light another tool's dark screen at a
+     * session's end. The app tells it to go at the handshake and asks it
+     * nothing else, so the new helper is started instead.
+     */
+    @Test
+    public void anOlderHelperIsToldToGoAndAskedNothingElse() throws Exception {
+        android.content.Context app = org.robolectric.RuntimeEnvironment.getApplication();
+        java.lang.reflect.Field kept = PhoneHelperLink.class.getDeclaredField("app");
+        kept.setAccessible(true);
+        kept.set(null, null);
+        org.robolectric.Shadows.shadowOf(app.getSystemService(android.os.PowerManager.class)).setIsInteractive(true);
+        String key = "9e".repeat(32);
+        byte[] k = key.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        List<String> heard = java.util.Collections.synchronizedList(new ArrayList<>());
+        java.net.ServerSocket old = new java.net.ServerSocket(0, 4, java.net.InetAddress.getLoopbackAddress());
+        Thread t = new Thread(() -> {
+            while (!old.isClosed()) {
+                try (java.net.Socket s = old.accept()) {
+                    // A version-1 helper's handshake, as such a helper says it.
+                    java.io.BufferedReader in = new java.io.BufferedReader(new java.io.InputStreamReader(s.getInputStream(), java.nio.charset.StandardCharsets.UTF_8));
+                    java.io.OutputStream out = s.getOutputStream();
+                    String mine = PhoneHelper.challenge();
+                    out.write(("helper 1 " + mine + "\n").getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                    String[] w = String.valueOf(in.readLine()).split(" ");
+                    if (w.length != 3 || !PhoneHelper.same(w[1], PhoneHelper.proof(k, "app", mine))) continue;
+                    out.write(("ok " + PhoneHelper.proof(k, "helper", w[2]) + " on 35\n").getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                    String line;
+                    while ((line = in.readLine()) != null) heard.add(line);
+                } catch (java.io.IOException gone) {
+                    // closed
+                }
+            }
+        }, "old-helper");
+        t.setDaemon(true);
+        t.start();
+        Object page = new Object();
+        try {
+            assertTrue(PhoneHelperLink.adopt(app, String.valueOf(old.getLocalPort()), key));
+            PhoneHelperLink.session(app, page, true, true);
+            assertTrue("told to go", until(() -> heard.contains("quit"), 8000));
+            Thread.sleep(1500);
+            assertEquals("nothing but quit", List.of("quit"), new ArrayList<>(new java.util.LinkedHashSet<>(heard)));
+            assertFalse("never linked", PhoneHelperLink.linked());
+        } finally {
+            PhoneHelperLink.session(app, page, false, false);
+            until(() -> "none".equals(PhoneHelperLink.state()), 8000);
+            old.close();
+        }
+    }
+
+    /** A panel the helper made dark: the window's close lights it again, as ever. */
+    @Test
+    public void aWindowClosingLightsAPanelTheHelperMadeDark() throws Exception {
+        android.content.Context app = org.robolectric.RuntimeEnvironment.getApplication();
+        java.net.ServerSocket server = linkedHelper(app, "8d".repeat(32));
+        Object page = new Object();
+        try {
+            PhoneHelperLink.session(app, page, true, true);
+            assertTrue(until(() -> "off".equals(PhoneHelperLink.state()) && !power.lit, 8000));
+            PhoneHelperLink.session(app, page, false, false);
+            assertTrue(until(() -> "none".equals(PhoneHelperLink.state()) && power.lit, 8000));
+            assertEquals(List.of("off", "on"), power.calls);
+        } finally {
+            PhoneHelperLink.session(app, page, false, false);
             until(() -> "none".equals(PhoneHelperLink.state()), 8000);
             server.close();
         }

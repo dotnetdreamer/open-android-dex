@@ -13,6 +13,9 @@ import android.view.KeyEvent;
 import android.view.MotionEvent;
 
 import java.io.BufferedReader;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
@@ -26,6 +29,10 @@ import java.security.MessageDigest;
 import java.security.SecureRandom;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
+import java.util.concurrent.TimeUnit;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
@@ -83,7 +90,9 @@ import javax.crypto.spec.SecretKeySpec;
  *   → app &lt;proof&gt; &lt;challenge&gt;
  *                      ← ok &lt;proof&gt; on|off &lt;sdk&gt;   (or the end: a wrong proof)
  *   → off              ← off | error &lt;why&gt;      the panel dark, the phone still awake
- *   → on               ← on | error &lt;why&gt;
+ *   → on               ← on | error &lt;why&gt;       the person at the computer asked: lit
+ *   → restore          ← on | error &lt;why&gt;       a session over: the panel as it was found
+ *                                                (protocol 2; an older helper is told to go)
  *   → forget           ← on                     the computer is about to put the phone to sleep
  *                                                (its lock key): the panel is Android's
  *                      ← asleep                 (unasked) the phone fell asleep while dark: a person
@@ -106,11 +115,27 @@ import javax.crypto.spec.SecretKeySpec;
  * back as a person expects. A sleep the computer asks for itself is said first
  * ({@code forget}) and left alone. A finger down when the connection ends is
  * lifted.
+ *
+ * <p><b>Someone else's dark screen.</b> Another tool may have the panel dark
+ * already when a computer asks for it (an Open Android DeX desktop's or
+ * scrcpy's screen off: the same power mode). The helper asks SurfaceFlinger
+ * first ({@link Power#lit}); a panel found dark is left dark when the session
+ * ends ({@code restore}, the connection's end, {@code --quit}), so ending a
+ * session never undoes that tool's screen off. Only the person's own
+ * {@code on} lights it. A panel a helper of this app left dark (it died
+ * before lighting it again) is told apart by a mark on the phone
+ * ({@link Power#markedDark}): that one is lit again as before.
  */
 public final class PhoneHelper {
 
-    /** The wire's version: what the helper's first line says. A change that breaks it bumps it. */
-    static final int PROTOCOL = 1;
+    /**
+     * The wire's version: what the helper's first line says. A change that
+     * breaks it bumps it. 2 (2026-11-23): {@code restore}, and a panel found
+     * dark left so. A version-1 helper an update left running would light that
+     * panel, so the app tells it to go ({@link PhoneHelperLink}) and the new
+     * one starts.
+     */
+    static final int PROTOCOL = 2;
     /** The helper's own socket, for the shell only: one helper at a time, and its goodbye. */
     static final String LOCK_SUFFIX = ".helper-own";
 
@@ -130,6 +155,11 @@ public final class PhoneHelper {
     private final Object lock = new Object();
     /** The connection that made the panel dark, or null: only its end lights the panel again. */
     private Conn owner;
+    /**
+     * The panel was dark already when {@link #owner} asked (someone else's
+     * screen off): an end of the session leaves it dark. Under lock.
+     */
+    private boolean foundDark;
     private volatile boolean quitting;
     /** The finger, while one is down: when it went down. Input's own. */
     private long touchDownAt = -1;
@@ -145,6 +175,15 @@ public final class PhoneHelper {
 
         /** Wakes the phone as its power button would (Android lights the panel itself then). */
         void wake();
+
+        /** Whether a built-in panel is lit now (SurfaceFlinger's power mode); null when that cannot be told. */
+        Boolean lit();
+
+        /** A helper of this app made the panel dark and none lit it since (it died first): this boot's mark. */
+        boolean markedDark();
+
+        /** That mark set (a helper made the panel dark) or cleared (lit again, or Android's again). */
+        void markDark(boolean dark);
     }
 
     /** Where input events go: InputManager's injectInputEvent here, a list in tests. */
@@ -218,7 +257,7 @@ public final class PhoneHelper {
             }
         }
         int port = server.getLocalPort();
-        PhoneHelper h = new PhoneHelper(pkg, new Panel(), new Injector());
+        PhoneHelper h = new PhoneHelper(pkg, new Panel(pkg), new Injector());
         System.out.println("helper: ready for " + pkg + " on Android " + Build.VERSION.SDK_INT + ", port " + port);
         System.out.flush();
         Thread shell = new Thread(() -> h.serveOwn(own), "helper-own");
@@ -315,15 +354,24 @@ public final class PhoneHelper {
             case "off":
                 synchronized (lock) {
                     if (!power.awake()) return "error asleep";
-                    try {
-                        power.set(false);
-                    } catch (Throwable t) {
-                        return "error " + oneLine(t);
+                    if (owner == null) {
+                        // Dark already, and not by a helper of this app: another tool's screen off
+                        // (a DeX desktop's, scrcpy's). Kept dark while asked, and left so after.
+                        foundDark = Boolean.FALSE.equals(power.lit()) && !power.markedDark();
+                    }
+                    if (!foundDark) {
+                        try {
+                            power.set(false);
+                        } catch (Throwable t) {
+                            return "error " + oneLine(t);
+                        }
+                        power.markDark(true);
                     }
                     owner = c;
                 }
                 return "off";
             case "on":
+                // The person at the computer asked for the screen: lit, whoever made it dark first.
                 synchronized (lock) {
                     if (owner != null) {
                         try {
@@ -331,13 +379,22 @@ public final class PhoneHelper {
                         } catch (Throwable t) {
                             return "error " + oneLine(t);
                         }
+                        power.markDark(false);
                         owner = null;
+                        foundDark = false;
                     }
                 }
+                return "on";
+            case "restore":
+                // A session over (its window closed, its computer gone): the panel as it was
+                // found, lit again only if this helper made it dark.
+                if (!lightIfOurs()) return "error the panel could not be lit again";
                 return "on";
             case "forget":
                 synchronized (lock) {
                     owner = null;
+                    foundDark = false;
+                    power.markDark(false);
                 }
                 return "on";
             case "quit":
@@ -378,20 +435,26 @@ public final class PhoneHelper {
      * the phone awake. The record of who darkened it goes only once that worked
      * (or Android has the phone asleep, and the panel is Android's): after a
      * failure the panel is still ours to light, a new connection is told it is
-     * dark, and {@link #relightLeft} tries again.
+     * dark, and {@link #relightLeft} tries again. A panel that was dark already
+     * when asked ({@link #foundDark}) is not ours: left dark, only the record
+     * goes.
      *
      * @return true when no panel of ours is left dark
      */
     private boolean lightIfOurs() {
         synchronized (lock) {
             if (owner == null) return true;
-            try {
-                if (power.awake()) power.set(true);
-            } catch (Throwable t) {
-                System.out.println("helper: could not light the panel again (" + t + "), trying again");
-                return false;
+            if (!foundDark) {
+                try {
+                    if (power.awake()) power.set(true);
+                } catch (Throwable t) {
+                    System.out.println("helper: could not light the panel again (" + t + "), trying again");
+                    return false;
+                }
+                power.markDark(false);
             }
             owner = null;
+            foundDark = false;
             return true;
         }
     }
@@ -443,6 +506,9 @@ public final class PhoneHelper {
             if (awake) return;
             told = owner;
             owner = null;
+            foundDark = false;
+            // Asleep: the panel is Android's, which lights it when the phone wakes.
+            power.markDark(false);
         }
         try {
             power.wake();
@@ -614,8 +680,13 @@ public final class PhoneHelper {
                     System.out.flush();
                     System.exit(0);
                 }
+                boolean found;
+                synchronized (lock) {
+                    found = foundDark;
+                }
                 out.write(("panel " + (isDark() ? "off" : "on") + " touches " + touches + " scrolls " + scrolls
-                        + " keys " + keys + " path " + Panel.path + "\n").getBytes(StandardCharsets.UTF_8));
+                        + " keys " + keys + " path " + Panel.path + " found " + (found ? "dark" : "lit")
+                        + "\n").getBytes(StandardCharsets.UTF_8));
             } catch (IOException e) {
                 sleep(200);
             }
@@ -637,11 +708,69 @@ public final class PhoneHelper {
 
     /** SurfaceControl's power mode on every built-in panel, and PowerManager's awake. */
     static final class Panel implements Power {
+        private final String pkg;
         private Class<?> displayControl;
         private boolean displayControlResolved;
         private Object powerManager;
         /** Where the panel's tokens came from, for {@code --state}: SurfaceControl, DisplayControl, or a single display's call. */
         static volatile String path = "not-yet";
+
+        Panel(String pkg) {
+            this.pkg = pkg;
+        }
+
+        /**
+         * SurfaceFlinger's own power mode for the built-in panels, the one
+         * SurfaceControl sets (Android's PowerManager and DisplayManager still
+         * say "on" while another tool keeps the panel dark). About 15 ms on
+         * Android 17, 40 ms on Android 10 (whose dumpsys has no --displays
+         * and prints everything); unknown after 1.5 s, well inside the app's
+         * 3 s wait for an answer.
+         */
+        @Override
+        public Boolean lit() {
+            String dump = run(1500, "dumpsys", "SurfaceFlinger", "--displays");
+            return dump == null ? null : litIn(dump);
+        }
+
+        /** The mark: a file of the shell's own, holding this boot's id, so a restart of the phone forgets it. */
+        private File mark() {
+            return new File("/data/local/tmp/" + pkg + ".panel-dark");
+        }
+
+        @Override
+        public boolean markedDark() {
+            File f = mark();
+            if (!f.isFile()) return false;
+            try (BufferedReader in = new BufferedReader(new InputStreamReader(new FileInputStream(f), StandardCharsets.UTF_8))) {
+                return bootId().equals(String.valueOf(in.readLine()).trim());
+            } catch (IOException e) {
+                return false;
+            }
+        }
+
+        @Override
+        public void markDark(boolean dark) {
+            File f = mark();
+            if (!dark) {
+                if (f.exists() && !f.delete()) System.out.println("helper: the dark panel's mark stays (" + f + ")");
+                return;
+            }
+            try (OutputStream out = new FileOutputStream(f)) {
+                out.write((bootId() + "\n").getBytes(StandardCharsets.UTF_8));
+            } catch (IOException e) {
+                System.out.println("helper: no mark for the dark panel (" + e + ")");
+            }
+        }
+
+        private static String bootId() {
+            try (BufferedReader in = new BufferedReader(new InputStreamReader(
+                    new FileInputStream("/proc/sys/kernel/random/boot_id"), StandardCharsets.UTF_8))) {
+                return String.valueOf(in.readLine()).trim();
+            } catch (IOException e) {
+                return "";
+            }
+        }
 
         @Override
         public synchronized void set(boolean on) throws Exception {
@@ -796,6 +925,106 @@ public final class PhoneHelper {
                 System.out.println("helper: input refused (" + t + ")");
                 return false;
             }
+        }
+    }
+
+    // ── SurfaceFlinger's word on the panel ──
+
+    /** Android 13 and newer: a display's own block, its lines indented under it. */
+    private static final Pattern DISPLAY_BLOCK = Pattern.compile("(?m)^Display \\d+[^\\n]*\\n((?:[ \\t]+[^\\n]*(?:\\n|$))*)");
+    /** Android 10 to 12: a display's line, and its power mode on the next. */
+    private static final Pattern DISPLAY_DEVICE = Pattern.compile("(?m)^\\+ DisplayDevice\\{([^}]*)\\}[^\\n]*\\n[ \\t]*powerMode=(\\w+)");
+    private static final Pattern POWER_MODE = Pattern.compile("powerMode=(\\w+)");
+
+    /**
+     * From SurfaceFlinger's dump: whether a built-in panel is lit; null when
+     * the dump names none. Android 13 and newer ({@code --displays}) give each
+     * display a block, "Display &lt;id&gt;", with "connectionType=Internal"
+     * and "powerMode=ON" (OFF, DOZE, ...) among its lines. Android 10 to 12
+     * know no {@code --displays} and print everything; there a display is
+     * "+ DisplayDevice{0, primary, ...}" (Android 11 and 12 add "internal"),
+     * and the next line starts "powerMode=2" (Android 10) or "powerMode=On
+     * (2)". Package-private for the tests, which hold real phones' dumps.
+     */
+    static Boolean litIn(String dump) {
+        String d = dump.replace("\r", "");
+        boolean any = false;
+        Matcher block = DISPLAY_BLOCK.matcher(d);
+        while (block.find()) {
+            String body = block.group(1);
+            if (!body.contains("connectionType=Internal")) continue;
+            Matcher m = POWER_MODE.matcher(body);
+            Boolean on = m.find() ? modeLit(m.group(1)) : null;
+            if (on == null) continue;
+            if (on) return true;
+            any = true;
+        }
+        Matcher dev = DISPLAY_DEVICE.matcher(d);
+        while (dev.find()) {
+            // The words before the display's quoted name: "0, primary, " or "0, internal, primary, ".
+            String kind = dev.group(1).split("\"")[0].toLowerCase(Locale.ROOT);
+            if (!kind.contains("primary") && !kind.contains("internal")) continue;
+            Boolean on = modeLit(dev.group(2));
+            if (on == null) continue;
+            if (on) return true;
+            any = true;
+        }
+        return any ? Boolean.FALSE : null;
+    }
+
+    /** A power mode, as a word (ON, Off, DOZE_SUSPEND) or HWC's number: lit or not; null when unknown. */
+    private static Boolean modeLit(String mode) {
+        switch (mode.toUpperCase(Locale.ROOT)) {
+            case "ON":
+            case "NORMAL":
+            case "ON_SUSPEND":
+            case "ONSUSPEND":
+            case "2":
+            case "4":
+                return true;
+            case "OFF":
+            case "DOZE":
+            case "DOZE_SUSPEND":
+            case "DOZESUSPEND":
+            case "0":
+            case "1":
+            case "3":
+                return false;
+            default:
+                return null;
+        }
+    }
+
+    /** A shell command's output (both streams, at most 4 MB), or null if it did not end within {@code ms}. */
+    private static String run(long ms, String... cmd) {
+        try {
+            Process p = new ProcessBuilder(cmd).redirectErrorStream(true).start();
+            StringBuilder said = new StringBuilder();
+            Thread read = new Thread(() -> {
+                char[] buf = new char[8192];
+                try (InputStreamReader in = new InputStreamReader(p.getInputStream(), StandardCharsets.UTF_8)) {
+                    int n;
+                    while ((n = in.read(buf)) > 0) {
+                        synchronized (said) {
+                            if (said.length() < 4 << 20) said.append(buf, 0, n);
+                        }
+                    }
+                } catch (IOException ignored) {
+                    // ended
+                }
+            }, "helper-run");
+            read.setDaemon(true);
+            read.start();
+            if (!p.waitFor(ms, TimeUnit.MILLISECONDS)) {
+                p.destroy();
+                return null;
+            }
+            read.join(Math.max(200, ms / 4));
+            synchronized (said) {
+                return said.toString();
+            }
+        } catch (Exception e) {
+            return null;
         }
     }
 

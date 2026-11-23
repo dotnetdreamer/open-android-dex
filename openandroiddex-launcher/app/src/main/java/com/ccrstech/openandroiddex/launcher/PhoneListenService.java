@@ -61,6 +61,11 @@ public final class PhoneListenService extends Service {
         PhoneStream.hold(this, this);
         main.removeCallbacks(controlCheck);
         main.postDelayed(controlCheck, CONTROL_CHECK_MS);
+        // Wireless debugging the app switched on for Screen off's helper, with
+        // its switch-off lost to a force-stop (which ends Android's alarms, and
+        // after which Android 11 to 14 send no BOOT_COMPLETED when the app
+        // opens again): looked at again whenever Remote desktop's listener starts.
+        PhoneHelperStart.resume(this);
         return START_STICKY;
     }
 

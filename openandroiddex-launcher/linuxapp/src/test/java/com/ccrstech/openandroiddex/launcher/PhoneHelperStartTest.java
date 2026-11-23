@@ -248,6 +248,216 @@ public class PhoneHelperStartTest {
         assertFalse(new File(PhoneHelperStart.dir(app), "switched-on").exists());
     }
 
+    // ── the switch-off, whatever happens to the app's process ──
+
+    private int wirelessNow() {
+        return Settings.Global.getInt(app.getContentResolver(), "adb_wifi_enabled", 0);
+    }
+
+    /** Until Wireless debugging's switch is {@code want} (the switch-off runs on the start's thread), 10 s at most. */
+    private void awaitWireless(int want) throws Exception {
+        File mark = new File(PhoneHelperStart.dir(app), "switched-on");
+        // Switched off is done when its mark has gone too (a moment after the switch).
+        for (int i = 0; i < 200 && (wirelessNow() != want || (want == 0 && mark.exists())); i++) Thread.sleep(50);
+    }
+
+    /** Android starting the receiver an alarm names, as it does in a new process: no main thread's message in between. */
+    private void deliver(org.robolectric.shadows.ShadowAlarmManager.ScheduledAlarm alarm) throws Exception {
+        Intent named = shadowOf(alarm.operation).getSavedIntent();
+        android.content.BroadcastReceiver r = (android.content.BroadcastReceiver)
+                Class.forName(named.getComponent().getClassName()).getDeclaredConstructor().newInstance();
+        r.onReceive(app, named);
+    }
+
+    /** A start the app switched Wireless debugging on for: on, and marked as the app's. */
+    private void switchedOnByAStart() throws Exception {
+        paired();
+        developer(true);
+        shadowOf(RuntimeEnvironment.getApplication()).grantPermissions(Manifest.permission.WRITE_SECURE_SETTINGS);
+        wireless(false);
+        PhoneHelperStart.ensure(app, true); // switches on, then finds no adbd here: failed
+        awaitIdle();
+        assertEquals(1, wirelessNow());
+        assertTrue(new File(PhoneHelperStart.dir(app), "switched-on").exists());
+    }
+
+    /**
+     * A start no computer watches (Settings' "Try again"), or one the
+     * computer left while it still ran: no computer leaves afterwards, so
+     * nothing ever switched Wireless debugging off. Now off two minutes after
+     * the app switched it on.
+     */
+    @Test
+    public void aStartNoComputerWatches_isSwitchedOffAgainAfterTwoMinutes() throws Exception {
+        switchedOnByAStart();
+        org.robolectric.shadows.ShadowLooper.idleMainLooper(90, java.util.concurrent.TimeUnit.SECONDS);
+        awaitIdle();
+        assertEquals("not before two minutes", 1, wirelessNow());
+        org.robolectric.shadows.ShadowLooper.idleMainLooper(60, java.util.concurrent.TimeUnit.SECONDS);
+        awaitWireless(0);
+        assertEquals(0, wirelessNow());
+        assertFalse(new File(PhoneHelperStart.dir(app), "switched-on").exists());
+    }
+
+    /**
+     * The app's process dies within the two minutes (Android needs the
+     * memory, an update, a crash): the switch-off it had waiting on its main
+     * thread dies with it. Android's alarm does not: it comes, and Android
+     * starts the receiver it names in a new process.
+     */
+    @Test
+    public void theSwitchOffOutlivesTheAppsProcess() throws Exception {
+        switchedOnByAStart();
+        PhoneHelperStart.computersGone(app);
+        // The app's clock: under Robolectric the app's System.currentTimeMillis follows the
+        // uptime clock (the test's own System.currentTimeMillis is the PC's).
+        long left = android.os.SystemClock.uptimeMillis();
+        // The process dies: what it had waiting on its main thread goes with it. Three minutes pass.
+        PhoneHelperStart.processDiedForTest();
+        org.robolectric.shadows.ShadowSystemClock.advanceBy(java.time.Duration.ofMinutes(3));
+        assertEquals(1, wirelessNow());
+        android.app.AlarmManager am = app.getSystemService(android.app.AlarmManager.class);
+        org.robolectric.shadows.ShadowAlarmManager.ScheduledAlarm alarm = shadowOf(am).peekNextScheduledAlarm();
+        assertNotNull("an alarm Android keeps", alarm);
+        // The wall clock, which runs on through the phone's deep sleep (the main thread's stops).
+        assertEquals(android.app.AlarmManager.RTC, alarm.getType());
+        assertEquals("two minutes after the last computer left", left + 120_000, alarm.getTriggerAtMs());
+        deliver(alarm);
+        awaitWireless(0);
+        assertEquals(0, wirelessNow());
+        assertFalse(new File(PhoneHelperStart.dir(app), "switched-on").exists());
+        assertNull("nothing left set", shadowOf(am).peekNextScheduledAlarm());
+    }
+
+    /**
+     * The phone restarts (or the app is updated, or the desktop app's
+     * clean-up force-stops it) with the switch-off pending: that ends Android's
+     * alarms as well. The app's restart receiver takes it up.
+     */
+    @Test
+    public void anUpdate_takesUpTheSwitchOffItsLastProcessLeft() throws Exception {
+        switchedOnByAStart();
+        PhoneHelperStart.computersGone(app);
+        PhoneHelperStart.processDiedForTest();
+        org.robolectric.shadows.ShadowSystemClock.advanceBy(java.time.Duration.ofMinutes(5));
+        android.app.AlarmManager am = app.getSystemService(android.app.AlarmManager.class);
+        org.robolectric.shadows.ShadowAlarmManager.ScheduledAlarm alarm = shadowOf(am).peekNextScheduledAlarm();
+        if (alarm != null) am.cancel(alarm.operation);
+        new RemoteResumeReceiver().onReceive(app, new Intent(Intent.ACTION_MY_PACKAGE_REPLACED));
+        awaitWireless(0);
+        assertEquals(0, wirelessNow());
+        assertFalse(new File(PhoneHelperStart.dir(app), "switched-on").exists());
+    }
+
+    /**
+     * A person force-stops the app (Android ends its alarms with it) and opens
+     * it again later: Android 11 to 14 send no BOOT_COMPLETED for that, but
+     * Remote desktop's listener starts, and takes up the switch-off.
+     */
+    @Test
+    public void aForceStop_isTakenUpWhenRemoteDesktopsListenerStarts() throws Exception {
+        switchedOnByAStart();
+        PhoneHelperStart.computersGone(app);
+        // Force-stopped: the process dies (its main thread's switch-off with it), and Android ends its alarms.
+        PhoneHelperStart.processDiedForTest();
+        android.app.AlarmManager am = app.getSystemService(android.app.AlarmManager.class);
+        org.robolectric.shadows.ShadowAlarmManager.ScheduledAlarm alarm = shadowOf(am).peekNextScheduledAlarm();
+        assertNotNull(alarm);
+        am.cancel(alarm.operation);
+        org.robolectric.shadows.ShadowSystemClock.advanceBy(java.time.Duration.ofMinutes(5));
+        // Opened again five minutes later: Remote desktop's listener starts.
+        Robolectric.buildService(PhoneListenService.class).create().startCommand(0, 1);
+        awaitWireless(0);
+        assertEquals(0, wirelessNow());
+        assertFalse(new File(PhoneHelperStart.dir(app), "switched-on").exists());
+    }
+
+    /**
+     * The switch-off does not take: the app lost WRITE_SECURE_SETTINGS
+     * meanwhile (a reinstall, a person's revoke). The mark stays and the
+     * switch-off is tried again in ten minutes, instead of being dropped for
+     * good; the helper's next start grants the permission again.
+     */
+    @Test
+    public void aSwitchOffThatDoesNotTakeIsTriedAgain() throws Exception {
+        switchedOnByAStart();
+        shadowOf(RuntimeEnvironment.getApplication()).denyPermissions(Manifest.permission.WRITE_SECURE_SETTINGS);
+        PhoneHelperStart.computersGone(app);
+        org.robolectric.shadows.ShadowLooper.idleMainLooper(150, java.util.concurrent.TimeUnit.SECONDS);
+        awaitIdle();
+        Thread.sleep(500);
+        assertEquals("could not switch it", 1, wirelessNow());
+        assertTrue("the mark stays", new File(PhoneHelperStart.dir(app), "switched-on").exists());
+        android.app.AlarmManager am = app.getSystemService(android.app.AlarmManager.class);
+        org.robolectric.shadows.ShadowAlarmManager.ScheduledAlarm alarm = shadowOf(am).peekNextScheduledAlarm();
+        assertNotNull("tried again later", alarm);
+        assertTrue("in about ten minutes", alarm.getTriggerAtMs() - android.os.SystemClock.uptimeMillis() > 9 * 60_000);
+        // The helper's next start grants it again: the next look switches it off.
+        shadowOf(RuntimeEnvironment.getApplication()).grantPermissions(Manifest.permission.WRITE_SECURE_SETTINGS);
+        org.robolectric.shadows.ShadowLooper.idleMainLooper(11, java.util.concurrent.TimeUnit.MINUTES);
+        awaitWireless(0);
+        assertEquals(0, wirelessNow());
+        assertFalse(new File(PhoneHelperStart.dir(app), "switched-on").exists());
+    }
+
+    /** A mark with no time kept (an earlier version's): off two minutes after the restart, not at once. */
+    @Test
+    public void aMarkWithNoTime_isSwitchedOffTwoMinutesAfterTheRestart() throws Exception {
+        switchedOnByAStart();
+        assertTrue(new File(PhoneHelperStart.dir(app), "switch-off-at").delete());
+        android.app.AlarmManager am = app.getSystemService(android.app.AlarmManager.class);
+        org.robolectric.shadows.ShadowAlarmManager.ScheduledAlarm alarm = shadowOf(am).peekNextScheduledAlarm();
+        if (alarm != null) am.cancel(alarm.operation);
+        org.robolectric.shadows.ShadowSystemClock.advanceBy(java.time.Duration.ofMinutes(30));
+        new RemoteResumeReceiver().onReceive(app, new Intent(Intent.ACTION_MY_PACKAGE_REPLACED));
+        awaitIdle();
+        Thread.sleep(300);
+        assertEquals(1, wirelessNow());
+        org.robolectric.shadows.ShadowLooper.idleMainLooper(90, java.util.concurrent.TimeUnit.SECONDS);
+        awaitIdle();
+        Thread.sleep(300);
+        assertEquals("not before two minutes", 1, wirelessNow());
+        org.robolectric.shadows.ShadowLooper.idleMainLooper(60, java.util.concurrent.TimeUnit.SECONDS);
+        awaitWireless(0);
+        assertEquals(0, wirelessNow());
+    }
+
+    /**
+     * A computer watches when the time comes (it came back, or a start it
+     * asked for ran long): nothing is switched off while it watches, an alarm
+     * stays set (for a process that dies mid-session), and the switch-off
+     * comes two minutes after it leaves.
+     */
+    @Test
+    public void whileAComputerWatches_nothingIsSwitchedOff() throws Exception {
+        java.lang.reflect.Field kept = PhoneHelperLink.class.getDeclaredField("app");
+        kept.setAccessible(true);
+        kept.set(null, null);
+        switchedOnByAStart();
+        Object computer = new Object();
+        PhoneHelperLink.session(app, computer, true, false);
+        try {
+            org.robolectric.shadows.ShadowLooper.idleMainLooper(3, java.util.concurrent.TimeUnit.MINUTES);
+            awaitIdle();
+            Thread.sleep(300);
+            assertEquals(1, wirelessNow());
+            android.app.AlarmManager am = app.getSystemService(android.app.AlarmManager.class);
+            assertNotNull("still an alarm, for a process that dies mid-session", shadowOf(am).peekNextScheduledAlarm());
+        } finally {
+            PhoneHelperLink.session(app, computer, false, false);
+        }
+        // The computer's leaving: the worker ends (no helper here) and starts the two minutes.
+        for (int i = 0; i < 200 && PhoneHelperLink.watched(); i++) Thread.sleep(50);
+        Thread.sleep(4000);
+        org.robolectric.shadows.ShadowLooper.idleMainLooper(90, java.util.concurrent.TimeUnit.SECONDS);
+        awaitIdle();
+        Thread.sleep(300);
+        assertEquals("not before two minutes", 1, wirelessNow());
+        org.robolectric.shadows.ShadowLooper.idleMainLooper(60, java.util.concurrent.TimeUnit.SECONDS);
+        awaitWireless(0);
+        assertEquals(0, wirelessNow());
+    }
+
     /** Until the start's thread is done (it is one thread; a no-op task after it ends with it). */
     private static void awaitIdle() throws Exception {
         long until = System.currentTimeMillis() + 30_000;

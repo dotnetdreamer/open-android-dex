@@ -383,5 +383,12 @@
         <receiver
             android:name=".PhoneHelperStart$CodeReceiver"
             android:exported="false" />
+
+        <!-- Android's alarm for switching Wireless debugging off again, when
+             the app switched it on for Screen off's helper: it still comes
+             if the app's process died in the meantime. -->
+        <receiver
+            android:name=".PhoneHelperStart$SwitchOffReceiver"
+            android:exported="false" />
     </application>
 </manifest>
