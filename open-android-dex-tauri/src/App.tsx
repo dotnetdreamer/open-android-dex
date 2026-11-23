@@ -51,6 +51,30 @@ const PHONE_ANSWER_TIMEOUT_MS = 240_000;
 
 const ISSUES_URL = "https://github.com/dotnetdreamer/open-android-dex/issues";
 
+/**
+ * The phone to open the desktop on: the one asked for, else the first ready one — but on
+ * its cable when the same phone is also on the cable, unless it was just moved onto
+ * Wi-Fi on purpose (`movedToWifi`), when the cable is about to come out. A phone that is
+ * on Wi-Fi only because it was remembered at start-up, or found by adb itself, should not
+ * take the desktop over Wi-Fi past a cable: on the S25 Ultra a Wi-Fi desktop with the
+ * cable in queued 0.2–0.36 MB to the computer while scrolling, felt as lag
+ * (doc/refresh-rate.md).
+ */
+function desktopDevice(
+  devices: DeviceInfo[],
+  preferred: string | null,
+  movedToWifi: boolean,
+): DeviceInfo | undefined {
+  const ready = devices.filter((d) => d.state === "device");
+  const asked = ready.find((d) => d.serial === preferred) ?? ready[0];
+  if (!asked || asked.connection === "usb" || !asked.hardwareSerial) return asked;
+  if (movedToWifi && asked.serial === preferred) return asked;
+  return (
+    ready.find((d) => d.connection === "usb" && d.hardwareSerial === asked.hardwareSerial) ??
+    asked
+  );
+}
+
 function desktopOptions(d: DeviceInfo): MirrorOptions {
   return {
     serial: d.serial,
@@ -149,6 +173,8 @@ export default function App() {
    * serial would tie the session to the cable the user is about to pull out.
    */
   const preferredSerial = useRef<string | null>(null);
+  /** True when `preferredSerial` is a phone just moved onto Wi-Fi on purpose (see desktopDevice). */
+  const movedToWifi = useRef(false);
   /**
    * Set when a live session was stopped in order to move it onto Wi-Fi.
    * `adb tcpip` restarts adbd, which drops every transport including the one
@@ -224,6 +250,7 @@ export default function App() {
         if (live && back.length > 0) {
           logInfo(`boot: ${back.join(", ")} answered`);
           preferredSerial.current = back[0];
+          movedToWifi.current = false;
         }
       })
       .catch(() => {})
@@ -390,10 +417,8 @@ export default function App() {
     const current = phaseRef.current;
     if (current.kind !== "boot" && current.kind !== "connect") return;
     // A phone just moved onto Wi-Fi is briefly present twice, once per
-    // transport. Prefer the one that was asked for.
-    const ready =
-      devices.find((d) => d.state === "device" && d.serial === preferredSerial.current) ??
-      devices.find((d) => d.state === "device");
+    // transport. Prefer the one that was asked for — and otherwise the cable.
+    const ready = desktopDevice(devices, preferredSerial.current, movedToWifi.current);
     if (ready && armedRef.current && opensAppsOnConnect()) {
       // Its owner asked for the phone's apps here rather than its desktop:
       // the Apps page, and no desktop is set up on the phone at all.
@@ -550,6 +575,7 @@ export default function App() {
           .then(async (result) => {
             logInfo(`wireless: ${phase.device.serial} is now reachable at ${result.address}`);
             preferredSerial.current = result.serial;
+            movedToWifi.current = true;
             const list = await invoke<DeviceInfo[]>("adb_list_devices").catch(() => []);
             say("Wi‑Fi is set up — you can unplug the cable.", "ok");
             launch(
@@ -629,9 +655,7 @@ export default function App() {
 
   /** After a launch failed: straight back in if the phone is still there, otherwise wait for it. */
   const retry = useCallback(() => {
-    const ready =
-      devices.find((d) => d.state === "device" && d.serial === preferredSerial.current) ??
-      devices.find((d) => d.state === "device");
+    const ready = desktopDevice(devices, preferredSerial.current, movedToWifi.current);
     if (ready) {
       launch(ready);
     } else {
@@ -644,6 +668,7 @@ export default function App() {
   const onWirelessConnected = useCallback(
     (result: WirelessResult) => {
       preferredSerial.current = result.serial;
+      movedToWifi.current = true;
       armedRef.current = true;
       setPhase((p) => (p.kind === "connect" ? { kind: "connect" } : p));
       refresh();
@@ -712,9 +737,7 @@ export default function App() {
   }, [say]);
 
   /** The phone "Open desktop" means: the one asked for, as auto-launch and retry choose it. */
-  const readyDevice =
-    devices.find((d) => d.state === "device" && d.serial === preferredSerial.current) ??
-    devices.find((d) => d.state === "device");
+  const readyDevice = desktopDevice(devices, preferredSerial.current, movedToWifi.current);
   /** The stream dropped and scrcpy is bringing it back by itself. */
   const stalled =
     phase.kind === "ready" && sessions[`${phase.device.serial}|desktop`]?.status === "reconnecting";
