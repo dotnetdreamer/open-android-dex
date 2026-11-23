@@ -19,6 +19,8 @@
 //! * [`pairing`] — turning an eight-character code into a meeting place.
 //! * [`proto`] — the ALPNs and the handful of messages.
 //! * [`pipe`] — joining a QUIC stream to a socket or to stdio.
+//! * `rtc` — the phone's screen straight to a browser by WebRTC (feature
+//!   `rtc`; the phone's build only).
 //! * [`sftp`] — files onto the phone's Linux, over SFTP in the same tunnel
 //!   (feature `sftp`; a computer's build only).
 //! * [`outbox`] — and files back: Send To in the guest, fetched into Downloads.
@@ -38,6 +40,8 @@ pub mod pc;
 pub mod phone;
 pub mod pipe;
 pub mod proto;
+#[cfg(all(feature = "rtc", unix))]
+pub mod rtc;
 #[cfg(feature = "sftp")]
 pub mod sftp;
 pub mod sshkey;

@@ -1,0 +1,63 @@
+--- a/src/vrend/vrend_shader.h
++++ b/src/vrend/vrend_shader.h
+@@ -198,6 +198,9 @@
+          uint8_t cbufs_are_a8_bitmask;
+          uint8_t cbufs_signed_int_bitmask;
+          uint8_t cbufs_unsigned_int_bitmask;
++         /* The colour buffers bound when the shader is drawn with: a shader
++          * that writes all of them (gl_FragColor) declares only these. */
++         uint8_t nr_cbufs;
+          uint32_t logicop_func : 4;
+          uint32_t logicop_enabled : 1;
+          uint32_t prim_is_points : 1;
+--- a/src/vrend/vrend_renderer.c
++++ b/src/vrend/vrend_renderer.c
+@@ -4049,6 +4049,7 @@
+       key->fs.lower_left_origin = !sub_ctx->fbo_origin_upper_left;
+       key->fs.swizzle_output_rgb_to_bgr = sub_ctx->swizzle_output_rgb_to_bgr;
+       key->fs.needs_manual_srgb_encode_bitmask = sub_ctx->needs_manual_srgb_encode_bitmask;
++      key->fs.nr_cbufs = sub_ctx->nr_cbufs;
+       if (vrend_state.use_gles && can_emulate_logicop(sub_ctx->blend_state.logicop_func)) {
+          key->fs.logicop_enabled = sub_ctx->blend_state.logicop_enable;
+          key->fs.logicop_func = sub_ctx->blend_state.logicop_func;
+--- a/src/vrend/vrend_shader.c
++++ b/src/vrend/vrend_shader.c
+@@ -2174,12 +2174,28 @@
+    }
+ }
+ 
++/* How many colour outputs a shader that writes all colour buffers declares:
++ * the buffers bound, at least one, at most the host's limit. Declaring all
++ * max_draw_buffers of them, as before, made an Adreno 512's GLES compiler
++ * refuse every such shader ("Output fsout_c1 location or component exceeds
++ * max allowed", a Redmi Note 7 on Android 10), and outputs past the bound
++ * buffers are dropped anyway. */
++static int fs_cbuf_count(const struct dump_ctx *ctx)
++{
++   int n = ctx->key->fs.nr_cbufs;
++   if (n < 1)
++      n = 1;
++   if (n > ctx->cfg->max_draw_buffers)
++      n = ctx->cfg->max_draw_buffers;
++   return n;
++}
++
+ static void emit_cbuf_writes(const struct dump_ctx *ctx,
+                              struct vrend_glsl_strbufs *glsl_strbufs)
+ {
+    int i;
+ 
+-   for (i = ctx->num_outputs; i < ctx->cfg->max_draw_buffers; i++) {
++   for (i = ctx->num_outputs; i < fs_cbuf_count(ctx); i++) {
+       emit_buff(glsl_strbufs, "fsout_c%d = fsout_c0;\n", i);
+    }
+ }
+@@ -7323,7 +7339,7 @@
+       else if (ctx->key->fs.cbufs_signed_int_bitmask)
+          type = "ivec4";
+ 
+-      for (i = 0; i < (uint32_t)ctx->cfg->max_draw_buffers; i++) {
++      for (i = 0; i < (uint32_t)fs_cbuf_count(ctx); i++) {
+          if (ctx->cfg->use_gles) {
+             if (ctx->key->fs.logicop_enabled)
+                emit_hdrf(glsl_strbufs, "%s fsout_tmp_c%d;\n", type, i);

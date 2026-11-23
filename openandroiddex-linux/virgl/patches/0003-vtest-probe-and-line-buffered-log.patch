@@ -1,0 +1,114 @@
+--- a/vtest/vtest.h
++++ b/vtest/vtest.h
+@@ -47,6 +47,8 @@
+                         const char *render_device);
+ void vtest_cleanup_renderer(void);
+ 
++int vtest_probe_renderer(int ctx_flags, const char *render_device);
++
+ int vtest_create_context(struct vtest_input *input, int out_fd,
+                          uint32_t length_dw, struct vtest_context **out_ctx);
+ int vtest_lazy_init_context(struct vtest_context *ctx);
+--- a/vtest/vtest_renderer.c
++++ b/vtest/vtest_renderer.c
+@@ -625,6 +625,38 @@
+    return 0;
+ }
+ 
++/*
++ * Bring the renderer up once, the way the first client would, say what it is
++ * running on, and take it down again. For whoever starts the server: a host
++ * whose EGL or GLES cannot carry virgl fails here, before any guest app has
++ * been pointed at a server that would turn every GL context it asks for down.
++ * One line on stdout, "probe ok: ..." on success.
++ */
++int vtest_probe_renderer(int ctx_flags, const char *render_device)
++{
++   uint32_t max_ver = 0, max_size = 0;
++   union virgl_caps *caps;
++
++   if (vtest_init_renderer(false, ctx_flags, render_device))
++      return -1;
++
++   virgl_renderer_get_cap_set(2, &max_ver, &max_size);
++   caps = max_size ? calloc(1, max_size > sizeof(*caps) ? max_size : sizeof(*caps)) : NULL;
++   if (!caps) {
++      fprintf(stderr, "probe: no virgl caps\n");
++      vtest_cleanup_renderer();
++      return -1;
++   }
++   virgl_renderer_fill_caps(2, 1, caps);
++   /* renderer[] is not promised to be terminated: bounded by the precision. */
++   printf("probe ok: renderer=\"%.64s\" glsl=%u caps=v%u\n",
++          caps->v2.renderer, caps->v2.v1.glsl_level, max_ver);
++   fflush(stdout);
++   free(caps);
++   vtest_cleanup_renderer();
++   return 0;
++}
++
+ static void vtest_free_context(struct vtest_context *ctx, bool cleanup);
+ 
+ void vtest_cleanup_renderer(void)
+--- a/vtest/vtest_server.c
++++ b/vtest/vtest_server.c
+@@ -97,6 +97,7 @@
+    bool no_virgl;
+    bool use_compat_profile;
+    bool drm;
++   bool probe;
+ 
+    int ctx_flags;
+ 
+@@ -138,9 +139,16 @@
+ while (__AFL_LOOP(1000)) {
+ #endif
+ 
++   /* Line-buffered even into a file: the app that starts this keeps its
++    * output as a log, and a block-buffered one says nothing until it dies. */
++   setvbuf(stdout, NULL, _IOLBF, 0);
++
+    vtest_server_getenv();
+    vtest_server_parse_args(argc, argv);
+ 
++   if (server.probe)
++      exit(vtest_probe_renderer(server.ctx_flags, server.render_device) ? EXIT_FAILURE : EXIT_SUCCESS);
++
+    list_inithead(&server.new_clients);
+    list_inithead(&server.active_clients);
+    list_inithead(&server.inactive_clients);
+@@ -176,6 +184,7 @@
+ #define OPT_NO_VIRGL 'g'
+ #define OPT_COMPAT_PROFILE 'c'
+ #define OPT_DRM 'd'
++#define OPT_PROBE 'b'
+ 
+ static void vtest_server_parse_args(int argc, char **argv)
+ {
+@@ -194,6 +203,7 @@
+       {"no-virgl",            no_argument, NULL, OPT_NO_VIRGL},
+       {"compat",              no_argument, NULL, OPT_COMPAT_PROFILE},
+       {"drm",                 no_argument, NULL, OPT_DRM},
++      {"probe",               no_argument, NULL, OPT_PROBE},
+       {0, 0, 0, 0}
+    };
+ 
+@@ -243,6 +253,9 @@
+       case OPT_SOCKET_PATH:
+          server.socket_name = optarg;
+          break;
++      case OPT_PROBE:
++         server.probe = true;
++         break;
+ #ifdef ENABLE_DRM
+       case OPT_DRM:
+          server.drm = true;
+@@ -251,7 +264,7 @@
+       default:
+          printf("Usage: %s [--no-fork] [--no-loop-or-fork] [--multi-clients] "
+                 "[--use-glx] [--use-egl-surfaceless] [--use-gles] [--no-virgl]"
+-                "[--rendernode <dev>] [--socket-path <path>] "
++                "[--rendernode <dev>] [--socket-path <path>] [--probe] "
+ #ifdef ENABLE_VENUS
+                 " [--venus]"
+ #endif

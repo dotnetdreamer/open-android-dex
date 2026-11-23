@@ -142,6 +142,17 @@ final class LinuxRemote {
         return enabledMarker(ctx).exists();
     }
 
+    /**
+     * Whether the tunnel runs: for Linux's remote access (SSH, the desktop),
+     * or for Remote desktop, the phone's own screen ({@link PhoneRemote}),
+     * which reaches the same paired computers the same way. With only Remote
+     * desktop on, the tunnel carries the phone's screen and nothing of Linux's:
+     * no sshd runs and the desktop is said to be off.
+     */
+    static boolean tunnelOn(Context ctx) {
+        return isEnabled(ctx) || PhoneRemote.isEnabled(ctx);
+    }
+
     static void setEnabled(Context ctx, boolean on) {
         File f = enabledMarker(ctx);
         if (!on) {
@@ -163,15 +174,25 @@ final class LinuxRemote {
         /** Its endpoint id, hex: what the tunnel checks before anything else. */
         String id;
         String name;
-        /** windows, macos, linux or other — picks an icon, decides nothing. */
+        /** windows, macos, linux, browser or other — picks an icon, decides nothing. */
         String os;
-        /** Its SSH key line, which goes into the guest's authorized_keys. */
+        /** Its SSH key line, which goes into the guest's authorized_keys (not a browser's: {@link #scope}). */
         String ssh;
         /** When it was paired, epoch seconds. */
         long added;
         /** How: "code" or "usb". */
         String via;
+        /**
+         * {@link #SCOPE_PHONE} for a browser (the Remote desktop page on the
+         * web): the phone's own screen and nothing of Linux's, its key kept
+         * out of authorized_keys, which the daemon enforces too. Empty for a
+         * computer, which gets whatever the phone's switches offer.
+         */
+        String scope = "";
     }
+
+    /** A {@link Peer#scope}: the phone's own screen alone. */
+    static final String SCOPE_PHONE = "phone";
 
     /** Within one process FileLock throws rather than waiting; this serialises that half. */
     private static final Object LOCK = new Object();
@@ -217,6 +238,7 @@ final class LinuxRemote {
                 p.ssh = o.optString("ssh");
                 p.added = o.optLong("added");
                 p.via = o.optString("via", "code");
+                p.scope = o.optString("scope", "");
                 if (!p.id.isEmpty()) out.add(p);
             }
         } catch (Exception e) {
@@ -300,8 +322,11 @@ final class LinuxRemote {
             o.put("ssh", p.ssh);
             o.put("added", p.added);
             o.put("via", p.via);
+            if (p.scope != null && !p.scope.isEmpty()) o.put("scope", p.scope);
             arr.put(o);
-            keys.append(p.ssh.trim()).append('\n');
+            // A browser's key is no way into Linux: it lives in a web page's
+            // storage, and the browser asks for nothing but the phone's screen.
+            if (!SCOPE_PHONE.equals(p.scope)) keys.append(p.ssh.trim()).append('\n');
         }
         JSONObject root = new JSONObject();
         root.put("v", 1);

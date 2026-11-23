@@ -315,6 +315,14 @@ export function RemotePanel({ devices }: { devices: DeviceInfo[] }) {
                     </button>
                     <button
                       className="btn btn-secondary btn-sm"
+                      onClick={() => invoke("remote_open_phone", { id: p.id }).catch(fail)}
+                      title="See and use the phone's own screen in a window: Remote desktop, which is turned on in the phone's Settings"
+                    >
+                      <Icon name="phone" size={14} />
+                      Phone screen
+                    </button>
+                    <button
+                      className="btn btn-secondary btn-sm"
                       onClick={() => invoke("remote_open_terminal", { id: p.id }).catch(fail)}
                       title={`Open a terminal running ${p.sshCommand}`}
                     >

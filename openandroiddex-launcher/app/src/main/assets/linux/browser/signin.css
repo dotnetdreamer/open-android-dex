@@ -1,0 +1,19 @@
+/* The page an email's sign-in link opens (signin.html): a file of its own, since the door allows no inline style (its CSP). The phone page's colours. */
+:root { --bg: #090b10; --card: #11151d; --edge: #1d2330; --text: #e8ecf3; --faint: #9aa3af; --green: #4ade80; --amber: #ffb547; }
+* { box-sizing: border-box; }
+html, body { margin: 0; min-height: 100%; background: var(--bg); color: var(--text); font: 15px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+body { display: flex; align-items: center; justify-content: center; padding: 24px 16px; min-height: 100vh; }
+.card { width: 100%; max-width: 420px; background: var(--card); border: 1px solid var(--edge); border-radius: 18px; padding: 28px 24px 24px; display: flex; flex-direction: column; align-items: flex-start; gap: 12px; }
+.logo { width: 40px; height: 40px; }
+h1 { margin: 0; font-size: 21px; line-height: 1.3; font-weight: 700; }
+.words { margin: 0; color: #c3cad4; }
+button { margin-top: 6px; min-height: 44px; padding: 0 22px; border-radius: 12px; border: 1px solid var(--green); background: var(--green); color: #0b0f17; font: 600 15px system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; cursor: pointer; }
+button:hover { filter: brightness(1.06); }
+button:focus-visible, .code:focus-visible { outline: 2px solid var(--text); outline-offset: 3px; }
+button:disabled { opacity: 0.6; cursor: default; }
+.error { margin: 0; color: var(--amber); min-height: 0; }
+.error:empty { display: none; }
+.code { color: var(--green); font-weight: 600; text-decoration: none; padding: 6px 0; }
+.code:hover { text-decoration: underline; }
+.small { margin: 4px 0 0; color: var(--faint); font-size: 12.5px; }
+[hidden] { display: none !important; }

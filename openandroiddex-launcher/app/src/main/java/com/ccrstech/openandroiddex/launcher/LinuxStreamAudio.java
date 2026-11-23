@@ -37,6 +37,10 @@ import java.net.Socket;
  *
  * <p>Pure Java but for the Opus encoder, which the phone supplies
  * ({@link #opus}): the tests on a computer run this very file.
+ *
+ * <p><b>Where it reads.</b> Linux's tap by default; Remote desktop's sound
+ * reads the phone's own playback instead, through the same shaping, Opus and
+ * silence rules ({@link Tap}, {@link PhoneSound}).
  */
 final class LinuxStreamAudio {
 
@@ -47,6 +51,70 @@ final class LinuxStreamAudio {
 
         /** One run: {@code codec} {@link #PCM} (whole sample frames) or {@link #OPUS} (one packet). */
         void audio(int codec, byte[] data, int off, int len, long atUs) throws IOException;
+
+        /** The reading stopped for good, not asked to: {@code why}, for the computer. */
+        default void ended(String why) {
+        }
+    }
+
+    /**
+     * Where the sound is read: s16le, 48 kHz, stereo, as a stream that blocks
+     * until there is some. Linux's tap is a loopback port that comes back
+     * when the desktop does; the phone's own playback is opened once.
+     */
+    interface Tap {
+        /** The sound, from now on. */
+        InputStream open() throws IOException;
+
+        /** Wake a read wherever it waits, and let go. Any thread, any number of times. */
+        void close();
+
+        /** Gone or never opened: try again a little later? */
+        boolean retries();
+
+        /** For the log. */
+        String name();
+    }
+
+    /** Linux's tap: the guest's PulseAudio monitor on {@link #port}. */
+    private static final class LinuxTap implements Tap {
+        private volatile Socket sock;
+
+        @Override
+        public InputStream open() throws IOException {
+            Socket s = new Socket();
+            sock = s;
+            try {
+                s.connect(new InetSocketAddress("127.0.0.1", port), CONNECT_TIMEOUT_MS);
+                s.setTcpNoDelay(true);
+                return s.getInputStream();
+            } catch (IOException e) {
+                close();
+                throw e;
+            }
+        }
+
+        @Override
+        public void close() {
+            Socket s = sock;
+            sock = null;
+            if (s != null) {
+                try {
+                    s.close();
+                } catch (IOException ignored) {
+                }
+            }
+        }
+
+        @Override
+        public boolean retries() {
+            return true;
+        }
+
+        @Override
+        public String name() {
+            return "the tap on " + port;
+        }
     }
 
     /** An encoder of whole sample frames at its format's rate and channels, into packets for the sink. */
@@ -136,8 +204,9 @@ final class LinuxStreamAudio {
 
     private final Sink sink;
     private final String who;
+    private final Tap tap;
+    private final String area;
     private volatile boolean live = true;
-    private volatile Socket sock;
     private final Thread thread;
     /** What the browser's quality asks for now; applied at the next read. */
     private volatile Format wanted;
@@ -145,11 +214,19 @@ final class LinuxStreamAudio {
     /** Bytes handed to the sink, for the stream's stats and the tests. */
     volatile long sentBytes;
 
+    /** Linux's sound, from its tap. */
     LinuxStreamAudio(Sink sink, String who, Format format) {
+        this(sink, who, format, new LinuxTap(), "stream");
+    }
+
+    /** Sound from {@code tap}; {@code area} names it in the log. */
+    LinuxStreamAudio(Sink sink, String who, Format format, Tap tap, String area) {
         this.sink = sink;
         this.who = who;
         this.wanted = format;
-        this.thread = new Thread(this::run, "linux-stream-audio");
+        this.tap = tap;
+        this.area = area;
+        this.thread = new Thread(this::run, area + "-stream-audio");
         thread.setDaemon(true);
     }
 
@@ -163,16 +240,10 @@ final class LinuxStreamAudio {
         wanted = f;
     }
 
-    /** Stop reading, and unblock the read wherever it waits: a closed socket is what does that. */
+    /** Stop reading, and unblock the read wherever it waits: a closed tap is what does that. */
     void stop() {
         live = false;
-        Socket s = sock;
-        if (s != null) {
-            try {
-                s.close();
-            } catch (IOException ignored) {
-            }
-        }
+        tap.close();
     }
 
     boolean running() {
@@ -181,35 +252,34 @@ final class LinuxStreamAudio {
 
     private void run() {
         int misses = 0;
+        String why = null;
         while (live && misses < CONNECT_TRIES) {
-            Socket s = new Socket();
-            sock = s;
             try {
-                s.connect(new InetSocketAddress("127.0.0.1", port), CONNECT_TIMEOUT_MS);
-                s.setTcpNoDelay(true);
+                InputStream in = tap.open();
                 if (!live) return;
                 misses = 0;
-                DexLog.step("stream", "sound from the tap on " + port + " for " + who);
-                pump(s.getInputStream());
-                if (live) DexLog.step("stream", "the sound tap closed");
+                DexLog.step(area, "sound from " + tap.name() + " for " + who);
+                pump(in);
+                if (live) DexLog.step(area, "the sound from " + tap.name() + " ended");
+                why = "the sound ended";
             } catch (IOException e) {
                 if (!live) return;
                 misses++;
+                why = e.getMessage();
             } finally {
-                try {
-                    s.close();
-                } catch (IOException ignored) {
-                }
-                sock = null;
+                tap.close();
             }
             if (!live) return;
+            if (!tap.retries()) break;
             try {
                 Thread.sleep(RETRY_MS);
             } catch (InterruptedException e) {
                 return;
             }
         }
-        if (live) DexLog.step("stream", "no sound tap on " + port + ": the browser gets no sound");
+        if (!live) return;
+        DexLog.step(area, "no sound from " + tap.name() + (why != null ? " (" + why + ")" : "") + ": the computer gets none");
+        sink.ended(why != null ? why : "no sound");
     }
 
     // ── the format in use, owned by the pump ──

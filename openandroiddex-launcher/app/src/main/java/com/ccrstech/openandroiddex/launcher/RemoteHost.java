@@ -294,7 +294,7 @@ final class RemoteHost {
         // running — a code left on screen by a process that died must not come
         // back at the next turn-on. A stop that is not a switch-off (the
         // service going while remote access stays on) leaves it to be reopened.
-        if (!LinuxRemote.isEnabled(ctx)) {
+        if (!LinuxRemote.tunnelOn(ctx)) {
             pending.clear();
             pairCode = "";
             pairEndpoint = "";
@@ -367,6 +367,12 @@ final class RemoteHost {
             // daemon is this app's uid, which LinuxStream lets in.
             cmd.add("--stream-socket");
             cmd.add("@" + LinuxStream.socketName(ctx));
+            // Remote desktop, the phone's own screen, where this APK has it:
+            // PhoneStream lets this app's uid in, as LinuxStream does.
+            if (PhoneRemote.offered(ctx)) {
+                cmd.add("--phone-socket");
+                cmd.add("@" + PhoneRemote.socketName(ctx));
+            }
             String dns = dnsServers();
             if (!dns.isEmpty()) {
                 cmd.add("--dns");
@@ -633,6 +639,8 @@ final class RemoteHost {
         peer.ssh = LinuxRemote.unb64(w[4]);
         peer.added = System.currentTimeMillis() / 1000;
         peer.via = "code";
+        // The Remote desktop page on the web: the phone's own screen alone.
+        if ("browser".equals(peer.os)) peer.scope = LinuxRemote.SCOPE_PHONE;
         boolean saved = LinuxRemote.addPeer(ctx, peer);
         pairName = peer.name;
         send((saved ? "pair-commit " : "pair-reject ") + peer.id);
@@ -671,7 +679,7 @@ final class RemoteHost {
         // The marker is the truth. Off is normally an intent to the service,
         // but an intent Android refused would otherwise leave this running
         // with nothing on screen saying so.
-        if (!LinuxRemote.isEnabled(ctx)) {
+        if (!LinuxRemote.tunnelOn(ctx)) {
             DexLog.step("remote", "remote access was switched off");
             stopNow();
             return;
@@ -680,7 +688,11 @@ final class RemoteHost {
         String state;
         Linux.Status st = Linux.readStatus(ctx);
         boolean sshd = LinuxRemote.sshdInstalled(ctx);
-        if (!Linux.isInstalled(ctx) || "none".equals(st.phase)) {
+        if (!LinuxRemote.isEnabled(ctx)) {
+            // The tunnel is up for Remote desktop alone: nothing of Linux's.
+            state = "off";
+            stopSshNow();
+        } else if (!Linux.isInstalled(ctx) || "none".equals(st.phase)) {
             state = "missing";
             stopSshNow();
         } else if (sshHeld) {
@@ -947,6 +959,8 @@ final class RemoteHost {
      * ptrace, every three seconds.
      */
     private String desktopState(Linux.Status st) {
+        // The tunnel is up for Remote desktop alone: Linux's desktop is not offered.
+        if (!LinuxRemote.isEnabled(ctx)) return "off";
         if (!Linux.isInstalled(ctx) || "none".equals(st.phase)) return "missing";
         // A reset is deleting the container under it.
         if (sshHeld) return "installing";

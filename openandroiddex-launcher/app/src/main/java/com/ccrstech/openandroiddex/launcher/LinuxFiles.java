@@ -88,10 +88,20 @@ import java.util.zip.CRC32;
  * phone's shared folder cannot go there (another filesystem); the page asks
  * before deleting that for good.
  *
+ * <p><b>The phone's own files too</b> ({@link Kind#PHONE}): Remote desktop's
+ * Files (phone.html), over the phone's shared storage, through the door's
+ * {@code /pfs/}. The same operations and the same safety, with the phone's
+ * places, no Trash (Android's own is MediaStore's, and asks on the phone),
+ * nothing hidden at the top, and Android's own folders kept as they are.
+ * Design record: doc/phone-remote.md, "Files".
+ *
  * <p>Pure Java but for {@link Thumbs}, which the service gives it: the stand-in
  * tests on a computer run this very file.
  */
 final class LinuxFiles {
+
+    /** Whose files: Linux's (the guest's {@code /}), or the phone's own shared storage (Remote desktop's Files). */
+    enum Kind { LINUX, PHONE }
 
     /** A folder of the phone's that Linux sees at another path (proot's {@code -b}). */
     static final class Mount {
@@ -123,6 +133,16 @@ final class LinuxFiles {
     interface Thumbs {
         /** A JPEG or PNG at most {@code size} pixels each way, or null when there is none to make. */
         byte[] make(File file, String kind, int size) throws IOException;
+
+        /**
+         * A file uploaded into the phone's shared storage is in place: Android's
+         * media index is told. An upload arrives under a hidden part name and is
+         * renamed at the end, and Android's index skips hidden files and does
+         * not look again after the rename, so a photo uploaded from a browser
+         * never reached the phone's Gallery (found on the S25, 2026-11-22).
+         */
+        default void added(File file) {
+        }
     }
 
     /** The first transfer began, or the last one ended: the phone stays awake between. */
@@ -275,9 +295,32 @@ final class LinuxFiles {
     /** At or past this, a size or an offset goes in ZIP64's fields. Not final: the test makes it small, to check them. */
     static volatile long zip64At = 0xFFFFFFFFL;
 
+    /**
+     * The phone's places down the side, where they are on its storage: the
+     * folders Android itself makes. {@code /} is the phone ("phone").
+     */
+    private static final String[][] PHONE_PLACES = {
+            {"downloads", "/Download"},
+            {"camera", "/DCIM/Camera"},
+            {"pictures", "/Pictures"},
+            {"documents", "/Documents"},
+            {"music", "/Music"},
+            {"videos", "/Movies"},
+    };
+
+    /**
+     * Android's own folders at the top of the phone's storage, lower case (the
+     * storage ignores case): never renamed, moved or deleted from a browser,
+     * whatever is in them. Apps and the camera write into them by name.
+     */
+    private static final Set<String> PHONE_KEPT = new HashSet<>(Arrays.asList(
+            "alarms", "android", "audiobooks", "dcim", "documents", "download", "movies", "music", "notifications",
+            "pictures", "podcasts", "recordings", "ringtones"));
+
     private final Layout layout;
     private final Thumbs thumbs;
     private final Busy busyHook;
+    private final Kind kind;
     private final AtomicInteger busy = new AtomicInteger();
     private final Map<String, Ticket> tickets = new ConcurrentHashMap<>();
     private final SecureRandom random = new SecureRandom();
@@ -287,9 +330,45 @@ final class LinuxFiles {
     private long thumbBytes;
 
     LinuxFiles(Layout layout, Thumbs thumbs, Busy busy) {
+        this(layout, thumbs, busy, Kind.LINUX);
+    }
+
+    LinuxFiles(Layout layout, Thumbs thumbs, Busy busy, Kind kind) {
         this.layout = layout;
         this.thumbs = thumbs;
         this.busyHook = busy;
+        this.kind = kind;
+    }
+
+    Kind kind() {
+        return kind;
+    }
+
+    /** Linux's {@code /proc}, {@code /sys} and {@code /dev}, which are the phone's own; nothing on the phone's storage. */
+    private Set<String> hiddenTop() {
+        return kind == Kind.PHONE ? Collections.<String>emptySet() : HIDDEN_TOP;
+    }
+
+    /** Two paths name the same place: to the letter in Linux, whatever the case on the phone's storage. */
+    private boolean samePath(String a, String b) {
+        return kind == Kind.PHONE ? a.equalsIgnoreCase(b) : a.equals(b);
+    }
+
+    /** {@code path} is {@code dir} or inside it, as {@link #samePath} reads paths. */
+    private boolean within(String path, String dir) {
+        if (samePath(path, dir)) return true;
+        String d = "/".equals(dir) ? "/" : dir + "/";
+        return kind == Kind.PHONE ? path.toLowerCase(Locale.ROOT).startsWith(d.toLowerCase(Locale.ROOT)) : path.startsWith(d);
+    }
+
+    /** On the phone's storage: inside {@code /Android}, apps' own files, which a browser may look at and never change. */
+    private boolean phoneReadOnly(String guest) {
+        return kind == Kind.PHONE && within(guest, "/Android");
+    }
+
+    /** A folder something is to be written into: never one of {@link #phoneReadOnly}'s. */
+    private void guardWrite(Where dir) throws Refusal {
+        if (phoneReadOnly(dir.guest)) throw new Refusal(403, "protected");
     }
 
     /** Transfers running now, for a test. */
@@ -307,6 +386,9 @@ final class LinuxFiles {
     private static final Set<String> WRITES = new HashSet<>(Arrays.asList(
             "ticket", "put", "unpart", "batch", "mkdir", "rename", "move", "trash", "untrash", "emptytrash", "delete"));
 
+    /** Linux's Trash, which the phone's storage does not have. */
+    private static final Set<String> TRASH_OPS = new HashSet<>(Arrays.asList("trash", "untrash", "trashlist", "emptytrash"));
+
     /**
      * Answer {@code c} on {@code out}.
      *
@@ -320,6 +402,8 @@ final class LinuxFiles {
             // A change is never a GET: only the page's own POST and PUT, which
             // the server has already seen come from this origin.
             if (WRITES.contains(c.op) && !"POST".equals(c.method) && !"PUT".equals(c.method)) throw new Refusal(405, "method");
+            // The phone's storage has no Trash of this kind: deleting there is for good, and the page asks first.
+            if (kind == Kind.PHONE && TRASH_OPS.contains(c.op)) throw new Refusal(404, "op");
             switch (c.op) {
                 case "info":
                     return json(out, 200, info(), keep);
@@ -414,10 +498,18 @@ final class LinuxFiles {
         return "/".equals(dir) ? "/" + name : dir + "/" + name;
     }
 
-    /** A name a file can have in Linux: not empty, not . or .., no slash or NUL, at most 255 bytes. */
+    /**
+     * A name a file can have in Linux: not empty, not . or .., no slash or NUL, at most 255 bytes. Nor,
+     * only ever on a computer's JVM (the tests on Windows), the separator that is not '/' there.
+     */
     static boolean goodName(String n) {
         return n != null && !n.isEmpty() && !n.equals(".") && !n.equals("..") && n.indexOf('/') < 0
-                && n.indexOf('\0') < 0 && n.getBytes(StandardCharsets.UTF_8).length <= 255;
+                && n.indexOf('\0') < 0 && n.getBytes(StandardCharsets.UTF_8).length <= 255 && !foreignSeparator(n);
+    }
+
+    /** Windows' '\', which a phone's names may hold and a computer's File would read as a way out. */
+    private static boolean foreignSeparator(String n) {
+        return File.separatorChar != '/' && n.indexOf(File.separatorChar) >= 0;
     }
 
     /** One of this class's own files, which no listing shows; and the hard links proot keeps as hidden files. */
@@ -426,8 +518,8 @@ final class LinuxFiles {
     }
 
     /** {@code comps} of the guest's path on the phone: under the innermost bind, or the rootfs; null for the hidden. */
-    private static File hostOf(File rootfs, List<Mount> mounts, List<String> comps) {
-        if (!comps.isEmpty() && HIDDEN_TOP.contains(comps.get(0))) return null;
+    private static File hostOf(File rootfs, List<Mount> mounts, List<String> comps, Set<String> hidden) {
+        if (!comps.isEmpty() && hidden.contains(comps.get(0))) return null;
         Mount best = null;
         int bestLen = -1;
         for (Mount m : mounts) {
@@ -478,6 +570,7 @@ final class LinuxFiles {
         int links = 0;
         while (!todo.isEmpty()) {
             String c = todo.pollFirst();
+            if (foreignSeparator(c)) throw new Refusal(400, "path");
             if (c.equals(".")) continue;
             if (c.equals("..")) {
                 if (!done.isEmpty()) done.remove(done.size() - 1);
@@ -485,7 +578,7 @@ final class LinuxFiles {
             }
             done.add(c);
             if (todo.isEmpty() && !followLast) break;
-            File h = hostOf(rootfs, mounts, done);
+            File h = hostOf(rootfs, mounts, done, hiddenTop());
             if (h == null) throw new Refusal(404, "hidden");
             Path p;
             try {
@@ -512,7 +605,7 @@ final class LinuxFiles {
             List<String> t = parts(target);
             for (int i = t.size() - 1; i >= 0; i--) todo.addFirst(t.get(i));
         }
-        File host = hostOf(rootfs, mounts, done);
+        File host = hostOf(rootfs, mounts, done, hiddenTop());
         if (host == null) throw new Refusal(404, "hidden");
         return new Where(join(done), host);
     }
@@ -558,6 +651,15 @@ final class LinuxFiles {
      */
     private void guard(Where w) throws Refusal {
         String g = w.guest;
+        if (kind == Kind.PHONE) {
+            // The phone's storage itself, Android's own folders at its top
+            // and the camera's, and anything of an app's under Android/.
+            if (g.equals("/") || (parentOf(g).equals("/") && PHONE_KEPT.contains(nameOf(g).toLowerCase(Locale.ROOT)))
+                    || samePath(g, "/DCIM/Camera") || phoneReadOnly(g)) {
+                throw new Refusal(403, "protected");
+            }
+            return;
+        }
         if (g.equals("/") || parentOf(g).equals("/") || g.equals(HOME) || g.equals(TRASH) || g.equals(TRASH_FILES)
                 || g.equals(TRASH_INFO) || g.equals(HOME + "/.local") || g.equals(HOME + "/.local/share")) {
             throw new Refusal(403, "protected");
@@ -612,6 +714,15 @@ final class LinuxFiles {
     private String info() throws Refusal {
         File rootfs = layout.rootfs();
         if (rootfs == null) throw new Refusal(503, layout.state());
+        if (kind == Kind.PHONE) {
+            // The phone, at its storage's top, and Android's own folders that are there.
+            StringBuilder b = new StringBuilder("{\"home\":\"/\",\"places\":[{\"id\":\"phone\",\"path\":\"/\"}");
+            for (String[] p : PHONE_PLACES) {
+                if (isDir(p[1])) b.append(",{\"id\":").append(q(p[0])).append(",\"path\":").append(q(p[1])).append('}');
+            }
+            return b.append("],\"free\":").append(Math.max(0, rootfs.getUsableSpace() - MARGIN))
+                    .append(",\"total\":").append(rootfs.getTotalSpace()).append('}').toString();
+        }
         StringBuilder b = new StringBuilder("{\"home\":").append(q(HOME)).append(",\"places\":[");
         b.append("{\"id\":\"home\",\"path\":").append(q(HOME)).append('}');
         for (Map.Entry<String, String> e : userDirs().entrySet()) {
@@ -638,12 +749,14 @@ final class LinuxFiles {
         String[] names = w.host.list();
         if (names == null) throw new Refusal(403, "denied");
         StringBuilder b = new StringBuilder(96 + names.length * 72);
-        b.append("{\"path\":").append(q(w.guest)).append(",\"w\":").append(Files.isWritable(w.host.toPath()) ? 1 : 0)
+        b.append("{\"path\":").append(q(w.guest)).append(",\"w\":")
+                .append(Files.isWritable(w.host.toPath()) && !phoneReadOnly(w.guest) ? 1 : 0)
                 .append(",\"entries\":[");
         Set<String> seen = new HashSet<>();
         boolean first = true;
+        Set<String> hidden = hiddenTop();
         for (String n : names) {
-            if (internal(n) || ("/".equals(w.guest) && HIDDEN_TOP.contains(n))) continue;
+            if (internal(n) || ("/".equals(w.guest) && hidden.contains(n))) continue;
             String e;
             try {
                 e = entry(n, new File(w.host, n), child(w.guest, n));
@@ -761,7 +874,7 @@ final class LinuxFiles {
             if (names == null) continue;
             Arrays.sort(names);
             for (String n : names) {
-                if (internal(n) || ("/".equals(d.guest) && HIDDEN_TOP.contains(n))) continue;
+                if (internal(n) || ("/".equals(d.guest) && hiddenTop().contains(n))) continue;
                 File f = new File(d.host, n);
                 String g = child(d.guest, n);
                 BasicFileAttributes a = attrs(f, false);
@@ -1025,7 +1138,10 @@ final class LinuxFiles {
      * One file, or the rest of one: {@code path} where it goes, {@code size}
      * its whole length, {@code off} where this body starts (what {@code part}
      * said arrived), {@code mtime} its time, {@code on} what to do when the
-     * name is taken (fail, replace, rename).
+     * name is taken (fail, replace, rename). {@code force} 1: the person
+     * chose Replace, so the file is written even when one already there has
+     * the same size and time ({@link #same} is a quick check, and two
+     * different files can share both).
      */
     private boolean put(Call c, OutputStream out, boolean keep) throws IOException, Refusal {
         String path = c.param("path");
@@ -1033,17 +1149,25 @@ final class LinuxFiles {
         long size = c.num("size", -1);
         long off = c.num("off", 0);
         long mtime = c.num("mtime", 0);
+        boolean force = c.num("force", 0) == 1;
         String on = orElse(c.param("on"), "fail");
         long len = c.body == null ? 0 : c.body.left();
         if (size < 0 || off < 0 || off > size || len > size - off) throw new Refusal(400, "size");
         String name = nameOf(path);
         if (!goodName(name)) throw new Refusal(400, "name");
         Where dir = dir(parentOf(path));
+        guardWrite(dir);
         File dest = new File(dir.host, name);
         File part = partFile(dir.host, name, size, mtime);
         if (off == 0) {
-            if (same(dest, size, mtime)) {
-                boolean k = keep && (c.body == null || c.body.drain(1 << 20));
+            if (!force && same(dest, size, mtime)) {
+                // The body read to its end first, however long: a browser
+                // reads no answer while it is still sending, and one hung up
+                // on with the rest unread gets the reset, not this answer
+                // (Edge: "Failed to fetch"). The page asks part first and does
+                // not send a file that is here; this is for one that came
+                // anyway, in the moment between.
+                boolean k = keep && (c.body == null || c.body.drain(Long.MAX_VALUE));
                 return json(out, 200, "{\"done\":true,\"same\":true,\"path\":" + q(child(dir.guest, name)) + "}", k);
             }
             // Said before a byte is taken, not after the whole file.
@@ -1072,15 +1196,38 @@ final class LinuxFiles {
         }
         File fin = place(part, dest, on, mtime);
         if (fin == null) return json(out, 200, "{\"done\":true,\"skipped\":true}", keep);
+        indexed(fin);
         return json(out, 200, "{\"done\":true,\"path\":" + q(child(dir.guest, fin.getName())) + "}", keep);
     }
 
+    /**
+     * Asked before a big file goes (the page's runPut): what arrived of it
+     * ({@code have}, where a resume starts), and what put would answer at
+     * once without taking its body: already here ({@code same}: the same size
+     * and time), or a refusal (apps' folders, a folder that went; and from
+     * the start, {@code fresh} 1, no room or the name taken with {@code on}
+     * fail). Said here because, once the body is on its way, a refusal is
+     * lost: put hangs up on a body it will not take, and a browser, which
+     * reads no answer while it is still sending, gets the reset instead.
+     */
     private String part(Call c) throws Refusal {
         String path = c.param("path");
         if (path == null || !goodName(nameOf(path))) throw new Refusal(400, "path");
+        long size = c.num("size", -1);
+        long mtime = c.num("mtime", 0);
+        boolean force = c.num("force", 0) == 1;
         Where dir = dir(parentOf(path));
-        File part = partFile(dir.host, nameOf(path), c.num("size", -1), c.num("mtime", 0));
-        return "{\"have\":" + (exists(part) ? part.length() : 0) + "}";
+        File dest = new File(dir.host, nameOf(path));
+        File part = partFile(dir.host, nameOf(path), size, mtime);
+        long have = exists(part) ? part.length() : 0;
+        // put's own checks, in its order
+        guardWrite(dir);
+        if (!force && same(dest, size, mtime)) return "{\"have\":" + have + ",\"same\":true}";
+        if (c.num("fresh", 0) == 1) {
+            if ("fail".equals(orElse(c.param("on"), "fail")) && exists(dest)) throw new Refusal(409, "exists");
+            if (dir.host.getUsableSpace() - MARGIN < size) throw new Refusal(507, "full");
+        }
+        return "{\"have\":" + have + "}";
     }
 
     private String unpart(Call c) throws Refusal {
@@ -1104,12 +1251,14 @@ final class LinuxFiles {
      *   u64 size    (a file) then u64 its time in ms, then its bytes
      * </pre>
      * Big-endian. {@code on} says what a taken name gets: replace (folders
-     * merge), rename, or skip. A file already there the same is not written
-     * again.
+     * merge), rename, or skip. A file already there the same (size and time)
+     * is not written again, unless {@code force} 1: the person chose Replace.
      */
     private boolean batch(Call c, OutputStream out, boolean keep) throws IOException, Refusal {
         Where dir = dir(c.param("dir"));
+        guardWrite(dir);
         String on = orElse(c.param("on"), "replace");
+        boolean force = c.num("force", 0) == 1;
         if (!on.equals("replace") && !on.equals("rename") && !on.equals("skip")) throw new Refusal(400, "on");
         long total = c.num("total", 0);
         if (total > 0 && dir.host.getUsableSpace() - MARGIN < total) throw new Refusal(507, "full");
@@ -1142,6 +1291,12 @@ final class LinuxFiles {
                     add(failed, rel, "name");
                     continue;
                 }
+                // Apps' folders under Android/ on the phone, whatever the path under the folder sent to says.
+                if (phoneReadOnly(child(dir.guest, rel))) {
+                    skip(in, size);
+                    add(failed, rel, "protected");
+                    continue;
+                }
                 File parent;
                 try {
                     parent = mkdirs(dir.host, kind == 1 ? comps.subList(0, comps.size() - 1) : comps);
@@ -1156,7 +1311,7 @@ final class LinuxFiles {
                 }
                 String name = comps.get(comps.size() - 1);
                 File dest = new File(parent, name);
-                if (same(dest, size, mtime)) {
+                if (!force && same(dest, size, mtime)) {
                     skip(in, size);
                     same++;
                     continue;
@@ -1188,6 +1343,7 @@ final class LinuxFiles {
                     add(failed, rel, x.code);
                     continue;
                 }
+                if (fin != null) indexed(fin);
                 if (fin != null && !fin.getName().equals(name)) add(renamed, rel, fin.getName());
                 done++;
                 bytes += size;
@@ -1265,6 +1421,16 @@ final class LinuxFiles {
      *
      * @return where it went, or null when skipped
      */
+    /** An upload in place in the phone's storage: Android's media index hears of it (Thumbs.added). Never fails the upload. */
+    private void indexed(File fin) {
+        if (kind != Kind.PHONE || thumbs == null) return;
+        try {
+            thumbs.added(fin);
+        } catch (RuntimeException ignored) {
+            // the index finds it at its next scan
+        }
+    }
+
     private static File place(File tmp, File dest, String on, long mtime) throws IOException, Refusal {
         if (mtime > 0) {
             try {
@@ -1344,6 +1510,7 @@ final class LinuxFiles {
         String path = c.param("path");
         if (path == null || !goodName(nameOf(path))) throw new Refusal(400, "name");
         Where parent = dir(parentOf(path));
+        guardWrite(parent);
         File f = new File(parent.host, nameOf(path));
         if (exists(f)) {
             if (!"rename".equals(c.param("on"))) throw new Refusal(409, "exists");
@@ -1385,6 +1552,7 @@ final class LinuxFiles {
      */
     private String move(Call c) throws Refusal {
         Where to = dir(c.param("dir"));
+        guardWrite(to);
         boolean copy = "1".equals(c.param("copy"));
         String on = orElse(c.param("on"), "rename");
         StringBuilder moved = new StringBuilder();
@@ -1395,18 +1563,28 @@ final class LinuxFiles {
                 w = resolve(p, false);
                 if (!copy || w.guest.equals("/")) guard(w);
                 if (!exists(w.host)) throw new Refusal(404, "missing");
-                if (to.guest.equals(w.guest) || to.guest.startsWith(w.guest + "/")) throw new Refusal(409, "inside");
+                // On the phone's storage, which ignores case, "/Photos" holds "/photos/2024" too.
+                if (within(to.guest, w.guest)) throw new Refusal(409, "inside");
             } catch (Refusal r) {
                 add(failed, p, r.code);
                 continue;
             }
             String name = nameOf(w.guest);
-            if (!copy && parentOf(w.guest).equals(to.guest)) continue; // where it is already
+            if (!copy && samePath(parentOf(w.guest), to.guest)) continue; // where it is already
             File dest = new File(to.host, name);
             try {
                 if (exists(dest)) {
                     if ("skip".equals(on)) continue;
                     if ("replace".equals(on) && !Files.isSameFile(w.host.toPath(), dest.toPath())) {
+                        // What is replaced goes: on the phone, never one of Android's own folders.
+                        if (kind == Kind.PHONE) {
+                            try {
+                                guard(new Where(child(to.guest, name), dest));
+                            } catch (Refusal r) {
+                                add(failed, p, r.code);
+                                continue;
+                            }
+                        }
                         deleteTree(dest.toPath(), c.alive);
                     } else {
                         dest = freeName(to.host, name, isDirNoFollow(w.host));
@@ -1704,7 +1882,7 @@ final class LinuxFiles {
                 guard(w);
                 if (!exists(w.host)) throw new Refusal(404, "missing");
                 deleteTree(w.host.toPath(), c.alive);
-                if (parentOf(w.guest).equals(TRASH_FILES)) {
+                if (kind == Kind.LINUX && parentOf(w.guest).equals(TRASH_FILES)) {
                     new File(resolve(TRASH_INFO, true).host, nameOf(w.guest) + ".trashinfo").delete();
                 }
                 if (done.length() > 0) done.append(',');
@@ -1741,15 +1919,16 @@ final class LinuxFiles {
         if (t == null || !"zip".equals(t.kind)) throw new Refusal(403, "ticket");
         List<Z> entries = new ArrayList<>();
         Set<String> tops = new HashSet<>();
+        boolean phone = kind == Kind.PHONE;
         for (String p : t.paths) {
             Where w = resolve(p, true);
-            String top = w.guest.equals("/") ? "Linux" : nameOf(w.guest);
+            String top = w.guest.equals("/") ? (phone ? "Phone" : "Linux") : nameOf(w.guest);
             String unique = top;
             for (int i = 2; !tops.add(unique.toLowerCase(Locale.ROOT)); i++) unique = top + " (" + i + ")";
             gather(w, unique, entries, 0);
         }
         long total = layout(entries);
-        String name = t.name != null && goodName(t.name) ? t.name : "Linux files.zip";
+        String name = t.name != null && goodName(t.name) ? t.name : phone ? "Phone files.zip" : "Linux files.zip";
         if (!name.toLowerCase(Locale.ROOT).endsWith(".zip")) name += ".zip";
         head(out, 200, "application/zip", total, keep, "Content-Disposition", disposition(true, name),
                 "Cache-Control", "no-store");
@@ -1783,7 +1962,7 @@ final class LinuxFiles {
         if (names == null) return;
         Arrays.sort(names);
         for (String n : names) {
-            if (internal(n) || ("/".equals(w.guest) && HIDDEN_TOP.contains(n))) continue;
+            if (internal(n) || ("/".equals(w.guest) && hiddenTop().contains(n))) continue;
             String g = child(w.guest, n);
             File f = new File(w.host, n);
             Mount m = mountAt(g);

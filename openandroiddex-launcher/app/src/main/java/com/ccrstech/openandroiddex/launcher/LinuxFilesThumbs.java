@@ -26,6 +26,26 @@ import java.io.IOException;
  */
 final class LinuxFilesThumbs implements LinuxFiles.Thumbs {
 
+    /** For the phone's own files: where Android's media index is told of uploads; null for Linux's files. */
+    private final android.content.Context media;
+
+    /** Linux's files: nothing of them is in Android's media index. */
+    LinuxFilesThumbs() {
+        this(null);
+    }
+
+    /** The phone's shared storage: uploads are told to Android's media index (MediaScannerConnection). */
+    LinuxFilesThumbs(android.content.Context media) {
+        this.media = media;
+    }
+
+    @Override
+    public void added(File file) {
+        if (media == null) return;
+        android.media.MediaScannerConnection.scanFile(media.getApplicationContext(),
+                new String[]{file.getAbsolutePath()}, null, null);
+    }
+
     @Override
     public byte[] make(File file, String kind, int size) throws IOException {
         Bitmap b = null;

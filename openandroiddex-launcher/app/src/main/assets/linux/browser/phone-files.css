@@ -1,0 +1,58 @@
+/*
+ * Files on the phone's page (phone.html, phone-files.js): files.css draws
+ * them, in the look of Linux's page, from the colours and base rules that
+ * Linux's page has in viewer.css. Those are here, on Files' own boxes only, so
+ * that the phone's screen, bar and cover keep the phone page's look.
+ *
+ * Loaded before files.css, and no more specific than viewer.css's own rules
+ * (:where), so that files.css wins wherever it says otherwise, as it does on
+ * Linux's page.
+ */
+:where(.fx, .tray, .snack, .drop, .fx-menu, .fx-dialog, .peek, .drag-ghost) {
+  --bg: #0b1222;
+  --bg-deep: #060a14;
+  --card: rgba(20, 27, 39, 0.86);
+  --edge: rgba(255, 255, 255, 0.09);
+  --ink: #f5f7fb;
+  --ink-2: #b4bfcf;
+  --ink-3: #7f8a9c;
+  --amber: #ffc131;
+  --amber-2: #ffd876;
+  --blue: #5b7cff;
+  --sky: #7dd3fc;
+  --green: #4ade80;
+  --red: #ff6b6b;
+  --font: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans", "Helvetica Neue", Arial, sans-serif;
+  --mono: ui-monospace, "Cascadia Mono", "Cascadia Code", "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  --ease: cubic-bezier(0.2, 0.8, 0.2, 1);
+  color-scheme: dark;
+  color: var(--ink);
+  font: 15px/1.45 var(--font);
+  -webkit-font-smoothing: antialiased;
+  /* The phone's page takes selection away for its screen; Files' words can be selected, as on Linux's page. */
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+:where(.fx, .tray, .snack, .drop, .fx-menu, .fx-dialog, .peek) button { font: inherit; color: inherit; }
+:where(.fx, .tray, .snack, .drop, .fx-menu, .fx-dialog, .peek) :focus-visible { outline: 2px solid var(--sky); outline-offset: 2px; }
+
+/* The transfers' panel's round buttons (transfer.js), viewer.css's .icon on Linux's page. */
+:where(.tray) .icon {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--ink-2);
+  cursor: pointer;
+  transition: background 0.2s var(--ease), color 0.2s var(--ease);
+}
+:where(.tray) .icon:hover { background: rgba(255, 255, 255, 0.08); color: var(--ink); }
+:where(.tray) .icon svg { width: 18px; height: 18px; }
+
+/* Files open: the phone's bar and status line, under them, are out of reach too. */
+body.files-on .bar, body.files-on .status { visibility: hidden; }

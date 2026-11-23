@@ -28,6 +28,11 @@ path = "src/main.rs"
 # dials anyone and the binary ships twice in every APK.
 default = ["sftp"]
 sftp = ["dep:russh", "dep:russh-sftp", "dep:tokio-util", "dep:futures-util"]
+# The phone's own screen straight to a browser by WebRTC (src/rtc.rs), for the
+# Remote desktop page on the web, which otherwise reaches the phone only
+# through a relay. The phone's build has it (build-android.sh); a computer
+# dials the phone with iroh directly and needs none of it.
+rtc = ["dep:str0m"]
 
 [dependencies]
 # default-features off drops `metrics`, which nothing here reads. portmapper
@@ -59,6 +64,11 @@ russh = { version = "0.64", default-features = false, features = ["ring"], optio
 russh-sftp = { version = "2.4", optional = true }
 tokio-util = { version = "0.7", default-features = false, optional = true }
 futures-util = { version = "0.3", optional = true }
+# The `rtc` feature: str0m, WebRTC without IO of its own. Its DTLS (dimpl)
+# makes certificates with AWS-LC, a C build; for the two Android targets the
+# cc crate builds it with the NDK's clang alone (no CMake, no NASM), as
+# build-android.sh does.
+str0m = { version = "0.25", default-features = false, features = ["rust-crypto"], optional = true }
 
 # flock(2), for the identity lock. std's File::lock compiles for Android but
 # answers Unsupported there; libc is in the tree already, under tokio.

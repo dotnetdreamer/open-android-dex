@@ -32,14 +32,21 @@ SDK=${ANDROID_HOME:-${ANDROID_SDK_ROOT:-$HOME/Library/Android/sdk}}
 NDK=${ANDROID_NDK_HOME:-$SDK/ndk/$NDK_VERSION}
 [ -d "$NDK" ] || { echo "no NDK at $NDK — sdkmanager \"ndk;$NDK_VERSION\" or set ANDROID_NDK_HOME" >&2; exit 1; }
 
+# On Windows the NDK's clang for a target is a .cmd wrapper (the bare name is
+# a shell script Windows cannot run), and its tools end in .exe.
+CMD=""
+EXE=""
 case "$(uname -s)" in
   Darwin) HOST=darwin-x86_64 ;;   # the NDK's macOS build is universal
   Linux) HOST=linux-x86_64 ;;
-  MINGW*|MSYS*|CYGWIN*) HOST=windows-x86_64 ;;
+  MINGW*|MSYS*|CYGWIN*) HOST=windows-x86_64; CMD=.cmd; EXE=.exe ;;
   *) echo "unsupported build host $(uname -s)" >&2; exit 1 ;;
 esac
 TOOLCHAIN=$NDK/toolchains/llvm/prebuilt/$HOST/bin
 DEST=../openandroiddex-launcher/app/src/main/jniLibs
+# Where cargo puts it: CARGO_TARGET_DIR when set (a short path, on Windows,
+# keeps the deep dependency tree under MAX_PATH), the crate's target/ if not.
+OUT=${CARGO_TARGET_DIR:-target}
 
 for SPEC in aarch64-linux-android:arm64-v8a x86_64-linux-android:x86_64; do
   TARGET=${SPEC%%:*}
@@ -47,23 +54,42 @@ for SPEC in aarch64-linux-android:arm64-v8a x86_64-linux-android:x86_64; do
   UPPER=$(echo "$TARGET" | tr 'a-z-' 'A-Z_')
   LOWER=$(echo "$TARGET" | tr '-' '_')
   echo "══════════ $TARGET -> $ABI"
-  # ring compiles C and assembly through the cc crate, which reads CC_<target>;
-  # rustc links through the same clang so the two agree on the sysroot.
+  # ring and AWS-LC compile C and assembly through the cc crate, which reads
+  # CC_<target>; rustc links through the same clang so they agree on the
+  # sysroot. AWS-LC's own CMake build is not wanted: its cc build needs only
+  # the NDK.
   # No default features: `sftp` is the computer's way of copying files onto a
-  # phone, and the phone never dials anyone.
-  env "CC_$LOWER=$TOOLCHAIN/$TARGET$API-clang" \
-      "AR_$LOWER=$TOOLCHAIN/llvm-ar" \
-      "CARGO_TARGET_${UPPER}_LINKER=$TOOLCHAIN/$TARGET$API-clang" \
+  # phone, and the phone never dials anyone. `rtc`: the phone's screen
+  # straight to a browser (src/rtc.rs).
+  env "CC_$LOWER=$TOOLCHAIN/$TARGET$API-clang$CMD" \
+      "CXX_$LOWER=$TOOLCHAIN/$TARGET$API-clang++$CMD" \
+      "AR_$LOWER=$TOOLCHAIN/llvm-ar$EXE" \
+      "CARGO_TARGET_${UPPER}_LINKER=$TOOLCHAIN/$TARGET$API-clang$CMD" \
       "CARGO_TARGET_${UPPER}_RUSTFLAGS=-C link-arg=-Wl,-z,max-page-size=16384" \
-      cargo build --release --locked --no-default-features --target "$TARGET"
+      AWS_LC_SYS_CMAKE_BUILDER=0 \
+      cargo build --release --locked --no-default-features --features rtc --target "$TARGET"
   mkdir -p "$DEST/$ABI"
-  cp -f "target/$TARGET/release/dexremote" "$DEST/$ABI/libdexremote.so"
+  cp -f "$OUT/$TARGET/release/dexremote" "$DEST/$ABI/libdexremote.so"
   echo "  -> $DEST/$ABI/libdexremote.so ($(wc -c < "$DEST/$ABI/libdexremote.so" | tr -d ' ') bytes)"
 done
 
 # Verify, do not assume — the same check openandroiddex-linux/proot/build.sh
 # runs: an ELF whose LOAD segments are only 4 KB aligned cannot be mapped on a
-# 16 KB-page device.
+# 16 KB-page device. Without Python (Git Bash on Windows), the NDK's own
+# readelf says the same.
+if ! command -v python3 >/dev/null 2>&1; then
+  bad=""
+  for abi in arm64-v8a x86_64; do
+    aligns=$("$TOOLCHAIN/llvm-readelf$EXE" -lW "$DEST/$abi/libdexremote.so" | awk '$1 == "LOAD" { print $NF }' | tr -d '\r' | tr '\n' ' ')
+    echo "$abi/libdexremote.so LOAD align $aligns"
+    for a in $aligns; do
+      if [ $((a)) -lt $((0x4000)) ]; then bad="$bad $abi"; fi
+    done
+  done
+  [ -z "$bad" ] || { echo "NOT 16 KB aligned:$bad" >&2; exit 1; }
+  echo "all LOAD segments >= 16 KB aligned"
+  exit 0
+fi
 python3 - "$DEST" <<'PY'
 import struct, sys, os
 bad = []

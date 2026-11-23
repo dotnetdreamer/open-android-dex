@@ -2,7 +2,7 @@
 // "Open in a browser" (doc/linux-browser.md), checked as far as a computer
 // can without a phone.
 //
-//   node test/linux-browser-test.mjs [--browser <chrome or edge exe>] [--shots <dir>]
+//   node test/linux-browser-test.mjs [--browser <chrome or edge exe>] [--shots <dir>] [--node-only]
 //
 // The server is the launcher's own: LinuxBrowserServer, LinuxBrowser,
 // LinuxBrowserCert and LinuxStreamSocket compiled for this JVM, serving the
@@ -41,6 +41,7 @@ import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import tls from 'node:tls';
+import zlib from 'node:zlib';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -118,6 +119,24 @@ console.log('h264.js');
   const a = h.splitAccessUnit(annexB);
   check('an access unit: its parameter sets, a key frame, the AUD dropped, the slice length-prefixed',
     a.sps && a.pps && a.key && a.data.length === 4 + idr.length && a.data[3] === idr.length);
+}
+
+console.log('the page from anywhere (openandroiddex-remote/web/www)');
+{
+  // Its viewer is this phone.js, copied there by web/build.sh: the copies the
+  // site serves must be these, and its own page must have every element the
+  // viewer reaches for (a Files button, hidden there, and Picture size), or
+  // the viewer stops at the first one missing.
+  const WWW = path.join(ROOT, 'openandroiddex-remote/web/www');
+  if (fs.existsSync(WWW) && !process.env.OADX_PAGE_DIR) {
+    const stale = ['phone.js', 'phone.css', 'sound.js', 'h264.js', 'keysym.js', 'icon.svg']
+      .filter((f) => !fs.existsSync(path.join(WWW, f)) || !fs.readFileSync(path.join(WWW, f)).equals(fs.readFileSync(path.join(ASSETS, f))));
+    check("the site's copies of the viewer are the phone's own (web/build.sh copies them)", stale.length === 0, stale.join(', '));
+    const used = [...new Set([...fs.readFileSync(path.join(ASSETS, 'phone.js'), 'utf8').matchAll(/\$\('([\w-]+)'\)/g)].map((m) => m[1]))];
+    const page = fs.readFileSync(path.join(WWW, 'index.html'), 'utf8');
+    const missing = used.filter((id) => !page.includes(`id="${id}"`));
+    check(`its page has every element the viewer reaches for (${used.length})`, missing.length === 0, missing.join(', '));
+  }
 }
 
 console.log('keysym.js');
@@ -1057,6 +1076,652 @@ console.log('while a browser is being let in');
   locker.stdin.end();
   await command('lockafter 5', 'OK lockafter');
   await command('restart', 'OK restarted');
+}
+
+console.log("the phone's own screen (Remote desktop), through the door and the tunnel");
+{
+  // The harness stands in for PhoneStream on a loopback port of its own
+  // (phoneLine), and says what each line was asked (phoneHead) and when it
+  // closed (phoneClosed). The door is LinuxBrowserServer itself.
+  const letIn = async () => said(await pairWith(await askCode())).token;
+  /** An upgrade on /phone, frame by frame, as the page makes it; {@code extra}: more headers to send. */
+  const phoneConnect = ({ token, ip = IP, host = `${IP}:${PORT}`, origin = BASE, extra = {} }) => new Promise((resolve) => {
+    const s = tls.connect({ host: ip, port: PORT, rejectUnauthorized: false, servername: undefined }, () => {
+      const key = crypto.randomBytes(16).toString('base64');
+      const more = Object.entries(extra).map(([k, v]) => `${k}: ${v}\r\n`).join('');
+      s.write(`GET /phone?t=${encodeURIComponent(token)} HTTP/1.1\r\nHost: ${host}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n`
+        + `Sec-WebSocket-Key: ${key}\r\nSec-WebSocket-Version: 13\r\n${origin ? `Origin: ${origin}\r\n` : ''}${more}\r\n`);
+    });
+    const c = { status: 0, texts: [], closedAt: 0, raw: '' };
+    c.closed = new Promise((r) => s.on('close', () => { c.closedAt = Date.now(); r(c.closedAt); resolve(c); }));
+    c.end = () => s.destroy();
+    let buf = Buffer.alloc(0);
+    s.on('error', () => {});
+    s.on('data', (d) => {
+      buf = Buffer.concat([buf, d]);
+      if (!c.status) {
+        const end = buf.indexOf('\r\n\r\n');
+        if (end < 0) return;
+        c.raw = buf.slice(0, end).toString();
+        c.status = Number(c.raw.split(' ')[1]);
+        buf = buf.slice(end + 4);
+        resolve(c);
+      }
+      while (buf.length >= 2) {
+        let len = buf[1] & 0x7f, off = 2;
+        if (len === 126) { if (buf.length < 4) break; len = buf.readUInt16BE(2); off = 4; }
+        if (buf.length < off + len) break;
+        if ((buf[0] & 0x0f) === 1) c.texts.push(buf.slice(off, off + len).toString());
+        buf = buf.slice(off + len);
+      }
+    });
+  });
+  const phones = async () => Number(((await command('phones?', 'PHONES ')) || 'PHONES -1').slice(7));
+  const headOf = (t) => until(() => evSince(t, (e) => e.phoneHead), 3000);
+
+  await command('phone off', 'OK phone');
+  let c = await phoneConnect({ token: await letIn() });
+  await within(c.closed, 3000);
+  check('Remote desktop off: /phone is told so, and closed', c.texts.some((x) => /turned off/.test(x)) && c.closedAt > 0,
+    JSON.stringify(c.texts));
+  await command('phone dead', 'OK phone');
+  c = await phoneConnect({ token: await letIn() });
+  await within(c.closed, 3000);
+  check('Remote desktop on and its stream not running: told how to start it', c.texts.some((x) => /not running/.test(x)), JSON.stringify(c.texts));
+  await command('phone on', 'OK phone');
+
+  // The way it came is the door's to say: a browser's own x-dex-* never gets through.
+  let t = Date.now();
+  const tokA = await letIn();
+  const a = await phoneConnect({ token: tokA, extra: { 'X-Dex-Via': 'tunnel', 'x-dex-peer': 'someone else' } });
+  let head = await headOf(t);
+  const h = head ? head.phoneHead.headers : {};
+  check("the browser's upgrade reaches the phone's screen, said to be from the Wi-Fi by the door alone",
+    a.status === 101 && h['x-dex-via'] === 'wifi' && !('x-dex-peer' in h) && h.host === '127.0.0.1' && !('origin' in h),
+    JSON.stringify({ status: a.status, head: h }));
+  await until(() => a.texts.length > 0, 2000);
+  check("…and the phone's own words come back through it", a.texts.some((x) => JSON.parse(x).t === 'video'), JSON.stringify(a.texts));
+  check('…counted as a phone stream open', (await phones()) === 1);
+
+  // Signed out on the phone: the stream outlives its token's check, and must end now.
+  t = Date.now();
+  await command('signout', 'CODE ');
+  await within(a.closed, 3000);
+  check('Sign them out ends a phone stream already running, at once',
+    a.closedAt > 0 && a.closedAt - t < 2500 && !!(await until(() => evSince(t, (e) => e.phoneClosed), 2000)),
+    JSON.stringify({ closedAfter: a.closedAt ? a.closedAt - t : null }));
+  check('…and none is counted after', (await until(async () => (await phones()) === 0, 3000)) === true);
+
+  // A browser's own Forget ends its stream, and only its own.
+  const tokB = await letIn(), tokC = await letIn();
+  const b = await phoneConnect({ token: tokB });
+  const c2 = await phoneConnect({ token: tokC });
+  await until(async () => (await phones()) === 2, 3000);
+  t = Date.now();
+  const f = await request('POST', '/forget', { headers: { ...FORM, Origin: BASE }, body: form({ token: tokB }) });
+  await within(b.closed, 3000);
+  await sleep(800);
+  check("a browser's Forget ends its own phone stream and not another's",
+    f.status === 200 && b.closedAt > 0 && c2.closedAt === 0 && (await phones()) === 1,
+    JSON.stringify({ forget: f.status, b: b.closedAt ? b.closedAt - t : null, c: c2.closedAt }));
+  t = Date.now();
+  await command('stop', 'OK stopped');
+  await within(c2.closed, 3000);
+  check('the door stopping ends the phone stream too', c2.closedAt > 0, JSON.stringify({ c: c2.closedAt }));
+  await command('restart', 'OK restarted');
+
+  // Through the Cloudflare tunnel: cloudflared on the phone, over loopback, with the tunnel's name.
+  const TUN = 'quiet-test-words.trycloudflare.com';
+  const TBASE = `https://${TUN}`;
+  await command(`tunnel ${TUN}`, 'OK tunnel');
+  const viaTun = (method, p, extra = {}) => request(method, p, { host: '127.0.0.1', headers: { Host: TUN, 'cf-connecting-ip': '203.0.113.7', ...extra } });
+  const root = await viaTun('GET', '/');
+  const pages = {};
+  for (const p of ['/index.html', '/viewer.js', '/mse.js', '/touch.js', '/phone.js', '/phone.css', '/sound.js', '/h264.js', '/keysym.js', '/icon.svg']) pages[p] = (await viaTun('GET', p)).status;
+  // The phone's page has Files of its own since 2026-11-21 (phone-files.js, on
+  // files.js's code): those files are checked with the phone's files below.
+  check("through the tunnel: the phone's page at /, its files, and nothing of Linux's page",
+    root.status === 200 && /phone\.js/.test(root.body) && pages['/index.html'] === 404 && pages['/viewer.js'] === 404
+    && pages['/mse.js'] === 404 && pages['/touch.js'] === 404 && pages['/phone.js'] === 200 && pages['/phone.css'] === 200
+    && pages['/sound.js'] === 200 && pages['/h264.js'] === 200 && pages['/keysym.js'] === 200 && pages['/icon.svg'] === 200,
+    JSON.stringify({ root: root.status, pages }));
+  const paired = said(await request('POST', '/pair', { host: '127.0.0.1', headers: { ...FORM, Host: TUN, Origin: TBASE, 'cf-connecting-ip': '203.0.113.7' }, body: form({ code: await askCode() }) })).token;
+  const fs1 = await viaTun('GET', '/fs/list?path=%2F', { Authorization: `Bearer ${paired}` });
+  const ws1 = await wsConnect({ ip: '127.0.0.1', host: TUN, origin: TBASE, token: paired });
+  await within(ws1.closed, 2000);
+  check("…Linux's files and Linux's stream refused there, with a token and Linux on",
+    !!paired && fs1.status === 403 && (ws1.status === 403 || ws1.status === 0),
+    JSON.stringify({ token: !!paired, fs: fs1.status, stream: ws1.status }));
+  t = Date.now();
+  const tp = await phoneConnect({ token: paired, ip: '127.0.0.1', host: TUN, origin: TBASE, extra: { 'cf-connecting-ip': '203.0.113.7', 'X-Dex-Via': 'wifi' } });
+  head = await headOf(t);
+  check("…the phone's screen through it, said to be the tunnel's",
+    tp.status === 101 && head && head.phoneHead.headers['x-dex-via'] === 'tunnel', JSON.stringify({ status: tp.status, head: head && head.phoneHead }));
+  tp.end();
+  const byAddress = await request('GET', '/', { host: '127.0.0.1', headers: { Host: `127.0.0.1:${PORT}` } });
+  check("loopback by any other name gets nothing, while the tunnel is up (the phone's other apps)", byAddress.status === 421, String(byAddress.status));
+  await command('tunnel none', 'OK tunnel');
+  const closedDoor = await request('GET', '/', { host: '127.0.0.1', headers: { Host: TUN } });
+  check('with the tunnel down, loopback is not let in at all', closedDoor.status === 0, String(closedDoor.status));
+
+  // Linux off, the door up for Remote desktop alone.
+  await command('linux off', 'OK linux');
+  const tokL = await letIn();
+  const rootL = await request('GET', '/');
+  const fsL = await request('GET', '/fs/list?path=%2F', { headers: { Authorization: `Bearer ${tokL}` } });
+  const wsL = await wsConnect({ token: tokL });
+  await within(wsL.closed, 2000);
+  const pL = await phoneConnect({ token: tokL });
+  check("Linux off with the door kept for Remote desktop: the phone's page at /, Linux's files and stream refused, the phone's screen given",
+    rootL.status === 200 && /phone\.js/.test(rootL.body) && fsL.status === 403 && wsL.status === 403 && pL.status === 101,
+    JSON.stringify({ root: rootL.status, fs: fsL.status, stream: wsL.status, phone: pL.status }));
+  pL.end();
+  await command('linux on', 'OK linux');
+}
+
+// ── the phone's own files (Remote desktop's Files) ──────────────────────
+//
+// The harness gives the door a folder standing in for the phone's shared
+// storage (phonefs), as LinuxService gives it /storage/emulated/0: the
+// launcher's own LinuxFiles, of the phone's kind, behind /pfs/.
+
+/** Where the phone's storage is stood in for, and what lies beside it (never to be reached). */
+const PHONE_STORAGE = path.join(tmp, 'phone-storage');
+const PHONE_OUTSIDE = path.join(tmp, 'phone-outside');
+const phonePut = (rel, data) => {
+  const p = path.join(PHONE_STORAGE, rel);
+  fs.mkdirSync(path.dirname(p), { recursive: true });
+  fs.writeFileSync(p, data);
+  return p;
+};
+const PHONE_BIG = crypto.randomBytes(8 * 1024 * 1024 + 11);
+{
+  for (const d of ['Download', 'DCIM/Camera', 'Pictures', 'Documents', 'Movies', 'Android/data/com.example', 'WhatsApp/Media']) {
+    fs.mkdirSync(path.join(PHONE_STORAGE, d), { recursive: true });
+  }
+  phonePut('Download/notes.txt', 'notes from the phone\n');
+  phonePut('Download/big.bin', PHONE_BIG);
+  phonePut('Documents/report.txt', 'a report\n');
+  phonePut('Documents/Trip/day one.txt', 'day one\n');
+  phonePut('Documents/Trip/day two.txt', 'day two\n');
+  phonePut('Android/data/com.example/cache.txt', "an app's own\n");
+  phonePut('WhatsApp/Media/hello.txt', 'hello\n');
+  fs.mkdirSync(PHONE_OUTSIDE, { recursive: true });
+  fs.writeFileSync(path.join(PHONE_OUTSIDE, 'secret.txt'), "outside the phone's storage\n");
+  // Links, made by the harness with these very targets (Node on Windows would rewrite them).
+  fs.writeFileSync(path.join(PHONE_STORAGE, '.links'), [
+    'Documents/to-download\t/Download', // absolute: the storage's own Download, never the computer's
+    'Documents/up\t../../../..', // climbs past the top: stops there
+    `Documents/secret\t${path.join(PHONE_OUTSIDE, 'secret.txt')}`, // a path of the computer's
+    '',
+  ].join('\n'));
+}
+
+/** A request whose body and answer are bytes; the phone's certificate taken as it is. */
+function phoneRequest(method, urlPath, { host = IP, headers = {}, body = null } = {}) {
+  return new Promise((resolve) => {
+    const all = { ...headers };
+    if (body != null && all['Content-Length'] == null) all['Content-Length'] = Buffer.byteLength(body);
+    const req = https.request({ host, port: PORT, method, path: urlPath, headers: all, rejectUnauthorized: false, agent: false }, (res) => {
+      const chunks = [];
+      res.on('data', (c) => chunks.push(c));
+      res.on('end', () => {
+        const buf = Buffer.concat(chunks);
+        let json = null;
+        try {
+          json = JSON.parse(buf.toString('utf8'));
+        } catch {
+          // not JSON
+        }
+        resolve({ status: res.statusCode, headers: res.headers, buf, json });
+      });
+      res.on('error', (e) => resolve({ status: res.statusCode, error: e.message, buf: Buffer.concat(chunks) }));
+    });
+    req.on('error', (e) => resolve({ status: 0, error: e.message, buf: Buffer.alloc(0) }));
+    if (body != null) req.write(body);
+    req.end();
+  });
+}
+
+/**
+ * Two requests on one connection, the first with its body, sent at once: how
+ * many answers came within {@code ms}. Two means the phone read the first
+ * body to its end, which is what lets a browser see the first answer at all:
+ * one that hangs up on a body it has not read sends a reset, and a browser,
+ * still sending, loses the answer to it.
+ */
+function twoOnOne(head1, body, head2, ms) {
+  return new Promise((resolve) => {
+    let got = '';
+    let done = false;
+    const count = () => (got.match(/HTTP\/1\.1 \d{3} /g) || []).length;
+    const end = (closed) => {
+      if (done) return;
+      done = true;
+      resolve({ answers: count(), closed, got });
+      s.destroy();
+    };
+    const s = tls.connect({ host: IP, port: PORT, rejectUnauthorized: false }, () => {
+      s.write(head1);
+      s.write(body);
+      s.write(head2);
+    });
+    s.on('data', (d) => {
+      got += d;
+      if (count() >= 2) setTimeout(() => end(false), 100);
+    });
+    s.on('error', () => {});
+    s.on('close', () => end(true));
+    setTimeout(() => end(false), ms);
+  });
+}
+
+/**
+ * A download read slowly, so that it is still going when something on the
+ * phone ends it: how much came, and how it ended. {@code drain()} reads the
+ * rest as fast as it comes (what this computer had buffered), {@code end()}
+ * lets it go from this end.
+ */
+function slowDownload(urlPath, { host = IP, headers = {} } = {}) {
+  const c = { got: 0, ended: false, how: null, status: 0, fast: false };
+  c.done = new Promise((resolve) => {
+    const fin = (how) => {
+      if (c.ended) return;
+      c.ended = true;
+      c.how = how;
+      resolve(how);
+    };
+    const req = https.request({ host, port: PORT, path: urlPath, headers, rejectUnauthorized: false, agent: false }, (res) => {
+      c.status = res.statusCode;
+      res.on('data', (d) => {
+        c.got += d.length;
+        if (c.fast) return;
+        res.pause();
+        setTimeout(() => res.resume(), 200);
+      });
+      res.on('end', () => fin('end'));
+      res.on('aborted', () => fin('aborted'));
+      res.on('error', () => fin('error'));
+      res.on('close', () => fin('close'));
+    });
+    req.on('error', () => fin('error'));
+    c.end = () => req.destroy();
+    req.end();
+  });
+  c.drain = () => {
+    c.fast = true;
+  };
+  return c;
+}
+
+/** A ZIP's entries read back from its central directory, each CRC checked against its data. */
+function readZipEntries(buf) {
+  try {
+    let eocd = -1;
+    for (let i = buf.length - 22; i >= 0 && i >= buf.length - 65557; i--) {
+      if (buf.readUInt32LE(i) === 0x06054b50) {
+        eocd = i;
+        break;
+      }
+    }
+    if (eocd < 0) return { ok: false, error: 'no end record' };
+    const count = buf.readUInt16LE(eocd + 10);
+    let p = buf.readUInt32LE(eocd + 16);
+    const entries = {};
+    for (let i = 0; i < count; i++) {
+      if (buf.readUInt32LE(p) !== 0x02014b50) return { ok: false, error: `central entry ${i}` };
+      const crc = buf.readUInt32LE(p + 16);
+      const size = buf.readUInt32LE(p + 24);
+      const nameLen = buf.readUInt16LE(p + 28);
+      const extraLen = buf.readUInt16LE(p + 30);
+      const commentLen = buf.readUInt16LE(p + 32);
+      const local = buf.readUInt32LE(p + 42);
+      const name = buf.subarray(p + 46, p + 46 + nameLen).toString('utf8');
+      const dataAt = local + 30 + buf.readUInt16LE(local + 26) + buf.readUInt16LE(local + 28);
+      const data = buf.subarray(dataAt, dataAt + size);
+      if (!name.endsWith('/') && zlib.crc32(data) !== crc) return { ok: false, error: `crc of ${name}` };
+      entries[name] = data;
+      p += 46 + nameLen + extraLen + commentLen;
+    }
+    return { ok: true, entries, names: Object.keys(entries) };
+  } catch (e) {
+    return { ok: false, error: String(e) };
+  }
+}
+
+console.log("the phone's own files (Remote desktop's Files), through the door and the tunnel");
+{
+  const letIn = async () => said(await pairWith(await askCode())).token;
+  await command(`phonefs ${PHONE_STORAGE}`, 'OK phonefs');
+  const linkTrouble = events.filter((e) => e.linkFailed);
+  const TOKEN = await letIn();
+  const AUTH = { Authorization: `Bearer ${TOKEN}` };
+  const CHANGE = { ...AUTH, Origin: BASE };
+  const enc = encodeURIComponent;
+  const q = (o) => {
+    const p = new URLSearchParams();
+    for (const [k, v] of Object.entries(o)) for (const x of [].concat(v)) p.append(k, String(x));
+    return p.toString();
+  };
+  const pGet = (op, o = {}, extra = {}) => phoneRequest('GET', `/pfs/${op}?${q(o)}`, { headers: { ...AUTH, ...extra } });
+  const pPost = (op, form = {}, o = {}, headers = CHANGE) => phoneRequest('POST', `/pfs/${op}?${q(o)}`,
+    { headers: { ...headers, ...FORM }, body: q(form) });
+  const names = (r) => (r.json && r.json.entries ? r.json.entries.map((e) => e.n).sort() : []);
+  const onPhone = (rel) => path.join(PHONE_STORAGE, rel);
+  const transfers = async () => Number((((await command('phonefiles?', 'PHONEFILES ')) || 'PHONEFILES -1').split(' '))[1]);
+
+  // Who gets in.
+  const none = await phoneRequest('GET', `/pfs/list?path=${enc('/Download')}`);
+  check("the phone's files with no token: 401, and not one name", none.status === 401 && !/notes/.test(none.buf.toString()), String(none.status));
+  const madeUp = await phoneRequest('GET', `/pfs/list?path=${enc('/Download')}`, { headers: { Authorization: `Bearer ${'x'.repeat(43)}` } });
+  check('…a made-up token: 401', madeUp.status === 401, String(madeUp.status));
+  const noOrigin = await phoneRequest('POST', '/pfs/mkdir', { headers: { ...AUTH, ...FORM }, body: q({ path: '/Download/by-someone' }) });
+  const otherSite = await phoneRequest('POST', '/pfs/mkdir', { headers: { ...AUTH, ...FORM, Origin: 'https://evil.example' }, body: q({ path: '/Download/by-someone' }) });
+  check('…a change from anywhere but the page itself (no Origin, or another site\'s) is refused, token or not',
+    noOrigin.status === 403 && otherSite.status === 403 && !fs.existsSync(onPhone('Download/by-someone')), `${noOrigin.status} ${otherSite.status}`);
+  const byGet = await pGet('mkdir', { path: '/Download/by-get' });
+  check('…and never by GET', byGet.status === 405 && !fs.existsSync(onPhone('Download/by-get')), String(byGet.status));
+  const named = await phoneRequest('GET', `/pfs/list?path=${enc('/')}`, { headers: { ...AUTH, Host: 'phone.example:7443' } });
+  check('…nor by a name rather than the address (DNS rebinding)', named.status === 421, String(named.status));
+
+  // Looking.
+  const info = await pGet('info');
+  const ids = info.json && info.json.places ? info.json.places.map((p) => p.id) : [];
+  check("places: the phone, and Android's own folders that are there (no Music here), no Trash",
+    JSON.stringify(ids) === JSON.stringify(['phone', 'downloads', 'camera', 'pictures', 'documents', 'videos'])
+      && info.json.home === '/' && info.json.free > 0 && info.json.total >= info.json.free, JSON.stringify(info.json));
+  const top = await pGet('list', { path: '/' });
+  check("the storage's top: every folder there, Android's too, nothing hidden",
+    ['Android', 'DCIM', 'Documents', 'Download', 'Movies', 'Pictures', 'WhatsApp'].every((n) => names(top).includes(n)) && top.json.w === 1,
+    names(top).join());
+  const climbed = await pGet('list', { path: '/Download/../../../..' });
+  check('.. stops at the top of the phone\'s storage', climbed.json && climbed.json.path === '/' && names(climbed).includes('Download'),
+    JSON.stringify(climbed.json && climbed.json.path));
+  const out1 = await pGet('get', { path: '/../phone-outside/secret.txt' });
+  const out2 = await pGet('get', { path: '/Download/../../phone-outside/secret.txt' });
+  const out3 = await pGet('get', { path: '/..\\phone-outside\\secret.txt' });
+  check('a path that climbs out of the storage reaches nothing beside it (/.., and \\ on this computer)',
+    [out1, out2, out3].every((r) => [400, 404].includes(r.status) && !r.buf.toString().includes('outside')), [out1, out2, out3].map((r) => r.status).join());
+  const toDl = await pGet('list', { path: '/Documents/to-download' });
+  const upLink = await pGet('list', { path: '/Documents/up' });
+  const secret = await pGet('get', { path: '/Documents/secret' });
+  check('links: an absolute one is the storage\'s own folder, one that climbs stops at the top, one to the computer leads nowhere',
+    !linkTrouble.length && toDl.json && toDl.json.path === '/Download' && names(toDl).includes('notes.txt')
+      && upLink.json && upLink.json.path === '/' && [400, 404].includes(secret.status) && !secret.buf.toString().includes('outside'),
+    JSON.stringify({ linkTrouble, dl: toDl.json && toDl.json.path, up: upLink.json && upLink.json.path, secret: secret.status }));
+  const androidDir = await pGet('list', { path: '/Android/data/com.example' });
+  check("apps' folders under Android: seen, read only", androidDir.status === 200 && names(androidDir).includes('cache.txt') && androidDir.json.w === 0,
+    JSON.stringify(androidDir.json));
+
+  // Bringing back.
+  const whole = await pGet('get', { path: '/Download/big.bin' });
+  const part = await pGet('get', { path: '/Download/big.bin' }, { Range: 'bytes=100-199' });
+  check('a file, whole and as a range', whole.status === 200 && whole.buf.equals(PHONE_BIG)
+    && part.status === 206 && part.buf.equals(PHONE_BIG.subarray(100, 200)), `${whole.status} ${part.status}`);
+  const tk = await pPost('ticket', { kind: 'get', p: '/Download/notes.txt' });
+  const byTicket = await phoneRequest('GET', `/pfs/get?k=${tk.json && tk.json.k}&dl=1`);
+  check('a ticket: the browser downloads the file by itself, as a download, with no token',
+    byTicket.status === 200 && byTicket.buf.toString() === 'notes from the phone\n' && /^attachment; filename="notes.txt"/.test(byTicket.headers['content-disposition'] || ''),
+    `${byTicket.status} ${byTicket.headers['content-disposition']}`);
+  const zt = await pPost('ticket', { kind: 'zip', p: ['/Documents/Trip', '/Download/notes.txt'], name: 'From the phone.zip' });
+  const zr = await phoneRequest('GET', `/pfs/zip?k=${zt.json && zt.json.k}`);
+  const zip = zr.status === 200 ? readZipEntries(zr.buf) : { ok: false, error: String(zr.status) };
+  check('a folder and a file as one ZIP, its length known first, read back byte for byte',
+    zip.ok && Number(zr.headers['content-length']) === zr.buf.length && zip.entries['Trip/day one.txt']?.toString() === 'day one\n'
+      && zip.entries['notes.txt']?.toString() === 'notes from the phone\n' && /From%20the%20phone\.zip/.test(zr.headers['content-disposition'] || ''),
+    zip.error || JSON.stringify(zip.names));
+
+  // Sending.
+  const one = Buffer.from('sent from the computer\n');
+  const mtime = Date.UTC(2025, 1, 2, 3, 4, 6);
+  const p1 = await phoneRequest('PUT', `/pfs/put?${q({ path: '/Download/sent.txt', size: one.length, mtime })}`, { headers: CHANGE, body: one });
+  check('a file sent into the open folder lands there, with its own time', p1.status === 200 && p1.json.done
+    && fs.readFileSync(onPhone('Download/sent.txt')).equals(one) && Math.abs(fs.statSync(onPhone('Download/sent.txt')).mtimeMs - mtime) < 2000,
+    JSON.stringify(p1.json));
+  const big = crypto.randomBytes(5 * 1024 * 1024 + 3);
+  const bq = { path: '/Movies/film.bin', size: big.length, mtime };
+  const half = 2 * 1024 * 1024 + 1;
+  const a1 = await phoneRequest('PUT', `/pfs/put?${q({ ...bq, off: 0 })}`, { headers: { ...CHANGE, 'Content-Length': half }, body: big.subarray(0, half) });
+  const have = await pGet('part', bq);
+  const a2 = await phoneRequest('PUT', `/pfs/put?${q({ ...bq, off: half })}`, { headers: CHANGE, body: big.subarray(half) });
+  check('…a big one in two goes, as a cut and a resume: what arrived kept out of sight, then whole in its place',
+    a1.json && a1.json.done === false && have.json && have.json.have === half && !names(await pGet('list', { path: '/Movies' })).some((n) => n.startsWith('.lodpart'))
+      && a2.json && a2.json.done && fs.readFileSync(onPhone('Movies/film.bin')).equals(big), JSON.stringify([a1.json, have.json, a2.json]));
+  // The same big file again (dropped twice, then Replace): the page asks
+  // first and sends nothing. One sent anyway is read to its end, so that its
+  // answer arrives: a browser reads no answer while it is still sending, and
+  // a phone that hung up on the rest left it a reset (Edge: "Failed to fetch").
+  const pre = await pGet('part', { ...bq, on: 'replace', fresh: 1 });
+  const again = await phoneRequest('PUT', `/pfs/put?${q({ ...bq, off: 0, on: 'replace' })}`, { headers: CHANGE, body: big });
+  check('…the same big file again: asked first, found there; sent anyway, its answer arrives',
+    pre.status === 200 && pre.json && pre.json.same === true && again.status === 200 && again.json && again.json.same === true
+      && fs.readFileSync(onPhone('Movies/film.bin')).equals(big), JSON.stringify([pre.status, pre.json, again.status, again.json || again.error]));
+  const head = (line, extra = '') => `${line} HTTP/1.1\r\nHost: ${IP}:${PORT}\r\nAuthorization: Bearer ${TOKEN}\r\nConnection: keep-alive\r\n${extra}\r\n`;
+  const onOne = await twoOnOne(head(`PUT /pfs/put?${q({ ...bq, off: 0, on: 'replace' })}`, `Origin: ${BASE}\r\nContent-Length: ${big.length}\r\n`),
+    big, head('GET /pfs/list?path=%2FMovies'), 5000);
+  check('…read to its end, which is what lets a browser see that answer: the same connection carries the next request',
+    onOne.answers === 2 && /"same":true/.test(onOne.got) && /"n":"film\.bin"/.test(onOne.got),
+    `${onOne.answers} answers, closed: ${onOne.closed}, ${onOne.got.replace(/\r\n/g, ' ').slice(0, 300)}`);
+  // What a put would refuse at once is said when asked, before a byte goes.
+  const noRoom = await pGet('part', { path: '/Movies/huge.bin', size: 2 ** 52, mtime, on: 'replace', fresh: 1 });
+  const readOnly = await pGet('part', { path: '/Android/data/com.example/big.bin', size: big.length, mtime, on: 'replace', fresh: 1 });
+  const wentAway = await pGet('part', { path: '/Movies/gone/big.bin', size: big.length, mtime, on: 'replace', fresh: 1 });
+  check('…and asked first, what the phone would refuse is said before a byte is sent: no room, apps\' folders, a folder that went',
+    noRoom.status === 507 && noRoom.json && noRoom.json.error === 'full' && readOnly.status === 403 && wentAway.status === 404,
+    `${noRoom.status} ${readOnly.status} ${wentAway.status}`);
+  /** A batch's body, as transfer.js makes one: a record for each [path under the folder, text]. */
+  const batchOf = (pairs) => Buffer.concat([
+    ...pairs.map(([rel, text]) => {
+      const name = Buffer.from(rel);
+      const data = Buffer.from(text);
+      const head = Buffer.alloc(3 + name.length + 16);
+      head[0] = 1;
+      head.writeUInt16BE(name.length, 1);
+      name.copy(head, 3);
+      head.writeBigUInt64BE(BigInt(data.length), 3 + name.length);
+      head.writeBigUInt64BE(BigInt(mtime), 11 + name.length);
+      return Buffer.concat([head, data]);
+    }),
+    Buffer.from([0]),
+  ]);
+  const batch = batchOf([['Album/one.txt', 'one'], ['Album/deeper/two.txt', 'two'], ['../escape.txt', 'no'], ['Album/after.txt', 'yes']]);
+  const bt = await phoneRequest('POST', `/pfs/batch?${q({ dir: '/Pictures', on: 'rename' })}`, { headers: { ...CHANGE, 'Content-Type': 'application/octet-stream' }, body: batch });
+  check('many small files in one request, folders made as they come; one that climbs out refused, the rest landing',
+    bt.json && bt.json.done === 3 && bt.json.failed.length === 1 && fs.readFileSync(onPhone('Pictures/Album/deeper/two.txt'), 'utf8') === 'two'
+      && fs.readFileSync(onPhone('Pictures/Album/after.txt'), 'utf8') === 'yes' && !fs.existsSync(path.join(PHONE_STORAGE, 'escape.txt'))
+      && !fs.existsSync(path.join(tmp, 'escape.txt')), JSON.stringify(bt.json));
+  // Two different files of the same size and time. The quick check takes the
+  // second for the first (a retry after a cut relies on it); Replace chosen
+  // (force) sends and writes it, one file to a request and many alike. Until
+  // 2026-11-21 Replace kept the first, without a word.
+  const twinQ = { path: '/Movies/twin.bin', size: 1024 * 1024 + 7, mtime };
+  const twinA = crypto.randomBytes(twinQ.size);
+  const twinB = crypto.randomBytes(twinQ.size);
+  await phoneRequest('PUT', `/pfs/put?${q({ ...twinQ, off: 0 })}`, { headers: CHANGE, body: twinA });
+  const quick = await pGet('part', { ...twinQ, on: 'replace', fresh: 1 });
+  const forcedAsk = await pGet('part', { ...twinQ, on: 'replace', fresh: 1, force: 1 });
+  const forcedPut = await phoneRequest('PUT', `/pfs/put?${q({ ...twinQ, off: 0, on: 'replace', force: 1 })}`, { headers: CHANGE, body: twinB });
+  const BATCH = { ...CHANGE, 'Content-Type': 'application/octet-stream' };
+  await phoneRequest('POST', `/pfs/batch?${q({ dir: '/Pictures', on: 'replace' })}`, { headers: BATCH, body: batchOf([['twin.txt', 'aaa']]) });
+  const quickBatch = await phoneRequest('POST', `/pfs/batch?${q({ dir: '/Pictures', on: 'replace' })}`, { headers: BATCH, body: batchOf([['twin.txt', 'bbb']]) });
+  const keptFirst = fs.readFileSync(onPhone('Pictures/twin.txt'), 'utf8');
+  const forcedBatch = await phoneRequest('POST', `/pfs/batch?${q({ dir: '/Pictures', on: 'replace', force: 1 })}`, { headers: BATCH, body: batchOf([['twin.txt', 'bbb']]) });
+  check('two different files of the same size and time: the quick check takes the second for the first; Replace (force) writes it, alone and in a batch',
+    quick.json && quick.json.same === true && forcedAsk.json && forcedAsk.json.same !== true
+      && forcedPut.json && forcedPut.json.done === true && forcedPut.json.same !== true && fs.readFileSync(onPhone('Movies/twin.bin')).equals(twinB)
+      && quickBatch.json && quickBatch.json.same === 1 && keptFirst === 'aaa'
+      && forcedBatch.json && forcedBatch.json.done === 1 && fs.readFileSync(onPhone('Pictures/twin.txt'), 'utf8') === 'bbb',
+    JSON.stringify([quick.json, forcedAsk.json, forcedPut.json, quickBatch.json, keptFirst, forcedBatch.json]));
+  const intoApp = await phoneRequest('PUT', `/pfs/put?${q({ path: '/Android/data/com.example/new.txt', size: 2, mtime })}`, { headers: CHANGE, body: Buffer.from('no') });
+  const mkApp = await pPost('mkdir', { path: '/android/data/made' });
+  check("nothing goes into apps' folders under Android, whatever the case of the name",
+    intoApp.status === 403 && intoApp.json.error === 'protected' && mkApp.status === 403 && !fs.existsSync(onPhone('Android/data/com.example/new.txt'))
+      && !fs.existsSync(onPhone('Android/data/made')), `${intoApp.status} ${mkApp.status}`);
+  const sneak = await phoneRequest('POST', `/pfs/batch?${q({ dir: '/', on: 'replace' })}`, { headers: { ...CHANGE, 'Content-Type': 'application/octet-stream' },
+    body: batchOf([['Android/data/com.example/sneak.txt', 'no'], ['android/data/sneak two.txt', 'no'], ['Documents/fine.txt', 'yes']]) });
+  check('…nor by many files sent to the top with Android/ in their paths; the rest land',
+    sneak.json && sneak.json.done === 1 && sneak.json.failed.length === 2 && sneak.json.failed.every((f) => f[1] === 'protected')
+      && !fs.existsSync(onPhone('Android/data/com.example/sneak.txt')) && !fs.existsSync(onPhone('Android/data/sneak two.txt'))
+      && fs.readFileSync(onPhone('Documents/fine.txt'), 'utf8') === 'yes', JSON.stringify(sneak.json));
+  fs.mkdirSync(onPhone('Documents/Download'), { recursive: true });
+  fs.writeFileSync(onPhone('Documents/Download/mine.txt'), 'mine');
+  const over = await pPost('move', { p: ['/Documents/Download'], dir: '/', on: 'replace' });
+  check("a move told to replace never replaces one of Android's own folders",
+    over.json && over.json.failed[0] && over.json.failed[0][1] === 'protected' && fs.existsSync(onPhone('Download/notes.txt'))
+      && fs.existsSync(onPhone('Documents/Download/mine.txt')), JSON.stringify(over.json));
+
+  // Folders and names; deleting is for good, and Android's own folders stay.
+  const mk = await pPost('mkdir', { path: '/Documents/New folder', on: 'rename' });
+  const rn = await pPost('rename', { path: '/Documents/New folder', name: 'Plans' });
+  const mv = await pPost('move', { p: ['/Documents/report.txt'], dir: '/Documents/Plans' });
+  const inside = await pPost('move', { p: ['/Documents/Plans'], dir: '/documents/plans' });
+  check('a new folder, renamed, a file moved into it; a folder never into itself, whatever the case',
+    mk.json && mk.json.path === '/Documents/New folder' && rn.json && rn.json.path === '/Documents/Plans'
+      && mv.json && mv.json.moved.length === 1 && fs.existsSync(onPhone('Documents/Plans/report.txt'))
+      && inside.json && inside.json.failed[0] && inside.json.failed[0][1] === 'inside', JSON.stringify([mk.json, rn.json, mv.json, inside.json]));
+  const trash = await pPost('trash', { p: '/Documents/Plans/report.txt' });
+  const del = await pPost('delete', { p: ['/Documents/Plans/report.txt', '/Pictures/Album'] });
+  check("no Trash on the phone (the page asks, then deletes for good): deleted, folders and all",
+    trash.status === 404 && del.json && del.json.deleted.length === 2 && !fs.existsSync(onPhone('Documents/Plans/report.txt'))
+      && !fs.existsSync(onPhone('Pictures/Album')), JSON.stringify([trash.status, del.json]));
+  const kept = [];
+  for (const p of ['/', '/Download', '/DCIM', '/DCIM/Camera', '/android', '/Android/data', '/Android/data/com.example/cache.txt', '/Pictures']) {
+    const d = await pPost('delete', { p });
+    const r = await pPost('rename', { path: p, name: 'gone' });
+    if (!(d.json && d.json.failed[0] && d.json.failed[0][1] === 'protected' && r.status === 403)) kept.push(`${p}: ${JSON.stringify([d.json, r.status])}`);
+  }
+  check("the storage itself, Android's own folders, the camera's and apps' files cannot be deleted or renamed from a browser",
+    !kept.length && fs.existsSync(onPhone('Download/notes.txt')) && fs.existsSync(onPhone('Android/data/com.example/cache.txt')), kept.join(' | '));
+  const anyTop = await pPost('rename', { path: '/WhatsApp', name: 'Chats' });
+  check('…while a folder of the person\'s own at the top can be', anyTop.status === 200 && fs.existsSync(onPhone('Chats/Media/hello.txt')), String(anyTop.status));
+
+  // Where it may be asked from, and when.
+  const TUN = 'quiet-test-words.trycloudflare.com';
+  const TBASE = `https://${TUN}`;
+  await command(`tunnel ${TUN}`, 'OK tunnel');
+  const tunHead = { Host: TUN, 'cf-connecting-ip': '203.0.113.9' };
+  const viaTun = (method, p, headers = {}, body = null) => phoneRequest(method, p, { host: '127.0.0.1', headers: { ...tunHead, ...headers }, body });
+  const tList = await viaTun('GET', `/pfs/list?path=${enc('/Download')}`, AUTH);
+  const tMk = await viaTun('POST', '/pfs/mkdir', { ...AUTH, ...FORM, Origin: TBASE }, q({ path: '/Download/from far away' }));
+  const tLinux = await viaTun('GET', `/fs/list?path=${enc('/')}`, AUTH);
+  const tPages = {};
+  for (const p of ['/phone-files.js', '/phone-files.css', '/files.js', '/fileicons.js', '/transfer.js', '/peek.js', '/files.css', '/index.html', '/viewer.js']) {
+    tPages[p] = (await viaTun('GET', p)).status;
+  }
+  check("through the Cloudflare tunnel (Remote desktop's): the phone's files, looked at and changed from the page's own origin",
+    tList.status === 200 && names(tList).includes('notes.txt') && tMk.status === 200 && fs.existsSync(onPhone('Download/from far away')),
+    `${tList.status} ${tMk.status}`);
+  check("…with the page's Files, and still nothing of Linux's: its files (/fs/), its page",
+    tLinux.status === 403 && ['/phone-files.js', '/phone-files.css', '/files.js', '/fileicons.js', '/transfer.js', '/peek.js', '/files.css'].every((p) => tPages[p] === 200)
+      && tPages['/index.html'] === 404 && tPages['/viewer.js'] === 404, JSON.stringify({ fs: tLinux.status, tPages }));
+  await command('tunnel none', 'OK tunnel');
+  await command('linux off', 'OK linux');
+  const lOff = await pGet('list', { path: '/Download' });
+  await command('linux on', 'OK linux');
+  check("Linux's switch off, the door kept for Remote desktop: the phone's files still given", lOff.status === 200, String(lOff.status));
+  await command('phone off', 'OK phone');
+  const rOff = await pGet('list', { path: '/Download' });
+  const rOffTicket = await phoneRequest('GET', `/pfs/get?k=${tk.json.k}`);
+  await command('phone on', 'OK phone');
+  check('Remote desktop off: the phone\'s files refused, and said so, even by a ticket', rOff.status === 403 && rOff.json && rOff.json.error === 'off'
+    && rOffTicket.status === 403, `${rOff.status} ${rOffTicket.status}`);
+  await command('phonefsstate noaccess', 'OK phonefsstate');
+  const noAccess = await pGet('info');
+  await command('phonefsstate unavailable', 'OK phonefsstate');
+  const unavailable = await pGet('list', { path: '/' });
+  await command('phonefsstate ready', 'OK phonefsstate');
+  check("no All files access yet, or a build without it: said, as words the page knows",
+    noAccess.status === 503 && noAccess.json.error === 'noaccess' && unavailable.status === 503 && unavailable.json.error === 'unavailable',
+    `${noAccess.status} ${noAccess.buf && noAccess.buf.toString()} ${unavailable.status}`);
+
+  // What ends a transfer under way: a sign-out, the browser's own Forget, the door stopping, Remote desktop going off.
+  const dlTicket = async (token) => {
+    const r = await phoneRequest('POST', '/pfs/ticket', { headers: { Authorization: `Bearer ${token}`, Origin: BASE, ...FORM }, body: q({ kind: 'get', p: '/Download/big.bin' }) });
+    return r.json && r.json.k;
+  };
+  let d = slowDownload(`/pfs/get?k=${await dlTicket(TOKEN)}`);
+  await until(() => d.got > 0, 5000);
+  const counted = await transfers();
+  await command('droplinux', 'OK droplinux');
+  await sleep(1200);
+  check("a download of the phone's under way is counted, and Linux's switch going off leaves it alone",
+    counted === 1 && !d.ended && d.got > 0, JSON.stringify({ counted, ended: d.ended, how: d.how }));
+  await command('signout', 'CODE ');
+  d.drain();
+  let how = await within(d.done, 15000);
+  const afterSignOut = await phoneRequest('GET', `/pfs/get?k=${(await dlTicket(TOKEN)) || 'none'}`);
+  const listAfter = await pGet('list', { path: '/' });
+  check('a sign-out on the phone cuts a download of the phone\'s files under way; its token opens nothing after',
+    d.ended && d.got < PHONE_BIG.length && listAfter.status === 401 && afterSignOut.status === 401,
+    JSON.stringify({ how, got: d.got, list: listAfter.status }));
+  check('…and none is counted after', (await until(async () => (await transfers()) === 0, 3000)) === true);
+
+  const tokA = await letIn();
+  const tokB = await letIn();
+  const da = slowDownload(`/pfs/get?k=${await dlTicket(tokA)}`);
+  const db = slowDownload(`/pfs/get?path=${enc('/Download/big.bin')}`, { headers: { Authorization: `Bearer ${tokB}` } });
+  await until(async () => da.got > 0 && db.got > 0 && (await transfers()) === 2, 5000);
+  const forget = await request('POST', '/forget', { headers: { ...FORM, Origin: BASE }, body: form({ token: tokA }) });
+  da.drain();
+  await within(da.done, 15000);
+  await sleep(800);
+  check("a browser's own Forget cuts its download of the phone's files, and not another browser's",
+    forget.status === 200 && da.ended && da.got < PHONE_BIG.length && !db.ended && (await transfers()) === 1,
+    JSON.stringify({ forget: forget.status, a: [da.ended, da.how], b: [db.ended, db.how] }));
+  // Switched off on the phone, which tells the door nothing: its reaper sees it
+  // within half a second (Host.phoneFiles is null), and the transfer ends.
+  const offAt = Date.now();
+  await command('phone off', 'OK phone');
+  // The door's own count: what this computer had buffered still arrives after.
+  const gone = await until(async () => (await transfers()) === 0, 3000, 50);
+  const offAfter = gone ? Date.now() - offAt : null;
+  db.drain();
+  how = await within(db.done, 15000);
+  await command('phone on', 'OK phone');
+  check("Remote desktop switched off on the phone cuts a download of the phone's files under way, within a second",
+    db.ended && offAfter !== null && offAfter < 1500 && db.got < PHONE_BIG.length, JSON.stringify({ how, got: db.got, offAfter }));
+  const tokC = await letIn();
+  const dc = slowDownload(`/pfs/get?k=${await dlTicket(tokC)}`);
+  await until(() => dc.got > 0, 5000);
+  await command('stop', 'OK stopped');
+  dc.drain();
+  how = await within(dc.done, 15000);
+  check("the door stopping cuts a download of the phone's files under way", dc.ended && dc.got < PHONE_BIG.length, JSON.stringify({ how, got: dc.got }));
+  await command('restart', 'OK restarted');
+
+  // An upload is cut the same way, and what arrived stays out of sight for a resume.
+  const tokU = await letIn();
+  const upBig = crypto.randomBytes(6 * 1024 * 1024);
+  const uq = { path: '/Download/cut.bin', size: upBig.length, mtime };
+  const up = await new Promise((resolve) => {
+    let mine = false;
+    const req = https.request({ host: IP, port: PORT, method: 'PUT', path: `/pfs/put?${q({ ...uq, off: 0 })}`, rejectUnauthorized: false, agent: false,
+      headers: { Authorization: `Bearer ${tokU}`, Origin: BASE, 'Content-Length': upBig.length } }, (res) => resolve({ status: res.statusCode }));
+    // Closed by the phone, or by this end after a wait: which one is what is checked.
+    req.on('socket', (s) => s.on('close', () => resolve({ status: 0, byPhone: !mine })));
+    req.on('error', () => {});
+    // A little, then nothing: still under way when the phone signs browsers out.
+    req.write(upBig.subarray(0, 512 * 1024));
+    setTimeout(async () => {
+      await command('signout', 'CODE ');
+      setTimeout(() => {
+        mine = true;
+        req.destroy();
+      }, 4000);
+    }, 600);
+  });
+  check("a sign-out cuts an upload of the phone's under way too, and nothing half sent shows in the folder",
+    up.byPhone === true && !fs.existsSync(onPhone('Download/cut.bin'))
+      && !names(await (async () => { const t = await letIn(); return phoneRequest('GET', `/pfs/list?path=${enc('/Download')}`, { headers: { Authorization: `Bearer ${t}` } }); })()).includes('cut.bin'),
+    JSON.stringify(up));
+}
+
+// --node-only: the door from Node and no browser (a quick run, as for a check
+// that must fail on an older copy: OADX_LAUNCHER_DIR).
+if (args.includes('--node-only')) {
+  console.log(`\n${passed} passed, ${failed} failed`);
+  cleanup();
+  process.exit(failed ? 1 : 0);
 }
 
 // ── the page, in a real browser ─────────────────────────────────────────
@@ -2215,6 +2880,256 @@ console.log('plain http, in a browser that refuses the certificate');
     check('no script errors on the plain page', P.pageErrors.length === 0, P.pageErrors.slice(0, 3).join(' | '));
     await P.quit();
     P.close();
+  }
+}
+
+console.log("Remote desktop's page: the phone's own files");
+{
+  // A browser of its own, the phone's page in it: phone.html, the stand-in
+  // phone's screen (frames from the harness), and Files over the folder the
+  // Node checks above used (PHONE_STORAGE).
+  const F = await launchBrowser();
+  check("a browser for the phone's page", !!F);
+  if (F) {
+    await F.cdp('Emulation.setDeviceMetricsOverride', { width: VW, height: VH, deviceScaleFactor: 1, mobile: false });
+    const fdl = path.join(tmp, 'phone-page-downloads');
+    fs.mkdirSync(fdl, { recursive: true });
+    await F.cdp('Browser.setDownloadBehavior', { behavior: 'allow', downloadPath: fdl, eventsEnabled: true });
+    const local = path.join(tmp, 'phone-page-local');
+    fs.mkdirSync(local, { recursive: true });
+    const fjs = F.js;
+    const frows = () => fjs(`[...document.querySelectorAll('#files .fx-row .fx-name .n, #files .fx-tile .fx-tname')].map((e) => e.textContent)`);
+    const frow = (name) => fjs(`(() => { const r = [...document.querySelectorAll('#files .fx-row, #files .fx-tile')].find((x) => (x.querySelector('.n') || x.querySelector('.fx-tname')).textContent === ${JSON.stringify(name)});
+      if (!r) return null; const b = r.getBoundingClientRect(); return { x: Math.round(b.left + Math.min(160, b.width / 2)), y: Math.round(b.top + b.height / 2) }; })()`);
+    const fmouse = async (x, y, { button = 'left', count = 1 } = {}) => {
+      const buttons = { left: 1, right: 2 }[button];
+      await F.cdp('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y });
+      for (let c = 1; c <= count; c++) {
+        await F.cdp('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button, buttons, clickCount: c });
+        await F.cdp('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button, buttons: 0, clickCount: c });
+      }
+    };
+    const fdrop = async (x, y, paths) => {
+      const data = { items: [], files: paths, dragOperationsMask: 1 };
+      await F.cdp('Input.dispatchDragEvent', { type: 'dragEnter', x, y, data });
+      await F.cdp('Input.dispatchDragEvent', { type: 'dragOver', x, y, data });
+      await sleep(250);
+      const said = await fjs(`(() => { const o = document.querySelector('.drop'); return o && !o.hidden ? o.querySelector('.drop-title').textContent : null; })()`);
+      await F.cdp('Input.dispatchDragEvent', { type: 'drop', x, y, data });
+      return said;
+    };
+    const place = (label) => fjs(`(() => { const p = [...document.querySelectorAll('#files .place')].find((x) => x.textContent === ${JSON.stringify(label)}); if (p) p.click(); return !!p; })()`);
+    const here = () => fjs(`(document.querySelector('#files .crumb.here') || {}).textContent || ''`);
+    const frames = async () => {
+      const l = await command('phoneframes?', 'PHONEFRAMES ');
+      const [, sent, , keys] = (l || 'PHONEFRAMES -1 -1 -1').split(' ');
+      return { sent: Number(sent), keys: Number(keys) };
+    };
+    await command(`phonefs ${PHONE_STORAGE}`, 'OK phonefs');
+    await command('phone on', 'OK phone');
+    await command('open', 'OK open');
+    await F.cdp('Page.navigate', { url: `${BASE}/phone.html` });
+    await clickThrough(F, BASE);
+    await until(() => fjs(`!!document.getElementById('pair') && !document.getElementById('pair').hidden`), 8000);
+    check("the phone's page before the code: no Files button", await fjs(`document.getElementById('files-btn').hidden === true`));
+    const code = await askCode();
+    let t = Date.now();
+    await fjs(`(() => { document.getElementById('code').value = ${JSON.stringify(code)}; document.getElementById('pair').requestSubmit(); })()`);
+    const screenUp = await until(() => fjs(`document.getElementById('cover').hidden === true`), 12000);
+    const btn = await until(() => fjs(`document.getElementById('files-btn').hidden === false`), 6000);
+    check("let in: the phone's screen on the page, and a Files button in its bar", !!screenUp && !!btn,
+      JSON.stringify({ screenUp, btn, cover: await fjs(`document.getElementById('cover-words').textContent`) }));
+    await F.shot('30-phone-page');
+
+    // Picture size, in the bar: the hello says Full size; Half size goes to
+    // the phone as half its screen and is kept for the next visit, and the
+    // status line gives the picture's own size.
+    const hello = evSince(t, (e) => e.phoneMsg && e.phoneMsg.t === 'hello');
+    const tSize = Date.now();
+    await fjs(`(() => { const s = document.getElementById('size'); s.value = '0.5'; s.dispatchEvent(new Event('change')); })()`);
+    const sized = await until(() => evSince(tSize, (e) => e.phoneMsg && e.phoneMsg.t === 'size'), 3000);
+    const sizeSaid = await fjs(`document.getElementById('status').textContent`);
+    check("Picture size in the bar: Full size first; Half size goes to the phone as half its screen, and is kept; the picture's size in the status line",
+      !!hello && hello.phoneMsg.scale === 1 && !!sized && sized.phoneMsg.scale === 0.5
+        && (await fjs(`localStorage.getItem('lod.phoneSize')`)) === '0.5' && sizeSaid.includes(' · 1280 × 720 · '),
+      JSON.stringify({ hello: hello && hello.phoneMsg, sized: sized && sized.phoneMsg, status: sizeSaid }));
+
+    // Files: the places, and the picture let go of.
+    t = Date.now();
+    await fjs(`document.getElementById('files-btn').click()`);
+    const opened = await until(() => fjs(`!!document.querySelector('#files.on') && document.querySelectorAll('#files .fx-row').length > 3`), 10000);
+    const places = await fjs(`[...document.querySelectorAll('#files .place span')].map((e) => e.textContent)`);
+    const rowsAtTop = await frows();
+    check("Files: the phone's places down the side (the folders that are there), the phone's storage listed",
+      !!opened && JSON.stringify(places) === JSON.stringify(['Phone', 'Downloads', 'Camera', 'Pictures', 'Documents', 'Movies'])
+        && ['Android', 'DCIM', 'Download', 'Documents'].every((n) => rowsAtTop.includes(n)),
+      JSON.stringify({ places, rows: rowsAtTop }));
+    const off = await until(() => evSince(t, (e) => e.phonePicture === false), 3000);
+    const f0 = await frames();
+    await sleep(1200);
+    const f1 = await frames();
+    check("…and the page tells the phone it wants no picture while Files are up: no frames come",
+      !!off && f1.sent - f0.sent <= 1, JSON.stringify({ off: !!off, f0, f1 }));
+    check('…the address says Files, for a reload or a bookmark', /^#files/.test(await fjs('location.hash')), await fjs('location.hash'));
+    await F.shot('31-phone-files');
+
+    // Downloads: typing in Files' search is Files', never the phone's.
+    await place('Downloads');
+    await until(async () => (await frows()).includes('notes.txt'), 5000);
+    const k0 = await frames();
+    await fjs(`document.getElementById('fx-q').focus()`);
+    await F.cdp('Input.insertText', { text: 'note' });
+    await F.press('a', 'KeyA', 65, 'a');
+    await F.press('Backspace', 'Backspace', 8);
+    await sleep(600);
+    const k1 = await frames();
+    const filtered = await frows();
+    check("typing in Files' search finds by name, and sends no key to the phone",
+      JSON.stringify(filtered) === JSON.stringify(['notes.txt']) && k1.keys === k0.keys, JSON.stringify({ filtered, k0, k1 }));
+    await fjs(`document.getElementById('fx-q').dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
+
+    // Upload, Files…: into the folder open now.
+    const picked = path.join(local, 'from the computer.txt');
+    fs.writeFileSync(picked, 'picked on the computer\n');
+    const input = await F.cdp('Runtime.evaluate', { expression: `document.querySelectorAll('#files input[type=file]')[0]` });
+    const node = await F.cdp('DOM.describeNode', { objectId: input.result.result.objectId });
+    await F.cdp('DOM.setFileInputFiles', { files: [picked], backendNodeId: node.result.node.backendNodeId });
+    const uploaded = await until(() => fs.existsSync(path.join(PHONE_STORAGE, 'Download/from the computer.txt'))
+      && fs.readFileSync(path.join(PHONE_STORAGE, 'Download/from the computer.txt'), 'utf8') === 'picked on the computer\n', 8000);
+    check("Upload: the chosen file lands in the phone's folder open in Files, byte for byte", !!uploaded);
+    const traySaid = await until(() => fjs(`(() => { const w = document.querySelector('.tray .job-where'); return w ? w.textContent : null; })()`), 4000);
+    check("…the transfers' panel says where, in the phone's words", traySaid === 'to Downloads on the phone', String(traySaid));
+    // A big file goes in pieces of 32 MB (a PUT each), as the Cloudflare tunnel needs: counted in the page.
+    await fjs(`(() => { window.__puts = []; const o = XMLHttpRequest.prototype.open;
+      XMLHttpRequest.prototype.open = function (m, u, ...rest) { if (m === 'PUT' && /pfs\\/put/.test(u)) window.__puts.push(String(u)); return o.call(this, m, u, ...rest); }; })()`);
+    const film = path.join(local, 'big film.bin');
+    const filmBytes = crypto.randomBytes(70 * 1024 * 1024 + 5);
+    fs.writeFileSync(film, filmBytes);
+    await F.cdp('DOM.setFileInputFiles', { files: [film], backendNodeId: node.result.node.backendNodeId });
+    const filmLanded = await until(() => {
+      const p = path.join(PHONE_STORAGE, 'Download/big film.bin');
+      return fs.existsSync(p) && fs.statSync(p).size === filmBytes.length;
+    }, 30000);
+    const puts = await fjs('window.__puts');
+    check('a big file goes in pieces of 32 MB, a PUT each, and lands whole',
+      !!filmLanded && fs.readFileSync(path.join(PHONE_STORAGE, 'Download/big film.bin')).equals(filmBytes) && puts.length === 3
+        && puts.map((u) => new URL(u, BASE).searchParams.get('off')).join() === `0,${32 * 1024 * 1024},${64 * 1024 * 1024}`,
+      JSON.stringify({ landed: !!filmLanded, puts: puts.map((u) => new URL(u, BASE).searchParams.get('off')) }));
+    fs.rmSync(path.join(PHONE_STORAGE, 'Download/big film.bin'), { force: true });
+
+    // Files dropped onto the list.
+    const dropped = path.join(local, 'dropped photo.png');
+    fs.writeFileSync(dropped, crypto.randomBytes(300 * 1024));
+    const list = await fjs(`(() => { const b = document.querySelector('#files .fx-scroll').getBoundingClientRect(); return { x: Math.round(b.left + b.width / 2), y: Math.round(b.top + b.height / 2) }; })()`);
+    const dropSaid = await fdrop(list.x, list.y + 80, [dropped]);
+    const dropLanded = await until(() => fs.existsSync(path.join(PHONE_STORAGE, 'Download/dropped photo.png'))
+      && fs.readFileSync(path.join(PHONE_STORAGE, 'Download/dropped photo.png')).equals(fs.readFileSync(dropped)), 10000);
+    check('a file dropped onto the list: said where it goes, and there', dropSaid === 'Drop to copy into Downloads' && !!dropLanded, String(dropSaid));
+
+    // Downloads to this computer: a file, and a folder as one ZIP.
+    await until(async () => (await frows()).includes('notes.txt'), 5000);
+    const nr = await frow('notes.txt');
+    await fmouse(nr.x, nr.y);
+    await fjs(`document.querySelector('#files .sel-dl').click()`);
+    const gotFile = await until(() => fs.existsSync(path.join(fdl, 'notes.txt')) && fs.readFileSync(path.join(fdl, 'notes.txt'), 'utf8') === 'notes from the phone\n', 10000);
+    check("Download: the phone's file, where this browser saves downloads", !!gotFile);
+    await place('Documents');
+    await until(async () => (await frows()).includes('Trip'), 5000);
+    const tr = await frow('Trip');
+    await fmouse(tr.x, tr.y);
+    await fjs(`document.querySelector('#files .sel-dl').click()`);
+    const zipAt = path.join(fdl, 'Trip.zip');
+    const gotZip = await until(() => fs.existsSync(zipAt) && !fs.readdirSync(fdl).some((n) => n.endsWith('.crdownload')), 10000);
+    const zread = gotZip ? readZipEntries(fs.readFileSync(zipAt)) : { ok: false, error: 'no zip' };
+    check('…a folder: one ZIP of everything in it, read back', zread.ok && zread.entries['Trip/day two.txt']?.toString() === 'day two\n', zread.error || JSON.stringify(zread.names));
+
+    // Deleting: no Trash on the phone. The menu has one Delete, which asks, then deletes for good.
+    await place('Downloads');
+    await until(async () => (await frows()).includes('sent.txt'), 5000);
+    const sr = await frow('sent.txt');
+    await fmouse(sr.x, sr.y);
+    await fmouse(sr.x, sr.y, { button: 'right' });
+    const menuItems = await until(() => fjs(`(() => { const m = document.querySelector('.fx-menu'); return m ? [...m.querySelectorAll('.lbl')].map((e) => e.textContent) : null; })()`), 3000);
+    check("the menu of a file of the phone's: Delete, and nothing of a Trash",
+      !!menuItems && menuItems.includes('Delete') && !menuItems.some((x) => /Trash|for good/.test(x)), JSON.stringify(menuItems));
+    await F.press('Escape', 'Escape', 27);
+    await fmouse(sr.x, sr.y);
+    await F.press('Delete', 'Delete', 46);
+    const asked = await until(() => fjs(`(() => { const d = document.querySelector('dialog.fx-dialog[open]'); return d ? d.querySelector('h2').textContent + ' | ' + d.querySelector('p').textContent : null; })()`), 4000);
+    check('Delete: asked first, in plain words', asked === 'Delete “sent.txt”? | “sent.txt” is deleted from the phone, and cannot be brought back.', String(asked));
+    await F.shot('32-phone-delete');
+    await fjs(`[...document.querySelectorAll('dialog.fx-dialog[open] button')].find((b) => b.textContent === 'Delete').click()`);
+    check('…Delete: gone from the phone', !!(await until(() => !fs.existsSync(path.join(PHONE_STORAGE, 'Download/sent.txt')), 5000)));
+
+    // Apps' folders: looked at, never changed.
+    await fjs(`(() => { location.hash = ''; })()`);
+    await place('Phone');
+    await until(async () => (await frows()).includes('Android'), 5000);
+    const ar = await frow('Android');
+    await fmouse(ar.x, ar.y, { count: 2 });
+    await until(() => here().then((h) => h === 'Android'), 5000);
+    const roNow = await until(() => fjs(`(() => { const s = document.querySelector('#files .fx-status'); return s && /Read only/.test(s.textContent) && document.querySelector('#files .fx-primary').disabled; })()`), 4000);
+    check("Android's folder in Files: read only, Upload off", !!roNow, await fjs(`document.querySelector('#files .fx-status').textContent`));
+
+    // Screen: back to the phone, the picture asked for again.
+    t = Date.now();
+    const s0 = await frames();
+    await fjs(`document.querySelector('#files .fx-desk').click()`);
+    const back = await until(() => evSince(t, (e) => e.phonePicture === true), 3000);
+    await until(async () => (await frames()).sent > s0.sent + 5, 4000);
+    const s1 = await frames();
+    check('Screen: Files close, the phone is asked for the picture again, and frames come',
+      !!back && s1.sent > s0.sent + 5 && (await fjs(`!document.querySelector('#files.on') && !document.body.classList.contains('files-on')`)) && !/^#files/.test(await fjs('location.hash')),
+      JSON.stringify({ back: !!back, s0, s1 }));
+    // A file dropped on the phone's screen goes into Downloads, as scrcpy's does.
+    const onScreen = path.join(local, 'onto the screen.txt');
+    fs.writeFileSync(onScreen, 'dropped on the phone\'s screen\n');
+    const screenSaid = await fdrop(640, 360, [onScreen]);
+    const screenLanded = await until(() => fs.existsSync(path.join(PHONE_STORAGE, 'Download/onto the screen.txt')), 8000);
+    check("a file dropped on the phone's screen: said, and into the phone's Downloads", screenSaid === 'Drop to copy into Downloads on the phone' && !!screenLanded, String(screenSaid));
+    await sleep(600);
+    await F.shot('33-phone-screen-drop');
+
+    // No access to the phone's storage yet: Files says what to do on the phone.
+    await command('phonefsstate noaccess', 'OK phonefsstate');
+    await fjs(`document.getElementById('files-btn').click()`);
+    const noAccess = await until(() => fjs(`(() => { const e = document.querySelector('#files .fx-empty h3'); return e && !document.querySelector('#files .fx-empty').hidden ? e.textContent + ' | ' + document.querySelector('#files .fx-empty p').textContent : null; })()`), 6000);
+    check('no access to all files on the phone: Files says what to allow, and where',
+      noAccess === 'LinuxOnDroid needs access to all files | On the phone, open LinuxOnDroid › Settings › Remote desktop and choose Allow access to all files. Then choose Try again here.', String(noAccess));
+    await F.shot('34-phone-noaccess');
+    await command('phonefsstate ready', 'OK phonefsstate');
+    await fjs(`[...document.querySelectorAll('#files .fx-empty button')].find((b) => b.textContent === 'Try again').click()`);
+    check('…and Try again shows the files once allowed', !!(await until(() => fjs(`document.querySelectorAll('#files .fx-row').length > 0`), 6000)));
+
+    // Signed out on the phone with Files up: the page asks for the code, Files and the button gone.
+    await command('signout', 'CODE ');
+    await until(() => fjs(`!document.getElementById('pair').hidden`), 8000);
+    check('signed out on the phone: the code is asked for again, Files closed and the button gone',
+      (await fjs(`!document.getElementById('pair').hidden && !document.querySelector('#files.on') && document.getElementById('files-btn').hidden`)) === true,
+      JSON.stringify({ pair: await fjs(`!document.getElementById('pair').hidden`), files: await fjs(`!!document.querySelector('#files.on')`) }));
+    const code2 = await askCode();
+    const tAgain = Date.now();
+    await fjs(`(() => { document.getElementById('code').value = ${JSON.stringify(code2)}; document.getElementById('pair').requestSubmit(); })()`);
+    check('…the code again: the Files button is back', !!(await until(() => fjs(`document.getElementById('files-btn').hidden === false`), 8000)));
+    const helloAgain = await until(() => evSince(tAgain, (e) => e.phoneMsg && e.phoneMsg.t === 'hello'), 8000);
+    check('…and the phone opens again at the Picture size chosen: Half size in the hello and in the bar',
+      !!helloAgain && helloAgain.phoneMsg.scale === 0.5 && (await fjs(`document.getElementById('size').value`)) === '0.5',
+      JSON.stringify({ hello: helloAgain && helloAgain.phoneMsg, bar: await fjs(`document.getElementById('size').value`) }));
+    await fjs(`(() => { const s = document.getElementById('size'); s.value = '1'; s.dispatchEvent(new Event('change')); })()`);
+    check("no script errors on the phone's page", F.pageErrors.length === 0, F.pageErrors.slice(0, 3).join(' | '));
+
+    // The page from anywhere (openandroiddex-remote/web) runs this phone.js with no door behind it.
+    const A = await F.newTab('about:blank');
+    await A.cdp('Page.addScriptToEvaluateOnNewDocument', { source: `window.PHONE_SOCKET = () => new WebSocket('wss://' + location.host + '/phone?t=none');` });
+    await A.cdp('Page.navigate', { url: `${BASE}/phone.html` });
+    await until(() => A.js(`document.readyState === 'complete'`), 8000);
+    await sleep(1500);
+    const anywhere = await A.js(`({ btn: document.getElementById('files-btn').hidden, asked: performance.getEntriesByType('resource').filter((e) => /pfs\\/|phone-files\\.js|files\\.js/.test(e.name)).map((e) => e.name) })`);
+    check('the page from anywhere (no door): no Files button, and nothing of Files asked for', anywhere.btn === true && anywhere.asked.length === 0, JSON.stringify(anywhere));
+    check('…and no script errors there', A.pageErrors.length === 0, A.pageErrors.slice(0, 3).join(' | '));
+    A.close();
+    await F.quit();
+    F.close();
   }
 }
 

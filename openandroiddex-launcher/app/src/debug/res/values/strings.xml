@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- The launcher, which the desktop app installs, names its Linux entry and
+         window "Linux"; the Linux app of its own (linuxapp, Google Play and the
+         GitHub APK) keeps "LinuxOnDroid" from main. linuxapp's res is
+         app/src/main/res alone, so this folder never reaches it. The user's
+         call, 2026-11-22. -->
+    <string name="ln_label" translatable="false">Linux</string>
+</resources>

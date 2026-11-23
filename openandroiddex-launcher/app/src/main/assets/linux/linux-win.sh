@@ -118,7 +118,21 @@ mkdir -p /tmp/runtime-root && chmod 700 /tmp/runtime-root
 # yes exported, after Xvnc and before the bus and every app.
 GPUPROBE=
 GPUDIR=/usr/local/lib/openandroiddex/gpu
-if [ -n "$OADX_GPU" ] && [ -x $GPUDIR/oadx-vkprobe ] && [ -f $GPUDIR/${OADX_GPU}_icd.json ]; then
+# VirGL (OADX_GPU=virgl), on a GPU no driver of ours runs: the app runs a
+# server on the Android side, on the phone own GL driver, at
+# /tmp/.virgl_test, and Mesa in here reaches it as GALLIUM_DRIVER=virpipe.
+# Its probe asks Mesa for a GL context that way and wants a VirGL renderer,
+# through EGL, or through GLX on this display where the guest has no EGL.
+if [ "$OADX_GPU" = virgl ]; then
+  if [ -S /tmp/.virgl_test ] && [ -x $GPUDIR/oadx-glprobe ]; then
+    GALLIUM_DRIVER=virpipe LIBGL_ALWAYS_SOFTWARE=1 DISPLAY=:2 XAUTHORITY=/tmp/.oadx-win.xauth \
+      timeout 15 $GPUDIR/oadx-glprobe >/tmp/.oadx-win-gpu 2>&1 &
+    GPUPROBE=$!
+  else
+    echo "no VirGL server at /tmp/.virgl_test" >/tmp/.oadx-win-gpu
+    echo "gpu: not used -- no VirGL server at /tmp/.virgl_test"
+  fi
+elif [ -n "$OADX_GPU" ] && [ -x $GPUDIR/oadx-vkprobe ] && [ -f $GPUDIR/${OADX_GPU}_icd.json ]; then
   VK_ICD_FILENAMES=$GPUDIR/${OADX_GPU}_icd.json \
     timeout 15 $GPUDIR/oadx-vkprobe >/tmp/.oadx-win-gpu 2>&1 &
   GPUPROBE=$!
@@ -129,7 +143,17 @@ Xvnc :2 -geometry GEOMETRY -depth 24 -dpi DPIVALUE -rfbport 5902 -localhost \
 XVNC=$!
 export DISPLAY=:2 XAUTHORITY=/tmp/.oadx-win.xauth
 if [ -n "$GPUPROBE" ]; then
-  if wait $GPUPROBE; then
+  wait $GPUPROBE
+  GPURC=$?
+  if [ "$OADX_GPU" = virgl ] && [ $GPURC = 0 ]; then
+    echo "gpu: VirGL, $(head -c 200 /tmp/.oadx-win-gpu)"
+    export GALLIUM_DRIVER=virpipe
+  elif [ "$OADX_GPU" = virgl ] && [ $GPURC = 2 ]; then
+    # No Mesa in this guest yet, so no GL app either: the server was
+    # checked on the Android side, and an app installed later gets it.
+    echo "gpu: VirGL, not checked in the guest -- $(head -c 200 /tmp/.oadx-win-gpu)"
+    export GALLIUM_DRIVER=virpipe
+  elif [ $GPURC = 0 ]; then
     echo "gpu: $(head -c 200 /tmp/.oadx-win-gpu)"
     export MESA_LOADER_DRIVER_OVERRIDE=zink LIBGL_KOPPER_DRI2=1 MESA_VK_WSI_DEBUG=sw
   else

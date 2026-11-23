@@ -45,6 +45,29 @@ public class RemoteResumeReceiver extends BroadcastReceiver {
                 && !ACTION_RESUME.equals(action)) {
             return;
         }
+        // "Email me when an address changes" (EmailNotice): each of the three
+        // ended the tunnel, whose next address is new. Said why, and the job
+        // set going; the email itself waits until the new address is there.
+        EmailNotice.poke(ctx, Intent.ACTION_BOOT_COMPLETED.equals(action) ? "boot"
+                : Intent.ACTION_MY_PACKAGE_REPLACED.equals(action) ? "update" : "stopped");
+        // Remote desktop, started with the phone: Android asks for screen
+        // sharing once per session, so the question comes up now (the user
+        // has just unlocked the phone: BOOT_COMPLETED waits for that). A
+        // receiver may not start it from the background, and the control
+        // service may not be back yet: the mark has the control service ask
+        // when it is (PhoneControlService), and with it already back, it asks
+        // now. Without control, the notification asks. Only for a share kept
+        // ready (PhoneRemote.asksAfterRestart). The tunnel itself comes back
+        // below, with Linux's remote access.
+        if (Intent.ACTION_BOOT_COMPLETED.equals(action) && PhoneRemote.offered(ctx)
+                && PhoneRemote.asksAfterRestart(ctx)) {
+            if (PhoneControlService.live() != null) {
+                PhoneRemoteService.askForScreen(ctx, "the phone started");
+            } else {
+                PhoneRemote.markBoot(ctx);
+                if (!PhoneRemote.controlEnabled(ctx)) PhoneRemoteService.askForScreen(ctx, "the phone started");
+            }
+        }
         // The install first. Its long steps outlast many desktop sessions, and
         // every session's clean-up killed whatever step was running, which the
         // next session then began again — "installing browsers" for ever. Picked
@@ -91,8 +114,8 @@ public class RemoteResumeReceiver extends BroadcastReceiver {
         // that is. This is what finishes switching it back on when remote access
         // went off without the permission to: the desktop app keeps it in place
         // until the switch is back, and sends this right after its exit.
-        SamsungSlowdown.sync(ctx, LinuxRemote.isEnabled(ctx) && LinuxRemote.available(ctx));
-        if (!LinuxRemote.isEnabled(ctx) || !LinuxRemote.available(ctx)) return;
+        SamsungSlowdown.sync(ctx, LinuxRemote.tunnelOn(ctx) && LinuxRemote.available(ctx));
+        if (!LinuxRemote.tunnelOn(ctx) || !LinuxRemote.available(ctx)) return;
         DexLog.step("remote", "resuming remote access after " + action);
         if (!LinuxService.remoteResume(ctx)) offerResume(ctx);
     }

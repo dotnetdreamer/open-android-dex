@@ -423,7 +423,7 @@ phone's own video chip makes the picture and the computer's graphics chip shows
 it, so scrolling and videos stay smooth. Copy and paste work both ways. In
 Chrome and Edge, full screen hands every key to Linux, Alt+Tab included. The
 browser remembers that you let it in, so next time it is just the address. To
-shut every browser out again, use **Sign them out** on the same page. How it
+shut every browser out again, use **Sign out every browser** on the same page. How it
 works: [doc/linux-browser.md](doc/linux-browser.md).
 
 **Files** on that bar shows Linux's files instead of the desktop. Drag files or
@@ -458,6 +458,74 @@ screen as a touchscreen, or use it as a trackpad. Each one spells out what taps,
 drags and two finger gestures do.
 
 <img src="doc/img/linux-controls.png" alt="The interaction method panel offering Direct, Touch and Mouse control" width="380">
+
+### Use your phone from your computer, from anywhere
+
+LinuxOnDroid can also put the phone itself on your computer: its own screen,
+its apps, its settings, with your mouse and keyboard. Help a parent with their
+phone from across town, or reach your own phone when it's in another room or
+another country.
+
+1. On the phone, in LinuxOnDroid: ⋮ → **Settings** → **Remote desktop**. Turn
+   it on and Android asks once to share the screen. **Turn on control** lets the
+   computer tap and type too
+2. Add your computer once: **Add a computer** shows a code, and you type it in
+   Open Android DeX on the computer, in the Linux tab
+3. From then on, **Phone screen** on the computer opens the phone in a window
+
+No app on the computer? On the same Wi-Fi, any browser works: the Remote desktop
+card shows an address and a code. Open the address, enter the code, and the
+phone's screen is in the tab, with the same keys and the same Low, Medium and
+High. The first time, the browser warns that the connection is not private,
+because the phone made its own certificate: choose Advanced, then Continue.
+
+Not on the same Wi-Fi? Turn on **From anywhere, in a browser** on the same card.
+Cloudflare then gives the phone a web address that works from any network, for
+free and with no account. Open it anywhere and enter the same code. The address
+changes whenever the phone restarts, and Cloudflare calls these addresses a
+service for testing, with no promise to stay up.
+
+The app works over home Wi-Fi and across the internet, with nothing to set up on
+a router and no account anywhere. The phone and computer talk to each other
+directly whenever the networks allow, so nobody pays for a server in between.
+
+In the window on the computer, pick **Low** for the fastest picture on a slow
+network, **High** for the sharpest, or **Medium** in between, any time. On home
+Wi-Fi a click reaches the phone and comes back as a picture in about 75 ms in
+the app's window and about 50 ms in a browser (Galaxy S25 Ultra, the middle of
+30 clicks).
+
+**Picture size**, next to those, makes the picture smaller: Three quarters,
+Half size or A third of the size the quality gives. A smaller picture comes
+sooner when the whole screen changes, as when an app opens: on the S25 Ultra,
+Half size brought such a change in about 115 ms instead of 150 over home Wi-Fi,
+and in about 145 ms instead of 235 through Cloudflare. A single button press is
+just as quick at every size, so Full size is the default. The app's window
+remembers both choices for each phone.
+
+On a Xiaomi, Redmi or POCO phone, **Clear all** in Recent apps closes
+LinuxOnDroid too, and Android then turns control off. To keep Remote desktop
+running, lock LinuxOnDroid in Recent apps: press and hold the LinuxOnDroid
+card, then tap the lock. If control is off anyway, a notification on the
+phone leads back to the switch.
+
+- The left mouse button is your finger, the right one is Back and the middle one
+  is Home. The wheel scrolls. Typing goes into whatever box is selected, and
+  Ctrl+V pastes your computer's clipboard
+- The window has buttons for Back, Home, Recent apps and the notifications
+- If the phone is asleep, the computer wakes it. You see the lock screen and can
+  unlock it with the phone's PIN, as you would in your hand
+- Android stops screen sharing whenever the phone locks, and asks again each
+  time. Until someone says yes at the phone, the computer gets a slower view,
+  about three pictures a second, that still works with nobody there
+- **Ask to share the screen after a restart** makes the phone ask once, right
+  after you unlock the phone
+
+To use a phone with nobody next to it at full speed, even while it's locked,
+allow it once from a computer with USB debugging:
+`adb shell cmd appops set com.dotnetdreamer.linuxondroid PROJECT_MEDIA allow`
+(for the app from GitHub, `com.ccrstech.linuxondroid`). Android then shares the
+screen without asking. Uninstalling the app undoes it.
 
 ### Your desktop in a web browser
 
