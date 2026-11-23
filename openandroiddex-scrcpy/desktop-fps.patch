@@ -1,0 +1,142 @@
+diff --git a/server/src/main/java/com/genymobile/scrcpy/video/DesktopFps.java b/server/src/main/java/com/genymobile/scrcpy/video/DesktopFps.java
+new file mode 100644
+index 0000000..716fb5c
+--- /dev/null
++++ b/server/src/main/java/com/genymobile/scrcpy/video/DesktopFps.java
+@@ -0,0 +1,112 @@
++package com.genymobile.scrcpy.video;
++
++import java.io.BufferedReader;
++import java.io.InputStreamReader;
++import java.io.OutputStream;
++import java.net.InetAddress;
++import java.net.InetSocketAddress;
++import java.net.Socket;
++import java.nio.charset.StandardCharsets;
++import java.util.concurrent.atomic.AtomicInteger;
++
++/**
++ * Open Android DeX: the frames per second this server streams, for the desktop's FPS
++ * readout (doc/refresh-rate.md). Once a second the count goes to the window daemon on
++ * 127.0.0.1:7191 as "FPS display frames", and the launcher's gauge asks the daemon.
++ *
++ * <p>Counted where the encoder hands frames out, because every frame the desktop shows
++ * passes there, whoever drew it: an app, a window being dragged, the launcher. A frame
++ * MediaCodec repeats by itself while nothing changes (KEY_REPEAT_PREVIOUS_FRAME_AFTER, one
++ * every 100 ms) is not counted — it puts nothing new on screen — and is told apart by its
++ * timestamp, exactly the repeat delay after the frame before it.
++ *
++ * <p>The encoder's thread only counts. Talking to the daemon is a thread of its own, so a
++ * slow or missing daemon can never hold a frame up; without one there is just no readout.
++ */
++public final class DesktopFps {
++
++    private static final long REPEAT_US = 100_000;
++    private static final int DAEMON_PORT = 7191;
++
++    private static final AtomicInteger FRAMES = new AtomicInteger();
++    private static volatile int display = -1;
++    /** The last frame's timestamp; the encoder's thread alone touches it. */
++    private static long lastPtsUs = Long.MIN_VALUE;
++    private static Thread reporter;
++
++    private DesktopFps() {
++        // not instantiable
++    }
++
++    /** Count the frames of a display this server made, and start telling the daemon. */
++    public static synchronized void start(int displayId) {
++        display = displayId;
++        if (reporter == null) {
++            reporter = new Thread(DesktopFps::report, "desktop-fps");
++            reporter.setDaemon(true);
++            reporter.start();
++        }
++    }
++
++    /** One frame out of the encoder, by its presentation time. */
++    public static void frame(long ptsUs) {
++        if (display < 0) {
++            return; // not a display of its own: nothing here asks
++        }
++        boolean repeat = lastPtsUs != Long.MIN_VALUE && Math.abs(ptsUs - lastPtsUs - REPEAT_US) <= 1;
++        lastPtsUs = ptsUs;
++        if (!repeat) {
++            FRAMES.incrementAndGet();
++        }
++    }
++
++    private static void report() {
++        Socket socket = null;
++        BufferedReader replies = null;
++        long since = System.nanoTime();
++        long retryAt = 0;
++        while (true) {
++            try {
++                Thread.sleep(1000);
++            } catch (InterruptedException e) {
++                return;
++            }
++            long now = System.nanoTime();
++            int frames = FRAMES.getAndSet(0);
++            int fps = Math.round(frames * 1e9f / Math.max(1, now - since));
++            since = now;
++            try {
++                if (socket == null) {
++                    if (now < retryAt) {
++                        continue;
++                    }
++                    // A daemon not there is asked again in five seconds, not every second.
++                    retryAt = now + 5_000_000_000L;
++                    socket = new Socket();
++                    // 127.0.0.1 by name: the daemon listens on IPv4 only, and Android's
++                    // getLoopbackAddress() is ::1.
++                    socket.connect(new InetSocketAddress(InetAddress.getByName("127.0.0.1"), DAEMON_PORT), 500);
++                    socket.setSoTimeout(1000);
++                    socket.setTcpNoDelay(true);
++                    replies = new BufferedReader(new InputStreamReader(socket.getInputStream(), StandardCharsets.US_ASCII));
++                }
++                OutputStream out = socket.getOutputStream();
++                out.write(("FPS " + display + " " + fps + "\n").getBytes(StandardCharsets.US_ASCII));
++                out.flush();
++                // Read the answer, so nothing piles up on either side over a long session.
++                if (replies.readLine() == null) {
++                    throw new java.io.EOFException();
++                }
++            } catch (Exception e) {
++                if (socket != null) {
++                    try {
++                        socket.close();
++                    } catch (Exception ignored) {
++                        // closing anyway
++                    }
++                    socket = null;
++                }
++            }
++        }
++    }
++}
+diff --git a/server/src/main/java/com/genymobile/scrcpy/video/NewDisplayCapture.java b/server/src/main/java/com/genymobile/scrcpy/video/NewDisplayCapture.java
+index 37ba5ab..9495d44 100644
+--- a/server/src/main/java/com/genymobile/scrcpy/video/NewDisplayCapture.java
++++ b/server/src/main/java/com/genymobile/scrcpy/video/NewDisplayCapture.java
+@@ -257,6 +257,7 @@ public class NewDisplayCapture extends SurfaceCapture {
+             // Before the line below: the computer starts using the display when it reads it
+             clearForcedDensity(virtualDisplayId, "left by an earlier display");
+             Ln.i("New display: " + displaySize.getWidth() + "x" + displaySize.getHeight() + "/" + dpi + " (id=" + virtualDisplayId + ")");
++            DesktopFps.start(virtualDisplayId);
+ 
+             if (displayImePolicy != -1) {
+                 ServiceManager.getWindowManager().setDisplayImePolicy(virtualDisplayId, displayImePolicy);
+diff --git a/server/src/main/java/com/genymobile/scrcpy/video/SurfaceEncoder.java b/server/src/main/java/com/genymobile/scrcpy/video/SurfaceEncoder.java
+index 539681b..38e77bc 100644
+--- a/server/src/main/java/com/genymobile/scrcpy/video/SurfaceEncoder.java
++++ b/server/src/main/java/com/genymobile/scrcpy/video/SurfaceEncoder.java
+@@ -264,6 +264,7 @@ public class SurfaceEncoder implements AsyncProcessor {
+                         // If this is not a config packet, then it contains a frame
+                         firstFrameSent = true;
+                         consecutiveErrors = 0;
++                        DesktopFps.frame(bufferInfo.presentationTimeUs);
+                     }
+ 
+                     ByteBuffer codecBuffer = codec.getOutputBuffer(outputBufferId);

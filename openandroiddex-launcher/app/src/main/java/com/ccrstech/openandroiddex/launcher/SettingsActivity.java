@@ -21,12 +21,14 @@ import android.graphics.drawable.Drawable;
 import android.graphics.drawable.GradientDrawable;
 import android.graphics.drawable.RippleDrawable;
 import android.graphics.drawable.StateListDrawable;
+import android.hardware.display.DisplayManager;
 import android.net.Uri;
 import android.os.Bundle;
 import android.text.Editable;
 import android.text.TextUtils;
 import android.text.TextWatcher;
 import android.util.TypedValue;
+import android.view.Display;
 import android.view.Gravity;
 import android.view.KeyEvent;
 import android.view.View;
@@ -42,6 +44,7 @@ import android.widget.TextView;
 import android.widget.Toast;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Locale;
 
@@ -410,7 +413,7 @@ public class SettingsActivity extends Activity {
                 R.string.st_gesture_3right, R.string.st_gesture_3tap}));
         navs.add(new Nav(SEC_STREAM, R.string.st_nav_stream, R.string.st_nav_stream_sub,
                 "🎞", 0xFFf59e0b, new int[]{R.string.st_resolution, R.string.st_codec,
-                R.string.st_encoder, R.string.st_bitrate, R.string.st_fps,
+                R.string.st_encoder, R.string.st_bitrate, R.string.st_hz, R.string.st_fps,
                 R.string.st_audio_output}));
         navs.add(new Nav(SEC_CLIPBOARD, R.string.st_nav_clipboard, R.string.st_nav_clipboard_sub,
                 "📋", 0xFF4ade80, new int[]{R.string.st_clip_sync, R.string.st_clip_current,
@@ -2927,6 +2930,28 @@ public class SettingsActivity extends Activity {
         body.addView(button, lp);
     }
 
+    /**
+     * The phone panel's refresh rates at the resolution it is set to, 60 Hz and up,
+     * fastest first: what Smoothness offers. Under 60 is no rate for a desktop.
+     */
+    private List<Integer> panelRates() {
+        List<Integer> rates = new ArrayList<>();
+        DisplayManager displays = getSystemService(DisplayManager.class);
+        Display panel = displays == null ? null : displays.getDisplay(Display.DEFAULT_DISPLAY);
+        if (panel == null) return rates;
+        Display.Mode now = panel.getMode();
+        for (Display.Mode mode : panel.getSupportedModes()) {
+            if (mode.getPhysicalWidth() != now.getPhysicalWidth()
+                    || mode.getPhysicalHeight() != now.getPhysicalHeight()) {
+                continue;
+            }
+            int hz = Math.round(mode.getRefreshRate());
+            if (hz >= 60 && !rates.contains(hz)) rates.add(hz);
+        }
+        Collections.sort(rates, Collections.reverseOrder());
+        return rates;
+    }
+
     private void buildStreamSection(LinearLayout body) {
         LinearLayout resCard = card(body);
         cardHeader(resCard, s(R.string.st_resolution));
@@ -3015,6 +3040,33 @@ public class SettingsActivity extends Activity {
                         pcConfig(DexPrefs.KEY_BITRATE, value);
                         showSection(SEC_STREAM, false);
                     });
+        }
+
+        // Smoothness: the rate the phone's own panel is held at while the desktop is
+        // open. The desktop is paced off that panel, and with the phone's screen off it
+        // falls to 60 Hz by itself (doc/refresh-rate.md). Applied at once — it is a
+        // hold on the panel, not a scrcpy argument — and offered only where the panel
+        // has more than 60 to give, in the rates it really runs at.
+        List<Integer> rates = panelRates();
+        if (!rates.isEmpty() && rates.get(0) > 60) {
+            LinearLayout hzCard = card(body);
+            cardHeader(hzCard, s(R.string.st_hz));
+            int hz = DexPrefs.getInt(this, DexPrefs.KEY_HZ, DexPrefs.DEF_HZ);
+            choiceRow(hzCard, null, s(R.string.st_hz_auto), s(R.string.st_hz_auto_sub),
+                    hz == 0, () -> {
+                        pcConfig(DexPrefs.KEY_HZ, 0);
+                        showSection(SEC_STREAM, false);
+                    });
+            for (int i = 0; i < rates.size(); i++) {
+                final int rate = rates.get(i);
+                choiceRow(hzCard, null, getString(R.string.st_hz_value, rate),
+                        i == 0 ? s(R.string.st_hz_top_sub) : null,
+                        rate == hz, () -> {
+                            pcConfig(DexPrefs.KEY_HZ, rate);
+                            showSection(SEC_STREAM, false);
+                        });
+            }
+            note(body, s(R.string.st_hz_note));
         }
 
         LinearLayout fpsCard = card(body);
@@ -3463,7 +3515,7 @@ public class SettingsActivity extends Activity {
         // be wiped on the PC by a stream reset while the phone kept its copy,
         // and the two sides would disagree with nothing to reconcile them.
         scopes.add(new ResetScope(R.string.st_scope_stream, DexPrefs.KEY_RESOLUTION,
-                DexPrefs.KEY_BITRATE, DexPrefs.KEY_FPS, DexPrefs.KEY_CODEC,
+                DexPrefs.KEY_BITRATE, DexPrefs.KEY_FPS, DexPrefs.KEY_HZ, DexPrefs.KEY_CODEC,
                 DexPrefs.KEY_ENCODER, DexPrefs.KEY_AUDIO, DexPrefs.KEY_AUDIO_DUP,
                 DexPrefs.KEY_CLIP_SYNC,
                 DexPrefs.KEY_CLIP_HISTORY, DexPrefs.KEY_MOUSE_MODE,

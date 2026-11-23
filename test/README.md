@@ -374,6 +374,18 @@ screen; never the launcher's Settings on another display; and in the gap an APK
 install makes, the display the desktop was last seen on while that display holds a
 task, then none at all — not the other display's app.
 
+The window daemon's answer to `HZ` — which of the phone panel's modes holds the
+desktop's refresh rate (`doc/refresh-rate.md`) — is checked the same way:
+
+```sh
+node test/refresh-rate-test.mjs
+```
+
+It compiles the daemon's own `RefreshRates` and runs it over the modes a Galaxy S25
+Ultra lists: the rate asked for, or the panel's next one down; never above the
+phone's own ceiling; only modes the size the phone is set to; and the rates offered
+at that size, fastest first, each once.
+
 Everything else needs a device. `doc/web-viewer.md`, `doc/remote-access.md`,
 `doc/usb-desktop.md`, `doc/apps-on-pc.md`, `doc/phone-notifications.md` and
 `doc/game-mode.md` list what is still unverified there.

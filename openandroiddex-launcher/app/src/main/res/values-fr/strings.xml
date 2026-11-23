@@ -9,7 +9,10 @@
     <string name="tm_cpu_short">PROC</string>
     <string name="tm_mem_short">RAM</string>
     <string name="tm_disk_short">DISQUE</string>
+    <string name="tm_fps_short">IPS</string>
     <string name="tm_cpu_busy">utilisé</string>
+    <string name="tm_fps">Fréquence d’images</string>
+    <string name="tm_fps_streamed">envoyées à l’ordinateur</string>
     <string name="tm_cpu_unavailable">non disponible sur cet appareil</string>
     <string name="tm_of">%1$s sur %2$s</string>
     <string name="tm_open_apps">Ouvert sur ce bureau</string>
@@ -418,6 +421,12 @@
     <string name="st_fps_value">%1$d ips</string>
     <string name="st_fps_auto">Sans limite</string>
     <string name="st_fps_auto_sub">Aussi vite que le téléphone peut encoder</string>
+    <string name="st_hz">Fluidité</string>
+    <string name="st_hz_auto">Automatique</string>
+    <string name="st_hz_auto_sub">Le téléphone décide — 60 Hz tant que son propre écran est éteint</string>
+    <string name="st_hz_value">%1$d Hz</string>
+    <string name="st_hz_top_sub">Le plus fluide — consomme plus de batterie</string>
+    <string name="st_hz_note">Tant que le bureau est ouvert, l’écran du téléphone fonctionne lui aussi à cette fréquence. Les changements s’appliquent immédiatement.</string>
     <string name="st_audio">Audio</string>
     <string name="st_audio_forward">Transférer le son</string>
     <string name="st_audio_forward_sub">Jouer le son du téléphone sur cet ordinateur</string>

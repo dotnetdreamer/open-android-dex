@@ -324,6 +324,24 @@ final class WmClient {
         }
     }
 
+    /**
+     * The frames per second the desktop on {@code display} streamed over the last second,
+     * as its scrcpy server told the daemon; -1 when nothing has lately (no computer, or a
+     * daemon or server from before the readout). Blocking socket I/O: never call this
+     * from the main thread.
+     */
+    int desktopFps(int display) {
+        String reply = request("FPS " + display);
+        if (!ok(reply)) return -1;
+        String[] parts = reply.trim().split(" +");
+        if (parts.length < 2) return -1;
+        try {
+            return Integer.parseInt(parts[1]);
+        } catch (NumberFormatException e) {
+            return -1;
+        }
+    }
+
     /** One app's cost: resident bytes and cumulative processor jiffies. */
     static final class ProcCost {
         long rssBytes;

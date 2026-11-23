@@ -739,6 +739,10 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
     private TextView[] perfLabels;
     private ProgressBar[] perfBars;
     private View perfGaugeView;
+    /** The gauge's FPS column, shown only while the desktop is being streamed. */
+    private View perfFpsColumn;
+    /** What a full FPS bar is: the phone panel's top rate, which the desktop is paced by. */
+    private int perfFpsTop = 60;
 
     /**
      * Driven from onStart/onStop, not onResume/onPause like the clock: a
@@ -1690,6 +1694,9 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
         // Survives a density rebuild: the CPU figure is a delta between two
         // readings, and a fresh sampler would have to throw the first one away.
         if (sysStats == null) sysStats = new SysStats(this);
+        // Frames are counted for a desktop display only: the phone's own screen is
+        // not streamed anywhere, so it has no FPS to show.
+        sysStats.setFpsDisplay(displayId() > 0 ? displayId() : -1);
         setupPerfGauge();
         taskbarView = buildTaskbar();
         // Its own TYPE_APPLICATION_OVERLAY window, so the activity's pointers
@@ -1921,6 +1928,7 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
         perfGaugeView = null;
         perfLabels = null;
         perfBars = null;
+        perfFpsColumn = null;
     }
 
     private void scheduleOverlayUpgrade(int attempt) {
@@ -3111,10 +3119,14 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
             return true;
         });
 
-        perfLabels = new TextView[3];
-        perfBars = new ProgressBar[3];
-        int[] captions = {R.string.tm_cpu_short, R.string.tm_mem_short, R.string.tm_disk_short};
-        for (int i = 0; i < 3; i++) {
+        // Frames per second first, beside the processor: how smoothly the desktop is
+        // streaming right now (SysStats.fps). It is hidden until there is a figure.
+        perfLabels = new TextView[4];
+        perfBars = new ProgressBar[4];
+        perfFpsTop = panelTopRate();
+        int[] captions = {R.string.tm_fps_short, R.string.tm_cpu_short, R.string.tm_mem_short,
+                R.string.tm_disk_short};
+        for (int i = 0; i < 4; i++) {
             LinearLayout col = new LinearLayout(this);
             col.setOrientation(LinearLayout.VERTICAL);
             col.setGravity(Gravity.CENTER_HORIZONTAL);
@@ -3124,7 +3136,15 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
             label.setTextColor(theme.textDim);
             label.setTextSize(TypedValue.COMPLEX_UNIT_PX, sp(9));
             label.setGravity(Gravity.CENTER);
-            col.addView(label);
+            // WRAP_CONTENT, not the column's default MATCH_PARENT: a column that wraps its
+            // content sizes itself by its other children when one says MATCH_PARENT, so
+            // every label was squeezed to its bar's 34dp, "RAM 70%" broke at the space
+            // and only "RAM" showed. As wide as its widest figure from the start, so the
+            // gauge does not twitch as the figures change.
+            label.setMinWidth((int) Math.ceil(label.getPaint().measureText(
+                    getString(captions[i]) + (i == 0 ? " 888" : " 100%"))));
+            col.addView(label, new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
             ProgressBar bar = new ProgressBar(this, null,
                     android.R.attr.progressBarStyleHorizontal);
@@ -3140,8 +3160,14 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
 
             LinearLayout.LayoutParams colLp = new LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-            if (i > 0) colLp.leftMargin = dp(7);
+            // The gap is the FPS column's own, so the gauge closes up when it hides.
+            if (i == 0) colLp.rightMargin = dp(7);
+            if (i > 1) colLp.leftMargin = dp(7);
             wrap.addView(col, colLp);
+            if (i == 0) {
+                perfFpsColumn = col;
+                col.setVisibility(View.GONE);
+            }
         }
         updatePerfGauge();
         return wrap;
@@ -3150,20 +3176,45 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
     private void updatePerfGauge() {
         if (perfLabels == null || sysStats == null) return;
         sysStats.sample();
+        // -1: nothing is streaming this desktop (or the phone cannot count it yet).
+        int fps = sysStats.fps;
+        perfFpsColumn.setVisibility(fps < 0 ? View.GONE : View.VISIBLE);
+        if (fps >= 0) {
+            perfLabels[0].setText(getString(R.string.tm_fps_short) + " " + fps);
+            perfBars[0].setProgress(Math.min(100, fps * 100 / Math.max(1, perfFpsTop)));
+        }
         int[] values = {sysStats.cpuPercent, sysStats.memPercent, sysStats.diskPercent};
         int[] captions = {R.string.tm_cpu_short, R.string.tm_mem_short, R.string.tm_disk_short};
         for (int i = 0; i < 3; i++) {
             int v = values[i];
             // -1 is "the platform will not tell us", which must not render as 0%
-            perfLabels[i].setText(v < 0
+            perfLabels[i + 1].setText(v < 0
                     ? getString(captions[i])
                     : getString(captions[i]) + " " + v + "%");
-            perfBars[i].setProgress(Math.max(v, 0));
+            perfBars[i + 1].setProgress(Math.max(v, 0));
             // Storage is the one that matters when it is nearly full, and the
             // processor when it is pegged; colour the bar rather than add chrome.
-            perfBars[i].setProgressTintList(ColorStateList.valueOf(
+            perfBars[i + 1].setProgressTintList(ColorStateList.valueOf(
                     v >= 90 ? theme.danger : theme.accent));
         }
+    }
+
+    /** The phone panel's fastest refresh rate: the most frames a second the desktop can get. */
+    private int panelTopRate() {
+        int top = 60;
+        try {
+            android.hardware.display.DisplayManager displays =
+                    getSystemService(android.hardware.display.DisplayManager.class);
+            Display panel = displays == null ? null : displays.getDisplay(Display.DEFAULT_DISPLAY);
+            if (panel != null) {
+                for (Display.Mode mode : panel.getSupportedModes()) {
+                    top = Math.max(top, Math.round(mode.getRefreshRate()));
+                }
+            }
+        } catch (Throwable ignored) {
+            // 60 is every panel's rate
+        }
+        return top;
     }
 
     private void launchTaskManager() {

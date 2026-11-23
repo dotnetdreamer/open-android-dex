@@ -287,6 +287,9 @@ fn build_args(opts: &MirrorOptions) -> Vec<String> {
     if opts.max_fps > 0 {
         args.push(format!("--max-fps={}", opts.max_fps));
     }
+    if print_fps_enabled() {
+        args.push("--print-fps".into());
+    }
     if !opts.audio {
         args.push("--no-audio".into());
     } else if opts.audio_playback {
@@ -1870,6 +1873,21 @@ fn stored_audio_forwarding(app: &AppHandle) -> (bool, bool) {
     (forward, dup)
 }
 
+/// The desktop's refresh rate from Settings → Stream → Smoothness, in Hz; 0 for
+/// "Automatic", the phone's own choice — also what an unset or unreadable value
+/// means. Read off disk each time: the enforcer asks every arm, so a choice made on
+/// the desktop holds within one, and the request pump applies it at once anyway.
+fn stored_refresh_rate(app: &AppHandle) -> u32 {
+    refresh_rate_value(config_value(app, "hz").as_deref())
+}
+
+fn refresh_rate_value(stored: Option<&str>) -> u32 {
+    stored
+        .and_then(|v| v.trim().parse::<u32>().ok())
+        .filter(|hz| *hz <= 1000)
+        .unwrap_or(0)
+}
+
 /// "Where sound plays", as (forward, duplicate), for the app windows' sound menu.
 pub fn audio_forwarding(app: &AppHandle) -> (bool, bool) {
     stored_audio_forwarding(app)
@@ -2330,6 +2348,13 @@ fn reclaim_enabled() -> bool {
     std::env::var("OPENDEX_RECLAIM").is_ok_and(|v| v == "1")
 }
 
+/// Run with `OPENDEX_PRINT_FPS=1` to have scrcpy log the frames it shows each
+/// second ("INFO: 120 fps"), the computer's end of a frame-rate measurement
+/// (doc/refresh-rate.md).
+fn print_fps_enabled() -> bool {
+    std::env::var("OPENDEX_PRINT_FPS").is_ok_and(|v| v == "1")
+}
+
 /// How long the on-device watchdog waits, hearing nothing from here, before it
 /// concludes the PC is gone and undoes the session itself.
 ///
@@ -2418,6 +2443,9 @@ struct Enforcer {
     /// When the daemon was last started again because it had gone (see the
     /// re-arm in `tick`), so a phone that keeps losing it is not hammered.
     wmd_restarted_at: Option<Instant>,
+    /// The refresh rate the daemon last said it holds for this desktop, so the log
+    /// says when it changes rather than every arm. See [`Enforcer::hold_refresh`].
+    refresh_held: Option<u32>,
     /// last broadcast payload, to skip redundant broadcasts
     last_pkgs: Option<String>,
     /// Same, for the file-transfer HUD: its state is broadcast only when it
@@ -2435,6 +2463,26 @@ struct Enforcer {
 }
 
 impl Enforcer {
+    /// The desktop's refresh rate (Settings → Stream → Smoothness), held on the
+    /// phone's panel by the daemon (doc/refresh-rate.md). Sent with every arm, not
+    /// once: a daemon started again holds nothing, and a repeat costs it nothing.
+    /// "Automatic" is a 0, which gives back a rate held a moment ago.
+    fn hold_refresh(&mut self) {
+        let Some(held) = self.wm.hold_refresh(stored_refresh_rate(&self.app)) else {
+            return; // no daemon, or one from before the verb
+        };
+        if self.refresh_held != Some(held) {
+            match held {
+                0 if self.refresh_held.is_some() => {
+                    log::info!("freeform-enforcer [{}] the refresh rate is the phone's again", self.key)
+                }
+                0 => {}
+                hz => log::info!("freeform-enforcer [{}] the phone's panel is held at {hz} Hz", self.key),
+            }
+            self.refresh_held = Some(held);
+        }
+    }
+
     /// Run a device shell command, logging (not propagating) failures.
     fn run(&mut self, cmd: &str) -> Option<String> {
         match self.shell.run(&self.app, cmd) {
@@ -3261,6 +3309,15 @@ impl RequestPump {
                 if what == "audio" || what == "audiodup" || what == "reset" {
                     audio_dirty = true;
                 }
+                // Smoothness takes effect now too: it is a hold on the phone's panel
+                // (doc/refresh-rate.md), not a scrcpy argument. The enforcer would
+                // pick it up at its next arm; this saves the wait.
+                if what == "hz" || what == "reset" {
+                    let hz = stored_refresh_rate(&self.app);
+                    if let Some(held) = self.wm.hold_refresh(hz) {
+                        log::info!("request-pump [{}] smoothness {hz}: the phone's panel holds {held} Hz", self.key);
+                    }
+                }
                 true
             } else if cmd == "perf" {
                 // "Reduce quality" (Settings → Performance). The launcher does
@@ -3821,6 +3878,9 @@ impl Enforcer {
                 }
             }
         }
+        if self.ticks % ARM_EVERY_TICKS == 0 {
+            self.hold_refresh();
+        }
         // grep on the device: the full dump is hundreds of KB and shipping
         // it 5x/second would dominate the tick; the parser only needs these
         // four line shapes. Measured ~70ms — the launcher's request queue is
@@ -3969,6 +4029,7 @@ fn spawn_freeform_enforcer(
                 // moment after the display comes up, and a second start racing
                 // it would only kill the first.
                 wmd_restarted_at: Some(Instant::now()),
+                refresh_held: None,
                 last_pkgs: None,
                 last_transfer: None,
                 tseq: 0,
@@ -5112,6 +5173,19 @@ pub fn kill_all(app: &AppHandle) {
 
 #[cfg(test)]
 mod tests {
+
+    /// Smoothness as the launcher stores it ("hz.<rate>"): a rate, or 0 for the
+    /// phone's own choice whenever the value is missing or makes no sense.
+    #[test]
+    fn a_stored_smoothness_is_a_rate_or_the_phones_own_choice() {
+        assert_eq!(super::refresh_rate_value(Some("120")), 120);
+        assert_eq!(super::refresh_rate_value(Some(" 80 ")), 80);
+        assert_eq!(super::refresh_rate_value(Some("0")), 0);
+        assert_eq!(super::refresh_rate_value(None), 0);
+        assert_eq!(super::refresh_rate_value(Some("fast")), 0);
+        assert_eq!(super::refresh_rate_value(Some("-60")), 0);
+        assert_eq!(super::refresh_rate_value(Some("100000")), 0);
+    }
 
     /// A desktop takes its density off before its display goes, on the
     /// Androids that would keep it, and only on its own display.

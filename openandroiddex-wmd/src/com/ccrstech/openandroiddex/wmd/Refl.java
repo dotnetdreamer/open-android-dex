@@ -108,28 +108,48 @@ final class Refl {
     }
 
     static Object field(Object target, String name) {
+        Field f = fieldOf(target, name);
+        try {
+            return f.get(target);
+        } catch (Throwable t) {
+            throw new WmError("field " + target.getClass().getName() + "." + name + ": " + t);
+        }
+    }
+
+    static void setField(Object target, String name, Object value) {
+        Field f = fieldOf(target, name);
+        try {
+            f.set(target, value);
+        } catch (Throwable t) {
+            throw new WmError("field " + target.getClass().getName() + "." + name + ": " + t);
+        }
+    }
+
+    /** True if the field exists. Hidden classes change shape between releases. */
+    static boolean hasField(Object target, String name) {
+        try {
+            fieldOf(target, name);
+            return true;
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    private static Field fieldOf(Object target, String name) {
         String key = target.getClass().getName() + "." + name;
         Field cached = FIELDS.get(key);
-        try {
-            if (cached == null) {
-                Field f = null;
-                for (Class<?> c = target.getClass(); c != null && f == null; c = c.getSuperclass()) {
-                    try {
-                        f = c.getDeclaredField(name);
-                    } catch (NoSuchFieldException ignored) {
-                    }
-                }
-                if (f == null) throw new WmError("no field " + key);
-                f.setAccessible(true);
-                FIELDS.put(key, f);
-                cached = f;
+        if (cached != null) return cached;
+        Field f = null;
+        for (Class<?> c = target.getClass(); c != null && f == null; c = c.getSuperclass()) {
+            try {
+                f = c.getDeclaredField(name);
+            } catch (NoSuchFieldException ignored) {
             }
-            return cached.get(target);
-        } catch (WmError e) {
-            throw e;
-        } catch (Throwable t) {
-            throw new WmError("field " + key + ": " + t);
         }
+        if (f == null) throw new WmError("no field " + key);
+        f.setAccessible(true);
+        FIELDS.put(key, f);
+        return f;
     }
 
     private static Class<?> unbox(Class<?> c) {

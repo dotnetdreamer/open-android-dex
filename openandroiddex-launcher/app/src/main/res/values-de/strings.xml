@@ -9,7 +9,10 @@
     <string name="tm_cpu_short">CPU</string>
     <string name="tm_mem_short">RAM</string>
     <string name="tm_disk_short">SPEICHER</string>
+    <string name="tm_fps_short">FPS</string>
     <string name="tm_cpu_busy">ausgelastet</string>
+    <string name="tm_fps">Bildrate</string>
+    <string name="tm_fps_streamed">an den Computer gestreamt</string>
     <string name="tm_cpu_unavailable">auf diesem Gerät nicht verfügbar</string>
     <string name="tm_of">%1$s von %2$s</string>
     <string name="tm_open_apps">Auf diesem Desktop geöffnet</string>
@@ -418,6 +421,12 @@
     <string name="st_fps_value">%1$d fps</string>
     <string name="st_fps_auto">Unbegrenzt</string>
     <string name="st_fps_auto_sub">So schnell, wie das Telefon codieren kann</string>
+    <string name="st_hz">Bildwiederholrate</string>
+    <string name="st_hz_auto">Automatisch</string>
+    <string name="st_hz_auto_sub">Das Telefon entscheidet — 60 Hz, solange sein eigener Bildschirm aus ist</string>
+    <string name="st_hz_value">%1$d Hz</string>
+    <string name="st_hz_top_sub">Am flüssigsten — braucht mehr Akku</string>
+    <string name="st_hz_note">Solange der Desktop offen ist, läuft auch der Bildschirm des Telefons mit dieser Rate. Änderungen gelten sofort.</string>
     <string name="st_audio">Audio</string>
     <string name="st_audio_forward">Ton übertragen</string>
     <string name="st_audio_forward_sub">Den Telefonton auf diesem Rechner abspielen</string>

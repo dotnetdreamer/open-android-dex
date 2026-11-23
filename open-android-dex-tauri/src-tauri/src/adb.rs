@@ -1728,6 +1728,17 @@ pub fn restore_phone(app: &tauri::AppHandle, serial: &str) {
     if wm.clear_audio_route() {
         log::info!("{serial}: the media-output pin was cleared");
     }
+    // 0c. the desktop's refresh rate (doc/refresh-rate.md), by the same authority and
+    //     before the same deadline. Left behind, it would end at the phone's next change
+    //     of policy anyway; given back here, the phone's own panel is its own at once.
+    match wm.release_refresh() {
+        Ok(true) => log::info!("{serial}: the refresh rate held for the desktop was given back"),
+        Ok(false) => {}
+        Err(why) => log::warn!(
+            "{serial}: the refresh rate held for the desktop could not be given back ({why}) \
+             — it ends at the phone's next change of display policy"
+        ),
+    }
 
     let services = run_adb_timeout(
         app,

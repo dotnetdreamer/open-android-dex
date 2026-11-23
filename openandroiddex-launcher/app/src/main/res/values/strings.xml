@@ -10,7 +10,10 @@
     <string name="tm_cpu_short">CPU</string>
     <string name="tm_mem_short">RAM</string>
     <string name="tm_disk_short">DISK</string>
+    <string name="tm_fps_short">FPS</string>
     <string name="tm_cpu_busy">in use</string>
+    <string name="tm_fps">Frame rate</string>
+    <string name="tm_fps_streamed">streamed to the computer</string>
     <string name="tm_cpu_unavailable">not available on this device</string>
     <string name="tm_of">%1$s of %2$s</string>
     <string name="tm_open_apps">Open on this desktop</string>
@@ -331,6 +334,12 @@
     <string name="st_fps_value">%1$d fps</string>
     <string name="st_fps_auto">Unlimited</string>
     <string name="st_fps_auto_sub">As fast as the phone can encode</string>
+    <string name="st_hz">Smoothness</string>
+    <string name="st_hz_auto">Automatic</string>
+    <string name="st_hz_auto_sub">The phone decides — 60 Hz while its own screen is off</string>
+    <string name="st_hz_value">%1$d Hz</string>
+    <string name="st_hz_top_sub">Smoothest — uses more battery</string>
+    <string name="st_hz_note">While the desktop is open, the phone\'s own screen runs at this rate too. Changes take effect at once.</string>
     <string name="st_audio">Audio</string>
     <string name="st_audio_forward">Forward audio</string>
     <string name="st_audio_forward_sub">Play the phone sound through this computer</string>
@@ -493,7 +502,7 @@
     <string name="st_audio_computer_sub">Sound moves to the computer. The phone stays silent.</string>
     <string name="st_audio_both_sub">Sound comes out of the computer and the phone — this is the default. Costs the phone a little more work.</string>
     <string name="st_audio_phone_sub">Nothing is sent to the computer. Sound stays on the phone.</string>
-    <string name="st_audio_live_note">Where sound plays changes right away — the one stream setting that needs no restart.</string>
+    <string name="st_audio_live_note">Where sound plays changes right away — no restart needed.</string>
     <string name="lx_sound_output">SOUND OUTPUT</string>
     <string name="lx_media_output">Media output</string>
     <string name="lx_audio_computer">Computer only</string>

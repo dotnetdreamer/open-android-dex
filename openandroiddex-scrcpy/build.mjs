@@ -1,10 +1,12 @@
 #!/usr/bin/env node
 // Build scrcpy's server — the part that runs on the phone — from scrcpy's own
-// source at the release the desktop app bundles, with three changes of ours,
+// source at the release the desktop app bundles, with four changes of ours,
 // applied in this order: display-scale.patch (see doc/sharp-desktop.md,
-// "Following the window"), desktop-splash.patch (doc/desktop-splash.md) and
+// "Following the window"), desktop-splash.patch (doc/desktop-splash.md),
 // desktop-wake.patch (a sleeping phone is woken before its new display is made,
-// or the display goes black at its first resize: see the patch).
+// or the display goes black at its first resize: see the patch) and
+// desktop-fps.patch (the frames streamed each second, told to the window daemon
+// for the desktop's FPS readout: doc/refresh-rate.md).
 //
 //   node openandroiddex-scrcpy/build.mjs     →  openandroiddex-scrcpy/build/scrcpy-server
 //
@@ -67,12 +69,13 @@ if (head() !== SCRCPY_COMMIT) {
   console.log(`[1/4] scrcpy v${SCRCPY_VERSION} already in ${relative(process.cwd(), src)}`)
 }
 
-console.log('[2/4] apply display-scale.patch, desktop-splash.patch, desktop-wake.patch')
+console.log('[2/4] apply display-scale.patch, desktop-splash.patch, desktop-wake.patch, desktop-fps.patch')
 run('git', ['-C', src, 'checkout', '--quiet', '--', '.'])
 run('git', ['-C', src, 'clean', '--quiet', '-fd'])
 run('git', ['-C', src, 'apply', join(here, 'display-scale.patch')])
 run('git', ['-C', src, 'apply', join(here, 'desktop-splash.patch')])
 run('git', ['-C', src, 'apply', join(here, 'desktop-wake.patch')])
+run('git', ['-C', src, 'apply', join(here, 'desktop-fps.patch')])
 
 // ── the toolchain ─────────────────────────────────────────────────────────
 

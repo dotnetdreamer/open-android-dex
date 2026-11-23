@@ -9,7 +9,10 @@
     <string name="tm_cpu_short">CPU</string>
     <string name="tm_mem_short">RAM</string>
     <string name="tm_disk_short">DISCO</string>
+    <string name="tm_fps_short">FPS</string>
     <string name="tm_cpu_busy">en uso</string>
+    <string name="tm_fps">Fotogramas</string>
+    <string name="tm_fps_streamed">enviados al ordenador</string>
     <string name="tm_cpu_unavailable">no disponible en este dispositivo</string>
     <string name="tm_of">%1$s de %2$s</string>
     <string name="tm_open_apps">Abierto en este escritorio</string>
@@ -418,6 +421,12 @@
     <string name="st_fps_value">%1$d fps</string>
     <string name="st_fps_auto">Sin límite</string>
     <string name="st_fps_auto_sub">Tan rápido como el móvil pueda codificar</string>
+    <string name="st_hz">Fluidez</string>
+    <string name="st_hz_auto">Automático</string>
+    <string name="st_hz_auto_sub">Decide el teléfono — 60 Hz mientras su propia pantalla está apagada</string>
+    <string name="st_hz_value">%1$d Hz</string>
+    <string name="st_hz_top_sub">Lo más fluido — gasta más batería</string>
+    <string name="st_hz_note">Mientras el escritorio está abierto, la pantalla del teléfono también funciona a esta frecuencia. Los cambios se aplican al momento.</string>
     <string name="st_audio">Audio</string>
     <string name="st_audio_forward">Reenviar audio</string>
     <string name="st_audio_forward_sub">Reproducir el sonido del móvil en este ordenador</string>
