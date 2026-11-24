@@ -295,6 +295,7 @@ public class BrowserSettingsTest {
         System.out.println("no network: " + all);
         assertTrue(all.contains(app.getString(R.string.bw_set_no_network)));
         assertFalse("no address to give", all.contains("192.168"));
+        assertTrue("away from Wi-Fi: Tailscale", all.contains(app.getString(R.string.bw_set_away)));
         c.pause().stop().destroy();
     }
 
@@ -309,6 +310,7 @@ public class BrowserSettingsTest {
         String all = joined(root(c.get()));
         assertTrue("Wi-Fi first", all.contains("192.168.2.25:7443"));
         assertTrue("the hotspot's too, named", all.contains(app.getString(R.string.wb_if_hotspot) + "  192.168.43.1:7443"));
+        assertTrue("under the addresses, the way from away: Tailscale", all.contains(app.getString(R.string.bw_set_away)));
         c.pause().stop().destroy();
     }
 
@@ -360,6 +362,7 @@ public class BrowserSettingsTest {
         assertTrue("the VPN's address, as it is typed", BrowserTestKit.texts(r).contains("100.101.102.103:7443"));
         assertTrue("…named as a VPN", all.contains(app.getString(R.string.bw_if_vpn)));
         assertFalse("not the no-network note", all.contains(app.getString(R.string.bw_set_no_network)));
+        assertTrue("the note that names the VPN address", all.contains(app.getString(R.string.bw_set_away)));
         c.pause().stop().destroy();
     }
 

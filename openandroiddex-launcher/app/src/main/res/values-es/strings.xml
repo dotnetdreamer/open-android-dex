@@ -808,6 +808,7 @@ Si lo desactivas más adelante, Android cerrará Linux a la fuerza y el escritor
     <string name="bw_set_starting">Preparando…</string>
     <string name="bw_set_watching">Linux está abierto en %1$s</string>
     <string name="bw_set_no_network">Conecta este teléfono y el ordenador a la misma red Wi-Fi. O activa el punto de acceso de este teléfono y conecta el ordenador al punto de acceso.</string>
+    <string name="bw_set_away">¿Fuera de esta red Wi-Fi? Instala Tailscale en este teléfono y en el ordenador, e inicia sesión en ambos con la misma cuenta. Después abre la dirección marcada como VPN.</string>
     <string name="bw_set_failed">Los navegadores no pueden conectarse a este teléfono. %1$s</string>
     <string name="bw_set_warning">La primera vez, el navegador puede avisarte de que la conexión no es privada. Si la dirección coincide con la que se muestra aquí, elige «Configuración avanzada» y después «Continuar».</string>
     <string name="bw_set_plain">Si el navegador sigue bloqueando la página, vuelve a abrir la dirección y elige «Continue without encryption». Otras personas en la misma red Wi-Fi podrían ver la pantalla y lo que escribes.</string>
@@ -1048,7 +1049,7 @@ Si lo desactivas más adelante, Android cerrará Linux a la fuerza y el escritor
     <string name="pr_disclose_title">¿Dejar que el ordenador controle este teléfono?</string>
     <string name="pr_disclose_body">Android llama a este permiso «Accesibilidad». Permite que un ordenador autorizado toque la pantalla de este teléfono, se desplace y escriba. Mientras haya un ordenador conectado, LinuxOnDroid puede mantener la pantalla encendida y enviar capturas si el vídeo en directo está desactivado.</string>
     <string name="pr_disclose_cloudflare">Si usas el enlace de Cloudflare, la imagen de la pantalla y lo que escribes pasan por Cloudflare.</string>
-    <string name="pr_disclose_next">En la siguiente pantalla, elige Escritorio remoto y activa el interruptor. Si Android dice que el ajuste está restringido, abre Información de la app de LinuxOnDroid, toca el menú, elige Permitir ajustes restringidos y vuelve a probar.</string>
+    <string name="pr_disclose_next">En la siguiente pantalla, elige Escritorio remoto y activa el interruptor. En algunos teléfonos, Escritorio remoto está en Aplicaciones instaladas o Aplicaciones descargadas. Si Android dice que el ajuste está restringido, abre Información de la app de LinuxOnDroid, toca el menú, elige Permitir ajustes restringidos y vuelve a probar.</string>
     <string name="pr_disclose_no">Ahora no</string>
     <string name="pr_disclose_yes">Continuar</string>
     <string name="pr_channel">Escritorio remoto</string>
@@ -1060,12 +1061,12 @@ Si lo desactivas más adelante, Android cerrará Linux a la fuerza y el escritor
     <string name="pr_notif_ask_text">Un ordenador está esperando. Toca aquí y luego Empezar para recibir la imagen a máxima velocidad.</string>
     <string name="pr_channel_asks">Escritorio remoto: preguntas</string>
     <string name="pr_notif_control">Vuelve a activar el control de Escritorio remoto</string>
-    <string name="pr_notif_control_text">Android desactivó el control al cerrarse la aplicación. Toca aquí y luego activa Escritorio remoto.</string>
+    <string name="pr_notif_control_text">Android desactivó el control al cerrarse la aplicación. Toca aquí y luego activa Escritorio remoto. En algunos teléfonos, Escritorio remoto está en Aplicaciones instaladas o Aplicaciones descargadas.</string>
     <string name="pr_set_control_lost">Android desactivó el control al cerrarse la app. Vuelve a activarlo para tocar la pantalla, desplazarte y escribir desde el ordenador.</string>
-    <string name="pr_set_control_unbound">El control está activado en los ajustes de Android, pero no está conectado. Desactiva y vuelve a activar Escritorio remoto allí para tocar la pantalla, desplazarte y escribir desde el ordenador.</string>
+    <string name="pr_set_control_unbound">El control está activado en los ajustes de Android, pero no está conectado. Desactiva y vuelve a activar Escritorio remoto allí para tocar la pantalla, desplazarte y escribir desde el ordenador. En algunos teléfonos, Escritorio remoto está en Aplicaciones instaladas o Aplicaciones descargadas.</string>
     <string name="pr_set_control_reconnect">Abrir ajustes de accesibilidad</string>
     <string name="pr_notif_control_unbound">El control de Escritorio remoto no está conectado</string>
-    <string name="pr_notif_control_unbound_text">Android no conectó el control cuando la aplicación volvió a iniciarse. Toca aquí y luego desactiva y vuelve a activar Escritorio remoto.</string>
+    <string name="pr_notif_control_unbound_text">Android no conectó el control cuando la aplicación volvió a iniciarse. Toca aquí y luego desactiva y vuelve a activar Escritorio remoto. En algunos teléfonos, Escritorio remoto está en Aplicaciones instaladas o Aplicaciones descargadas.</string>
     <string name="pr_set_xiaomi_tip">En los teléfonos Xiaomi, «Borrar todo» en Aplicaciones recientes también cierra LinuxOnDroid. Con el inicio automático activado, LinuxOnDroid vuelve a arrancar solo, normalmente en menos de un minuto.</string>
     <string name="pr_control_label">Escritorio remoto</string>
     <string name="pr_control_summary">Permite que un ordenador que has añadido toque, se desplace y escriba en este teléfono</string>

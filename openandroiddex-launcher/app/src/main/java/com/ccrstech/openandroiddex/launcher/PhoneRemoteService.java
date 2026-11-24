@@ -228,7 +228,7 @@ public class PhoneRemoteService extends Service {
         NotificationManager nm = ctx.getSystemService(NotificationManager.class);
         if (nm == null) return;
         PendingIntent tap = PendingIntent.getActivity(ctx, 2,
-                new Intent(android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                PhoneRemote.accessibilitySettings(ctx).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
                 PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
         Notification n = asking(ctx, nm)
                 .setSmallIcon(R.drawable.hm_ic_remote)

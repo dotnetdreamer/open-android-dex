@@ -420,7 +420,7 @@ public class LinuxSettingsActivity extends Activity {
     /** Android's accessibility settings, where control is turned off and on again to connect it. */
     private void openAccessibilitySettings() {
         try {
-            startActivity(new Intent(android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS));
+            startActivity(PhoneRemote.accessibilitySettings(this));
         } catch (Exception e) {
             DexLog.warn("phone", "cannot open the accessibility settings", e);
         }
@@ -1098,7 +1098,11 @@ public class LinuxSettingsActivity extends Activity {
         }
     }
 
-    /** Android's page for this service where it has one (Android 13), its accessibility list otherwise. */
+    /**
+     * Android's page for this service where the phone lets an app open it
+     * (most keep that page for app stores: a Galaxy S25 refuses it), and
+     * otherwise the accessibility list with the way to Remote desktop marked.
+     */
     private void openAccessibility() {
         if (Build.VERSION.SDK_INT >= 33) {
             try {
@@ -1106,11 +1110,11 @@ public class LinuxSettingsActivity extends Activity {
                         .putExtra(Intent.EXTRA_COMPONENT_NAME, PhoneRemote.controlComponent(this).flattenToString()));
                 return;
             } catch (Exception ignored) {
-                // not on this phone: the list
+                // refused or missing: the list
             }
         }
         try {
-            startActivity(new Intent(android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS));
+            startActivity(PhoneRemote.accessibilitySettings(this));
         } catch (Exception e) {
             Toast.makeText(this, getString(R.string.ln_cannot_open), Toast.LENGTH_SHORT).show();
         }
@@ -1200,6 +1204,7 @@ public class LinuxSettingsActivity extends Activity {
 
         if (where.isEmpty()) {
             panel.addView(statusLine(AMBER, getString(R.string.bw_set_no_network)));
+            panel.addView(awayNote(), boxParams(dp(10)));
             return panel;
         }
         if (kind.equals("failed")) {
@@ -1230,6 +1235,7 @@ public class LinuxSettingsActivity extends Activity {
             asButton(also, getString(R.string.bw_set_copy) + " " + url);
             panel.addView(also);
         }
+        panel.addView(awayNote(), boxParams(dp(10)));
 
         panel.addView(stepTitle(2, getString(R.string.bw_set_step_code)), boxParams(dp(20)));
         if (usedUp) {
@@ -1297,6 +1303,18 @@ public class LinuxSettingsActivity extends Activity {
         panel.addView(quality, boxParams(dp(8)));
         addRemembered(panel, remembered);
         return panel;
+    }
+
+    /**
+     * For a computer away from the phone's Wi-Fi: Tailscale on both. Its
+     * network then shows on this card as a VPN address (LinuxBrowser.kindOf:
+     * tun, tailscale), and the door lets its computers in
+     * (LinuxBrowser.isLocalPeer: 100.64/10 and fc00::/7).
+     */
+    private TextView awayNote() {
+        TextView away = text(getString(R.string.bw_set_away), 13, theme.textFaint, 400);
+        away.setLineSpacing(0, 1.15f);
+        return away;
     }
 
     /** The server's own words for why it is not listening: "failed port 7443", "failed <why>". */

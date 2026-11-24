@@ -813,6 +813,7 @@ Se desativar isto mais tarde, o Android força o encerramento do Linux e o ambie
     <string name="bw_set_starting">A preparar…</string>
     <string name="bw_set_watching">O Linux está aberto em %1$s</string>
     <string name="bw_set_no_network">Ligue este telemóvel e o computador à mesma rede Wi-Fi. Ou ative o hotspot deste telemóvel e ligue o computador ao hotspot.</string>
+    <string name="bw_set_away">Fora desta rede Wi-Fi? Instale o Tailscale neste telemóvel e no computador, e inicie sessão em ambos com a mesma conta. Depois abra o endereço marcado como VPN.</string>
     <string name="bw_set_failed">Os navegadores não conseguem ligar-se a este telemóvel. %1$s</string>
     <string name="bw_set_warning">Da primeira vez, o navegador pode avisar que a ligação não é privada. Se o endereço for o mesmo que aparece aqui, escolha «Avançadas» e depois «Continuar».</string>
     <string name="bw_set_plain">Se o navegador continuar a bloquear a página, abra o endereço novamente e escolha «Continue without encryption». Outras pessoas na mesma rede Wi-Fi podem ver o ecrã e o que escreve.</string>
@@ -1048,7 +1049,7 @@ Se desativar isto mais tarde, o Android força o encerramento do Linux e o ambie
     <string name="pr_disclose_title">Deixar o computador controlar este telemóvel?</string>
     <string name="pr_disclose_body">O Android chama «Acessibilidade» a esta permissão. Permite que um computador autorizado toque, percorra o ecrã e escreva neste telemóvel. Enquanto um computador estiver ligado, o LinuxOnDroid pode manter o ecrã ligado e enviar capturas de ecrã quando não há vídeo em direto.</string>
     <string name="pr_disclose_cloudflare">Se usar a ligação da Cloudflare, o ecrã e o que escreve passam pela Cloudflare.</string>
-    <string name="pr_disclose_next">No ecrã seguinte, escolha Ambiente de trabalho remoto e ative o interruptor. Se o Android disser que a definição é restrita, abra Informações da app do LinuxOnDroid, toque no menu, escolha Permitir definições restritas e tente novamente.</string>
+    <string name="pr_disclose_next">No ecrã seguinte, escolha Ambiente de trabalho remoto e ative o interruptor. Em alguns telemóveis, o Ambiente de trabalho remoto está em Aplicações instaladas ou Apps transferidas. Se o Android disser que a definição é restrita, abra Informações da app do LinuxOnDroid, toque no menu, escolha Permitir definições restritas e tente novamente.</string>
     <string name="pr_disclose_no">Agora não</string>
     <string name="pr_disclose_yes">Continuar</string>
     <string name="pr_channel">Ambiente de trabalho remoto</string>
@@ -1060,12 +1061,12 @@ Se desativar isto mais tarde, o Android força o encerramento do Linux e o ambie
     <string name="pr_notif_ask_text">Um computador está à espera. Toque aqui e depois em Iniciar para ter a imagem à velocidade máxima.</string>
     <string name="pr_channel_asks">Ambiente de trabalho remoto: perguntas</string>
     <string name="pr_notif_control">Voltar a ativar o controlo para o Ambiente de trabalho remoto</string>
-    <string name="pr_notif_control_text">O Android desativou o controlo quando a aplicação foi fechada. Toque aqui e depois ative o Ambiente de trabalho remoto.</string>
+    <string name="pr_notif_control_text">O Android desativou o controlo quando a aplicação foi fechada. Toque aqui e depois ative o Ambiente de trabalho remoto. Em alguns telemóveis, o Ambiente de trabalho remoto está em Aplicações instaladas ou Apps transferidas.</string>
     <string name="pr_set_control_lost">O Android desativou o controlo quando a aplicação fechou. Volte a ativá-lo para tocar, percorrer o ecrã e escrever a partir do computador.</string>
-    <string name="pr_set_control_unbound">O controlo está ativado nas definições do Android, mas não está ligado. Desative e volte a ativar o Ambiente de trabalho remoto aí para tocar, percorrer o ecrã e escrever a partir do computador.</string>
+    <string name="pr_set_control_unbound">O controlo está ativado nas definições do Android, mas não está ligado. Desative e volte a ativar o Ambiente de trabalho remoto aí para tocar, percorrer o ecrã e escrever a partir do computador. Em alguns telemóveis, o Ambiente de trabalho remoto está em Aplicações instaladas ou Apps transferidas.</string>
     <string name="pr_set_control_reconnect">Abrir definições de acessibilidade</string>
     <string name="pr_notif_control_unbound">O controlo do Ambiente de trabalho remoto não está ligado</string>
-    <string name="pr_notif_control_unbound_text">O Android não ligou o controlo quando a aplicação voltou a iniciar. Toque aqui e depois desative e volte a ativar o Ambiente de trabalho remoto.</string>
+    <string name="pr_notif_control_unbound_text">O Android não ligou o controlo quando a aplicação voltou a iniciar. Toque aqui e depois desative e volte a ativar o Ambiente de trabalho remoto. Em alguns telemóveis, o Ambiente de trabalho remoto está em Aplicações instaladas ou Apps transferidas.</string>
     <string name="pr_set_xiaomi_tip">Nos telemóveis Xiaomi, «Limpar tudo» nas apps recentes também fecha o LinuxOnDroid. Com o arranque automático ligado, o LinuxOnDroid volta a arrancar sozinho, normalmente em menos de um minuto.</string>
     <string name="pr_control_label">Ambiente de trabalho remoto</string>
     <string name="pr_control_summary">Permite que um computador que adicionou toque, desloque o ecrã e escreva neste telemóvel</string>

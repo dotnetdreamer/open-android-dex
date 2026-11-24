@@ -813,6 +813,7 @@ Wenn du sie später wieder abschaltest, erzwingt Android das Beenden von Linux u
     <string name="bw_set_starting">Wird vorbereitet…</string>
     <string name="bw_set_watching">Linux ist in %1$s geöffnet</string>
     <string name="bw_set_no_network">Verbinde dieses Handy und den Computer mit demselben WLAN. Oder schalte den Hotspot dieses Handys ein und verbinde den Computer mit dem Hotspot.</string>
+    <string name="bw_set_away">Nicht im selben WLAN? Installiere Tailscale auf diesem Handy und auf dem Computer und melde dich auf beiden mit demselben Konto an. Öffne dann die Adresse, neben der „VPN“ steht.</string>
     <string name="bw_set_failed">Browser können sich nicht mit diesem Handy verbinden. %1$s</string>
     <string name="bw_set_warning">Beim ersten Öffnen kann der Browser melden, dass die Verbindung nicht privat ist. Wenn die Adresse mit der hier angezeigten übereinstimmt, wähle „Erweitert“ und dann „Weiter“.</string>
     <string name="bw_set_plain">Wenn der Browser die Seite weiterhin blockiert, öffne die Adresse erneut und wähle „Continue without encryption“. Andere im selben WLAN könnten den Bildschirm sehen und mitlesen, was du tippst.</string>
@@ -1048,7 +1049,7 @@ Wenn du sie später wieder abschaltest, erzwingt Android das Beenden von Linux u
     <string name="pr_disclose_title">Dem Computer erlauben, dieses Handy zu steuern?</string>
     <string name="pr_disclose_body">Android nennt diese Berechtigung „Bedienungshilfen“. Damit kannst du von einem Computer, dem du Zugriff erlaubst, auf diesem Handy tippen, scrollen und Text eingeben. Solange ein Computer verbunden ist, kann LinuxOnDroid den Bildschirm eingeschaltet lassen und Bildschirmfotos senden, wenn kein Livebild läuft.</string>
     <string name="pr_disclose_cloudflare">Wenn du den Cloudflare-Link nutzt, werden das Bild und deine Tastatureingaben über Cloudflare übertragen.</string>
-    <string name="pr_disclose_next">Wähle auf dem nächsten Bildschirm „Remote-Desktop“ und aktiviere den Schalter. Wenn Android sagt, dass die Einstellung eingeschränkt ist, öffne „App-Info“ für LinuxOnDroid, tippe auf das Menü, wähle „Eingeschränkte Einstellungen zulassen“ und versuche dann noch einmal, den Schalter zu aktivieren.</string>
+    <string name="pr_disclose_next">Wähle auf dem nächsten Bildschirm „Remote-Desktop“ und aktiviere den Schalter. Auf manchen Handys steht „Remote-Desktop“ unter „Installierte Apps“ oder „Heruntergeladene Apps“. Wenn Android sagt, dass die Einstellung eingeschränkt ist, öffne „App-Info“ für LinuxOnDroid, tippe auf das Menü, wähle „Eingeschränkte Einstellungen zulassen“ und versuche dann noch einmal, den Schalter zu aktivieren.</string>
     <string name="pr_disclose_no">Jetzt nicht</string>
     <string name="pr_disclose_yes">Weiter</string>
     <string name="pr_channel">Remote-Desktop</string>
@@ -1060,12 +1061,12 @@ Wenn du sie später wieder abschaltest, erzwingt Android das Beenden von Linux u
     <string name="pr_notif_ask_text">Ein Computer wartet. Tippe hier und dann auf „Starten“, um das Bild in vollem Tempo zu bekommen.</string>
     <string name="pr_channel_asks">Remote-Desktop: Rückfragen</string>
     <string name="pr_notif_control">Steuerung für Remote-Desktop wieder einschalten</string>
-    <string name="pr_notif_control_text">Android hat die Steuerung ausgeschaltet, als die App geschlossen wurde. Tippe hier und schalte dann „Remote-Desktop“ ein.</string>
+    <string name="pr_notif_control_text">Android hat die Steuerung ausgeschaltet, als die App geschlossen wurde. Tippe hier und schalte dann „Remote-Desktop“ ein. Auf manchen Handys steht „Remote-Desktop“ unter „Installierte Apps“ oder „Heruntergeladene Apps“.</string>
     <string name="pr_set_control_lost">Android hat die Steuerung beim Schließen der App ausgeschaltet. Schalte sie wieder ein, um vom Computer aus zu tippen, zu scrollen und Text einzugeben.</string>
-    <string name="pr_set_control_unbound">Die Steuerung ist in den Android-Einstellungen an, aber nicht verbunden. Schalte „Remote-Desktop“ dort aus und wieder ein, um vom Computer aus zu tippen, zu scrollen und Text einzugeben.</string>
+    <string name="pr_set_control_unbound">Die Steuerung ist in den Android-Einstellungen an, aber nicht verbunden. Schalte „Remote-Desktop“ dort aus und wieder ein, um vom Computer aus zu tippen, zu scrollen und Text einzugeben. Auf manchen Handys steht „Remote-Desktop“ unter „Installierte Apps“ oder „Heruntergeladene Apps“.</string>
     <string name="pr_set_control_reconnect">Bedienungshilfen öffnen</string>
     <string name="pr_notif_control_unbound">Steuerung für Remote-Desktop nicht verbunden</string>
-    <string name="pr_notif_control_unbound_text">Android hat die Steuerung nach dem Neustart der App nicht verbunden. Tippe hier und schalte dann „Remote-Desktop“ aus und wieder ein.</string>
+    <string name="pr_notif_control_unbound_text">Android hat die Steuerung nach dem Neustart der App nicht verbunden. Tippe hier und schalte dann „Remote-Desktop“ aus und wieder ein. Auf manchen Handys steht „Remote-Desktop“ unter „Installierte Apps“ oder „Heruntergeladene Apps“.</string>
     <string name="pr_set_xiaomi_tip">Auf Xiaomi-Telefonen schließt „Alle löschen“ in den letzten Apps auch LinuxOnDroid. Mit eingeschaltetem Autostart startet LinuxOnDroid von selbst wieder, meist innerhalb einer Minute.</string>
     <string name="pr_control_label">Remote-Desktop</string>
     <string name="pr_control_summary">Lässt einen Computer, den du hinzugefügt hast, auf diesem Handy tippen, scrollen und schreiben</string>

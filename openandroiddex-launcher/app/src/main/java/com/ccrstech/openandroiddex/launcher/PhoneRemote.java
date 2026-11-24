@@ -2,7 +2,10 @@ package com.ccrstech.openandroiddex.launcher;
 
 import android.content.ComponentName;
 import android.content.Context;
+import android.content.Intent;
 import android.content.pm.PackageManager;
+import android.os.Build;
+import android.os.Bundle;
 import android.provider.Settings;
 import android.text.TextUtils;
 
@@ -276,6 +279,45 @@ final class PhoneRemote {
 
     static ComponentName controlComponent(Context ctx) {
         return new ComponentName(ctx, PhoneControlService.class);
+    }
+
+    /** The row Android's Settings marks when a page is opened with it (AOSP SettingsActivity.EXTRA_FRAGMENT_ARG_KEY). */
+    static final String SETTINGS_MARK = ":settings:fragment_args_key";
+    /** The page's own arguments, where AOSP's Settings reads the mark (EXTRA_SHOW_FRAGMENT_ARGUMENTS). */
+    static final String SETTINGS_PAGE_ARGS = ":settings:show_fragment_args";
+    /**
+     * Samsung's "Installed apps" row on its accessibility page, which holds
+     * every downloaded app's service (key from SecSettings'
+     * sec_accessibility_settings.xml, One UI 9 on a Galaxy S25 Ultra).
+     */
+    static final String SAMSUNG_INSTALLED_APPS = "accessibility_installed_services";
+
+    /**
+     * Android's accessibility settings, with the row to go to marked.
+     *
+     * <p>The page that switches control on directly
+     * (ACCESSIBILITY_DETAILS_SETTINGS) is not an app's to open: Android keeps
+     * it for app stores and its own apps (OPEN_ACCESSIBILITY_DETAILS_SETTINGS,
+     * signature|installer, read off a Galaxy S25 Ultra). The accessibility
+     * page itself is, and Settings marks the row named by
+     * {@link #SETTINGS_MARK}: AOSP reads the mark from the page's arguments,
+     * Samsung from either place, so both carry it.
+     *
+     * <p>Which row: AOSP lists downloaded apps' services on that first page,
+     * each keyed by its component, so Remote desktop's own row. Samsung lists
+     * them one page down, so its "Installed apps" row (marked on the S25,
+     * Android 17; a made-up key marked nothing there, another row's key marked
+     * that row). A phone that knows neither key just opens the page.
+     */
+    static Intent accessibilitySettings(Context ctx) {
+        String row = "samsung".equalsIgnoreCase(Build.MANUFACTURER)
+                ? SAMSUNG_INSTALLED_APPS
+                : controlComponent(ctx).flattenToString();
+        Bundle pageArgs = new Bundle();
+        pageArgs.putString(SETTINGS_MARK, row);
+        return new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
+                .putExtra(SETTINGS_MARK, row)
+                .putExtra(SETTINGS_PAGE_ARGS, pageArgs);
     }
 
     /**

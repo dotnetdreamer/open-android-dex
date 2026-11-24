@@ -808,6 +808,7 @@
     <string name="bw_set_starting">正在准备…</string>
     <string name="bw_set_watching">Linux 已在 %1$s 中打开</string>
     <string name="bw_set_no_network">请让这部手机和电脑连接同一个 Wi-Fi。或者打开这部手机的热点，让电脑连接这个热点。</string>
+    <string name="bw_set_away">不在这个 Wi-Fi 上？在这部手机和电脑上安装 Tailscale，并用同一个账号登录。然后打开标有 VPN 的地址。</string>
     <string name="bw_set_failed">浏览器无法连接这部手机。%1$s</string>
     <string name="bw_set_warning">首次访问时，浏览器可能会提示连接不是私密连接。如果地址与这里显示的一致，请选择“高级”，然后选择“继续”。</string>
     <string name="bw_set_plain">如果浏览器仍然阻止打开页面，请重新打开该地址并选择“Continue without encryption”。同一个 Wi-Fi 上的其他人可能会看到屏幕和你输入的内容。</string>
@@ -1047,7 +1048,7 @@
     <string name="pr_disclose_title">允许电脑控制这部手机？</string>
     <string name="pr_disclose_body">Android 将这项权限称为“无障碍”。它让你允许的电脑可以在这部手机上点按、滚动和输入。电脑连接时，LinuxOnDroid 可以让屏幕保持开启，并在没有实时视频时发送截图。</string>
     <string name="pr_disclose_cloudflare">如果使用 Cloudflare 链接，屏幕画面和你输入的内容会经过 Cloudflare。</string>
-    <string name="pr_disclose_next">在下一个屏幕上，选择“远程桌面”并打开开关。如果 Android 提示该设置受限，请打开 LinuxOnDroid 的“应用信息”，点按菜单，选择“允许受限制的设置”，然后重试。</string>
+    <string name="pr_disclose_next">在下一个屏幕上，选择“远程桌面”并打开开关。在某些手机上，“远程桌面”位于“已安装的应用程序”或“已下载的应用”中。如果 Android 提示该设置受限，请打开 LinuxOnDroid 的“应用信息”，点按菜单，选择“允许受限制的设置”，然后重试。</string>
     <string name="pr_disclose_no">暂不</string>
     <string name="pr_disclose_yes">继续</string>
     <string name="pr_channel">远程桌面</string>
@@ -1059,12 +1060,12 @@
     <string name="pr_notif_ask_text">有一台电脑正在等待。点按这里，然后点按“开始”，即可获得全速画面。</string>
     <string name="pr_channel_asks">远程桌面：询问</string>
     <string name="pr_notif_control">重新开启远程桌面的控制</string>
-    <string name="pr_notif_control_text">应用关闭时，Android 关闭了控制。点按这里，然后开启“远程桌面”。</string>
+    <string name="pr_notif_control_text">应用关闭时，Android 关闭了控制。点按这里，然后开启“远程桌面”。在某些手机上，“远程桌面”位于“已安装的应用程序”或“已下载的应用”中。</string>
     <string name="pr_set_control_lost">应用关闭时，Android 关闭了控制。重新开启后，就可以在电脑上点按、滚动和输入。</string>
-    <string name="pr_set_control_unbound">Android 设置中已开启控制，但尚未连接。在那里关闭再重新开启“远程桌面”，即可在电脑上点按、滚动和输入。</string>
+    <string name="pr_set_control_unbound">Android 设置中已开启控制，但尚未连接。在那里关闭再重新开启“远程桌面”，即可在电脑上点按、滚动和输入。在某些手机上，“远程桌面”位于“已安装的应用程序”或“已下载的应用”中。</string>
     <string name="pr_set_control_reconnect">打开无障碍设置</string>
     <string name="pr_notif_control_unbound">远程桌面的控制未连接</string>
-    <string name="pr_notif_control_unbound_text">应用重新启动后，Android 没有连接控制。点按这里，然后关闭再重新开启“远程桌面”。</string>
+    <string name="pr_notif_control_unbound_text">应用重新启动后，Android 没有连接控制。点按这里，然后关闭再重新开启“远程桌面”。在某些手机上，“远程桌面”位于“已安装的应用程序”或“已下载的应用”中。</string>
     <string name="pr_set_xiaomi_tip">在小米手机上，最近任务里的“全部清除”也会关闭 LinuxOnDroid。开启自启动后，LinuxOnDroid 会自己重新启动，通常在一分钟内。</string>
     <string name="pr_control_label">远程桌面</string>
     <string name="pr_control_summary">让你添加的电脑在这部手机上点按、滚动和输入</string>

@@ -1192,6 +1192,7 @@ If you switch this off again later, Android force-closes Linux and the desktop r
     <string name="bw_set_starting">Getting ready…</string>
     <string name="bw_set_watching">Linux is open in %1$s</string>
     <string name="bw_set_no_network">Connect this phone and the computer to the same Wi-Fi. Or turn on this phone\'s hotspot and connect the computer to the hotspot.</string>
+    <string name="bw_set_away">Away from this Wi-Fi? Install Tailscale on this phone and on the computer, and sign in to both with the same account. Then open the address marked VPN.</string>
     <string name="bw_set_failed">Browsers cannot connect to this phone. %1$s</string>
     <string name="bw_set_warning">On your first visit, the browser may say the connection is not private. If the address matches the one shown here, choose Advanced, then Continue.</string>
     <string name="bw_set_plain">If the browser still blocks the page, open the address again and choose Continue without encryption. Other people on the same Wi-Fi could see the screen and what you type.</string>
@@ -1431,7 +1432,7 @@ If you switch this off again later, Android force-closes Linux and the desktop r
     <string name="pr_disclose_title">Let the computer control this phone?</string>
     <string name="pr_disclose_body">Android calls this permission Accessibility. It lets a computer you allow tap, scroll and type on this phone. While a computer is connected, LinuxOnDroid can keep the screen awake and send screenshots when live video is off.</string>
     <string name="pr_disclose_cloudflare">If you use the Cloudflare link, the screen and what you type pass through Cloudflare.</string>
-    <string name="pr_disclose_next">On the next screen, choose Remote desktop and turn on the switch. If Android says the setting is restricted, open App info for LinuxOnDroid, tap the menu, choose Allow restricted settings, then try again.</string>
+    <string name="pr_disclose_next">On the next screen, choose Remote desktop and turn on the switch. On some phones, Remote desktop is under Installed apps or Downloaded apps. If Android says the setting is restricted, open App info for LinuxOnDroid, tap the menu, choose Allow restricted settings, then try again.</string>
     <string name="pr_disclose_no">Not now</string>
     <string name="pr_disclose_yes">Continue</string>
     <string name="pr_channel">Remote desktop</string>
@@ -1443,12 +1444,12 @@ If you switch this off again later, Android force-closes Linux and the desktop r
     <string name="pr_notif_ask_text">A computer is waiting. Tap here, then Start, for the full-speed picture.</string>
     <string name="pr_channel_asks">Remote desktop: questions</string>
     <string name="pr_notif_control">Turn control back on for Remote desktop</string>
-    <string name="pr_notif_control_text">Android turned control off when the app was closed. Tap here, then turn on Remote desktop.</string>
+    <string name="pr_notif_control_text">Android turned control off when the app was closed. Tap here, then turn on Remote desktop. On some phones, Remote desktop is under Installed apps or Downloaded apps.</string>
     <string name="pr_set_control_lost">Android turned off control when the app closed. Turn it back on to tap, scroll and type from your computer.</string>
-    <string name="pr_set_control_unbound">Control is on in Android\'s settings but not connected. Turn Remote desktop off and on again there to tap, scroll and type from your computer.</string>
+    <string name="pr_set_control_unbound">Control is on in Android\'s settings but not connected. Turn Remote desktop off and on again there to tap, scroll and type from your computer. On some phones, Remote desktop is under Installed apps or Downloaded apps.</string>
     <string name="pr_set_control_reconnect">Open accessibility settings</string>
     <string name="pr_notif_control_unbound">Control for Remote desktop is not connected</string>
-    <string name="pr_notif_control_unbound_text">Android did not connect control after the app started again. Tap here, then turn Remote desktop off and on.</string>
+    <string name="pr_notif_control_unbound_text">Android did not connect control after the app started again. Tap here, then turn Remote desktop off and on. On some phones, Remote desktop is under Installed apps or Downloaded apps.</string>
     <string name="pr_set_xiaomi_tip">On Xiaomi phones, Clear all in Recent apps also closes LinuxOnDroid. With Autostart on, LinuxOnDroid starts again by itself, usually within a minute.</string>
     <string name="pr_control_label">Remote desktop</string>
     <string name="pr_control_summary">Lets a computer you added tap, scroll and type on this phone</string>

@@ -9,8 +9,13 @@ import static org.robolectric.Shadows.shadowOf;
 
 import android.app.Activity;
 import android.app.Dialog;
+import android.app.Notification;
+import android.app.NotificationManager;
+import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
+import android.content.IntentFilter;
+import android.os.Bundle;
 import android.provider.Settings;
 import android.view.View;
 import android.widget.Switch;
@@ -344,6 +349,24 @@ public class PhoneRemoteSettingsTest {
         Settings.Secure.putInt(app.getContentResolver(), Settings.Secure.ACCESSIBILITY_ENABLED, 1);
     }
 
+    /**
+     * The row Android's Settings is asked to mark: in the page's arguments,
+     * where AOSP reads it, and on the intent itself, the same row.
+     */
+    private static String markedRow(Intent i) {
+        Bundle pageArgs = i.getBundleExtra(":settings:show_fragment_args");
+        assertNotNull("the page's arguments carry the mark (AOSP reads it there)", pageArgs);
+        String row = pageArgs.getString(":settings:fragment_args_key");
+        assertEquals("the same row on the intent itself", row, i.getStringExtra(":settings:fragment_args_key"));
+        return row;
+    }
+
+    /** Remote desktop's own row on most phones; on a Samsung, the "Installed apps" row that holds it. */
+    private String rowToGoTo(String maker) {
+        return maker.equals("samsung") ? "accessibility_installed_services"
+                : PhoneRemote.controlComponent(app).flattenToString();
+    }
+
     @Test
     public void offByDefault_inItsOwnSection() throws Exception {
         ActivityController<LinuxSettingsActivity> c = page();
@@ -563,11 +586,71 @@ public class PhoneRemoteSettingsTest {
         Intent next = shadowOf(c.get()).getNextStartedActivity();
         assertNotNull("Android's accessibility settings", next);
         assertEquals(Settings.ACTION_ACCESSIBILITY_SETTINGS, next.getAction());
+        assertEquals("Remote desktop's own row marked", rowToGoTo(android.os.Build.MANUFACTURER), markedRow(next));
         c.pause().stop().destroy();
 
         // Control off in Android's settings: not "not connected", the plain words.
         Settings.Secure.putString(app.getContentResolver(), Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES, "");
         assertFalse(PhoneRemote.controlUnbound(app));
+    }
+
+    /**
+     * Android keeps the page with control's own switch for app stores and its
+     * own apps (a Galaxy S25 refuses it). After the words and Continue, the
+     * accessibility list opens with the way to Remote desktop marked: its own
+     * row on most phones, the "Installed apps" row on a Samsung.
+     */
+    @Test
+    public void control_whenAndroidKeepsItsOwnPage_opensTheListWithTheWayMarked() throws Exception {
+        // Only the accessibility list opens for an app here: the page for one service is refused.
+        shadowOf(RuntimeEnvironment.getApplication()).checkActivities(true);
+        ComponentName list = new ComponentName("com.android.settings",
+                "com.android.settings.Settings$AccessibilitySettingsActivity");
+        org.robolectric.shadows.ShadowPackageManager pm = shadowOf(app.getPackageManager());
+        pm.addActivityIfNotPresent(list);
+        IntentFilter f = new IntentFilter(Settings.ACTION_ACCESSIBILITY_SETTINGS);
+        f.addCategory(Intent.CATEGORY_DEFAULT);
+        pm.addIntentFilterForActivity(list, f);
+
+        for (String maker : new String[]{"Google", "samsung"}) {
+            org.robolectric.shadows.ShadowBuild.setManufacturer(maker);
+            PhoneRemote.setEnabled(app, true);
+            ActivityController<LinuxSettingsActivity> c = page();
+            tap(root(c.get()), R.string.pr_set_control_turn_on);
+            Dialog d = ShadowDialog.getLatestDialog();
+            target(d.getWindow().getDecorView(), app.getString(R.string.pr_disclose_yes)).performClick();
+            BrowserTestKit.settle(200);
+            Intent next = shadowOf(c.get()).getNextStartedActivity();
+            assertNotNull(maker + ": Android's accessibility list", next);
+            assertEquals(maker, Settings.ACTION_ACCESSIBILITY_SETTINGS, next.getAction());
+            assertEquals(maker + ": the row to go to", rowToGoTo(maker), markedRow(next));
+            c.pause().stop().destroy();
+        }
+    }
+
+    /** Both control notifications open the accessibility list with the way to Remote desktop marked. */
+    @Test
+    public void controlNotifications_openTheListWithTheWayMarked() {
+        NotificationManager nm = app.getSystemService(NotificationManager.class);
+        int[] titles = {R.string.pr_notif_control, R.string.pr_notif_control_unbound};
+        for (String maker : new String[]{"Google", "samsung"}) {
+            org.robolectric.shadows.ShadowBuild.setManufacturer(maker);
+            for (int title : titles) {
+                nm.cancelAll();
+                if (title == R.string.pr_notif_control) PhoneRemoteService.postControlLost(app);
+                else PhoneRemoteService.postControlUnbound(app);
+                Notification n = null;
+                for (Notification one : shadowOf(nm).getAllNotifications()) {
+                    CharSequence t = one.extras.getCharSequence(Notification.EXTRA_TITLE);
+                    if (t != null && app.getString(title).contentEquals(t)) n = one;
+                }
+                assertNotNull(maker + ": " + app.getString(title), n);
+                Intent tap = shadowOf(n.contentIntent).getSavedIntent();
+                assertEquals(Settings.ACTION_ACCESSIBILITY_SETTINGS, tap.getAction());
+                assertEquals(maker + ": " + app.getString(title), rowToGoTo(maker), markedRow(tap));
+            }
+        }
+        nm.cancelAll();
     }
 
     @Test

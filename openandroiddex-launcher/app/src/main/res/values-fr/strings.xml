@@ -808,6 +808,7 @@ Si vous la désactivez plus tard, Android forcera la fermeture de Linux et le bu
     <string name="bw_set_starting">Préparation…</string>
     <string name="bw_set_watching">Linux est ouvert dans %1$s</string>
     <string name="bw_set_no_network">Connectez ce téléphone et l\'ordinateur au même Wi-Fi. Ou activez le point d\'accès de ce téléphone et connectez l\'ordinateur au point d\'accès.</string>
+    <string name="bw_set_away">Hors de ce Wi-Fi ? Installez Tailscale sur ce téléphone et sur l\'ordinateur, puis connectez-vous sur les deux avec le même compte. Ouvrez ensuite l\'adresse marquée VPN.</string>
     <string name="bw_set_failed">Les navigateurs ne peuvent pas se connecter à ce téléphone. %1$s</string>
     <string name="bw_set_warning">La première fois, le navigateur peut signaler que la connexion n’est pas privée. Si l’adresse correspond à celle affichée ici, choisissez « Paramètres avancés », puis « Continuer ».</string>
     <string name="bw_set_plain">Si le navigateur bloque toujours la page, ouvrez de nouveau l’adresse et choisissez « Continue without encryption ». D’autres personnes sur le même réseau Wi-Fi pourraient voir l’écran et ce que vous tapez.</string>
@@ -1048,7 +1049,7 @@ Si vous la désactivez plus tard, Android forcera la fermeture de Linux et le bu
     <string name="pr_disclose_title">Laisser l\'ordinateur contrôler ce téléphone ?</string>
     <string name="pr_disclose_body">Android appelle cette autorisation « Accessibilité ». Elle permet de toucher l’écran, de faire défiler et de taper du texte sur ce téléphone depuis un ordinateur autorisé. Lorsqu’un ordinateur est connecté, LinuxOnDroid peut garder l’écran allumé et envoyer des captures d’écran si la vidéo en direct est coupée.</string>
     <string name="pr_disclose_cloudflare">Si vous utilisez le lien Cloudflare, l’image de l’écran et ce que vous tapez passent par Cloudflare.</string>
-    <string name="pr_disclose_next">Sur l\'écran suivant, choisissez Bureau à distance et activez le bouton. Si Android indique que le paramètre est restreint, ouvrez Infos sur l\'appli pour LinuxOnDroid, appuyez sur le menu, choisissez Autoriser les paramètres restreints, puis réessayez.</string>
+    <string name="pr_disclose_next">Sur l\'écran suivant, choisissez Bureau à distance et activez le bouton. Sur certains téléphones, Bureau à distance se trouve dans Applications installées ou Applications téléchargées. Si Android indique que le paramètre est restreint, ouvrez Infos sur l\'appli pour LinuxOnDroid, appuyez sur le menu, choisissez Autoriser les paramètres restreints, puis réessayez.</string>
     <string name="pr_disclose_no">Pas maintenant</string>
     <string name="pr_disclose_yes">Continuer</string>
     <string name="pr_channel">Bureau à distance</string>
@@ -1060,12 +1061,12 @@ Si vous la désactivez plus tard, Android forcera la fermeture de Linux et le bu
     <string name="pr_notif_ask_text">Un ordinateur attend. Appuyez ici, puis sur Commencer, pour avoir l\'image à pleine vitesse.</string>
     <string name="pr_channel_asks">Bureau à distance : questions</string>
     <string name="pr_notif_control">Réactiver le contrôle pour Bureau à distance</string>
-    <string name="pr_notif_control_text">Android a désactivé le contrôle à la fermeture de l\'application. Appuyez ici, puis activez Bureau à distance.</string>
+    <string name="pr_notif_control_text">Android a désactivé le contrôle à la fermeture de l\'application. Appuyez ici, puis activez Bureau à distance. Sur certains téléphones, Bureau à distance se trouve dans Applications installées ou Applications téléchargées.</string>
     <string name="pr_set_control_lost">Android a désactivé le contrôle à la fermeture de l’appli. Réactivez-le pour toucher l’écran, faire défiler et taper du texte depuis votre ordinateur.</string>
-    <string name="pr_set_control_unbound">Le contrôle est activé dans les paramètres d’Android, mais il n’est pas connecté. Désactivez puis réactivez Bureau à distance à cet endroit pour toucher l’écran, faire défiler et taper du texte depuis votre ordinateur.</string>
+    <string name="pr_set_control_unbound">Le contrôle est activé dans les paramètres d’Android, mais il n’est pas connecté. Désactivez puis réactivez Bureau à distance à cet endroit pour toucher l’écran, faire défiler et taper du texte depuis votre ordinateur. Sur certains téléphones, Bureau à distance se trouve dans Applications installées ou Applications téléchargées.</string>
     <string name="pr_set_control_reconnect">Ouvrir les paramètres d’accessibilité</string>
     <string name="pr_notif_control_unbound">Le contrôle de Bureau à distance n’est pas connecté</string>
-    <string name="pr_notif_control_unbound_text">Android n’a pas connecté le contrôle au redémarrage de l’application. Appuyez ici, puis désactivez et réactivez Bureau à distance.</string>
+    <string name="pr_notif_control_unbound_text">Android n’a pas connecté le contrôle au redémarrage de l’application. Appuyez ici, puis désactivez et réactivez Bureau à distance. Sur certains téléphones, Bureau à distance se trouve dans Applications installées ou Applications téléchargées.</string>
     <string name="pr_set_xiaomi_tip">Sur les téléphones Xiaomi, « Tout effacer » dans les applis récentes ferme aussi LinuxOnDroid. Avec le démarrage automatique activé, LinuxOnDroid redémarre tout seul, en général en moins d\'une minute.</string>
     <string name="pr_control_label">Bureau à distance</string>
     <string name="pr_control_summary">Permet à un ordinateur que vous avez ajouté de toucher, faire défiler et taper sur ce téléphone</string>
