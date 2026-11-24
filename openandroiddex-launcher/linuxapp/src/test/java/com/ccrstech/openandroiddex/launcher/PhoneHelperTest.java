@@ -35,7 +35,7 @@ import java.util.List;
 public class PhoneHelperTest {
 
     /** The panel as a phone has it, and every call made to it. */
-    private static final class FakePower implements PhoneHelper.Power {
+    static final class FakePower implements PhoneHelper.Power {
         volatile boolean awake = true;
         volatile boolean lit = true;
         volatile boolean failNext;
@@ -85,7 +85,7 @@ public class PhoneHelperTest {
     }
 
     /** Input events, kept instead of put in. */
-    private static final class FakeInput implements PhoneHelper.Input {
+    static final class FakeInput implements PhoneHelper.Input {
         final List<InputEvent> events = new ArrayList<>();
 
         @Override
@@ -590,7 +590,7 @@ public class PhoneHelperTest {
      * lines (run()'s loop, written out here because run() ends the process on
      * quit), with the stand-in panel.
      */
-    private static java.net.ServerSocket serveHelper(PhoneHelper h, byte[] key) throws Exception {
+    static java.net.ServerSocket serveHelper(PhoneHelper h, byte[] key) throws Exception {
         java.net.ServerSocket server = new java.net.ServerSocket(0, 4, java.net.InetAddress.getLoopbackAddress());
         Thread accept = new Thread(() -> {
             while (!server.isClosed()) {
@@ -730,30 +730,18 @@ public class PhoneHelperTest {
     }
 
     /**
-     * A helper an update left running, of the protocol before {@code restore}
-     * (1): its {@code on} would light another tool's dark screen at a
-     * session's end. The app tells it to go at the handshake and asks it
-     * nothing else, so the new helper is started instead.
+     * A helper of an earlier protocol, as such a helper shakes hands: every
+     * line it hears after the handshake goes into {@code heard}.
      */
-    @Test
-    public void anOlderHelperIsToldToGoAndAskedNothingElse() throws Exception {
-        android.content.Context app = org.robolectric.RuntimeEnvironment.getApplication();
-        java.lang.reflect.Field kept = PhoneHelperLink.class.getDeclaredField("app");
-        kept.setAccessible(true);
-        kept.set(null, null);
-        org.robolectric.Shadows.shadowOf(app.getSystemService(android.os.PowerManager.class)).setIsInteractive(true);
-        String key = "9e".repeat(32);
-        byte[] k = key.getBytes(java.nio.charset.StandardCharsets.UTF_8);
-        List<String> heard = java.util.Collections.synchronizedList(new ArrayList<>());
+    private static java.net.ServerSocket serveOldHelper(byte[] k, int version, List<String> heard) throws Exception {
         java.net.ServerSocket old = new java.net.ServerSocket(0, 4, java.net.InetAddress.getLoopbackAddress());
         Thread t = new Thread(() -> {
             while (!old.isClosed()) {
                 try (java.net.Socket s = old.accept()) {
-                    // A version-1 helper's handshake, as such a helper says it.
                     java.io.BufferedReader in = new java.io.BufferedReader(new java.io.InputStreamReader(s.getInputStream(), java.nio.charset.StandardCharsets.UTF_8));
                     java.io.OutputStream out = s.getOutputStream();
                     String mine = PhoneHelper.challenge();
-                    out.write(("helper 1 " + mine + "\n").getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                    out.write(("helper " + version + " " + mine + "\n").getBytes(java.nio.charset.StandardCharsets.UTF_8));
                     String[] w = String.valueOf(in.readLine()).split(" ");
                     if (w.length != 3 || !PhoneHelper.same(w[1], PhoneHelper.proof(k, "app", mine))) continue;
                     out.write(("ok " + PhoneHelper.proof(k, "helper", w[2]) + " on 35\n").getBytes(java.nio.charset.StandardCharsets.UTF_8));
@@ -766,17 +754,65 @@ public class PhoneHelperTest {
         }, "old-helper");
         t.setDaemon(true);
         t.start();
-        Object page = new Object();
+        return old;
+    }
+
+    /**
+     * A helper an update left running, of the protocol before {@code restore}
+     * (1): its {@code on} would light another tool's dark screen at a
+     * session's end. The app tells it to go at the handshake and asks it
+     * nothing else, so the new helper is started instead. The same for the
+     * protocol before {@code project} (2), which would answer Easy access with
+     * "error unknown".
+     */
+    @Test
+    public void anOlderHelperIsToldToGoAndAskedNothingElse() throws Exception {
+        android.content.Context app = org.robolectric.RuntimeEnvironment.getApplication();
+        java.lang.reflect.Field kept = PhoneHelperLink.class.getDeclaredField("app");
+        kept.setAccessible(true);
+        kept.set(null, null);
+        org.robolectric.Shadows.shadowOf(app.getSystemService(android.os.PowerManager.class)).setIsInteractive(true);
+        for (int version = 1; version < PhoneHelper.PROTOCOL; version++) {
+            String key = (version == 1 ? "9e" : "8f").repeat(32);
+            List<String> heard = java.util.Collections.synchronizedList(new ArrayList<>());
+            java.net.ServerSocket old = serveOldHelper(key.getBytes(java.nio.charset.StandardCharsets.UTF_8), version, heard);
+            Object page = new Object();
+            try {
+                // A rename onto a kept key fails on Windows (never on a phone): the last round's goes first.
+                PhoneHelperLink.keyFile(app).delete();
+                assertTrue(PhoneHelperLink.adopt(app, String.valueOf(old.getLocalPort()), key));
+                PhoneHelperLink.session(app, page, true, true);
+                assertTrue("version " + version + " told to go", until(() -> heard.contains("quit"), 8000));
+                Thread.sleep(1500);
+                assertEquals("nothing but quit", List.of("quit"), new ArrayList<>(new java.util.LinkedHashSet<>(heard)));
+                assertFalse("never linked", PhoneHelperLink.linked());
+            } finally {
+                PhoneHelperLink.session(app, page, false, false);
+                until(() -> "none".equals(PhoneHelperLink.state()), 8000);
+                old.close();
+            }
+        }
+    }
+
+    /**
+     * Settings' one question (Easy access) to a helper an update left
+     * running, of the protocol before {@code project}: no answer for the app
+     * (so it starts the new helper), and the old one is told to go, never
+     * asked the question.
+     */
+    @Test
+    public void oneQuestionToAnOlderHelperTellsItToGoAndGetsNoAnswer() throws Exception {
+        android.content.Context app = org.robolectric.RuntimeEnvironment.getApplication();
+        String key = "4d".repeat(32);
+        List<String> heard = java.util.Collections.synchronizedList(new ArrayList<>());
+        java.net.ServerSocket old = serveOldHelper(key.getBytes(java.nio.charset.StandardCharsets.UTF_8),
+                PhoneHelper.PROTOCOL - 1, heard);
         try {
             assertTrue(PhoneHelperLink.adopt(app, String.valueOf(old.getLocalPort()), key));
-            PhoneHelperLink.session(app, page, true, true);
-            assertTrue("told to go", until(() -> heard.contains("quit"), 8000));
-            Thread.sleep(1500);
-            assertEquals("nothing but quit", List.of("quit"), new ArrayList<>(new java.util.LinkedHashSet<>(heard)));
-            assertFalse("never linked", PhoneHelperLink.linked());
+            assertNull(PhoneHelperLink.askOnce(app, "project on", 3000));
+            assertTrue("told to go", until(() -> heard.contains("quit"), 5000));
+            assertFalse("never asked", heard.contains("project on"));
         } finally {
-            PhoneHelperLink.session(app, page, false, false);
-            until(() -> "none".equals(PhoneHelperLink.state()), 8000);
             old.close();
         }
     }
@@ -798,6 +834,288 @@ public class PhoneHelperTest {
             until(() -> "none".equals(PhoneHelperLink.state()), 8000);
             server.close();
         }
+    }
+
+    // ── Easy access: this app's own PROJECT_MEDIA, and nothing else ──
+
+    /** The shell's app-ops: every call kept; Android's change ({@link #android}) or a refusal. */
+    static final class FakeOps implements PhoneHelper.Ops {
+        final List<String> calls = java.util.Collections.synchronizedList(new ArrayList<>());
+        /** Android's words for a refusal; null: Android takes the change. */
+        volatile String refuse;
+        /** What Android does on a change it takes (the settings tests set the app's op there). */
+        volatile java.util.function.BiConsumer<String, Boolean> android = (pkg, on) -> { };
+        /** How long Android takes over the change: a slow phone, or a helper that answers late. */
+        volatile long delayMs;
+
+        @Override
+        public String project(String pkg, boolean on) {
+            calls.add(pkg + " " + (on ? "on" : "off"));
+            if (delayMs > 0) {
+                try {
+                    Thread.sleep(delayMs);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            }
+            if (refuse != null) return refuse;
+            android.accept(pkg, on);
+            return null;
+        }
+    }
+
+    /**
+     * Android's app-ops for one app, as {@code cmd appops} shows and sets
+     * them. Android keeps a mode only when it is not the op's own default
+     * ({@code opDefault}: "ignore" for PROJECT_MEDIA on the S25), and a mode
+     * for the uid wins over the app's own.
+     */
+    static class FakeAppOps implements PhoneHelper.ShellOps.Shell {
+        final String opDefault;
+        /** The uid's mode, null with none; the app's own mode, null with none. */
+        volatile String uid, pkg;
+        final List<String> said = java.util.Collections.synchronizedList(new ArrayList<>());
+        /** How long each command takes: past the time it is given, it gives no answer. */
+        volatile long slowMs;
+
+        FakeAppOps(String opDefault) {
+            this.opDefault = opDefault;
+        }
+
+        @Override
+        public String run(long ms, String... cmd) {
+            said.add(String.join(" ", cmd));
+            if (slowMs > 0) {
+                try {
+                    Thread.sleep(Math.min(slowMs, ms));
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+                if (slowMs > ms) return null;
+            }
+            List<String> w = java.util.Arrays.asList(cmd);
+            if ("get".equals(w.get(2))) {
+                if (!"com.ccrstech.linuxondroid".equals(w.get(3))) return "Error: No UID for " + w.get(3) + " in user 0\n";
+                StringBuilder s = new StringBuilder();
+                if (uid != null) s.append("Uid mode: PROJECT_MEDIA: ").append(uid).append('\n');
+                if (pkg != null) s.append("PROJECT_MEDIA: ").append(pkg).append("; time=+1s ago\n");
+                return s.length() == 0 ? "No operations.\n" : s.toString();
+            }
+            String mode = w.get(w.size() - 1);
+            String kept = mode.equals(opDefault) ? null : mode;
+            if (w.contains("--uid")) {
+                uid = kept;
+            } else {
+                pkg = kept;
+            }
+            return "";
+        }
+    }
+
+    private static final String APP = "com.ccrstech.linuxondroid";
+
+    /**
+     * The S25's state after the stray probe (2026-11-24): a uid mode
+     * "default" over the app's own allow. On clears the uid's line with
+     * "ignore" (the op's default there), then allows, and reads Android back.
+     */
+    @Test
+    public void shellOps_onClearsAUidModeFirst_thenAllows() {
+        FakeAppOps android = new FakeAppOps("ignore");
+        android.uid = "default";
+        android.pkg = "allow";
+        assertNull(new PhoneHelper.ShellOps(android, 5000).project(APP, true));
+        assertNull("no uid line left", android.uid);
+        assertEquals("allow", android.pkg);
+        assertEquals(List.of(
+                "cmd appops get " + APP + " PROJECT_MEDIA",
+                "cmd appops set --uid " + APP + " PROJECT_MEDIA ignore",
+                "cmd appops get " + APP + " PROJECT_MEDIA",
+                "cmd appops set " + APP + " PROJECT_MEDIA allow",
+                "cmd appops get " + APP + " PROJECT_MEDIA"), android.said);
+    }
+
+    /** A build where the op's own default is "default": "ignore" stays as a uid line, so "default" clears it. */
+    @Test
+    public void shellOps_whereDefaultIsTheOpsDefault_clearsWithDefault() {
+        FakeAppOps android = new FakeAppOps("default");
+        android.uid = "deny";
+        assertNull(new PhoneHelper.ShellOps(android, 5000).project(APP, true));
+        assertNull(android.uid);
+        assertEquals("allow", android.pkg);
+        assertTrue(android.said.contains("cmd appops set --uid " + APP + " PROJECT_MEDIA default"));
+    }
+
+    /** Off is "ignore", PROJECT_MEDIA's own default: never the word "default", which Android would keep as a mode. */
+    @Test
+    public void shellOps_offIsIgnore_neverTheWordDefault() {
+        FakeAppOps android = new FakeAppOps("ignore");
+        android.pkg = "allow";
+        assertNull(new PhoneHelper.ShellOps(android, 5000).project(APP, false));
+        assertNull("back to nothing kept: Android's default", android.pkg);
+        assertNull(android.uid);
+        for (String c : android.said) assertFalse(c, c.endsWith(" default"));
+        assertTrue(android.said.contains("cmd appops set " + APP + " PROJECT_MEDIA ignore"));
+    }
+
+    /** A uid line that will not go: said, and the app's own mode is not touched. */
+    @Test
+    public void shellOps_aUidModeThatStays_isSaid() {
+        FakeAppOps android = new FakeAppOps("never") {
+            @Override
+            public String run(long ms, String... cmd) {
+                String r = super.run(ms, cmd);
+                uid = "deny"; // something else keeps putting it back
+                return r;
+            }
+        };
+        android.uid = "deny";
+        String why = new PhoneHelper.ShellOps(android, 5000).project(APP, true);
+        assertTrue(why, why != null && why.startsWith("a mode for the whole app stays"));
+        assertNull(android.pkg);
+    }
+
+    /** Android's own error (the app gone, say) is the answer, in Android's words. */
+    @Test
+    public void shellOps_androidsErrorIsTheAnswer() {
+        FakeAppOps android = new FakeAppOps("ignore");
+        String why = new PhoneHelper.ShellOps(android, 5000).project("com.nope.nothere", true);
+        assertEquals("Error: No UID for com.nope.nothere in user 0", why);
+    }
+
+    /**
+     * Android's commands hanging: the change gives up within its own time,
+     * so the helper answers before the app stops waiting (PhoneEasyAccess
+     * waits well past the helper's 12 s).
+     */
+    @Test
+    public void shellOps_givesUpWithinItsTime() {
+        FakeAppOps android = new FakeAppOps("ignore");
+        android.slowMs = 60_000;
+        long t0 = System.nanoTime();
+        String why = new PhoneHelper.ShellOps(android, 400).project(APP, true);
+        long took = (System.nanoTime() - t0) / 1_000_000L;
+        assertTrue(why, why != null && why.contains("did not answer"));
+        assertTrue("gave up after " + took + " ms", took < 1500);
+        assertTrue("the helper's own limit sits well inside the app's wait",
+                PhoneHelper.ShellOps.BUDGET_MS * 2 <= PhoneEasyAccess.answerMs);
+    }
+
+    @Test
+    public void projectSetsThisAppsOwnScreenSharingAndNothingElse() {
+        FakeOps ops = new FakeOps();
+        PhoneHelper h = new PhoneHelper("com.ccrstech.linuxondroid", power, input, ops);
+        FakeConn c = new FakeConn();
+        assertEquals("project on", h.handle(c, "project on"));
+        assertEquals("project off", h.handle(c, "project off"));
+        // No other word, no other app, no mode named on the line: refused, Android not asked.
+        assertEquals("error unknown project allow", h.handle(c, "project allow"));
+        assertEquals("error unknown project on com.other.app", h.handle(c, "project on com.other.app"));
+        assertEquals("error unknown project", h.handle(c, "project"));
+        assertEquals(List.of("com.ccrstech.linuxondroid on", "com.ccrstech.linuxondroid off"), ops.calls);
+        assertEquals(List.of(), power.calls);
+        assertEquals(List.of(), input.events);
+    }
+
+    @Test
+    public void projectRefusedByAndroidIsAnErrorInAndroidsWords() {
+        FakeOps ops = new FakeOps();
+        ops.refuse = "Error: No UID for com.ccrstech.linuxondroid in user 0\n";
+        PhoneHelper h = new PhoneHelper("com.ccrstech.linuxondroid", power, input, ops);
+        assertEquals("error Error: No UID for com.ccrstech.linuxondroid in user 0", h.handle(new FakeConn(), "project on"));
+    }
+
+    @Test
+    public void aHelperThatSetsNoAppOpsSaysSo() {
+        assertEquals("error no app-ops here", helper.handle(new FakeConn(), "project on"));
+    }
+
+    /**
+     * {@code cmd appops get}'s answers, read the way Android decides. The
+     * first two came from a Galaxy S25 Ultra (Android 17) on 2026-11-24: the
+     * second, with a uid mode "default" left behind, did not let the app
+     * through although its own line said allow.
+     */
+    @Test
+    public void androidsAnswerIsReadAsAndroidDecides() {
+        assertEquals(Boolean.TRUE, PhoneHelper.allowedIn("PROJECT_MEDIA: allow; time=+14h34m45s997ms ago\n"));
+        assertEquals("the uid's mode wins", Boolean.FALSE,
+                PhoneHelper.allowedIn("Uid mode: PROJECT_MEDIA: default\nPROJECT_MEDIA: allow; time=+14h34m46s82ms ago\n"));
+        assertEquals("default", PhoneHelper.uidModeIn("Uid mode: PROJECT_MEDIA: default\r\nPROJECT_MEDIA: allow; time=+1s ago\r\n"));
+        assertNull(PhoneHelper.uidModeIn("PROJECT_MEDIA: allow; time=+14h34m45s997ms ago\n"));
+        assertEquals(Boolean.TRUE, PhoneHelper.allowedIn("Uid mode: PROJECT_MEDIA: allow\n"));
+        assertEquals("nothing set: Android's default, never allow", Boolean.FALSE, PhoneHelper.allowedIn("No operations.\n"));
+        assertEquals(Boolean.FALSE, PhoneHelper.allowedIn("PROJECT_MEDIA: ignore; time=+3s ago; rejectTime=+1s ago\n"));
+        assertNull("an error is no answer", PhoneHelper.allowedIn("Error: No UID for com.nope.nothere in user 0\n"));
+    }
+
+    /**
+     * Settings' one question ends while a computer's finger is down: the
+     * press goes on, and only the computer's own connection lifts it. Before,
+     * any connection's end lifted it.
+     */
+    @Test
+    public void aConnectionThatPressedNothingLeavesTheComputersFingerDown() {
+        FakeConn computer = new FakeConn();
+        FakeConn question = new FakeConn();
+        helper.handle(computer, "touch d 10 20");
+        helper.ended(question);
+        assertEquals("no up from the question's end", 1, input.events.size());
+        helper.handle(computer, "touch m 12 24");
+        helper.handle(computer, "touch u 12 24");
+        assertEquals(MotionEvent.ACTION_UP, ((MotionEvent) input.events.get(2)).getActionMasked());
+        helper.handle(computer, "touch d 30 30");
+        helper.ended(computer);
+        assertEquals("the computer's own end lifts its finger", MotionEvent.ACTION_UP,
+                ((MotionEvent) input.events.get(input.events.size() - 1)).getActionMasked());
+    }
+
+    /**
+     * Settings' one question over a real loopback connection while a
+     * computer has the phone's screen off: the helper answers it, and the
+     * computer's session goes on as it was.
+     */
+    @Test
+    public void oneQuestionGetsItsAnswerAndLeavesAComputersSessionAlone() throws Exception {
+        android.content.Context app = org.robolectric.RuntimeEnvironment.getApplication();
+        java.lang.reflect.Field kept = PhoneHelperLink.class.getDeclaredField("app");
+        kept.setAccessible(true);
+        kept.set(null, null);
+        org.robolectric.Shadows.shadowOf(app.getSystemService(android.os.PowerManager.class)).setIsInteractive(true);
+        FakeOps ops = new FakeOps();
+        String key = "3f".repeat(32);
+        java.net.ServerSocket server = serveHelper(new PhoneHelper(app.getPackageName(), power, input, ops),
+                key.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        Object page = new Object();
+        try {
+            assertTrue(PhoneHelperLink.adopt(app, String.valueOf(server.getLocalPort()), key));
+            PhoneHelperLink.session(app, page, true, true);
+            assertTrue("dark for the computer", until(() -> "off".equals(PhoneHelperLink.state()) && !power.lit, 8000));
+            assertEquals("project on", PhoneHelperLink.askOnce(app, "project on", 5000));
+            assertEquals(List.of(app.getPackageName() + " on"), ops.calls);
+            Thread.sleep(500);
+            assertEquals("the computer's session goes on", "off", PhoneHelperLink.state());
+            assertFalse("still dark", power.lit);
+            assertEquals(List.of("off"), power.calls);
+        } finally {
+            PhoneHelperLink.session(app, page, false, false);
+            until(() -> "none".equals(PhoneHelperLink.state()), 8000);
+            server.close();
+        }
+    }
+
+    /** No helper on the port: no answer, at once. */
+    @Test
+    public void oneQuestionWithNoHelperHasNoAnswer() throws Exception {
+        android.content.Context app = org.robolectric.RuntimeEnvironment.getApplication();
+        int free;
+        try (java.net.ServerSocket s = new java.net.ServerSocket(0, 1, java.net.InetAddress.getLoopbackAddress())) {
+            free = s.getLocalPort();
+        }
+        assertTrue(PhoneHelperLink.adopt(app, String.valueOf(free), "2c".repeat(32)));
+        long t0 = System.currentTimeMillis();
+        assertNull(PhoneHelperLink.askOnce(app, "project on", 5000));
+        assertTrue("at once, not after the answer's wait", System.currentTimeMillis() - t0 < 2500);
     }
 
     // ── screens Android keeps from the accessibility service ──

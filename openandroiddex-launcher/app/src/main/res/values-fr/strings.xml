@@ -1083,7 +1083,7 @@ Si vous la désactivez plus tard, Android forcera la fermeture de Linux et le bu
     <string name="pr_set_anywhere">De n\'importe où, dans un navigateur</string>
     <string name="pr_set_anywhere_sub">Cloudflare vous fournit un lien gratuit pour ouvrir ce téléphone dans un navigateur. Le lien peut changer si vous redémarrez ce téléphone ou si vous désactivez puis réactivez ce réglage.</string>
     <string name="pr_set_anywhere_wait">Obtention d\'une adresse auprès de Cloudflare…</string>
-    <string name="pr_set_anywhere_open">Sur n\'importe quel ordinateur, ouvrez cette adresse dans un navigateur, puis saisissez le code ci-dessus</string>
+    <string name="pr_set_anywhere_open">Sur n\'importe quel ordinateur, ouvrez cette adresse dans un navigateur</string>
     <string name="pr_set_anywhere_note">Cloudflare fournit ce lien gratuit pour faire des essais. Le lien peut cesser de fonctionner.</string>
     <string name="pr_sound_notif">Laisser l\'ordinateur entendre ce téléphone ?</string>
     <string name="pr_sound_notif_text">Touchez ici, puis choisissez Autoriser. Android appelle cette autorisation Enregistrer de l\'audio, mais seul le son des applis va à l\'ordinateur, jamais le micro.</string>
@@ -1247,7 +1247,7 @@ Si vous la désactivez plus tard, Android forcera la fermeture de Linux et le bu
     <string name="ph_set_try">Réessayer</string>
     <string name="ph_set_open_dev">Ouvrir les options pour les développeurs</string>
     <string name="ph_setup_title">Configurer Écran éteint</string>
-    <string name="ph_setup_body">Un ordinateur peut alors éteindre l\'écran de ce téléphone pendant que vous utilisez le téléphone depuis l\'ordinateur, ce qui économise la batterie, et appuyer sur les boutons Autoriser qu\'Android réserve à une personne devant le téléphone. Le téléphone le fait avec son propre débogage sans fil : aucun ordinateur n\'est nécessaire. LinuxOnDroid active le débogage sans fil quand un ordinateur a besoin de l\'assistant, puis le désactive ensuite.</string>
+    <string name="ph_setup_body">Un ordinateur peut alors éteindre l\'écran de ce téléphone pendant que vous utilisez le téléphone depuis l\'ordinateur, ce qui économise la batterie, et appuyer sur les boutons Autoriser qu\'Android réserve à une personne devant le téléphone. Le téléphone le fait avec son propre débogage sans fil : aucun ordinateur n\'est nécessaire. LinuxOnDroid active le débogage sans fil quand un ordinateur a besoin de l\'assistant, puis le désactive ensuite. L\'Accès facile demande la même configuration.</string>
     <string name="ph_setup_dev">1. Activez les options pour les développeurs : dans Paramètres, ouvrez À propos du téléphone et appuyez 7 fois sur Numéro de build. Sur certains téléphones, Numéro de build se trouve dans Informations sur le logiciel</string>
     <string name="ph_setup_dev_done">1. Les options pour les développeurs sont activées</string>
     <string name="ph_setup_open_about">Ouvrir À propos du téléphone</string>
@@ -1271,4 +1271,16 @@ Si vous la désactivez plus tard, Android forcera la fermeture de Linux et le bu
     <string name="ph_pair_wrong">Ce code n\'a pas fonctionné. Appuyez à nouveau sur Associer l\'appareil avec un code d\'association et saisissez le nouveau code</string>
     <string name="ph_pair_closed">L\'association n\'est pas ouverte sur ce téléphone. Dans Débogage sans fil, appuyez sur Associer l\'appareil avec un code d\'association, puis saisissez le code</string>
     <string name="ph_pair_failed">L\'association n\'a pas fonctionné : %1$s</string>
+    <!-- Easy access (PhoneEasyAccess, LinuxSettingsActivity): screen sharing with no question on the phone, even while locked, set by the phone's helper -->
+    <string name="pr_set_easy">Accès facile</string>
+    <string name="pr_set_easy_turning_on">Activation de l\'Accès facile…</string>
+    <string name="pr_set_easy_turning_off">Désactivation de l\'Accès facile…</string>
+    <string name="pr_set_easy_failed">L\'Accès facile n\'a pas changé : %1$s</string>
+    <string name="pr_set_easy_nohelper">L\'Accès facile n\'a pas changé, car l\'assistant du téléphone n\'a pas démarré. La ligne Écran éteint ci-dessus indique ce dont l\'assistant a besoin</string>
+    <string name="pr_set_easy_noanswer">L\'Accès facile n\'a pas changé : l\'assistant du téléphone n\'a pas répondu à temps. L\'interrupteur montre ce que dit Android maintenant</string>
+    <string name="pr_set_easy_setup">L\'Accès facile demande la même configuration unique qu\'Écran éteint</string>
+    <string name="pr_set_easy_pc">Sous Android 10, l\'Accès facile a besoin de l\'assistant du téléphone, qu\'un ordinateur avec adb lance une fois après chaque redémarrage de ce téléphone</string>
+    <string name="pr_easy_title">Activer l\'Accès facile ?</string>
+    <string name="pr_easy_body">Un ordinateur autorisé peut alors voir l\'écran de ce téléphone à tout moment, sans personne devant ce téléphone, même quand ce téléphone est verrouillé. Android n\'affiche d\'abord aucune question sur ce téléphone et montre toujours un signe pendant le partage de l\'écran. Avec le contrôle activé, l\'ordinateur peut aussi toucher l\'écran et taper du texte sur ce téléphone. Seuls les ordinateurs autorisés avec le code affiché sur ce téléphone peuvent se connecter. L\'Accès facile peut être désactivé ici à tout moment.</string>
+    <string name="pr_easy_yes">Activer</string>
 </resources>

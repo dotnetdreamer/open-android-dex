@@ -49,6 +49,9 @@ import java.util.concurrent.TimeUnit;
  * <p><b>Input.</b> {@link PhoneInput} gives the helper the computer's fingers,
  * wheel and keys while it is linked ({@link #input}), and uses its
  * accessibility service otherwise.
+ *
+ * <p><b>One question.</b> Settings' Easy access asks the helper once, with or
+ * without a computer watching, on a connection of its own ({@link #askOnce}).
  */
 final class PhoneHelperLink {
 
@@ -257,6 +260,30 @@ final class PhoneHelperLink {
         if (l == null) return false;
         l.close();
         return true;
+    }
+
+    /** {@link #askOnce}: a helper took the question, and no answer came in time (or it went meanwhile). */
+    static final String NO_ANSWER = "\u0000no-answer";
+
+    /**
+     * One question for the helper outside any computer's session (Settings'
+     * Easy access, {@link PhoneEasyAccess}): the helper's answer within
+     * {@code ms}; {@link #NO_ANSWER} when a helper took the question and gave
+     * no answer in that time; null when no helper of this app's version
+     * answers at all (none runs, or an older one, which is told to go as at
+     * any link). A connection of its own, closed after the answer: the helper
+     * serves each connection apart, so a computer's session goes on as it
+     * was. Never on the main thread.
+     */
+    static String askOnce(Context ctx, String line, long ms) {
+        Link l = Link.open(ctx);
+        if (l == null) return null;
+        try {
+            String answer = l.ask(line, ms);
+            return answer != null ? answer : NO_ANSWER;
+        } finally {
+            l.close();
+        }
     }
 
     // ── the key ──
@@ -593,11 +620,16 @@ final class PhoneHelperLink {
          * kick is dropped (the worker looks again after every answer anyway).
          */
         String ask(String line) {
+            return ask(line, 3000);
+        }
+
+        /** {@link #ask(String)}, waiting up to {@code ms} for the answer (Android's app-ops take longer than the panel). */
+        String ask(String line, long ms) {
             if (!send(line)) return null;
             boolean slept = false;
             try {
                 while (true) {
-                    String l = lines.poll(3, TimeUnit.SECONDS);
+                    String l = lines.poll(ms, TimeUnit.MILLISECONDS);
                     if (l == null || GONE.equals(l)) {
                         if (l != null) lines.add(GONE);
                         return null;

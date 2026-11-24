@@ -1083,7 +1083,7 @@ Si lo desactivas más adelante, Android cerrará Linux a la fuerza y el escritor
     <string name="pr_set_anywhere">Desde cualquier lugar, en un navegador</string>
     <string name="pr_set_anywhere_sub">Cloudflare te da un enlace gratuito para abrir este teléfono en un navegador. El enlace puede cambiar si reinicias el teléfono o desactivas y vuelves a activar este ajuste.</string>
     <string name="pr_set_anywhere_wait">Obteniendo una dirección de Cloudflare…</string>
-    <string name="pr_set_anywhere_open">En cualquier ordenador, abre esta dirección en un navegador y luego escribe el código de arriba</string>
+    <string name="pr_set_anywhere_open">En cualquier ordenador, abre esta dirección en un navegador</string>
     <string name="pr_set_anywhere_note">Cloudflare ofrece este enlace gratuito para pruebas. Puede dejar de funcionar.</string>
     <string name="pr_sound_notif">¿Dejar que el ordenador oiga este teléfono?</string>
     <string name="pr_sound_notif_text">Toca aquí y elige Permitir. Android llama al permiso Grabar audio, pero solo el sonido de las apps va al ordenador, nunca el micrófono.</string>
@@ -1247,7 +1247,7 @@ Si lo desactivas más adelante, Android cerrará Linux a la fuerza y el escritor
     <string name="ph_set_try">Volver a intentarlo</string>
     <string name="ph_set_open_dev">Abrir opciones para desarrolladores</string>
     <string name="ph_setup_title">Configurar Pantalla apagada</string>
-    <string name="ph_setup_body">Así, un ordenador puede apagar la pantalla de este teléfono mientras usas el teléfono desde allí, lo que ahorra batería, y pulsar los botones Permitir que Android reserva para alguien que esté junto al teléfono. El teléfono lo hace con su propia depuración inalámbrica, así que no hace falta ningún ordenador. LinuxOnDroid activa la depuración inalámbrica cuando un ordenador necesita el ayudante y la vuelve a desactivar después.</string>
+    <string name="ph_setup_body">Así, un ordenador puede apagar la pantalla de este teléfono mientras usas el teléfono desde allí, lo que ahorra batería, y pulsar los botones Permitir que Android reserva para alguien que esté junto al teléfono. El teléfono lo hace con su propia depuración inalámbrica, así que no hace falta ningún ordenador. LinuxOnDroid activa la depuración inalámbrica cuando un ordenador necesita el ayudante y la vuelve a desactivar después. Acceso fácil necesita la misma configuración.</string>
     <string name="ph_setup_dev">1. Activa las opciones para desarrolladores: en Ajustes, abre Información del teléfono y toca Número de compilación 7 veces. En algunos teléfonos, Número de compilación está en Información de software</string>
     <string name="ph_setup_dev_done">1. Las opciones para desarrolladores están activadas</string>
     <string name="ph_setup_open_about">Abrir Información del teléfono</string>
@@ -1271,4 +1271,16 @@ Si lo desactivas más adelante, Android cerrará Linux a la fuerza y el escritor
     <string name="ph_pair_wrong">Ese código no ha funcionado. Toca otra vez Vincular dispositivo con código de vinculación y escribe el código nuevo</string>
     <string name="ph_pair_closed">La vinculación no está abierta en este teléfono. En Depuración inalámbrica, toca Vincular dispositivo con código de vinculación y escribe el código</string>
     <string name="ph_pair_failed">La vinculación no ha funcionado: %1$s</string>
+    <!-- Easy access (PhoneEasyAccess, LinuxSettingsActivity): screen sharing with no question on the phone, even while locked, set by the phone's helper -->
+    <string name="pr_set_easy">Acceso fácil</string>
+    <string name="pr_set_easy_turning_on">Activando Acceso fácil…</string>
+    <string name="pr_set_easy_turning_off">Desactivando Acceso fácil…</string>
+    <string name="pr_set_easy_failed">Acceso fácil sigue igual: %1$s</string>
+    <string name="pr_set_easy_nohelper">Acceso fácil sigue igual porque el ayudante del teléfono no se ha iniciado. La línea de Pantalla apagada de arriba indica lo que necesita el ayudante</string>
+    <string name="pr_set_easy_noanswer">Acceso fácil sigue igual: el ayudante del teléfono no ha respondido a tiempo. El interruptor muestra lo que dice Android ahora</string>
+    <string name="pr_set_easy_setup">Acceso fácil necesita la misma configuración única que Pantalla apagada</string>
+    <string name="pr_set_easy_pc">En Android 10, Acceso fácil necesita el ayudante del teléfono, que un ordenador con adb inicia una vez después de cada reinicio de este teléfono</string>
+    <string name="pr_easy_title">¿Activar Acceso fácil?</string>
+    <string name="pr_easy_body">Así, un ordenador al que hayas dado acceso puede ver la pantalla de este teléfono en cualquier momento, sin nadie junto a este teléfono, incluso si este teléfono está bloqueado. Android no muestra antes ninguna pregunta en este teléfono y sigue mostrando un aviso mientras se comparte la pantalla. Con el control activado, el ordenador también puede tocar la pantalla y escribir en este teléfono. Solo pueden conectarse los ordenadores autorizados con el código de este teléfono. Acceso fácil se puede desactivar aquí en cualquier momento.</string>
+    <string name="pr_easy_yes">Activar</string>
 </resources>

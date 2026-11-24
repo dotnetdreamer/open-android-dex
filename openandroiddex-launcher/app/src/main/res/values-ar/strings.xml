@@ -1099,7 +1099,7 @@
     <string name="pr_set_anywhere">من أي مكان، في متصفح</string>
     <string name="pr_set_anywhere_sub">تمنحك Cloudflare رابطًا مجانيًا لفتح هذا الهاتف في المتصفح. قد يتغير الرابط عند إعادة تشغيل الهاتف أو إيقاف هذا الإعداد ثم تشغيله مجددًا.</string>
     <string name="pr_set_anywhere_wait">جارٍ الحصول على عنوان من Cloudflare…</string>
-    <string name="pr_set_anywhere_open">على أي كمبيوتر، افتح هذا العنوان في متصفح، ثم اكتب الرمز الظاهر أعلاه</string>
+    <string name="pr_set_anywhere_open">على أي كمبيوتر، افتح هذا العنوان في متصفح</string>
     <string name="pr_set_anywhere_note">توفّر Cloudflare هذا الرابط المجاني للاختبار. قد يتوقف عن العمل.</string>
     <string name="pr_sound_notif">هل تسمح للكمبيوتر بسماع هذا الهاتف؟</string>
     <string name="pr_sound_notif_text">انقر هنا ثم اختر السماح. يسمّي Android هذا الإذن تسجيل الصوت، لكن ما يذهب إلى الكمبيوتر هو صوت التطبيقات فقط، وليس الميكروفون أبدًا.</string>
@@ -1263,7 +1263,7 @@
     <string name="ph_set_try">حاول مجددًا</string>
     <string name="ph_set_open_dev">فتح خيارات المطور</string>
     <string name="ph_setup_title">إعداد إيقاف الشاشة</string>
-    <string name="ph_setup_body">بعدها يمكن للكمبيوتر إطفاء شاشة هذا الهاتف أثناء استخدامك الهاتف من الكمبيوتر، وهذا يوفّر البطارية، والضغط على أزرار «السماح» التي يحتفظ بها Android لمن يكون عند الهاتف. يفعل الهاتف ذلك بتصحيح الأخطاء اللاسلكي الخاص به، فلا حاجة إلى كمبيوتر. يشغّل LinuxOnDroid تصحيح الأخطاء اللاسلكي عندما يحتاج كمبيوتر إلى المساعد، ثم يوقفه بعد ذلك.</string>
+    <string name="ph_setup_body">بعدها يمكن للكمبيوتر إطفاء شاشة هذا الهاتف أثناء استخدامك الهاتف من الكمبيوتر، وهذا يوفّر البطارية، والضغط على أزرار «السماح» التي يحتفظ بها Android لمن يكون عند الهاتف. يفعل الهاتف ذلك بتصحيح الأخطاء اللاسلكي الخاص به، فلا حاجة إلى كمبيوتر. يشغّل LinuxOnDroid تصحيح الأخطاء اللاسلكي عندما يحتاج كمبيوتر إلى المساعد، ثم يوقفه بعد ذلك. يحتاج الوصول السهل إلى الإعداد نفسه.</string>
     <string name="ph_setup_dev">1. شغّل خيارات المطور: في الإعدادات افتح «لمحة عن الهاتف» وانقر على «رقم الإصدار» 7 مرات. في بعض الهواتف يكون «رقم الإصدار» داخل «معلومات البرامج»</string>
     <string name="ph_setup_dev_done">1. خيارات المطور مفعّلة</string>
     <string name="ph_setup_open_about">فتح «لمحة عن الهاتف»</string>
@@ -1287,4 +1287,16 @@
     <string name="ph_pair_wrong">لم يعمل هذا الرمز. انقر مجددًا على «إقران الجهاز باستخدام رمز الإقران» واكتب الرمز الجديد</string>
     <string name="ph_pair_closed">الإقران غير مفتوح على هذا الهاتف. في «تصحيح الأخطاء اللاسلكي» انقر على «إقران الجهاز باستخدام رمز الإقران»، ثم اكتب الرمز</string>
     <string name="ph_pair_failed">لم ينجح الإقران: %1$s</string>
+    <!-- Easy access (PhoneEasyAccess, LinuxSettingsActivity): screen sharing with no question on the phone, even while locked, set by the phone's helper -->
+    <string name="pr_set_easy">الوصول السهل</string>
+    <string name="pr_set_easy_turning_on">جارٍ تشغيل الوصول السهل…</string>
+    <string name="pr_set_easy_turning_off">جارٍ إيقاف الوصول السهل…</string>
+    <string name="pr_set_easy_failed">لم يتغيّر الوصول السهل: %1$s</string>
+    <string name="pr_set_easy_nohelper">لم يتغيّر الوصول السهل، لأن مساعد الهاتف لم يبدأ. يوضّح سطر إيقاف الشاشة في الأعلى ما يحتاجه المساعد</string>
+    <string name="pr_set_easy_noanswer">لم يتغيّر الوصول السهل: لم يُجب مساعد الهاتف في الوقت المحدد. يُظهر المفتاح ما يقوله Android الآن</string>
+    <string name="pr_set_easy_setup">يحتاج الوصول السهل إلى الإعداد نفسه الذي يتم مرة واحدة لإيقاف الشاشة</string>
+    <string name="pr_set_easy_pc">على Android 10 يحتاج الوصول السهل إلى مساعد الهاتف، الذي يشغّله كمبيوتر مع adb مرة واحدة بعد كل إعادة تشغيل لهذا الهاتف</string>
+    <string name="pr_easy_title">تشغيل الوصول السهل؟</string>
+    <string name="pr_easy_body">عندها يمكن للكمبيوتر الذي سمحت له أن يرى شاشة هذا الهاتف في أي وقت، دون وجود أحد عند هذا الهاتف، حتى عندما يكون هذا الهاتف مقفلًا. لا يعرض Android أي سؤال على هذا الهاتف أولًا، ويظل يعرض علامة أثناء مشاركة الشاشة. وعند تشغيل التحكم، يمكن للكمبيوتر أيضًا النقر والكتابة على هذا الهاتف. لا تتصل إلا أجهزة الكمبيوتر التي سُمح لها بالرمز الظاهر على هذا الهاتف. يمكن إيقاف الوصول السهل من هنا في أي وقت.</string>
+    <string name="pr_easy_yes">تشغيل</string>
 </resources>

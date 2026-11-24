@@ -91,17 +91,105 @@ public class PhoneRemoteSettingsTest {
                 on ? android.app.AppOpsManager.MODE_ALLOWED : android.app.AppOpsManager.MODE_IGNORED);
     }
 
+    /** From anywhere offered (the tunnel's binary there), switched on, and with {@code url} as its address (none: null). */
+    private void anywhere(String url) throws Exception {
+        File lib = new File(app.getCacheDir(), "lib-anywhere");
+        assertTrue(lib.isDirectory() || lib.mkdirs());
+        assertTrue(new File(lib, "libcloudflared.so").isFile() || new File(lib, "libcloudflared.so").createNewFile());
+        app.getApplicationInfo().nativeLibraryDir = lib.getAbsolutePath();
+        PhoneTunnel.setSwitchedOn(app, true);
+        File f = new File(PhoneRemote.dir(app), "tunnel-address");
+        if (url == null) {
+            f.delete();
+        } else {
+            PhoneRemote.write(f, url);
+        }
+    }
+
+    /** How many views show exactly {@code words}. */
+    private static int count(View root, String words) {
+        int n = 0;
+        for (View v : BrowserTestKit.all(root)) {
+            if (v instanceof TextView && v.isShown() && words.contentEquals(((TextView) v).getText())) n++;
+        }
+        return n;
+    }
+
+    /** The door's code as the card shows it: "123 456". */
+    private String codeShown() {
+        String code = LinuxService.browser(app).code();
+        return code.substring(0, 3) + " " + code.substring(3);
+    }
+
+    /**
+     * No Wi-Fi (mobile data only): the Wi-Fi steps say there is no network
+     * and show no code, so From anywhere shows the code itself, under its
+     * address, and the code works from that moment. Before, From anywhere
+     * said "type the code shown above", and there was none above.
+     */
     @Test
-    public void unattendedAccess_isSaid_onlyWhenAComputerGaveIt() throws Exception {
+    public void fromAnywhere_showsTheCode_evenWithNoWifi() throws Exception {
+        PhoneRemote.setEnabled(app, true);
+        BrowserAddressShadow.wifi();
+        anywhere("https://quiet-river-fox.trycloudflare.com");
+        File pairing = new File(LinuxService.browser(app).dir(), "pairing-until");
+        pairing.delete();
+        ActivityController<LinuxSettingsActivity> c = page();
+        View r = root(c.get());
+        assertTrue("the Wi-Fi part: no network", BrowserTestKit.showsText(r, app.getString(R.string.bw_set_no_network)));
+        assertTrue(BrowserTestKit.showsText(r, app.getString(R.string.pr_set_anywhere_open)));
+        assertTrue(BrowserTestKit.showsText(r, app.getString(R.string.bw_set_step_code)));
+        assertEquals("the code, under From anywhere", 1, count(r, codeShown()));
+        assertTrue("with how long the code works", BrowserTestKit.showsText(r, app.getString(R.string.bw_set_code_hint)));
+        assertTrue("and the code works from now", pairing.isFile());
+        c.pause().stop().destroy();
+    }
+
+    /** With Wi-Fi as well: the same code in both places, the Wi-Fi steps and From anywhere. */
+    @Test
+    public void fromAnywhere_withWifiToo_showsTheSameCodeInBothPlaces() throws Exception {
+        PhoneRemote.setEnabled(app, true);
+        anywhere("https://quiet-river-fox.trycloudflare.com");
+        ActivityController<LinuxSettingsActivity> c = page();
+        assertEquals(2, count(root(c.get()), codeShown()));
+        c.pause().stop().destroy();
+    }
+
+    /**
+     * From anywhere on, its address not there yet, and no Wi-Fi: no code is
+     * shown anywhere, so none is opened for use either.
+     */
+    @Test
+    public void fromAnywhere_noAddressYet_noCodeAnywhere() throws Exception {
+        PhoneRemote.setEnabled(app, true);
+        BrowserAddressShadow.wifi();
+        anywhere(null);
+        File pairing = new File(LinuxService.browser(app).dir(), "pairing-until");
+        pairing.delete();
+        ActivityController<LinuxSettingsActivity> c = page();
+        View r = root(c.get());
+        assertTrue(BrowserTestKit.showsText(r, app.getString(R.string.pr_set_anywhere_wait)));
+        assertEquals(0, count(r, codeShown()));
+        assertFalse("no code opened", pairing.isFile());
+        c.pause().stop().destroy();
+    }
+
+    /**
+     * Unattended access is Easy access's switch (EasyAccessTest has the
+     * rest): on only while Android lets the app through, however it was
+     * given (the switch, or a computer's adb).
+     */
+    @Test
+    public void unattendedAccess_isTheEasyAccessSwitch() throws Exception {
         PhoneRemote.setEnabled(app, true);
         assertFalse(PhoneRemote.unattended(app));
         ActivityController<LinuxSettingsActivity> c = page();
-        assertFalse(BrowserTestKit.showsText(root(c.get()), app.getString(R.string.pr_set_unattended_on)));
+        assertFalse(checked(target(root(c.get()), app.getString(R.string.pr_set_easy))));
         c.pause().stop().destroy();
         unattended(true);
         assertTrue(PhoneRemote.unattended(app));
         c = page();
-        assertTrue(BrowserTestKit.showsText(root(c.get()), app.getString(R.string.pr_set_unattended_on)));
+        assertTrue(checked(target(root(c.get()), app.getString(R.string.pr_set_easy))));
         c.pause().stop().destroy();
     }
 
@@ -797,6 +885,14 @@ public class PhoneRemoteSettingsTest {
         PhoneRemote.setKeepsReady(app, false);
         unattended(true);
         shot("en-w412dp-h892dp-xxhdpi", "phone-remote-en-unattended", true, true);
+        // Remote desktop off with Easy access still on: the switch stays, to turn Easy access off.
+        shot("en-w412dp-h892dp-xxhdpi", "phone-remote-en-easy-remote-off", false, true);
+        // From anywhere with no Wi-Fi: the code under its own address (the Wi-Fi steps show none).
+        unattended(false);
+        BrowserAddressShadow.wifi();
+        anywhere("https://quiet-river-fox.trycloudflare.com");
+        shot("en-w412dp-h892dp-xxhdpi", "phone-remote-en-anywhere-nowifi", true, true, R.string.pr_set_anywhere);
+        shot("de-w360dp-h780dp-xxhdpi", "phone-remote-de-anywhere-nowifi", true, true, R.string.pr_set_anywhere);
     }
 
     private void shot(String qualifiers, String name, boolean on, boolean control) throws Exception {

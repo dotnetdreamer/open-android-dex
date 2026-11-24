@@ -1082,7 +1082,7 @@
     <string name="pr_set_anywhere">从任何地方通过浏览器使用</string>
     <string name="pr_set_anywhere_sub">Cloudflare 提供免费链接，让你在浏览器中打开这部手机。重启手机或关闭后重新打开此设置，链接可能会变。</string>
     <string name="pr_set_anywhere_wait">正在从 Cloudflare 获取地址…</string>
-    <string name="pr_set_anywhere_open">在任何电脑的浏览器中打开这个网址，然后输入上方的代码</string>
+    <string name="pr_set_anywhere_open">在任何电脑的浏览器中打开这个网址</string>
     <string name="pr_set_anywhere_note">Cloudflare 提供此免费链接用于测试。链接可能会失效。</string>
     <string name="pr_sound_notif">让电脑听到这部手机的声音吗？</string>
     <string name="pr_sound_notif_text">点按这里，然后选择允许。Android 把这项权限叫作录制音频，但发送到电脑的只有应用播放的声音，绝不会是麦克风。</string>
@@ -1246,7 +1246,7 @@
     <string name="ph_set_try">重试</string>
     <string name="ph_set_open_dev">打开开发者选项</string>
     <string name="ph_setup_title">设置关闭屏幕</string>
-    <string name="ph_setup_body">设置后，在电脑上使用这部手机时，电脑可以关闭这部手机的屏幕以节省电量，还可以按下 Android 留给手机旁的人的“允许”按钮。手机通过自己的无线调试完成这些，因此不需要电脑。电脑需要助手时，LinuxOnDroid 会开启无线调试，之后再关闭。</string>
+    <string name="ph_setup_body">设置后，在电脑上使用这部手机时，电脑可以关闭这部手机的屏幕以节省电量，还可以按下 Android 留给手机旁的人的“允许”按钮。手机通过自己的无线调试完成这些，因此不需要电脑。电脑需要助手时，LinuxOnDroid 会开启无线调试，之后再关闭。轻松访问也需要同样的设置。</string>
     <string name="ph_setup_dev">1. 开启开发者选项：在“设置”中打开“关于手机”，点按“版本号”7 次。有些手机的“版本号”在“软件信息”里</string>
     <string name="ph_setup_dev_done">1. 开发者选项已开启</string>
     <string name="ph_setup_open_about">打开“关于手机”</string>
@@ -1270,4 +1270,16 @@
     <string name="ph_pair_wrong">这个配对码无效。请再次点按“使用配对码配对设备”，然后输入新的配对码</string>
     <string name="ph_pair_closed">这部手机上没有打开配对。请在“无线调试”中点按“使用配对码配对设备”，然后输入配对码</string>
     <string name="ph_pair_failed">配对没有成功：%1$s</string>
+    <!-- Easy access (PhoneEasyAccess, LinuxSettingsActivity): screen sharing with no question on the phone, even while locked, set by the phone's helper -->
+    <string name="pr_set_easy">轻松访问</string>
+    <string name="pr_set_easy_turning_on">正在开启轻松访问…</string>
+    <string name="pr_set_easy_turning_off">正在关闭轻松访问…</string>
+    <string name="pr_set_easy_failed">轻松访问没有改变：%1$s</string>
+    <string name="pr_set_easy_nohelper">轻松访问没有改变，因为手机的助手没有启动。上方“关闭屏幕”一行说明了助手需要什么</string>
+    <string name="pr_set_easy_noanswer">轻松访问没有改变：手机的助手没有及时回应。开关显示的是 Android 现在的状态</string>
+    <string name="pr_set_easy_setup">轻松访问需要与“关闭屏幕”相同的一次性设置</string>
+    <string name="pr_set_easy_pc">在 Android 10 上，轻松访问需要手机的助手；这部手机每次重启后，需要一台装有 adb 的电脑启动一次助手</string>
+    <string name="pr_easy_title">开启轻松访问？</string>
+    <string name="pr_easy_body">开启后，你允许的电脑可以随时查看这部手机的屏幕，即使这部手机旁没有人，即使这部手机已锁屏。Android 不会先在这部手机上询问，但在共享屏幕期间仍会显示标志。开启控制后，电脑还可以在这部手机上点按和输入。只有通过这部手机上的代码获得允许的电脑才能连接。可以随时在这里关闭轻松访问。</string>
+    <string name="pr_easy_yes">开启</string>
 </resources>

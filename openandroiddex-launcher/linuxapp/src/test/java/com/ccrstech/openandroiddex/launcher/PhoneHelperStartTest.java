@@ -326,6 +326,10 @@ public class PhoneHelperStartTest {
         awaitWireless(0);
         assertEquals(0, wirelessNow());
         assertFalse(new File(PhoneHelperStart.dir(app), "switched-on").exists());
+        // The alarm is cancelled a moment after the mark goes (switchOffIfDue deletes the mark,
+        // then its kept time, then cancels): looked at until then, a second at most. Before, one
+        // look right after the mark went could land in between (seen once in a full run, 2026-11-24).
+        for (int i = 0; i < 40 && shadowOf(am).peekNextScheduledAlarm() != null; i++) Thread.sleep(25);
         assertNull("nothing left set", shadowOf(am).peekNextScheduledAlarm());
     }
 

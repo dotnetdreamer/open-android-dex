@@ -1083,7 +1083,7 @@
     <string name="pr_set_anywhere">ગમે ત્યાંથી, બ્રાઉઝરમાં</string>
     <string name="pr_set_anywhere_sub">બ્રાઉઝરમાં આ ફોન ખોલવા Cloudflare તમને મફત લિંક આપે છે. ફોન ફરી શરૂ કરો અથવા આ સેટિંગ બંધ કરીને ફરી ચાલુ કરો ત્યારે લિંક બદલાઈ શકે છે.</string>
     <string name="pr_set_anywhere_wait">Cloudflare પાસેથી સરનામું મેળવાઈ રહ્યું છે…</string>
-    <string name="pr_set_anywhere_open">કોઈપણ કમ્પ્યુટર પર આ સરનામું બ્રાઉઝરમાં ખોલો, પછી ઉપર આપેલો કોડ ટાઇપ કરો</string>
+    <string name="pr_set_anywhere_open">કોઈપણ કમ્પ્યુટર પર આ સરનામું બ્રાઉઝરમાં ખોલો</string>
     <string name="pr_set_anywhere_note">Cloudflare આ મફત લિંક પરીક્ષણ માટે આપે છે. તે કામ કરવાનું બંધ કરી શકે છે.</string>
     <string name="pr_sound_notif">કમ્પ્યુટરને આ ફોનનો અવાજ સાંભળવા દઈએ?</string>
     <string name="pr_sound_notif_text">અહીં ટૅપ કરો, પછી મંજૂરી આપો પસંદ કરો. Android આ પરવાનગીને ઑડિયો રેકોર્ડ કરવી કહે છે, પણ કમ્પ્યુટર સુધી ફક્ત ઍપનો અવાજ જાય છે, માઇક્રોફોન ક્યારેય નહીં.</string>
@@ -1247,7 +1247,7 @@
     <string name="ph_set_try">ફરી પ્રયાસ કરો</string>
     <string name="ph_set_open_dev">ડેવલપરના વિકલ્પો ખોલો</string>
     <string name="ph_setup_title">સ્ક્રીન બંધ સેટઅપ કરો</string>
-    <string name="ph_setup_body">પછી, તમે કમ્પ્યુટર પરથી આ ફોન વાપરો ત્યારે કમ્પ્યુટર આ ફોનની સ્ક્રીન બંધ કરી શકે છે, જેથી બેટરી બચે છે, અને એ “મંજૂરી આપો” બટન દબાવી શકે છે જે Android ફોન પાસે રહેલી વ્યક્તિ માટે રાખે છે. ફોન આ પોતાના વાયરલેસ ડિબગીંગથી કરે છે, એટલે કોઈ કમ્પ્યુટરની જરૂર નથી. કમ્પ્યુટરને હેલ્પર જોઈએ ત્યારે LinuxOnDroid વાયરલેસ ડિબગીંગ ચાલુ કરે છે અને પછી ફરી બંધ કરે છે.</string>
+    <string name="ph_setup_body">પછી, તમે કમ્પ્યુટર પરથી આ ફોન વાપરો ત્યારે કમ્પ્યુટર આ ફોનની સ્ક્રીન બંધ કરી શકે છે, જેથી બેટરી બચે છે, અને એ “મંજૂરી આપો” બટન દબાવી શકે છે જે Android ફોન પાસે રહેલી વ્યક્તિ માટે રાખે છે. ફોન આ પોતાના વાયરલેસ ડિબગીંગથી કરે છે, એટલે કોઈ કમ્પ્યુટરની જરૂર નથી. કમ્પ્યુટરને હેલ્પર જોઈએ ત્યારે LinuxOnDroid વાયરલેસ ડિબગીંગ ચાલુ કરે છે અને પછી ફરી બંધ કરે છે. સરળ ઍક્સેસ માટે પણ આ જ સેટઅપ જોઈએ.</string>
     <string name="ph_setup_dev">1. ડેવલપરના વિકલ્પો ચાલુ કરો: સેટિંગમાં “ફોન વિશે” ખોલો અને “બિલ્ડ નંબર” પર 7 વાર ટૅપ કરો. કેટલાક ફોનમાં “બિલ્ડ નંબર” “સોફ્ટવેરની માહિતી” હેઠળ હોય છે</string>
     <string name="ph_setup_dev_done">1. ડેવલપરના વિકલ્પો ચાલુ છે</string>
     <string name="ph_setup_open_about">“ફોન વિશે” ખોલો</string>
@@ -1271,4 +1271,16 @@
     <string name="ph_pair_wrong">આ કોડ ચાલ્યો નહીં. “જોડાણ કોડ વડે ડિવાઇસનું જોડાણ કરો” પર ફરી ટૅપ કરો અને નવો કોડ લખો</string>
     <string name="ph_pair_closed">આ ફોન પર જોડાણ ખુલ્લું નથી. “વાયરલેસ ડિબગીંગ”માં “જોડાણ કોડ વડે ડિવાઇસનું જોડાણ કરો” પર ટૅપ કરો, પછી કોડ લખો</string>
     <string name="ph_pair_failed">જોડાણ થયું નહીં: %1$s</string>
+    <!-- Easy access (PhoneEasyAccess, LinuxSettingsActivity): screen sharing with no question on the phone, even while locked, set by the phone's helper -->
+    <string name="pr_set_easy">સરળ ઍક્સેસ</string>
+    <string name="pr_set_easy_turning_on">સરળ ઍક્સેસ ચાલુ થઈ રહ્યું છે…</string>
+    <string name="pr_set_easy_turning_off">સરળ ઍક્સેસ બંધ થઈ રહ્યું છે…</string>
+    <string name="pr_set_easy_failed">સરળ ઍક્સેસ બદલાયું નહીં: %1$s</string>
+    <string name="pr_set_easy_nohelper">સરળ ઍક્સેસ બદલાયું નહીં, કારણ કે ફોનનો હેલ્પર શરૂ થયો નહીં. ઉપરની સ્ક્રીન બંધ વાળી લાઇન કહે છે કે હેલ્પરને શું જોઈએ</string>
+    <string name="pr_set_easy_noanswer">સરળ ઍક્સેસ બદલાયું નહીં: ફોનના હેલ્પરે સમયસર જવાબ આપ્યો નહીં. સ્વિચ બતાવે છે કે Android હમણાં શું કહે છે</string>
+    <string name="pr_set_easy_setup">સરળ ઍક્સેસ માટે સ્ક્રીન બંધ જેવું જ એક વખતનું સેટઅપ જોઈએ</string>
+    <string name="pr_set_easy_pc">Android 10 પર સરળ ઍક્સેસ માટે ફોનનો હેલ્પર જોઈએ, જે adb વાળું કમ્પ્યુટર આ ફોનના દરેક રીસ્ટાર્ટ પછી એક વાર શરૂ કરે છે</string>
+    <string name="pr_easy_title">સરળ ઍક્સેસ ચાલુ કરવું છે?</string>
+    <string name="pr_easy_body">પછી તમે મંજૂરી આપેલું કમ્પ્યુટર આ ફોનની સ્ક્રીન ગમે ત્યારે જોઈ શકે છે, આ ફોન પાસે કોઈ ન હોય ત્યારે પણ અને આ ફોન લૉક હોય ત્યારે પણ. Android પહેલાં આ ફોન પર કોઈ પ્રશ્ન બતાવતું નથી, અને સ્ક્રીન શેર થતી હોય ત્યારે એક નિશાની બતાવતું રહે છે. નિયંત્રણ ચાલુ હોય તો કમ્પ્યુટર આ ફોન પર ટૅપ અને ટાઇપ પણ કરી શકે છે. ફક્ત આ ફોન પરના કોડથી મંજૂરી મળેલાં કમ્પ્યુટર જ જોડાઈ શકે છે. સરળ ઍક્સેસ અહીંથી ગમે ત્યારે બંધ કરી શકાય છે.</string>
+    <string name="pr_easy_yes">ચાલુ કરો</string>
 </resources>

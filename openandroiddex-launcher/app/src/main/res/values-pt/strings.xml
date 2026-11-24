@@ -1083,7 +1083,7 @@ Se desativar isto mais tarde, o Android força o encerramento do Linux e o ambie
     <string name="pr_set_anywhere">De qualquer lugar, num navegador</string>
     <string name="pr_set_anywhere_sub">A Cloudflare dá-lhe uma ligação gratuita para abrir este telemóvel num navegador. A ligação pode mudar quando reiniciar o telemóvel ou desligar e voltar a ligar esta opção.</string>
     <string name="pr_set_anywhere_wait">A obter um endereço da Cloudflare…</string>
-    <string name="pr_set_anywhere_open">Em qualquer computador, abra este endereço num navegador e depois introduza o código acima</string>
+    <string name="pr_set_anywhere_open">Em qualquer computador, abra este endereço num navegador</string>
     <string name="pr_set_anywhere_note">A Cloudflare disponibiliza esta ligação gratuita para testes. Pode deixar de funcionar.</string>
     <string name="pr_sound_notif">Deixar o computador ouvir este telemóvel?</string>
     <string name="pr_sound_notif_text">Toque aqui e escolha Permitir. O Android chama à permissão Gravar áudio, mas só o som das apps vai para o computador, nunca o microfone.</string>
@@ -1247,7 +1247,7 @@ Se desativar isto mais tarde, o Android força o encerramento do Linux e o ambie
     <string name="ph_set_try">Tentar novamente</string>
     <string name="ph_set_open_dev">Abrir opções de programador</string>
     <string name="ph_setup_title">Configurar Ecrã desligado</string>
-    <string name="ph_setup_body">Assim, um computador pode desligar o ecrã deste telemóvel enquanto usa o telemóvel a partir do computador, o que poupa bateria, e tocar nos botões Permitir que o Android reserva a quem está junto ao telemóvel. O telemóvel faz isto com a sua própria depuração sem fios, por isso não é preciso nenhum computador. O LinuxOnDroid ativa a depuração sem fios quando um computador precisa do assistente e volta a desativá-la depois.</string>
+    <string name="ph_setup_body">Assim, um computador pode desligar o ecrã deste telemóvel enquanto usa o telemóvel a partir do computador, o que poupa bateria, e tocar nos botões Permitir que o Android reserva a quem está junto ao telemóvel. O telemóvel faz isto com a sua própria depuração sem fios, por isso não é preciso nenhum computador. O LinuxOnDroid ativa a depuração sem fios quando um computador precisa do assistente e volta a desativá-la depois. O Acesso fácil precisa da mesma configuração.</string>
     <string name="ph_setup_dev">1. Ative as opções de programador: nas Definições, abra Acerca do telemóvel e toque 7 vezes em Número de compilação. Em alguns telemóveis, o Número de compilação está em Informações de software</string>
     <string name="ph_setup_dev_done">1. As opções de programador estão ativadas</string>
     <string name="ph_setup_open_about">Abrir Acerca do telemóvel</string>
@@ -1271,4 +1271,16 @@ Se desativar isto mais tarde, o Android força o encerramento do Linux e o ambie
     <string name="ph_pair_wrong">Esse código não funcionou. Toque novamente em Sincronizar o dispositivo com um código de sincronização e escreva o novo código</string>
     <string name="ph_pair_closed">A sincronização não está aberta neste telemóvel. Na Depuração sem fios, toque em Sincronizar o dispositivo com um código de sincronização e escreva o código</string>
     <string name="ph_pair_failed">A sincronização não funcionou: %1$s</string>
+    <!-- Easy access (PhoneEasyAccess, LinuxSettingsActivity): screen sharing with no question on the phone, even while locked, set by the phone's helper -->
+    <string name="pr_set_easy">Acesso fácil</string>
+    <string name="pr_set_easy_turning_on">A ativar o Acesso fácil…</string>
+    <string name="pr_set_easy_turning_off">A desativar o Acesso fácil…</string>
+    <string name="pr_set_easy_failed">O Acesso fácil não mudou: %1$s</string>
+    <string name="pr_set_easy_nohelper">O Acesso fácil não mudou, porque o assistente do telemóvel não arrancou. A linha do Ecrã desligado acima diz do que o assistente precisa</string>
+    <string name="pr_set_easy_noanswer">O Acesso fácil não mudou: o assistente do telemóvel não respondeu a tempo. O interruptor mostra o que o Android diz agora</string>
+    <string name="pr_set_easy_setup">O Acesso fácil precisa da mesma configuração única do Ecrã desligado</string>
+    <string name="pr_set_easy_pc">No Android 10, o Acesso fácil precisa do assistente do telemóvel, que um computador com adb inicia uma vez depois de cada reinício deste telemóvel</string>
+    <string name="pr_easy_title">Ativar o Acesso fácil?</string>
+    <string name="pr_easy_body">Assim, um computador que tenha autorizado pode ver o ecrã deste telemóvel a qualquer momento, sem ninguém junto a este telemóvel, mesmo quando este telemóvel está bloqueado. O Android não mostra antes nenhuma pergunta neste telemóvel e continua a mostrar um sinal enquanto o ecrã é partilhado. Com o controlo ativado, o computador também pode tocar e escrever neste telemóvel. Só se podem ligar os computadores autorizados com o código deste telemóvel. O Acesso fácil pode ser desativado aqui a qualquer momento.</string>
+    <string name="pr_easy_yes">Ativar</string>
 </resources>

@@ -151,6 +151,25 @@ public class EmailNoticeSettingsTest {
         tap(r, app.getString(R.string.em_sec_starttls));
     }
 
+    /**
+     * Android 15 and later hide a whole window from screen sharing while a
+     * password field is on it: seen through Remote desktop, in the person's
+     * own browser, the whole Settings page was black. The password field says
+     * it is not that kind of secret; its dots stay.
+     */
+    @Test
+    @Config(sdk = 35)
+    public void thePasswordField_leavesThePageVisibleInScreenSharing() throws Exception {
+        ActivityController<LinuxSettingsActivity> c = page();
+        tap(root(c.get()), app.getString(R.string.em_set_title));
+        EditText pw = field(root(c.get()), R.string.em_set_password);
+        assertEquals(View.CONTENT_SENSITIVITY_NOT_SENSITIVE, pw.getContentSensitivity());
+        assertFalse(pw.isContentSensitive());
+        assertTrue("still dots",
+                (pw.getInputType() & android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD) == android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD);
+        c.pause().stop().destroy();
+    }
+
     @Test
     public void offByDefault_inASectionOfItsOwn() throws Exception {
         ActivityController<LinuxSettingsActivity> c = page();

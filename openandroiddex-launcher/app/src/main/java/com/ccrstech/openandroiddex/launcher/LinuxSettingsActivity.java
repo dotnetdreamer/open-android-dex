@@ -111,6 +111,8 @@ public class LinuxSettingsActivity extends Activity {
         // Made again while Android's battery question was up (the phone
         // turned, the theme changed): screen sharing's question still follows.
         if (savedInstanceState != null) consentAfterBattery = savedInstanceState.getBoolean(KEY_CONSENT_AFTER_BATTERY);
+        // Opened afresh (not made again after a turn): Easy access's last "did not change" is an earlier page's.
+        if (savedInstanceState == null) PhoneEasyAccess.pageOpened();
         theme = DexTheme.of(this);
         homeLook = Linux.hasHomeScreen(this);
         palette();
@@ -517,6 +519,101 @@ public class LinuxSettingsActivity extends Activity {
     }
 
     /**
+     * Easy access's switch. No app may give itself the app-op behind it, or
+     * take it away, so the phone's helper is needed both ways: without the
+     * one-time setup of Screen off, the setup opens instead. On asks first,
+     * since it lets a computer in with nobody at the phone; off needs no
+     * question.
+     *
+     * @return the switch's state now: Android's own, which changes only once the helper has done it
+     */
+    private boolean toggleEasy() {
+        boolean on = PhoneRemote.unattended(this);
+        if (!PhoneEasyAccess.working().isEmpty()) return on;
+        String helper = PhoneHelperStart.state(this);
+        if (PhoneHelperStart.SETUP.equals(helper) || PhoneHelperStart.UNPAIRED.equals(helper)) {
+            showHelperSetup();
+        } else if (on) {
+            PhoneEasyAccess.set(this, false);
+            ticks.post(() -> drawPhone(true));
+        } else {
+            confirmEasy();
+        }
+        return on;
+    }
+
+    /**
+     * Under Easy access's switch: a change under way, why the last one did
+     * not happen, or what the helper needs first. Null when there is nothing
+     * to say: the switch and the words in its row say the rest.
+     */
+    private View easyLines() {
+        LinearLayout lines = new LinearLayout(this);
+        lines.setOrientation(LinearLayout.VERTICAL);
+        lines.setPaddingRelative(dp(56), 0, 0, dp(14));
+        String working = PhoneEasyAccess.working();
+        String failed = PhoneEasyAccess.failed(this);
+        String helper = PhoneHelperStart.state(this);
+        if (!working.isEmpty()) {
+            lines.addView(statusLine(sky, getString(PhoneEasyAccess.TURNING_ON.equals(working)
+                    ? R.string.pr_set_easy_turning_on : R.string.pr_set_easy_turning_off)));
+        } else if (PhoneEasyAccess.NO_HELPER.equals(failed)) {
+            lines.addView(statusLine(AMBER, getString(R.string.pr_set_easy_nohelper)));
+        } else if (PhoneEasyAccess.NO_ANSWER.equals(failed)) {
+            lines.addView(statusLine(AMBER, getString(R.string.pr_set_easy_noanswer)));
+        } else if (!failed.isEmpty()) {
+            String why = failed.length() > 140 ? failed.substring(0, 140) + "…" : failed;
+            lines.addView(statusLine(AMBER, getString(R.string.pr_set_easy_failed, why)));
+        } else if (PhoneHelperStart.SETUP.equals(helper) || PhoneHelperStart.UNPAIRED.equals(helper)) {
+            lines.addView(statusLine(sky, getString(R.string.pr_set_easy_setup)));
+            lines.addView(link(getString(R.string.ph_set_setup), this::showHelperSetup), linkParams());
+        } else if (PhoneHelperStart.PC.equals(helper)) {
+            lines.addView(statusLine(sky, getString(R.string.pr_set_easy_pc)));
+        } else {
+            return null;
+        }
+        return lines;
+    }
+
+    /** Before Easy access goes on: what a computer can do then, and a choice. */
+    private void confirmEasy() {
+        if (isFinishing()) return;
+        final android.app.Dialog d = new android.app.Dialog(this);
+        d.requestWindowFeature(android.view.Window.FEATURE_NO_TITLE);
+        if (d.getWindow() != null) d.getWindow().setBackgroundDrawable(new ColorDrawable(0));
+        LinearLayout panel = new LinearLayout(this);
+        panel.setOrientation(LinearLayout.VERTICAL);
+        panel.setPadding(dp(24), dp(22), dp(20), dp(16));
+        panel.setBackground(fill(homeLook ? 0xFF161D2A : theme.cardSolid, dp(26), cardEdge));
+        panel.addView(text(getString(R.string.pr_easy_title), 19, title, 700));
+        TextView body = text(getString(R.string.pr_easy_body), 14.5f, theme.textFaint, 400);
+        body.setLineSpacing(0, 1.2f);
+        panel.addView(body, boxParams(dp(10)));
+        LinearLayout buttons = new LinearLayout(this);
+        buttons.setOrientation(LinearLayout.HORIZONTAL);
+        buttons.setGravity(Gravity.END | Gravity.CENTER_VERTICAL);
+        buttons.addView(dialogButton(getString(R.string.pr_disclose_no), 0x00000000, theme.text, d::dismiss));
+        TextView yes = dialogButton(getString(R.string.pr_easy_yes), green, 0xFF0B0F17, () -> {
+            d.dismiss();
+            PhoneEasyAccess.set(this, true);
+            ticks.post(() -> drawPhone(true));
+        });
+        LinearLayout.LayoutParams yesLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        yesLp.setMarginStart(dp(8));
+        buttons.addView(yes, yesLp);
+        panel.addView(buttons, boxParams(dp(22)));
+        DexFonts.applyTo(this, panel);
+        DexCursors.decorate(panel);
+        d.setContentView(panel);
+        d.show();
+        if (d.getWindow() != null) {
+            int screen = getResources().getDisplayMetrics().widthPixels;
+            d.getWindow().setLayout(Math.min(screen - dp(32), dp(440)), ViewGroup.LayoutParams.WRAP_CONTENT);
+        }
+    }
+
+    /**
      * The card: the switch, and with it on, three things a person needs to
      * know (is the screen shared, can the computer control the phone, which
      * computers may come in) and the two choices (the picture, and starting
@@ -543,7 +640,15 @@ public class LinuxSettingsActivity extends Activity {
         String code = doorForPhone ? door.code() : "";
         boolean usedUp = doorForPhone && door.codeUsedUp();
         int remembered = doorForPhone ? door.tokenCount() : 0;
-        if (doorForPhone && !usedUp && !where.isEmpty() && !doorState.startsWith("failed")) {
+        // From anywhere: the same door through Cloudflare's link, so the same
+        // code signs a browser in there, and the card shows the code there
+        // too: with no Wi-Fi the Wi-Fi steps (and their code) are not shown.
+        String farUrl = on && PhoneTunnel.available(this) && PhoneTunnel.switchedOn(this) ? PhoneTunnel.address(this) : "";
+        String farCode = farUrl.isEmpty() ? "" : door.code();
+        boolean farUsedUp = !farUrl.isEmpty() && door.codeUsedUp();
+        boolean nearCode = doorForPhone && !usedUp && !where.isEmpty() && !doorState.startsWith("failed");
+        boolean farCodeShown = !farUrl.isEmpty() && !farUsedUp && !door.state().startsWith("failed");
+        if (nearCode || farCodeShown) {
             long now = System.currentTimeMillis();
             if (force || now - pairingOpenedAt > 30_000) {
                 door.openPairing(now);
@@ -557,7 +662,9 @@ public class LinuxSettingsActivity extends Activity {
                 + "|" + PhoneRemote.batteryExempt(this) + "|" + PhoneRemote.xiaomiAutostart(this)
                 + "|" + PhoneRemote.keepsReady(this) + "|" + PhoneRemote.unattended(this)
                 + "|" + PhoneRemote.controlUnbound(this)
-                + "|" + PhoneHelperStart.state(this) + "|" + PhoneHelperStart.why();
+                + "|" + PhoneHelperStart.state(this) + "|" + PhoneHelperStart.why()
+                + "|" + PhoneEasyAccess.working() + "|" + PhoneEasyAccess.failed(this)
+                + "|" + farCode + "|" + farUsedUp;
         refreshHelperSetup();
         if (!force && drawn.equals(phoneDrawn)) return;
         phoneDrawn = drawn;
@@ -565,12 +672,12 @@ public class LinuxSettingsActivity extends Activity {
         phoneCard.removeAllViews();
         phoneCard.addView(switchRow(R.drawable.hm_ic_remote, green, getString(R.string.pr_set_title),
                 getString(R.string.pr_set_sub), on, true, this::togglePhone));
+        LinearLayout.LayoutParams ruleLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, Math.max(1, dp(1)));
+        ruleLp.setMarginStart(dp(56));
         if (on) {
             View rule = new View(this);
             rule.setBackgroundColor(ruleColor);
-            LinearLayout.LayoutParams ruleLp = new LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, Math.max(1, dp(1)));
-            ruleLp.setMarginStart(dp(56));
             phoneCard.addView(rule, ruleLp);
             phoneCard.addView(phonePanel(st, control, computers, tunnel), new LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
@@ -604,12 +711,20 @@ public class LinuxSettingsActivity extends Activity {
                     LinearLayout far = new LinearLayout(this);
                     far.setOrientation(LinearLayout.VERTICAL);
                     far.setPaddingRelative(dp(56), 0, 0, dp(14));
-                    String url = PhoneTunnel.address(this);
+                    String url = farUrl;
+                    String doorNow = door.state();
                     if (url.isEmpty()) {
                         far.addView(statusLine(AMBER, getString(R.string.pr_set_anywhere_wait)));
+                    } else if (doorNow.startsWith("failed")) {
+                        // Nothing of ours is listening behind the link: no code to send a person to.
+                        far.addView(statusLine(AMBER, failedWhy(doorNow, doorNow.split(" ", 3))));
                     } else {
-                        far.addView(text(getString(R.string.pr_set_anywhere_open), 13.5f, theme.text, 500));
-                        far.addView(addressBox(url.substring("https://".length()), url + "/phone.html"), boxParams(dp(8)));
+                        // The same two steps as on the Wi-Fi, the code shown here too:
+                        // with no Wi-Fi the Wi-Fi steps (and their code) are not there.
+                        far.addView(stepTitle(1, getString(R.string.pr_set_anywhere_open)));
+                        far.addView(addressBox(url.substring("https://".length()), url + "/phone.html"), boxParams(dp(10)));
+                        far.addView(stepTitle(2, getString(R.string.bw_set_step_code)), boxParams(dp(20)));
+                        addCode(far, farCode, farUsedUp);
                     }
                     TextView note = text(getString(R.string.pr_set_anywhere_note), 12.5f, theme.textFaint, 400);
                     note.setLineSpacing(0, 1.15f);
@@ -617,6 +732,7 @@ public class LinuxSettingsActivity extends Activity {
                     phoneCard.addView(far);
                 }
             }
+            addEasyAccess(ruleLp);
             // A share held while no computer watches: only where the next
             // one would need someone at the phone (with unattended access it
             // starts by itself), and asked for again after a restart only
@@ -636,9 +752,33 @@ public class LinuxSettingsActivity extends Activity {
                             getString(R.string.pr_set_boot_sub), boot, true, this::togglePhoneBoot));
                 }
             }
+        } else if (PhoneRemote.unattended(this) || !PhoneEasyAccess.working().isEmpty()
+                || !PhoneEasyAccess.failed(this).isEmpty()) {
+            // Remote desktop off, and Easy access still given (Android keeps
+            // it): the switch stays, so it can be taken away here without
+            // turning Remote desktop on first, which would also start a From
+            // anywhere link. Gone once Easy access is off.
+            addEasyAccess(ruleLp);
         }
         DexFonts.applyTo(this, phoneCard);
         DexCursors.decorate(phoneCard);
+    }
+
+    /**
+     * Easy access: a computer the person allowed sees the screen with nobody
+     * at the phone, even while it is locked (PROJECT_MEDIA, set by the
+     * phone's helper: PhoneEasyAccess). The switch is Android's own answer;
+     * under it, a change under way, why the last one did not happen, or the
+     * setup it needs.
+     */
+    private void addEasyAccess(LinearLayout.LayoutParams ruleLp) {
+        View ruleE = new View(this);
+        ruleE.setBackgroundColor(ruleColor);
+        phoneCard.addView(ruleE, ruleLp);
+        phoneCard.addView(switchRow(R.drawable.hm_ic_shield, green, getString(R.string.pr_set_easy),
+                getString(R.string.pr_set_unattended_on), PhoneRemote.unattended(this), true, this::toggleEasy));
+        View easy = easyLines();
+        if (easy != null) phoneCard.addView(easy);
     }
 
     /**
@@ -667,13 +807,10 @@ public class LinuxSettingsActivity extends Activity {
                 panel.addView(statusLine(sky, getString(control ? R.string.pr_set_sharing_asks : R.string.pr_set_sharing_asks_off)));
             }
         }
-        // With unattended access the screen is shared only while a computer
-        // has it open, and that share starts by itself
-        // (PhoneRemoteService.idleCheck): none now is nothing to ask for, and
-        // the line below says how it works.
-        if (PhoneRemote.unattended(this)) {
-            panel.addView(statusLine(green, getString(R.string.pr_set_unattended_on)), boxParams(dp(12)));
-        }
+        // With unattended access (Easy access) the screen is shared only
+        // while a computer has it open, and that share starts by itself
+        // (PhoneRemoteService.idleCheck): none now is nothing to ask for.
+        // Easy access's own switch, further down the card, says how it works.
 
         // The control. On in Android's settings is not yet connected: after an
         // update Android 10 has left it so until it was turned off and on.
@@ -1238,40 +1375,7 @@ public class LinuxSettingsActivity extends Activity {
         panel.addView(awayNote(), boxParams(dp(10)));
 
         panel.addView(stepTitle(2, getString(R.string.bw_set_step_code)), boxParams(dp(20)));
-        if (usedUp) {
-            // Ten wrong codes were tried against it: it opens nothing now, and
-            // the way on is a new one, made here, where only the owner is.
-            TextView gone = text(getString(R.string.bw_set_used_up), 13.5f, theme.text, 500);
-            gone.setLineSpacing(0, 1.12f);
-            panel.addView(gone, boxParams(dp(8)));
-            TextView fresh = text(getString(R.string.bw_set_new_code), 14, linkColor, 600);
-            fresh.setGravity(Gravity.CENTER_VERTICAL);
-            fresh.setMinHeight(dp(44));
-            fresh.setPadding(dp(10), 0, dp(10), 0);
-            fresh.setBackground(pressable(0x00000000, dp(12), 0));
-            asButton(fresh, getString(R.string.bw_set_new_code));
-            fresh.setOnClickListener(v -> {
-                LinuxService.browser(this).rotateCode();
-                drawBrowser(true);
-            });
-            LinearLayout.LayoutParams freshLp = new LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-            freshLp.setMarginStart(-dp(10));
-            panel.addView(fresh, freshLp);
-        } else {
-            TextView digits = text(code.length() == 6 ? code.substring(0, 3) + " " + code.substring(3) : code,
-                    30, title, 700);
-            digits.setTypeface(Typeface.create(Typeface.MONOSPACE, Typeface.BOLD));
-            digits.setLetterSpacing(0.08f);
-            digits.setTextDirection(View.TEXT_DIRECTION_LTR);
-            digits.setPaddingRelative(dp(2), dp(4), 0, 0);
-            // Read out as digits, not as "four hundred and eighty-two thousand".
-            digits.setContentDescription(getString(R.string.bw_set_step_code) + ": " + code.replace("", " ").trim());
-            panel.addView(digits);
-            TextView window = text(getString(R.string.bw_set_code_hint), 12.5f, theme.textFaint, 400);
-            window.setLineSpacing(0, 1.12f);
-            panel.addView(window, boxParams(dp(4)));
-        }
+        addCode(panel, code, usedUp);
 
         String why;
         int dot;
@@ -1303,6 +1407,51 @@ public class LinuxSettingsActivity extends Activity {
         panel.addView(quality, boxParams(dp(8)));
         addRemembered(panel, remembered);
         return panel;
+    }
+
+    /**
+     * The code a browser types to sign in, as the Wi-Fi steps and From
+     * anywhere both show it (the same door, the same code): the digits and
+     * how long they work, or, once too many wrong codes were tried, the way to
+     * a new one.
+     */
+    private void addCode(LinearLayout panel, String code, boolean usedUp) {
+        if (usedUp) {
+            // Ten wrong codes were tried against it: it opens nothing now, and
+            // the way on is a new one, made here, where only the owner is.
+            TextView gone = text(getString(R.string.bw_set_used_up), 13.5f, theme.text, 500);
+            gone.setLineSpacing(0, 1.12f);
+            panel.addView(gone, boxParams(dp(8)));
+            TextView fresh = text(getString(R.string.bw_set_new_code), 14, linkColor, 600);
+            fresh.setGravity(Gravity.CENTER_VERTICAL);
+            fresh.setMinHeight(dp(44));
+            fresh.setPadding(dp(10), 0, dp(10), 0);
+            fresh.setBackground(pressable(0x00000000, dp(12), 0));
+            asButton(fresh, getString(R.string.bw_set_new_code));
+            fresh.setOnClickListener(v -> {
+                LinuxService.browser(this).rotateCode();
+                // Both cards show the one code.
+                drawBrowser(true);
+                drawPhone(true);
+            });
+            LinearLayout.LayoutParams freshLp = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            freshLp.setMarginStart(-dp(10));
+            panel.addView(fresh, freshLp);
+        } else {
+            TextView digits = text(code.length() == 6 ? code.substring(0, 3) + " " + code.substring(3) : code,
+                    30, title, 700);
+            digits.setTypeface(Typeface.create(Typeface.MONOSPACE, Typeface.BOLD));
+            digits.setLetterSpacing(0.08f);
+            digits.setTextDirection(View.TEXT_DIRECTION_LTR);
+            digits.setPaddingRelative(dp(2), dp(4), 0, 0);
+            // Read out as digits, not as "four hundred and eighty-two thousand".
+            digits.setContentDescription(getString(R.string.bw_set_step_code) + ": " + code.replace("", " ").trim());
+            panel.addView(digits);
+            TextView window = text(getString(R.string.bw_set_code_hint), 12.5f, theme.textFaint, 400);
+            window.setLineSpacing(0, 1.12f);
+            panel.addView(window, boxParams(dp(4)));
+        }
     }
 
     /**
@@ -1610,6 +1759,16 @@ public class LinuxSettingsActivity extends Activity {
             boolean saved = EmailNotice.hasPassword(ctx());
             password = field(f, R.string.em_set_password, "", 0,
                     android.text.InputType.TYPE_CLASS_TEXT | android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD);
+            // Android 15 and later hide a whole window from screen sharing
+            // while a password field is on it (sensitive content protection):
+            // seen through Remote desktop, in the person's own browser, this
+            // whole Settings page was black (2026-11-24). The dots stay, so
+            // the password still cannot be read over a shoulder or the link;
+            // the page is the person's own screen, shown over their own link,
+            // as WebActivity's password field already says.
+            if (Build.VERSION.SDK_INT >= 35) {
+                password.setContentSensitivity(View.CONTENT_SENSITIVITY_NOT_SENSITIVE);
+            }
             // A saved password shows as dots that are not it, in the page's own
             // font (Android gives a password field a typewriter's); what that
             // means is said under the field, where it has room.
