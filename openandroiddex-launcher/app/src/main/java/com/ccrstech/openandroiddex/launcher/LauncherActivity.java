@@ -2879,10 +2879,11 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
          * no-drop ring while it does not.
          *
          * An override rather than setPointerIcon because this is re-asked on
-         * every hover event, and the answer moves with the mouse. Note it only
-         * ever resolves while the drag is a HOVER — a left-button drag arrives
-         * from scrcpy as a touch, and the framework does not re-resolve the
-         * pointer for a non-mouse source.
+         * every mouse event, and the answer moves with the mouse. The
+         * framework re-resolves the pointer for a mouse only, never for a
+         * finger: a left-button drag from the computer's mouse is a mouse's
+         * (openandroiddex-scrcpy/desktop-mouse.patch; stock scrcpy sends it as
+         * a touch), a drag on a touchscreen is not.
          */
         @Override
         public PointerIcon onResolvePointerIcon(MotionEvent event, int pointerIndex) {

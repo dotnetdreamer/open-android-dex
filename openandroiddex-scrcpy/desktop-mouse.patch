@@ -1,0 +1,73 @@
+diff --git a/server/src/main/java/com/genymobile/scrcpy/control/Controller.java b/server/src/main/java/com/genymobile/scrcpy/control/Controller.java
+index 55d6e11..a39b4dc 100644
+--- a/server/src/main/java/com/genymobile/scrcpy/control/Controller.java
++++ b/server/src/main/java/com/genymobile/scrcpy/control/Controller.java
+@@ -94,6 +94,8 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
+     private final boolean clipboardAutosync;
+     private final boolean powerOn;
+     private final boolean keepActive;
++    /** Open Android DeX: the computer's mouse is a mouse to Android, its left button too (see injectTouch). */
++    private final boolean desktopMouse;
+ 
+     private final KeyCharacterMap charMap = KeyCharacterMap.load(KeyCharacterMap.VIRTUAL_KEYBOARD);
+ 
+@@ -125,6 +127,7 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
+             this.clipboardAutosync = false;
+             this.powerOn = false;
+             this.keepActive = false;
++            this.desktopMouse = false;
+             return;
+         }
+ 
+@@ -133,6 +136,9 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
+         this.clipboardAutosync = options.getClipboardAutosync();
+         this.powerOn = options.getPowerOn();
+         this.keepActive = options.getKeepActive();
++        // A display of its own is a desktop, or an app's window on the computer; the phone's own
++        // screen mirrored keeps upstream's finger.
++        this.desktopMouse = options.getNewDisplay() != null;
+         initPointers();
+         sender = new DeviceMessageSender(controlChannel);
+ 
+@@ -531,11 +537,24 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
+ 
+         int source;
+         boolean activeSecondaryButtons = ((actionButton | buttons) & ~MotionEvent.BUTTON_PRIMARY) != 0;
+-        if (pointerId == POINTER_ID_MOUSE && (action == MotionEvent.ACTION_HOVER_MOVE || activeSecondaryButtons)) {
++        // Open Android DeX: on a display of its own the computer's mouse is a mouse, its left
++        // button included. Upstream sends a left press as a finger, which suits a phone's screen
++        // mirrored; on a desktop it turns every left drag into a swipe: a list scrolls under it,
++        // nothing is drag-selected, no file is picked up. Given a mouse, apps do what they do on
++        // a computer: Samsung's lists draw a selection box, text is selected, an item is dragged
++        // at once. Fingers (a touchscreen's, a pinch's virtual one) stay fingers. A hover that
++        // ends (our client's, when the pointer leaves the window) is a mouse's in every session.
++        boolean hover = action == MotionEvent.ACTION_HOVER_MOVE || action == MotionEvent.ACTION_HOVER_EXIT;
++        boolean mouse = pointerId == POINTER_ID_MOUSE && (desktopMouse || hover || activeSecondaryButtons);
++        if (mouse) {
+             // real mouse event, or event incompatible with a finger
+             pointerProperties[pointerIndex].toolType = MotionEvent.TOOL_TYPE_MOUSE;
+             source = InputDevice.SOURCE_MOUSE;
+             pointer.setUp(buttons == 0);
++            if (buttons == 0 && (desktopMouse || hover)) {
++                // A mouse with nothing held presses nothing: a real one reports no pressure.
++                pointer.setPressure(0f);
++            }
+         } else {
+             // POINTER_ID_GENERIC_FINGER, POINTER_ID_VIRTUAL_FINGER or real touch from device
+             pointerProperties[pointerIndex].toolType = MotionEvent.TOOL_TYPE_FINGER;
+@@ -609,6 +628,15 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
+                     if (!Device.injectEvent(upEvent, targetDisplayId, Device.INJECT_MODE_ASYNC)) {
+                         return false;
+                     }
++
++                    // Open Android DeX: hovering again, as a real mouse says straight after its UP
++                    // (Android's CursorInputMapper does), so what is under the pointer shows it at
++                    // once rather than at the next move.
++                    if (desktopMouse && pointerCount == 1) {
++                        MotionEvent hoverEvent = MotionEvent.obtain(now, now, MotionEvent.ACTION_HOVER_MOVE, 1, pointerProperties,
++                                pointerCoords, 0, 0, 1f, 1f, DEFAULT_DEVICE_ID, 0, source, 0);
++                        Device.injectEvent(hoverEvent, targetDisplayId, Device.INJECT_MODE_ASYNC);
++                    }
+                 }
+ 
+                 return true;
