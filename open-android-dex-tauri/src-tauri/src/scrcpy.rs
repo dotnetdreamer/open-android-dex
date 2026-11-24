@@ -1657,7 +1657,7 @@ pub fn config_value(app: &AppHandle, key: &str) -> Option<String> {
 /// Store one `<key>.<value>` pair from the launcher. `reset.all` clears
 /// everything, which is how the Settings window's factory reset keeps this
 /// side from outliving the phone-side copy it mirrors.
-fn remember_config(app: &AppHandle, key: &str, value: &str) {
+pub(crate) fn remember_config(app: &AppHandle, key: &str, value: &str) {
     let mut map = load_config(app);
     if key == "reset" {
         if !map.is_empty() {

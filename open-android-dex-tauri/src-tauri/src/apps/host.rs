@@ -199,6 +199,12 @@ impl Server {
         let _ = self.send(&json!({"t": "warm"}));
     }
 
+    /// Whether the phone's own screen goes dark while windows are open, changed
+    /// while they are. A window's opening says it too; this is for the ones open now.
+    pub fn dark(&self, on: bool) {
+        let _ = self.send(&json!({"t": "dark", "on": on}));
+    }
+
     /// The phone's notifications to this computer, or no longer. It answers
     /// with `notifs` — whether it may listen — and then a snapshot of what it
     /// has; it listens for the connection this went on, which is said

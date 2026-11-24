@@ -140,6 +140,8 @@ pub fn run() {
             pmos::pmos_open_app,
             pmos::pmos_app_windows,
             apps::apps_prepare,
+            apps::apps_screen_off,
+            apps::apps_set_screen_off,
             apps::apps_drop,
             apps::apps_list,
             apps::apps_open,

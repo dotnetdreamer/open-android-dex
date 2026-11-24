@@ -166,6 +166,8 @@ public final class AppServer {
     private volatile AppWindow lastFront;
     /** Drags the windows' apps let go of, heard by the launcher, and carried out to the computer. */
     private final AppDrags drags = new AppDrags();
+    /** The phone's own panel while windows are open: woken, kept awake, dark. */
+    private final AppPanel panel = new AppPanel();
     /** What the computer may take from the phone: what a drag carried out, what the clipboard holds. */
     private final AppOffers offers = new AppOffers();
     /** "Send to computer" and the phone's photos, on the computer's {@code send} link. */
@@ -586,12 +588,14 @@ public final class AppServer {
                 windowAsked = true;
                 int serial = serials.incrementAndGet();
                 Thread.currentThread().setName("app-window-" + serial);
+                panel.windowOpened(hello.optBoolean("dark", true));
                 AppWindow w = new AppWindow(this, s, wire, hello, serial);
                 running.add(w);
                 try {
                     w.run();
                 } finally {
                     running.remove(w);
+                    if (running.isEmpty()) panel.windowsClosed("the last window has closed");
                     // The windows' Mute ends with the last of them, whether or not the computer is there to say so.
                     if (running.isEmpty() && audio != null && audio.lift("the last window has closed")) audioChanged();
                 }
@@ -800,6 +804,12 @@ public final class AppServer {
                     case "warm":
                         warmUp();
                         break;
+                    case "dark": {
+                        // The panel's choice, changed while windows are open; off the connection's thread, as it may wait on the panel.
+                        boolean on = j.optBoolean("on", true);
+                        notifying.execute(() -> panel.setDark(on));
+                        break;
+                    }
                     case "notifs":
                         wire.json(notifications(j.optBoolean("on"), wire));
                         break;
@@ -1175,6 +1185,7 @@ public final class AppServer {
                         log("cannot keep the windows awake (" + e.getMessage() + ")");
                     }
                 }
+                panel.tick();
                 SystemClock.sleep(AWAKE_EVERY_MS);
             }
         }, "apps-awake");
@@ -1276,6 +1287,7 @@ public final class AppServer {
         gamepads.stop();
         // The phone's media plays again, if the windows' Mute still had it silent.
         if (audio != null) audio.lift("the server is stopping");
+        panel.windowsClosed("the server is stopping");
         System.out.flush();
         System.exit(0);
     }
