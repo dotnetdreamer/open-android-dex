@@ -310,6 +310,55 @@ final class PhoneHelperStart {
         });
     }
 
+    /**
+     * {@code job} on the start's own thread, after any start already under
+     * way, told whether a helper answers: started first if none runs and the
+     * phone is set up for it. For a question that needs the helper outside
+     * any computer's session (Settings' Easy access, {@link PhoneEasyAccess}).
+     * A person asked, so Wireless debugging is switched on even where Android
+     * asks about the Wi-Fi, and off again two minutes later if the app
+     * switched it on, as after any start no computer watches. The card says
+     * "Starting the phone's helper…" meanwhile.
+     */
+    static void withHelper(Context ctx, java.util.function.Consumer<Boolean> job) {
+        Context app = ctx.getApplicationContext();
+        boolean mayStart;
+        synchronized (LOCK) {
+            // A start already under way runs before this on WORK: its helper is the one asked.
+            mayStart = !busy && supported() && paired(app);
+            if (mayStart) busy = true;
+        }
+        if (mayStart) tell();
+        WORK.execute(() -> {
+            boolean here = false;
+            try {
+                here = PhoneHelperLink.present(app);
+                if (!here && mayStart) {
+                    run(app, true);
+                    here = PhoneHelperLink.present(app);
+                } else if (here) {
+                    // A helper runs: an earlier start's failure no longer holds.
+                    ended("", "");
+                }
+            } catch (RuntimeException e) {
+                ended(FAILED, e.toString());
+            } finally {
+                if (mayStart) {
+                    synchronized (LOCK) {
+                        busy = false;
+                    }
+                    tell();
+                }
+            }
+            try {
+                job.accept(here);
+            } catch (RuntimeException e) {
+                // On WORK, where an uncaught exception would end the app's process.
+                DexLog.warn("phone", "a question for the phone's helper", e);
+            }
+        });
+    }
+
     private static void run(Context ctx, boolean asked) {
         if (!devOptionsOn(ctx)) {
             ended(DEV_OFF, "");

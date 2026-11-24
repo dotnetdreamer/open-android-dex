@@ -1433,7 +1433,7 @@ If you switch this off again later, Android force-closes Linux and the desktop r
     <string name="pr_set_anywhere">From anywhere, in a browser</string>
     <string name="pr_set_anywhere_sub">Cloudflare gives you a free link to open this phone in a browser. The link can change when you restart this phone or turn this setting off and on.</string>
     <string name="pr_set_anywhere_wait">Getting an address from Cloudflare…</string>
-    <string name="pr_set_anywhere_open">On any computer, open this address in a browser, then type the code shown above</string>
+    <string name="pr_set_anywhere_open">On any computer, open this address in a browser</string>
     <string name="pr_set_anywhere_note">Cloudflare provides this free link for testing. It may stop working.</string>
     <string name="pr_set_no_tunnel">Connect to this phone in a browser on the same Wi-Fi. Pairing in the desktop app is unavailable on this phone.</string>
     <string name="pr_set_boot">Ask to share the screen after a restart</string>
@@ -1628,7 +1628,7 @@ If you switch this off again later, Android force-closes Linux and the desktop r
     <string name="ph_set_try">Try again</string>
     <string name="ph_set_open_dev">Open Developer options</string>
     <string name="ph_setup_title">Set up Screen off</string>
-    <string name="ph_setup_body">A computer can then turn this phone\'s screen off while you use the phone from there, which saves battery, and press the Allow buttons Android keeps for someone at the phone. The phone does this with its own Wireless debugging, so no computer is needed. LinuxOnDroid turns Wireless debugging on when a computer needs the helper, and off again after.</string>
+    <string name="ph_setup_body">A computer can then turn this phone\'s screen off while you use the phone from there, which saves battery, and press the Allow buttons Android keeps for someone at the phone. The phone does this with its own Wireless debugging, so no computer is needed. LinuxOnDroid turns Wireless debugging on when a computer needs the helper, and off again after. Easy access needs the same setup.</string>
     <string name="ph_setup_dev">1. Turn on Developer options: in Settings, open About phone and tap Build number 7 times. On some phones Build number is under Software information</string>
     <string name="ph_setup_dev_done">1. Developer options are on</string>
     <string name="ph_setup_open_about">Open About phone</string>
@@ -1652,4 +1652,16 @@ If you switch this off again later, Android force-closes Linux and the desktop r
     <string name="ph_pair_wrong">That code did not work. Tap Pair device with pairing code again and type the new code</string>
     <string name="ph_pair_closed">Pairing is not open on this phone. In Wireless debugging, tap Pair device with pairing code, then type the code</string>
     <string name="ph_pair_failed">Pairing did not work: %1$s</string>
+    <!-- Easy access (PhoneEasyAccess, LinuxSettingsActivity): screen sharing with no question on the phone, even while locked, set by the phone's helper -->
+    <string name="pr_set_easy">Easy access</string>
+    <string name="pr_set_easy_turning_on">Turning on Easy access…</string>
+    <string name="pr_set_easy_turning_off">Turning off Easy access…</string>
+    <string name="pr_set_easy_failed">Easy access did not change: %1$s</string>
+    <string name="pr_set_easy_nohelper">Easy access did not change, because the phone\'s helper did not start. The Screen off line above says what the helper needs</string>
+    <string name="pr_set_easy_noanswer">Easy access did not change: the phone\'s helper did not answer in time. The switch shows what Android says now</string>
+    <string name="pr_set_easy_setup">Easy access needs the same one-time setup as Screen off</string>
+    <string name="pr_set_easy_pc">On Android 10, Easy access needs the phone\'s helper, which a computer with adb starts once after each restart of this phone</string>
+    <string name="pr_easy_title">Turn on Easy access?</string>
+    <string name="pr_easy_body">A computer you have allowed can then see this phone\'s screen at any time, with nobody at this phone, even while this phone is locked. Android shows no question on this phone first, and still shows a sign while the screen is shared. With control on, the computer can also tap and type on this phone. Only computers allowed with the code on this phone can connect. Easy access can be turned off here at any time.</string>
+    <string name="pr_easy_yes">Turn on</string>
 </resources>

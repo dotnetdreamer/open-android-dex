@@ -1083,7 +1083,7 @@ Wenn du sie später wieder abschaltest, erzwingt Android das Beenden von Linux u
     <string name="pr_set_anywhere">Von überall, in einem Browser</string>
     <string name="pr_set_anywhere_sub">Cloudflare stellt dir einen kostenlosen Link bereit, mit dem du dieses Handy im Browser öffnen kannst. Der Link kann sich ändern, wenn du dieses Handy neu startest oder diese Einstellung aus- und wieder einschaltest.</string>
     <string name="pr_set_anywhere_wait">Adresse wird von Cloudflare geholt…</string>
-    <string name="pr_set_anywhere_open">Öffne diese Adresse auf einem beliebigen Computer in einem Browser und gib dann den Code von oben ein</string>
+    <string name="pr_set_anywhere_open">Öffne diese Adresse auf einem beliebigen Computer in einem Browser</string>
     <string name="pr_set_anywhere_note">Cloudflare stellt diesen kostenlosen Link zum Testen bereit. Er kann ausfallen.</string>
     <string name="pr_sound_notif">Den Computer dieses Handy hören lassen?</string>
     <string name="pr_sound_notif_text">Hier tippen, dann Zulassen wählen. Android nennt die Berechtigung Audio aufnehmen, aber nur der Ton von Apps geht an den Computer, nie das Mikrofon.</string>
@@ -1247,7 +1247,7 @@ Wenn du sie später wieder abschaltest, erzwingt Android das Beenden von Linux u
     <string name="ph_set_try">Noch einmal versuchen</string>
     <string name="ph_set_open_dev">Entwickleroptionen öffnen</string>
     <string name="ph_setup_title">„Bildschirm aus“ einrichten</string>
-    <string name="ph_setup_body">Ein Computer kann dann den Bildschirm dieses Telefons ausschalten, während du das Telefon von dort aus nutzt, was Akku spart, und die „Zulassen“-Schaltflächen drücken, die Android für jemanden am Telefon vorbehält. Das Telefon nutzt dafür sein eigenes kabelloses Debugging, ein Computer ist nicht nötig. LinuxOnDroid schaltet kabelloses Debugging ein, wenn ein Computer den Helfer braucht, und danach wieder aus.</string>
+    <string name="ph_setup_body">Ein Computer kann dann den Bildschirm dieses Telefons ausschalten, während du das Telefon von dort aus nutzt, was Akku spart, und die „Zulassen“-Schaltflächen drücken, die Android für jemanden am Telefon vorbehält. Das Telefon nutzt dafür sein eigenes kabelloses Debugging, ein Computer ist nicht nötig. LinuxOnDroid schaltet kabelloses Debugging ein, wenn ein Computer den Helfer braucht, und danach wieder aus. Einfacher Zugriff braucht dieselbe Einrichtung.</string>
     <string name="ph_setup_dev">1. Schalte die Entwickleroptionen ein: Öffne in den Einstellungen „Über das Telefon“ und tippe 7-mal auf „Build-Nummer“. Auf manchen Telefonen steht die Build-Nummer unter „Softwareinformationen“</string>
     <string name="ph_setup_dev_done">1. Die Entwickleroptionen sind an</string>
     <string name="ph_setup_open_about">„Über das Telefon“ öffnen</string>
@@ -1271,4 +1271,16 @@ Wenn du sie später wieder abschaltest, erzwingt Android das Beenden von Linux u
     <string name="ph_pair_wrong">Dieser Code hat nicht funktioniert. Tippe noch einmal auf „Gerät über einen Kopplungscode koppeln“ und gib den neuen Code ein</string>
     <string name="ph_pair_closed">Die Kopplung ist auf diesem Telefon nicht offen. Tippe in „Kabelloses Debugging“ auf „Gerät über einen Kopplungscode koppeln“ und gib dann den Code ein</string>
     <string name="ph_pair_failed">Die Kopplung hat nicht funktioniert: %1$s</string>
+    <!-- Easy access (PhoneEasyAccess, LinuxSettingsActivity): screen sharing with no question on the phone, even while locked, set by the phone's helper -->
+    <string name="pr_set_easy">Einfacher Zugriff</string>
+    <string name="pr_set_easy_turning_on">Einfacher Zugriff wird eingeschaltet…</string>
+    <string name="pr_set_easy_turning_off">Einfacher Zugriff wird ausgeschaltet…</string>
+    <string name="pr_set_easy_failed">Einfacher Zugriff ist unverändert: %1$s</string>
+    <string name="pr_set_easy_nohelper">Einfacher Zugriff ist unverändert, weil der Helfer des Telefons nicht gestartet ist. Die Zeile zu „Bildschirm aus“ weiter oben sagt, was der Helfer braucht</string>
+    <string name="pr_set_easy_noanswer">Einfacher Zugriff ist unverändert: Der Helfer des Telefons hat nicht rechtzeitig geantwortet. Der Schalter zeigt, was Android jetzt sagt</string>
+    <string name="pr_set_easy_setup">Einfacher Zugriff braucht dieselbe einmalige Einrichtung wie „Bildschirm aus“</string>
+    <string name="pr_set_easy_pc">Unter Android 10 braucht Einfacher Zugriff den Helfer des Telefons, den ein Computer mit adb nach jedem Neustart dieses Telefons einmal startet</string>
+    <string name="pr_easy_title">Einfachen Zugriff einschalten?</string>
+    <string name="pr_easy_body">Ein Computer, dem du Zugriff erlaubt hast, kann dann den Bildschirm dieses Handys jederzeit sehen, auch wenn niemand am Handy ist und auch wenn dieses Handy gesperrt ist. Android stellt vorher keine Frage auf diesem Handy und zeigt weiterhin ein Zeichen, solange der Bildschirm geteilt wird. Mit eingeschalteter Steuerung kann der Computer auf diesem Handy auch tippen und Text eingeben. Nur Computer, die mit dem Code auf diesem Handy zugelassen wurden, können sich verbinden. Einfacher Zugriff lässt sich hier jederzeit ausschalten.</string>
+    <string name="pr_easy_yes">Einschalten</string>
 </resources>

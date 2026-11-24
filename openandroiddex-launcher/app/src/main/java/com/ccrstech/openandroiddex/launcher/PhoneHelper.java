@@ -51,6 +51,11 @@ import javax.crypto.spec.SecretKeySpec;
  *       app's own way, its accessibility service, may not press what Android
  *       keeps for a person at the phone or a declared accessibility tool:
  *       permission dialogs, the installer, sensitive Settings switches.</li>
+ *   <li><b>Easy access.</b> This app's own PROJECT_MEDIA app-op, which lets
+ *       its screen sharing start with no question on the phone and go on
+ *       while the phone is locked: the shell may set it, no app may set it
+ *       for itself ({@link Ops}). Only this app's, only that op, only on or
+ *       off: Settings' Easy access switch asks ({@link PhoneEasyAccess}).</li>
  * </ul>
  *
  * <p><b>How it runs.</b> Never inside the app: started from adb's shell with
@@ -100,6 +105,9 @@ import javax.crypto.spec.SecretKeySpec;
  *   → touch d|m|u x y                           a finger, in the screen's pixels (no answer)
  *   → scroll x y h v                            the wheel at x, y: AXIS_HSCROLL, AXIS_VSCROLL
  *   → key d|u &lt;keycode&gt; &lt;meta&gt;                a key, as KeyEvent has it
+ *   → project on|off   ← project on|off | error &lt;why&gt;
+ *                                                Easy access: this app's PROJECT_MEDIA allowed, or
+ *                                                back to Android's own default (protocol 3)
  *   → quit             ← bye                    an app with a newer helper: this one goes
  * </pre>
  * The handshake's three lines never change, whatever the version, so any
@@ -113,8 +121,9 @@ import javax.crypto.spec.SecretKeySpec;
  * phone's power button while it is dark puts the phone to sleep, and the
  * helper wakes it at once ({@link #lookAwake}), so the press brings the screen
  * back as a person expects. A sleep the computer asks for itself is said first
- * ({@code forget}) and left alone. A finger down when the connection ends is
- * lifted.
+ * ({@code forget}) and left alone. A finger down when the connection that put
+ * it down ends is lifted; another connection's end (Settings' one question,
+ * {@link PhoneHelperLink#askOnce}) leaves a computer's finger where it is.
  *
  * <p><b>Someone else's dark screen.</b> Another tool may have the panel dark
  * already when a computer asks for it (an Open Android DeX desktop's or
@@ -133,9 +142,10 @@ public final class PhoneHelper {
      * breaks it bumps it. 2 (2026-11-23): {@code restore}, and a panel found
      * dark left so. A version-1 helper an update left running would light that
      * panel, so the app tells it to go ({@link PhoneHelperLink}) and the new
-     * one starts.
+     * one starts. 3 (2026-11-24): {@code project}, Easy access; a version-2
+     * helper would answer it "error unknown", so it is told to go the same way.
      */
-    static final int PROTOCOL = 2;
+    static final int PROTOCOL = 3;
     /** The helper's own socket, for the shell only: one helper at a time, and its goodbye. */
     static final String LOCK_SUFFIX = ".helper-own";
 
@@ -152,6 +162,8 @@ public final class PhoneHelper {
     private final String pkg;
     private final Power power;
     private final Input input;
+    /** This app's own app-op, as the shell sets it; null where none may be set (most tests). */
+    private final Ops ops;
     private final Object lock = new Object();
     /** The connection that made the panel dark, or null: only its end lights the panel again. */
     private Conn owner;
@@ -164,6 +176,8 @@ public final class PhoneHelper {
     /** The finger, while one is down: when it went down. Input's own. */
     private long touchDownAt = -1;
     private float touchX, touchY;
+    /** The connection that put the finger down: only its end lifts the finger. Input's own. */
+    private Conn fingerOf;
     /** What was put in, for {@code --state}: presses, scrolls and key events. */
     private volatile int touches, scrolls, keys;
 
@@ -191,10 +205,26 @@ public final class PhoneHelper {
         boolean inject(InputEvent e);
     }
 
+    /** This app's own screen-sharing app-op (PROJECT_MEDIA): Android's {@code cmd appops} here, a stand-in in tests. */
+    interface Ops {
+        /**
+         * {@code pkg}'s PROJECT_MEDIA allowed ({@code on}) or back to
+         * Android's own default, read back after: null once Android says so,
+         * else why not.
+         */
+        String project(String pkg, boolean on);
+    }
+
+    /** A helper that sets no app-op: the tests that are about the panel and input. */
     PhoneHelper(String pkg, Power power, Input input) {
+        this(pkg, power, input, null);
+    }
+
+    PhoneHelper(String pkg, Power power, Input input, Ops ops) {
         this.pkg = pkg;
         this.power = power;
         this.input = input;
+        this.ops = ops;
     }
 
     public static void main(String[] args) {
@@ -257,7 +287,7 @@ public final class PhoneHelper {
             }
         }
         int port = server.getLocalPort();
-        PhoneHelper h = new PhoneHelper(pkg, new Panel(pkg), new Injector());
+        PhoneHelper h = new PhoneHelper(pkg, new Panel(pkg), new Injector(), new ShellOps());
         System.out.println("helper: ready for " + pkg + " on Android " + Build.VERSION.SDK_INT + ", port " + port);
         System.out.flush();
         Thread shell = new Thread(() -> h.serveOwn(own), "helper-own");
@@ -344,12 +374,13 @@ public final class PhoneHelper {
     String handle(Conn c, String line) {
         if (line.startsWith("touch ") || line.startsWith("scroll ") || line.startsWith("key ")) {
             try {
-                inputLine(line);
+                inputLine(c, line);
             } catch (RuntimeException e) {
                 // A malformed line is dropped: input has no answers.
             }
             return null;
         }
+        if (line.startsWith("project ")) return project(line.substring("project ".length()));
         switch (line) {
             case "off":
                 synchronized (lock) {
@@ -411,13 +442,40 @@ public final class PhoneHelper {
     }
 
     /**
+     * Easy access: this app's own PROJECT_MEDIA allowed ("on") or back to
+     * Android's default ("off"). Nothing else is ever set: no other op, no
+     * other app, no other mode, whatever the line says.
+     */
+    private String project(String word) {
+        boolean on;
+        if ("on".equals(word)) {
+            on = true;
+        } else if ("off".equals(word)) {
+            on = false;
+        } else {
+            return "error unknown project " + word;
+        }
+        if (ops == null) return "error no app-ops here";
+        String why;
+        try {
+            why = ops.project(pkg, on);
+        } catch (Throwable t) {
+            why = oneLine(t);
+        }
+        if (why != null) return "error " + why.replace('\r', ' ').replace('\n', ' ').trim();
+        System.out.println("helper: easy access " + word + " for " + pkg);
+        System.out.flush();
+        return "project " + word;
+    }
+
+    /**
      * {@code c} ended: the panel lit again if {@code c} made it dark, and a
-     * finger left down lifted. Should lighting fail, the panel stays on record
-     * as {@code c}'s, and {@link #relightLeft} tries again.
+     * finger {@code c} left down lifted. Should lighting fail, the panel stays
+     * on record as {@code c}'s, and {@link #relightLeft} tries again.
      */
     void ended(Conn c) {
         c.gone = true;
-        liftFinger();
+        liftFingerOf(c);
         synchronized (lock) {
             // Under the lock throughout: a new connection darkening the panel meanwhile keeps it dark.
             if (owner == c) lightIfOurs();
@@ -520,7 +578,7 @@ public final class PhoneHelper {
 
     // ── input ──
 
-    private synchronized void inputLine(String line) {
+    private synchronized void inputLine(Conn c, String line) {
         String[] w = line.split(" ");
         long now = SystemClock.uptimeMillis();
         switch (w[0]) {
@@ -532,6 +590,7 @@ public final class PhoneHelper {
                     // A finger still down (its up lost) is lifted before the next goes down.
                     liftFinger();
                     touchDownAt = now;
+                    fingerOf = c;
                     touches++;
                     action = MotionEvent.ACTION_DOWN;
                 } else if (touchDownAt < 0) {
@@ -542,7 +601,10 @@ public final class PhoneHelper {
                 touchX = x;
                 touchY = y;
                 input.inject(touch(touchDownAt, now, action, x, y));
-                if (action == MotionEvent.ACTION_UP) touchDownAt = -1;
+                if (action == MotionEvent.ACTION_UP) {
+                    touchDownAt = -1;
+                    fingerOf = null;
+                }
                 return;
             }
             case "scroll": {
@@ -579,6 +641,12 @@ public final class PhoneHelper {
         if (touchDownAt < 0) return;
         input.inject(touch(touchDownAt, SystemClock.uptimeMillis(), MotionEvent.ACTION_UP, touchX, touchY));
         touchDownAt = -1;
+        fingerOf = null;
+    }
+
+    /** The finger lifted if {@code c} put it down: a connection that pressed nothing lifts nothing when it ends. */
+    private synchronized void liftFingerOf(Conn c) {
+        if (fingerOf == c) liftFinger();
     }
 
     private static MotionEvent touch(long downAt, long now, int action, float x, float y) {
@@ -926,6 +994,141 @@ public final class PhoneHelper {
                 return false;
             }
         }
+    }
+
+    // ── Easy access: this app's PROJECT_MEDIA, as the shell sets it ──
+
+    /**
+     * Android's {@code cmd appops}, as adb's own shell runs it, for one op
+     * only. "Off" is {@code ignore}, PROJECT_MEDIA's own default, never the
+     * word {@code default}: Android keeps "default" as a mode of its own
+     * (MODE_DEFAULT) for an op whose default is something else, and a mode
+     * for the whole app's uid wins over the app's own. Seen on a Galaxy S25
+     * Ultra (Android 17), 2026-11-24: {@code set --uid ... default} left
+     * "Uid mode: PROJECT_MEDIA: default" behind, which overrode the app's
+     * "allow"; {@code ignore} took the uid's line away again. So a uid mode,
+     * which only a person at a computer would have set, is cleared first, and
+     * Android's answer is read back after every change.
+     */
+    static final class ShellOps implements Ops {
+        private static final String OP = "PROJECT_MEDIA";
+        /**
+         * All of one change, at most: up to seven of Android's commands
+         * (about 0.1 s each on the S25). Well inside the app's own wait
+         * (PhoneEasyAccess), so a helper that runs always answers before the
+         * app gives up, and never changes the op after the app said it did not.
+         */
+        static final long BUDGET_MS = 12_000;
+        /** One command, at most. */
+        private static final long COMMAND_MS = 5_000;
+
+        /** A shell command's output, or null if it did not end within {@code ms}: {@link PhoneHelper#run} here, a stand-in in tests. */
+        interface Shell {
+            String run(long ms, String... cmd);
+        }
+
+        private final Shell shell;
+        private final long budgetMs;
+        /** When this change must be over (System.nanoTime): set at its start. */
+        private long until;
+
+        ShellOps() {
+            this(PhoneHelper::run, BUDGET_MS);
+        }
+
+        ShellOps(Shell shell, long budgetMs) {
+            this.shell = shell;
+            this.budgetMs = budgetMs;
+        }
+
+        @Override
+        public synchronized String project(String pkg, boolean on) {
+            until = System.nanoTime() + budgetMs * 1_000_000L;
+            String why = clearUid(pkg);
+            if (why != null) return why;
+            String said = cmd("set", pkg, OP, on ? "allow" : "ignore");
+            if (said == null) return noAnswer();
+            if (!said.trim().isEmpty()) return said.trim();
+            String now = cmd("get", pkg, OP);
+            if (now == null) return noAnswer();
+            Boolean allowed = allowedIn(now);
+            if (allowed == null) return "Android's answer could not be read: " + now.trim();
+            return allowed == on ? null : "Android still says " + now.trim();
+        }
+
+        /**
+         * No mode for the whole uid: "ignore" first (removes the line where
+         * that is the op's default, as on Android 17), then "default" (where
+         * that one is). Nothing is written when there is no such line.
+         */
+        private String clearUid(String pkg) {
+            String[] words = {"ignore", "default"};
+            for (int i = 0; ; i++) {
+                String now = cmd("get", pkg, OP);
+                if (now == null) return noAnswer();
+                if (now.contains("Error")) return now.trim();
+                if (uidModeIn(now) == null) return null;
+                if (i == words.length) return "a mode for the whole app stays: " + now.trim();
+                String said = cmd("set", "--uid", pkg, OP, words[i]);
+                if (said == null) return noAnswer();
+                if (!said.trim().isEmpty()) return said.trim();
+            }
+        }
+
+        /**
+         * {@code cmd appops <words>}, given what is left of the change's time
+         * (and a command's own at most); null when it did not answer in that,
+         * or no time is left to ask at all.
+         */
+        private String cmd(String... words) {
+            long left = (until - System.nanoTime()) / 1_000_000L;
+            if (left <= 0) return null;
+            String[] all = new String[words.length + 2];
+            all[0] = "cmd";
+            all[1] = "appops";
+            System.arraycopy(words, 0, all, 2, words.length);
+            return shell.run(Math.min(COMMAND_MS, left), all);
+        }
+
+        private String noAnswer() {
+            return System.nanoTime() >= until ? "Android's app-ops did not answer in time" : "cmd appops did not answer";
+        }
+    }
+
+    /**
+     * The uid's own mode for PROJECT_MEDIA in {@code cmd appops get}'s answer
+     * ("Uid mode: PROJECT_MEDIA: default"), or null with none. Package-private
+     * for the tests.
+     */
+    static String uidModeIn(String answer) {
+        for (String line : answer.replace("\r", "").split("\n")) {
+            String l = line.trim();
+            if (l.startsWith("Uid mode: PROJECT_MEDIA:")) {
+                return l.substring("Uid mode: PROJECT_MEDIA:".length()).trim().split("[;\\s]")[0];
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Whether Android lets PROJECT_MEDIA through for the app, from
+     * {@code cmd appops get}'s answer, read the way Android decides: a uid
+     * mode wins (Android keeps one only when it is not the op's default),
+     * then the app's own ("PROJECT_MEDIA: allow; time=..."), and with
+     * neither the op's default, which is not "allow" ("No operations.").
+     * Null when the answer is an error. Package-private for the tests.
+     */
+    static Boolean allowedIn(String answer) {
+        if (answer.contains("Error")) return null;
+        String uid = uidModeIn(answer);
+        if (uid != null) return "allow".equals(uid);
+        for (String line : answer.replace("\r", "").split("\n")) {
+            String l = line.trim();
+            if (l.startsWith("PROJECT_MEDIA:")) {
+                return "allow".equals(l.substring("PROJECT_MEDIA:".length()).trim().split("[;\\s]")[0]);
+            }
+        }
+        return false;
     }
 
     // ── SurfaceFlinger's word on the panel ──
