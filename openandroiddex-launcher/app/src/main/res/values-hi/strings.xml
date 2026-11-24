@@ -9,7 +9,10 @@
     <string name="tm_cpu_short">CPU</string>
     <string name="tm_mem_short">RAM</string>
     <string name="tm_disk_short">स्टोरेज</string>
+    <string name="tm_fps_short">FPS</string>
     <string name="tm_cpu_busy">उपयोग में</string>
+    <string name="tm_fps">फ़्रेम दर</string>
+    <string name="tm_fps_streamed">कंप्यूटर पर स्ट्रीम</string>
     <string name="tm_cpu_unavailable">इस डिवाइस पर उपलब्ध नहीं</string>
     <string name="tm_of">%2$s में से %1$s</string>
     <string name="tm_open_apps">इस डेस्कटॉप पर खुला</string>
@@ -418,6 +421,12 @@
     <string name="st_fps_value">%1$d fps</string>
     <string name="st_fps_auto">असीमित</string>
     <string name="st_fps_auto_sub">जितना तेज़ फ़ोन एन्कोड कर सके</string>
+    <string name="st_hz">स्मूदनेस</string>
+    <string name="st_hz_auto">स्वचालित</string>
+    <string name="st_hz_auto_sub">फ़ोन तय करता है — उसकी अपनी स्क्रीन बंद रहने पर 60 Hz</string>
+    <string name="st_hz_value">%1$d Hz</string>
+    <string name="st_hz_top_sub">सबसे स्मूद — ज़्यादा बैटरी लेता है</string>
+    <string name="st_hz_note">डेस्कटॉप खुला रहने तक फ़ोन की अपनी स्क्रीन भी इसी दर पर चलती है। बदलाव तुरंत लागू होते हैं।</string>
     <string name="st_audio">ऑडियो</string>
     <string name="st_audio_forward">ऑडियो अग्रेषित करें</string>
     <string name="st_audio_forward_sub">फ़ोन की आवाज़ इस कंप्यूटर पर बजाएँ</string>

@@ -111,6 +111,11 @@ public final class WmDaemon {
     private static final java.util.ArrayDeque<String[]> REQUESTS = new java.util.ArrayDeque<>();
     private static final int REQUESTS_MAX = 256;
 
+    /** Per display: the frames per second its scrcpy server last reported, and when. */
+    private static final java.util.Map<Integer, long[]> FPS = new java.util.HashMap<>();
+    /** Reports come once a second; past three missed, the stream is gone. */
+    private static final long FPS_FRESH_MS = 3000L;
+
     /** A component name and nothing else: the LAUNCH verb's only input check. */
     static final java.util.regex.Pattern COMPONENT =
             java.util.regex.Pattern.compile("[A-Za-z0-9_.$]+/[A-Za-z0-9_.$]+");
@@ -760,6 +765,58 @@ public final class WmDaemon {
                 return;
             }
 
+            // The desktop's refresh rate. SurfaceFlinger paces the desktop off the phone's
+            // own panel, so this holds that panel: "HZ <rate>" at its mode nearest the rate
+            // (at or below it, within the phone's own ceiling), "HZ 0" back to the phone's
+            // choice. Answers "OK <held>", the rate actually held, 0 for none — which a
+            // ceiling below every rate also gives; "ERR" when the phone's policy could not
+            // be put back. A bare "HZ" adds the panel's rates at its size, fastest first.
+            // See Refresh.
+            case "HZ": {
+                if (a.length < 2) {
+                    out.println("OK " + Refresh.status());
+                    return;
+                }
+                int hz;
+                try {
+                    hz = Integer.parseInt(a[1]);
+                } catch (NumberFormatException e) {
+                    out.println("ERR bad rate");
+                    return;
+                }
+                out.println("OK " + Refresh.hold(hz));
+                return;
+            }
+
+            // The desktop's frames per second, for the launcher's gauge. "FPS <display>
+            // <fps>" is the desktop's scrcpy server reporting, once a second
+            // (desktop-fps.patch); "FPS <display>" reads it back: "OK <fps>", or "OK -1"
+            // when nothing has reported for that display lately — no computer, nothing
+            // streamed. Only a shell-uid caller reports: the launcher's uid is the
+            // Linux guest's too, and the gauge should show what was streamed.
+            case "FPS": {
+                int display = i(a, 1);
+                if (a.length >= 3) {
+                    if (caller != Caller.PC) {
+                        out.println("ERR not allowed: FPS");
+                        return;
+                    }
+                    long fps = Long.parseLong(a[2]);
+                    synchronized (FPS) {
+                        FPS.put(display, new long[]{fps, System.currentTimeMillis()});
+                    }
+                    out.println("OK");
+                    return;
+                }
+                long[] seen;
+                synchronized (FPS) {
+                    seen = FPS.get(display);
+                }
+                boolean fresh = seen != null && System.currentTimeMillis() - seen[1] <= FPS_FRESH_MS;
+                out.println("OK " + (fresh ? seen[0] : -1));
+                return;
+            }
+
             // Raw processor jiffies for the taskbar's performance gauge, as
             // "OK <busy> <total>". It lives here for one reason: /proc/stat is
             // labelled proc_stat, which untrusted_app has not been allowed to
@@ -1371,16 +1428,22 @@ public final class WmDaemon {
             // process with the panel still dark. Ahead of the ARM guard because a session
             // that never armed can still have blanked the phone, and the task-tree read
             // costs nothing while the panel is lit.
-            if (Screen.isOff()) {
+            // A held refresh rate is the desktop's too, and goes with it for the same
+            // reason: nothing else here would end it while this process lives.
+            if (Screen.isOff() || Refresh.isHeld()) {
                 boolean desktopGone = false;
                 try {
                     desktopGone = Wm.displayHosting(LAUNCHER) <= 0;
                 } catch (Throwable t) {
                     // A framework hiccup is not evidence that anything went away.
                 }
-                if (desktopGone) {
+                if (desktopGone && Screen.isOff()) {
                     log("watchdog: desktop gone with the panel dark — restoring it");
                     Screen.restore();
+                }
+                if (desktopGone && Refresh.isHeld()) {
+                    log("watchdog: desktop gone with its refresh rate held — giving it back");
+                    Refresh.release();   // one that fails stays held, and is tried next tick
                 }
             }
 
@@ -1441,6 +1504,7 @@ public final class WmDaemon {
         // Before anything else: the undo below ends in force-stopping the launcher, and a
         // dark phone with no desktop left to turn it back on is the worst state to leave.
         Screen.restore();
+        Refresh.release();
 
         // The media-route pin is desktop policy set with this process's authority
         // (AUDIOROUTE SET), and this process is about to exit — left behind it would

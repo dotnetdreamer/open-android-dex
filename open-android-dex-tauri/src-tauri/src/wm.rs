@@ -361,6 +361,31 @@ impl WmClient {
         self.ok("AUDIOROUTE CLEAR")
     }
 
+    /// Hold the desktop's refresh rate, or with 0 give it back to the phone
+    /// (doc/refresh-rate.md). SurfaceFlinger paces the desktop off the phone's own
+    /// panel, so the daemon holds that panel, at its mode nearest `hz` at or below it
+    /// and never above the phone's own ceiling. The rate actually held, 0 for none;
+    /// `None` from a daemon without the verb, or none at all. Repeating a rate already
+    /// held costs the daemon nothing.
+    pub fn hold_refresh(&self, hz: u32) -> Option<u32> {
+        parse_held_rate(&self.request(&format!("HZ {hz}"))?)
+    }
+
+    /// Give a held refresh rate back to the phone. Asked before told, like
+    /// [`Self::restore_screen`]: `Ok(true)` when one was held and is the phone's again,
+    /// `Ok(false)` when none was (or no daemon answers), `Err` with the daemon's answer
+    /// when it could not put the phone's policy back — it keeps the rate to try again.
+    pub fn release_refresh(&self) -> Result<bool, String> {
+        match self.request("HZ").as_deref().and_then(parse_held_rate) {
+            Some(held) if held > 0 => match self.request("HZ 0") {
+                Some(reply) if parse_held_rate(&reply) == Some(0) => Ok(true),
+                Some(reply) => Err(reply.trim().to_string()),
+                None => Err("no answer".into()),
+            },
+            _ => Ok(false),
+        }
+    }
+
     /// Arm (and keep alive) the daemon's dead-man switch.
     ///
     /// Every other undo in this project runs from the PC. This one cannot: when the cable
@@ -607,9 +632,23 @@ fn serial_forwarding(list: &str, port: u16) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
+/// The rate in the daemon's answer to HZ: "OK <held>", followed by the panel's
+/// rates when nothing was asked for.
+fn parse_held_rate(reply: &str) -> Option<u32> {
+    reply.trim().strip_prefix("OK ")?.split_whitespace().next()?.parse().ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reads_the_rate_held_out_of_either_answer_to_hz() {
+        assert_eq!(parse_held_rate("OK 120"), Some(120));
+        assert_eq!(parse_held_rate("OK 0 120 80 60 48 30 24 10\n"), Some(0));
+        assert_eq!(parse_held_rate("ERR unknown HZ"), None); // a daemon from before the verb
+        assert_eq!(parse_held_rate("OK"), None);
+    }
 
     #[test]
     fn parses_a_shape_and_refuses_anything_that_is_not_a_cursor_name() {

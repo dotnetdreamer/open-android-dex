@@ -9,7 +9,10 @@
     <string name="tm_cpu_short">CPU</string>
     <string name="tm_mem_short">RAM</string>
     <string name="tm_disk_short">DISCO</string>
+    <string name="tm_fps_short">FPS</string>
     <string name="tm_cpu_busy">em uso</string>
+    <string name="tm_fps">Fotogramas</string>
+    <string name="tm_fps_streamed">enviados para o computador</string>
     <string name="tm_cpu_unavailable">não disponível neste dispositivo</string>
     <string name="tm_of">%1$s de %2$s</string>
     <string name="tm_open_apps">Aberto neste ambiente de trabalho</string>
@@ -418,6 +421,12 @@
     <string name="st_fps_value">%1$d fps</string>
     <string name="st_fps_auto">Sem limite</string>
     <string name="st_fps_auto_sub">O mais rápido que o telefone conseguir codificar</string>
+    <string name="st_hz">Fluidez</string>
+    <string name="st_hz_auto">Automático</string>
+    <string name="st_hz_auto_sub">O telemóvel decide — 60 Hz enquanto o próprio ecrã está desligado</string>
+    <string name="st_hz_value">%1$d Hz</string>
+    <string name="st_hz_top_sub">O mais fluido — gasta mais bateria</string>
+    <string name="st_hz_note">Enquanto o ambiente de trabalho está aberto, o ecrã do telemóvel também funciona a esta frequência. As alterações aplicam-se de imediato.</string>
     <string name="st_audio">Áudio</string>
     <string name="st_audio_forward">Encaminhar áudio</string>
     <string name="st_audio_forward_sub">Tocar o som do telefone neste computador</string>

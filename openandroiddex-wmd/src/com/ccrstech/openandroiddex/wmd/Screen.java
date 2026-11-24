@@ -46,6 +46,9 @@ final class Screen {
     static synchronized void power(boolean on) {
         Class<?> sc = Refl.cls("android.view.SurfaceControl");
         int mode = on ? POWER_MODE_NORMAL : POWER_MODE_OFF;
+        // A held refresh rate has to be one the panel has shown before it goes dark,
+        // or the desktop runs at whatever it showed last (see Refresh).
+        if (!on) Refresh.beforePanelOff();
         for (IBinder token : tokens()) {
             Refl.callStatic(sc, "setDisplayPowerMode",
                     new Class<?>[]{IBinder.class, int.class}, token, mode);
@@ -87,44 +90,68 @@ final class Screen {
      * two carries them is a per-build, per-OEM fact rather than a clean version boundary.
      */
     private static IBinder[] tokens() {
+        List<Panel> panels = panels();
+        IBinder[] tokens = new IBinder[panels.size()];
+        for (int i = 0; i < tokens.length; i++) tokens[i] = panels.get(i).token;
+        return tokens;
+    }
+
+    /** A physical display: SurfaceFlinger's id for it and its token. */
+    static final class Panel {
+        /** -1 before Android 10, which had no ids. */
+        final long id;
+        final IBinder token;
+
+        Panel(long id, IBinder token) {
+            this.id = id;
+            this.token = token;
+        }
+    }
+
+    /** The physical displays, the way {@link #tokens} finds them. */
+    static List<Panel> panels() {
         Class<?> sc = Refl.cls("android.view.SurfaceControl");
         if (Refl.hasMethod(sc, "getPhysicalDisplayIds")) {
-            IBinder[] tokens = tokensFrom(sc);
-            if (tokens.length > 0) return tokens;
+            List<Panel> panels = panelsFrom(sc);
+            if (!panels.isEmpty()) return panels;
         }
         Class<?> dc = displayControl();
         if (dc != null) {
-            IBinder[] tokens = tokensFrom(dc);
-            if (tokens.length > 0) return tokens;
+            List<Panel> panels = panelsFrom(dc);
+            if (!panels.isEmpty()) return panels;
         }
         // Before Android 10 there was one display and one call that returned it.
         if (Refl.hasMethod(sc, "getBuiltInDisplay", int.class)) {
             IBinder token = (IBinder) Refl.callStatic(sc, "getBuiltInDisplay",
                     new Class<?>[]{int.class}, 0);
-            if (token != null) return new IBinder[]{token};
+            if (token != null) {
+                List<Panel> one = new ArrayList<>(1);
+                one.add(new Panel(-1, token));
+                return one;
+            }
         }
         throw new Refl.WmError("no physical display token");
     }
 
-    private static IBinder[] tokensFrom(Class<?> owner) {
+    private static List<Panel> panelsFrom(Class<?> owner) {
+        List<Panel> panels = new ArrayList<>();
         if (!Refl.hasMethod(owner, "getPhysicalDisplayIds")
                 || !Refl.hasMethod(owner, "getPhysicalDisplayToken", long.class)) {
-            return new IBinder[0];
+            return panels;
         }
         long[] ids;
         try {
             ids = (long[]) Refl.callStatic(owner, "getPhysicalDisplayIds", new Class<?>[]{});
         } catch (Throwable t) {
-            return new IBinder[0];
+            return panels;
         }
-        if (ids == null) return new IBinder[0];
-        List<IBinder> tokens = new ArrayList<>(ids.length);
+        if (ids == null) return panels;
         for (long id : ids) {
             IBinder token = (IBinder) Refl.callStatic(owner, "getPhysicalDisplayToken",
                     new Class<?>[]{long.class}, id);
-            if (token != null) tokens.add(token);
+            if (token != null) panels.add(new Panel(id, token));
         }
-        return tokens.toArray(new IBinder[0]);
+        return panels;
     }
 
     /**

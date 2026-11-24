@@ -9,7 +9,10 @@
     <string name="tm_cpu_short">المعالج</string>
     <string name="tm_mem_short">الذاكرة</string>
     <string name="tm_disk_short">التخزين</string>
+    <string name="tm_fps_short">إطار/ث</string>
     <string name="tm_cpu_busy">قيد الاستخدام</string>
+    <string name="tm_fps">معدل الإطارات</string>
+    <string name="tm_fps_streamed">مُرسلة إلى الكمبيوتر</string>
     <string name="tm_cpu_unavailable">غير متاح على هذا الجهاز</string>
     <string name="tm_of">%1$s من %2$s</string>
     <string name="tm_open_apps">المفتوح على سطح المكتب هذا</string>
@@ -418,6 +421,12 @@
     <string name="st_fps_value">%1$d إطار/ث</string>
     <string name="st_fps_auto">بلا حد</string>
     <string name="st_fps_auto_sub">بأقصى سرعة يستطيع الهاتف الترميز بها</string>
+    <string name="st_hz">سلاسة الحركة</string>
+    <string name="st_hz_auto">تلقائي</string>
+    <string name="st_hz_auto_sub">يقرر الهاتف — 60 هرتز أثناء إطفاء شاشته</string>
+    <string name="st_hz_value">%1$d هرتز</string>
+    <string name="st_hz_top_sub">الأكثر سلاسة — يستهلك بطارية أكثر</string>
+    <string name="st_hz_note">ما دام سطح المكتب مفتوحًا، تعمل شاشة الهاتف نفسها بهذا المعدل أيضًا. تسري التغييرات فورًا.</string>
     <string name="st_audio">الصوت</string>
     <string name="st_audio_forward">تمرير الصوت</string>
     <string name="st_audio_forward_sub">تشغيل صوت الهاتف على هذا الحاسوب</string>

@@ -445,6 +445,18 @@ then the snaps, the speaker, minimise, ☰ and maximise, keeping 48 px to drag b
 so that ✕ is never pushed off the bar at any width from 72 to 1000 px. Back reaching the window it was pressed on, the menus as
 windows and the buttons themselves need a phone on Android 14 or newer.
 
+The window daemon's answer to `HZ` — which of the phone panel's modes holds the
+desktop's refresh rate (`doc/refresh-rate.md`) — is checked the same way:
+
+```sh
+node test/refresh-rate-test.mjs
+```
+
+It compiles the daemon's own `RefreshRates` and runs it over the modes a Galaxy S25
+Ultra lists: the rate asked for, or the panel's next one down; never above the
+phone's own ceiling; only modes the size the phone is set to; and the rates offered
+at that size, fastest first, each once.
+
 Everything else needs a device. `doc/web-viewer.md`, `doc/remote-access.md`,
 `doc/usb-desktop.md`, `doc/apps-on-pc.md`, `doc/phone-notifications.md` and
 `doc/game-mode.md` list what is still unverified there.

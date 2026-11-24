@@ -9,7 +9,10 @@
     <string name="tm_cpu_short">CPU</string>
     <string name="tm_mem_short">内存</string>
     <string name="tm_disk_short">存储</string>
+    <string name="tm_fps_short">帧率</string>
     <string name="tm_cpu_busy">占用中</string>
+    <string name="tm_fps">帧率</string>
+    <string name="tm_fps_streamed">串流到电脑</string>
     <string name="tm_cpu_unavailable">此设备不提供</string>
     <string name="tm_of">%1$s / %2$s</string>
     <string name="tm_open_apps">此桌面上已打开</string>
@@ -418,6 +421,12 @@
     <string name="st_fps_value">%1$d fps</string>
     <string name="st_fps_auto">不限制</string>
     <string name="st_fps_auto_sub">手机能编码多快就多快</string>
+    <string name="st_hz">流畅度</string>
+    <string name="st_hz_auto">自动</string>
+    <string name="st_hz_auto_sub">由手机决定 — 手机自身屏幕关闭时为 60 Hz</string>
+    <string name="st_hz_value">%1$d Hz</string>
+    <string name="st_hz_top_sub">最流畅 — 更耗电</string>
+    <string name="st_hz_note">桌面打开期间，手机自身的屏幕也以此刷新率运行。更改立即生效。</string>
     <string name="st_audio">音频</string>
     <string name="st_audio_forward">转发音频</string>
     <string name="st_audio_forward_sub">在这台电脑上播放手机的声音</string>

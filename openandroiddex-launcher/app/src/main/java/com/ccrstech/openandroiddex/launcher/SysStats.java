@@ -8,7 +8,8 @@ import android.os.StatFs;
 import java.io.RandomAccessFile;
 
 /**
- * What the phone is doing right now: processor, memory, storage.
+ * What the phone is doing right now: processor, memory, storage — and, for the
+ * desktop's own gauge, the frames per second it is streaming ({@link #fps}).
  *
  * One sampler shared by the taskbar's tray gauge and the Task Manager window,
  * because a CPU figure only exists as a DIFFERENCE between two readings — two
@@ -26,6 +27,13 @@ final class SysStats {
 
     /** 0..100, or -1 when the platform will not let us read /proc/stat. */
     int cpuPercent = -1;
+    /**
+     * Frames per second the desktop streamed over the last second, or -1 when there
+     * is no such figure: no display set (the Task Manager), or nothing streaming it.
+     */
+    int fps = -1;
+    /** The desktop display whose frames {@link #fps} counts; -1 for none. */
+    private volatile int fpsDisplay = -1;
     /** 0..100 of physical RAM in use. */
     int memPercent;
     long memUsedBytes;
@@ -67,16 +75,36 @@ final class SysStats {
         refreshCpuAsync();
     }
 
+    /**
+     * Count frames for the desktop on {@code display} too: the gauge's FPS. The figure
+     * comes from the scrcpy server streaming that display, through the daemon — see
+     * WmClient.desktopFps — so only the desktop's own sampler sets this.
+     */
+    void setFpsDisplay(int display) {
+        fpsDisplay = display;
+    }
+
     private void refreshCpuAsync() {
-        if (cpuUnavailable) return;
+        if (cpuUnavailable && fpsDisplay < 0) return;
         if (!cpuBusy.compareAndSet(false, true)) return; // one already running
         new Thread(() -> {
             try {
-                sampleCpu();
+                if (!cpuUnavailable) sampleCpu();
+                sampleFps();
             } finally {
                 cpuBusy.set(false);
             }
         }, "sysstats-cpu").start();
+    }
+
+    private void sampleFps() {
+        int display = fpsDisplay;
+        if (display < 0) {
+            fps = -1;
+            return;
+        }
+        if (wm == null) wm = new WmClient();
+        fps = wm.desktopFps(display);
     }
 
     private void sampleMemory() {

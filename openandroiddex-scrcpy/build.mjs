@@ -1,15 +1,17 @@
 #!/usr/bin/env node
 // Build scrcpy's server — the part that runs on the phone — from scrcpy's own
-// source at the release the desktop app bundles, with five changes of ours,
+// source at the release the desktop app bundles, with six changes of ours,
 // applied in this order: display-scale.patch (see doc/sharp-desktop.md,
 // "Following the window"), desktop-splash.patch (doc/desktop-splash.md),
 // desktop-wake.patch (a sleeping phone is woken before its new display is made,
 // or the display goes black at its first resize: see the patch),
 // flex-encoder-limit.patch (a display that follows its window is resized to
-// what the phone's encoder takes, not only its capture: see the patch) and
+// what the phone's encoder takes, not only its capture: see the patch),
 // desktop-rotation.patch (the rotation an Android 10 or 11 desktop is held at
 // comes off before its display goes, however the session ends, and off every
-// display made, so the next display never inherits it: see the patch).
+// display made, so the next display never inherits it: see the patch) and
+// desktop-fps.patch (the frames streamed each second, told to the window daemon
+// for the desktop's FPS readout: doc/refresh-rate.md).
 //
 //   node openandroiddex-scrcpy/build.mjs     →  openandroiddex-scrcpy/build/scrcpy-server
 //
@@ -72,7 +74,7 @@ if (head() !== SCRCPY_COMMIT) {
   console.log(`[1/4] scrcpy v${SCRCPY_VERSION} already in ${relative(process.cwd(), src)}`)
 }
 
-console.log('[2/4] apply display-scale.patch, desktop-splash.patch, desktop-wake.patch, flex-encoder-limit.patch, desktop-rotation.patch')
+console.log('[2/4] apply display-scale.patch, desktop-splash.patch, desktop-wake.patch, flex-encoder-limit.patch, desktop-rotation.patch, desktop-fps.patch')
 run('git', ['-C', src, 'checkout', '--quiet', '--', '.'])
 run('git', ['-C', src, 'clean', '--quiet', '-fd'])
 run('git', ['-C', src, 'apply', join(here, 'display-scale.patch')])
@@ -80,6 +82,7 @@ run('git', ['-C', src, 'apply', join(here, 'desktop-splash.patch')])
 run('git', ['-C', src, 'apply', join(here, 'desktop-wake.patch')])
 run('git', ['-C', src, 'apply', join(here, 'flex-encoder-limit.patch')])
 run('git', ['-C', src, 'apply', join(here, 'desktop-rotation.patch')])
+run('git', ['-C', src, 'apply', join(here, 'desktop-fps.patch')])
 
 // ── the toolchain ─────────────────────────────────────────────────────────
 

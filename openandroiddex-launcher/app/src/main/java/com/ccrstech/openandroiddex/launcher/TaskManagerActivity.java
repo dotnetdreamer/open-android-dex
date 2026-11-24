@@ -20,6 +20,7 @@ import android.os.Looper;
 import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.KeyEvent;
+import android.view.Display;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.ImageView;
@@ -64,6 +65,10 @@ public class TaskManagerActivity extends Activity {
     private TextView[] gaugeValues;
     private TextView[] gaugeDetails;
     private ProgressBar[] gaugeBars;
+    /** The frame-rate card, shown only while this desktop is being streamed. */
+    private View fpsGauge;
+    /** What a full frame-rate bar is: the phone panel's top rate. */
+    private int fpsTop = 60;
     private LinearLayout appList;
     private TextView appCount;
 
@@ -184,6 +189,9 @@ public class TaskManagerActivity extends Activity {
         OwnWindows.opened(this);
         theme = DexTheme.of(this);
         stats = new SysStats(this);
+        // Frames are counted for a desktop display: the one this window is on.
+        Display here = getDisplay();
+        stats.setFpsDisplay(here != null && here.getDisplayId() > 0 ? here.getDisplayId() : -1);
         build();
         // Our own windows open and close without any broadcast — same-process
         // registry, same source the taskbar tiles use.
@@ -250,11 +258,16 @@ public class TaskManagerActivity extends Activity {
         gaugesLp.topMargin = dp(14);
         root.addView(gauges, gaugesLp);
 
-        gaugeValues = new TextView[3];
-        gaugeDetails = new TextView[3];
-        gaugeBars = new ProgressBar[3];
-        int[] names = {R.string.tm_cpu, R.string.tm_mem, R.string.tm_disk};
-        for (int i = 0; i < 3; i++) gauges.addView(buildGauge(i, names[i]));
+        // Frame rate first, as on the desktop's gauge: the frames this desktop is
+        // streaming (SysStats.fps), hidden while nothing streams it.
+        gaugeValues = new TextView[4];
+        gaugeDetails = new TextView[4];
+        gaugeBars = new ProgressBar[4];
+        int[] names = {R.string.tm_fps, R.string.tm_cpu, R.string.tm_mem, R.string.tm_disk};
+        for (int i = 0; i < 4; i++) gauges.addView(buildGauge(i, names[i]));
+        fpsGauge = gauges.getChildAt(0);
+        fpsGauge.setVisibility(View.GONE);
+        fpsTop = panelTopRate();
 
         TextView heading = new TextView(this);
         heading.setText(s(R.string.tm_open_apps));
@@ -330,9 +343,13 @@ public class TaskManagerActivity extends Activity {
         gaugeDetails[index] = detail;
         gaugeBars[index] = bar;
 
+        // All as tall as the tallest: the frame rate's caption takes two lines in a
+        // narrow window, and a row of cards of different heights looks broken.
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0,
-                ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
-        if (index > 0) lp.leftMargin = dp(10);
+                ViewGroup.LayoutParams.MATCH_PARENT, 1f);
+        // The frame rate's gap is its own, so the row closes up when it hides.
+        if (index == 0) lp.rightMargin = dp(10);
+        if (index > 1) lp.leftMargin = dp(10);
         col.setLayoutParams(lp);
         return col;
     }
@@ -354,12 +371,39 @@ public class TaskManagerActivity extends Activity {
         };
         for (int i = 0; i < 3; i++) {
             int v = values[i];
-            gaugeValues[i].setText(v < 0 ? "—" : v + "%");
-            gaugeBars[i].setProgress(Math.max(v, 0));
-            gaugeBars[i].setProgressTintList(ColorStateList.valueOf(
+            gaugeValues[i + 1].setText(v < 0 ? "—" : v + "%");
+            gaugeBars[i + 1].setProgress(Math.max(v, 0));
+            gaugeBars[i + 1].setProgressTintList(ColorStateList.valueOf(
                     v >= 90 ? theme.danger : theme.accent));
-            gaugeDetails[i].setText(details[i]);
+            gaugeDetails[i + 1].setText(details[i]);
         }
+        // -1: nothing is streaming this desktop, so there is no frame rate to show.
+        int fps = stats.fps;
+        fpsGauge.setVisibility(fps < 0 ? View.GONE : View.VISIBLE);
+        if (fps >= 0) {
+            gaugeValues[0].setText(getString(R.string.st_fps_value, fps));
+            gaugeBars[0].setProgress(Math.min(100, fps * 100 / Math.max(1, fpsTop)));
+            gaugeBars[0].setProgressTintList(ColorStateList.valueOf(theme.accent));
+            gaugeDetails[0].setText(s(R.string.tm_fps_streamed));
+        }
+    }
+
+    /** The phone panel's fastest refresh rate: a full frame-rate bar. */
+    private int panelTopRate() {
+        int top = 60;
+        try {
+            android.hardware.display.DisplayManager displays =
+                    getSystemService(android.hardware.display.DisplayManager.class);
+            Display panel = displays == null ? null : displays.getDisplay(Display.DEFAULT_DISPLAY);
+            if (panel != null) {
+                for (Display.Mode mode : panel.getSupportedModes()) {
+                    top = Math.max(top, Math.round(mode.getRefreshRate()));
+                }
+            }
+        } catch (Throwable ignored) {
+            // 60 is every panel's rate
+        }
+        return top;
     }
 
     private void rebuildAppList() {

@@ -256,9 +256,10 @@ jobs:
         # splash, not on a black window), desktop-wake.patch (a sleeping
         # phone is woken before the desktop's display is made, or the display
         # goes black at its first resize), flex-encoder-limit.patch (a display
-        # that follows its window is held to the phone's encoder) and
+        # that follows its window is held to the phone's encoder),
         # desktop-rotation.patch (an Android 10 or 11 desktop's rotation hold
-        # is never left for the next display). The client is the release download
+        # is never left for the next display) and desktop-fps.patch (the frames
+        # streamed each second, for the desktop's FPS readout). The client is the release download
         # below, with ours laid over its executable (the scrcpy-client job); it
         # refuses a server of any other version, hence the check. The same
         # script `npm run apk` runs locally.

@@ -9,7 +9,10 @@
     <string name="tm_cpu_short">CPU</string>
     <string name="tm_mem_short">RAM</string>
     <string name="tm_disk_short">સ્ટોરેજ</string>
+    <string name="tm_fps_short">FPS</string>
     <string name="tm_cpu_busy">વપરાશમાં</string>
+    <string name="tm_fps">ફ્રેમ દર</string>
+    <string name="tm_fps_streamed">કમ્પ્યુટર પર સ્ટ્રીમ</string>
     <string name="tm_cpu_unavailable">આ ઉપકરણ પર ઉપલબ્ધ નથી</string>
     <string name="tm_of">%2$s માંથી %1$s</string>
     <string name="tm_open_apps">આ ડેસ્કટોપ પર ખુલ્લું</string>
@@ -418,6 +421,12 @@
     <string name="st_fps_value">%1$d fps</string>
     <string name="st_fps_auto">અમર્યાદિત</string>
     <string name="st_fps_auto_sub">ફોન જેટલી ઝડપે એન્કોડ કરી શકે</string>
+    <string name="st_hz">સ્મૂધનેસ</string>
+    <string name="st_hz_auto">આપોઆપ</string>
+    <string name="st_hz_auto_sub">ફોન નક્કી કરે છે — તેની પોતાની સ્ક્રીન બંધ હોય ત્યારે 60 Hz</string>
+    <string name="st_hz_value">%1$d Hz</string>
+    <string name="st_hz_top_sub">સૌથી સ્મૂધ — વધુ બેટરી વાપરે છે</string>
+    <string name="st_hz_note">ડેસ્કટોપ ખુલ્લું હોય ત્યાં સુધી ફોનની પોતાની સ્ક્રીન પણ આ દરે ચાલે છે. ફેરફારો તરત લાગુ થાય છે.</string>
     <string name="st_audio">ઓડિયો</string>
     <string name="st_audio_forward">ઓડિયો ફોરવર્ડ કરો</string>
     <string name="st_audio_forward_sub">ફોનનો અવાજ આ કમ્પ્યુટર પર વગાડો</string>

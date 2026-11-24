@@ -203,6 +203,13 @@ final class DexPrefs {
     static final String KEY_RESOLUTION = PC_PREFIX + "res";
     static final String KEY_BITRATE = PC_PREFIX + "bitrate";
     static final String KEY_FPS = PC_PREFIX + "fps";
+    /**
+     * Smoothness: the refresh rate the phone's own panel is held at while the
+     * desktop is open, in Hz; 0 leaves it to the phone. Not a scrcpy argument —
+     * the desktop app hands it to the window daemon, which holds the panel
+     * (doc/refresh-rate.md) — so it takes effect at once.
+     */
+    static final String KEY_HZ = PC_PREFIX + "hz";
     static final String KEY_CODEC = PC_PREFIX + "codec";
     static final String KEY_ENCODER = PC_PREFIX + "encoder";
     static final String KEY_AUDIO = PC_PREFIX + "audio";
@@ -374,6 +381,7 @@ final class DexPrefs {
     static final String DEF_RESOLUTION = "auto";
     static final int DEF_BITRATE = 0;
     static final int DEF_FPS = 0;                 // 0 = scrcpy decides
+    static final int DEF_HZ = 0;                  // 0 = the phone decides
     static final boolean DEF_AUDIO = true;
     /**
      * ON — the phone keeps its own sound unless the user says otherwise.

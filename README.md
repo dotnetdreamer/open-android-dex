@@ -566,6 +566,11 @@ and no restart.
   one does — on your laptop's touchpad and on your phone's
 - **Picture quality.** Resolution, frame rate, sharpness and sound, so you can
   trade smoothness for battery life on an older phone
+- **Smoothness.** Keep the desktop at one of your phone's own refresh rates
+  (up to 120 Hz on a Galaxy S25 Ultra), even with the phone's screen switched
+  off, where it would otherwise drop to 60. Browsers keep their own 60 frames a
+  second, on the desktop as on the phone. The gauge at the top right and the
+  Task Manager show the frames per second the desktop is streaming
 - **Display size.** Make everything on the desktop bigger or smaller, from five
   sizes or to the exact dpi. A live preview shows the result first, and whether
   most apps are likely to use their phone or tablet layout
