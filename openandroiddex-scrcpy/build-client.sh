@@ -2,7 +2,8 @@
 # Build scrcpy's client — the program that runs on the computer — from scrcpy's own
 # source at the release the app bundles, with pointer-shapes.patch: the desktop
 # window's cursor takes the shape the phone asks for, a double arrow over a window's
-# resize edge (doc/window-resize.md, issue #5).
+# resize edge (doc/window-resize.md, issue #5); and hover-leave.patch: the pointer
+# leaving the window ends Android's hover, so nothing stays lit as hovered.
 #
 #   openandroiddex-scrcpy/build-client.sh <target>
 #       <target>: linux-x86_64 | win64 | macos-aarch64 | macos-x86_64
@@ -69,12 +70,13 @@ else
   echo "[1/3] scrcpy v$VERSION already in $SRC"
 fi
 
-echo "[2/3] apply pointer-shapes.patch"
+echo "[2/3] apply pointer-shapes.patch, hover-leave.patch"
 # Back to the release's own files; app/deps/work and release/work are ignored by
 # scrcpy's .gitignore, so the dependencies already built survive this.
 git -C "$SRC" checkout --quiet -- .
 git -C "$SRC" clean --quiet -fd
 git -C "$SRC" apply "$HERE/pointer-shapes.patch"
+git -C "$SRC" apply "$HERE/hover-leave.patch"
 
 echo "[3/3] build the client for $TARGET"
 cd "$SRC"
@@ -117,6 +119,10 @@ esac
 # looking like a success.
 if ! grep -aqF "Pointer shapes: read from stdin" "$BUILT"; then
   echo "[scrcpy-client] $BUILT does not carry pointer-shapes.patch" >&2
+  exit 1
+fi
+if ! grep -aqF "inject hover exit" "$BUILT"; then
+  echo "[scrcpy-client] $BUILT does not carry hover-leave.patch" >&2
   exit 1
 fi
 mkdir -p "$OUT"

@@ -258,8 +258,10 @@ jobs:
         # goes black at its first resize), flex-encoder-limit.patch (a display
         # that follows its window is held to the phone's encoder),
         # desktop-rotation.patch (an Android 10 or 11 desktop's rotation hold
-        # is never left for the next display) and desktop-fps.patch (the frames
-        # streamed each second, for the desktop's FPS readout). The client is the release download
+        # is never left for the next display), desktop-fps.patch (the frames
+        # streamed each second, for the desktop's FPS readout) and
+        # desktop-mouse.patch (on the desktop the computer's left button is a
+        # mouse's, so a drag selects and picks up, not scrolls). The client is the release download
         # below, with ours laid over its executable (the scrcpy-client job); it
         # refuses a server of any other version, hence the check. The same
         # script `npm run apk` runs locally.
@@ -377,7 +379,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: openandroiddex-scrcpy/build/client/${{ matrix.target }}
-          key: scrcpy-client-v1-${{ matrix.target }}-${{ hashFiles('openandroiddex-scrcpy/build.mjs', 'openandroiddex-scrcpy/build-client.sh', 'openandroiddex-scrcpy/pointer-shapes.patch') }}
+          key: scrcpy-client-v1-${{ matrix.target }}-${{ hashFiles('openandroiddex-scrcpy/build.mjs', 'openandroiddex-scrcpy/build-client.sh', 'openandroiddex-scrcpy/pointer-shapes.patch', 'openandroiddex-scrcpy/hover-leave.patch') }}
 
       - name: Install the build's tools (Linux)
         if: env.WANTED == '1' && steps.cache.outputs.cache-hit != 'true' && matrix.target == 'linux-x86_64'

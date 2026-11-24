@@ -1,0 +1,98 @@
+diff --git a/app/src/input_manager.c b/app/src/input_manager.c
+index af6ef90..36aedbe 100644
+--- a/app/src/input_manager.c
++++ b/app/src/input_manager.c
+@@ -41,6 +41,7 @@ sc_input_manager_init(struct sc_input_manager *im,
+     im->vfinger_invert_y = false;
+ 
+     im->mouse_buttons_state = 0;
++    im->mouse_hovering = false;
+ 
+     im->last_keycode = SDLK_UNKNOWN;
+     im->last_mod = 0;
+@@ -767,6 +768,15 @@ sc_input_manager_process_mouse_motion(struct sc_input_manager *im,
+     assert(im->mp->ops->process_mouse_motion);
+     im->mp->ops->process_mouse_motion(im->mp, &evt);
+ 
++    // Open Android DeX: a move with nothing held is a hover (see
++    // sc_input_manager_process_mouse_leave)
++    im->mouse_hovering = !evt.buttons_state
++                      && evt.pointer_id == SC_POINTER_ID_MOUSE
++                      && !im->mp->relative_mode;
++    if (im->mouse_hovering) {
++        im->hover_position = evt.position;
++    }
++
+     // vfinger must never be used in relative mode
+     assert(!im->mp->relative_mode || !im->vfinger_down);
+ 
+@@ -934,6 +944,8 @@ sc_input_manager_process_mouse_button(struct sc_input_manager *im,
+     if (down) {
+         // Mark the button as pressed
+         im->mouse_buttons_state |= button;
++        // Open Android DeX: a press ends the hover
++        im->mouse_hovering = false;
+     }
+ 
+     bool change_vfinger = event->button == SDL_BUTTON_LEFT &&
+@@ -1163,10 +1175,44 @@ sc_input_manager_on_device_disconnected(struct sc_input_manager *im) {
+     }
+ }
+ 
++// Open Android DeX: the pointer left the window with nothing held. Android is
++// told the hover is over, as a computer's own windows are, so whatever was
++// under the pointer stops showing itself hovered rather than staying lit until
++// the pointer comes back. Only for a mouse the computer draws: a captured one
++// (relative mode) never leaves.
++static void
++sc_input_manager_process_mouse_leave(struct sc_input_manager *im) {
++    if (!im->mouse_hovering || im->mouse_buttons_state || !im->controller
++            || im->camera || !im->mp || im->mp->relative_mode
++            || im->screen->paused || im->disconnected) {
++        return;
++    }
++    im->mouse_hovering = false;
++
++    struct sc_control_msg msg = {
++        .type = SC_CONTROL_MSG_TYPE_INJECT_TOUCH_EVENT,
++        .inject_touch_event = {
++            .action = AMOTION_EVENT_ACTION_HOVER_EXIT,
++            .pointer_id = SC_POINTER_ID_MOUSE,
++            .position = im->hover_position,
++            .pressure = 0.f,
++            .action_button = 0,
++            .buttons = 0,
++        },
++    };
++
++    if (!sc_controller_push_msg(im->controller, &msg)) {
++        LOGW("Could not request 'inject hover exit'");
++    }
++}
++
+ void
+ sc_input_manager_handle_event(struct sc_input_manager *im,
+                               const SDL_Event *event) {
+     switch (event->type) {
++        case SDL_EVENT_WINDOW_MOUSE_LEAVE:
++            sc_input_manager_process_mouse_leave(im);
++            break;
+         case SDL_EVENT_TEXT_INPUT:
+             sc_input_manager_process_text_input(im, &event->text);
+             break;
+diff --git a/app/src/input_manager.h b/app/src/input_manager.h
+index c986cbc..2f50381 100644
+--- a/app/src/input_manager.h
++++ b/app/src/input_manager.h
+@@ -38,6 +38,11 @@ struct sc_input_manager {
+ 
+     uint8_t mouse_buttons_state; // OR of enum sc_mouse_button values
+ 
++    // Open Android DeX: the mouse hovers over the device (no button held), and
++    // where it last did, so leaving the window can end the hover there.
++    bool mouse_hovering;
++    struct sc_position hover_position;
++
+     // Tracks the number of identical consecutive shortcut key down events.
+     // Not to be confused with event->repeat, which counts the number of
+     // system-generated repeated key presses.
