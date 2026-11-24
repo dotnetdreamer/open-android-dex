@@ -97,6 +97,11 @@ export function AppsPanel({
   const search = useRef<HTMLInputElement>(null);
   const attempt = useRef(0);
   const [appsFirst, setAppsFirst] = useState(opensAppsOnConnect);
+  /** The phone's own screen goes dark while its apps are open here; stored on the Rust side. */
+  const [screenOff, setScreenOff] = useState(true);
+  useEffect(() => {
+    invoke<boolean>("apps_screen_off").then(setScreenOff).catch(() => {});
+  }, []);
 
   const refresh = useCallback(() => {
     if (!serial) {
@@ -331,6 +336,24 @@ export function AppsPanel({
           ))}
         </div>
         <label className="apps-pref mt-6">
+          <input
+            type="checkbox"
+            checked={screenOff}
+            onChange={(e) => {
+              setScreenOff(e.target.checked);
+              invoke("apps_set_screen_off", { on: e.target.checked }).catch((err) =>
+                logError(`apps: screen off ${e.target.checked}: ${String(err)}`),
+              );
+            }}
+          />
+          <span>
+            <span className="heading block text-[12.5px]">Turn my phone's screen off while apps are open</span>
+            <span className="caption block">
+              The phone stays awake and its apps keep working here. Its screen lights up again when the last window closes.
+            </span>
+          </span>
+        </label>
+        <label className="apps-pref mt-3">
           <input
             type="checkbox"
             checked={appsFirst}

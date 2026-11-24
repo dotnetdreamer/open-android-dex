@@ -1068,6 +1068,58 @@ phone — and a Linux window has not: its ✕ asks the app to close it
 unsaved work first, and the window goes when the X window does. A second ✕
 within six seconds closes the window here, for an app that does not answer.
 
+## The phone's own screen
+
+While any app of a phone has a window here, the phone is kept awake and, unless
+the person turned it off, its own screen is dark: what scrcpy's `--stay-awake
+--turn-screen-off` do for a mirror. The Apps tab's *Turn my phone's screen off
+while apps are open* is the switch (on unless turned off; kept in
+`stream-config.json` as `appsdark`, which the first window's opening reads again).
+`AppPanel` is the phone's half, driven by `AppServer`.
+
+**Why.** Before Android 13 a window's display shares the phone's display group,
+and a group that sleeps runs no input: once the phone timed out, or was asleep
+when the first window opened, the computer's clicks stopped landing. So, with
+the first window:
+
+- a sleeping phone is woken first, by `KEYCODE_WAKEUP` — never POWER, which would
+  put an awake phone to sleep — and given up to 2 s to come on and 0.5 s to
+  settle, as scrcpy's own wake does;
+- the panel is darkened through `Screen` (SurfaceControl's power mode, the
+  shell's authority, as the desktop's taskbar tile does it). Android still
+  believes the screen is on, so the phone stays awake, the windows keep running
+  and their input keeps flowing;
+- every `AWAKE_EVERY_MS` (4 s) the default display is told someone is using it,
+  as each window's display already was. The shortest screen timeout is 15 s.
+
+**Put back.** The panel is lit again with the last window, and when the server
+stops: asked to, or because the computer did not come back (the cable pulled)
+within `AppWindow.AWAY_MS`. A process killed outright cannot do either. The
+window daemon's dead-man switch does not cover it: that is the desktop's, and
+this server has its own process.
+
+**Both ways of changing it.** Every window's `open` message carries `dark`, so
+a server that was just started and a window opened by a pin both have the
+choice. The Apps tab's switch also sends `dark` on the control connection to the
+servers up, which darkens or lights the panel at once.
+
+**A person's power button** while the panel is dark puts the phone to sleep
+(Android thought the screen was on). The next look, within 4 s, wakes it and
+darkens it again.
+
+**Not handled.**
+
+- A desktop session's own *Screen off* (the taskbar's tile) uses the same power
+  mode in another process. The two do not know of each other: this server lights
+  the panel with its last window, whoever made it dark.
+- Nothing here checks SurfaceFlinger for a panel somebody else darkened first, as
+  the phone-remote helper does (`doc/phone-remote.md`, "A screen someone else
+  made dark").
+
+Tried by hand, from Windows, on a Galaxy S24 Ultra (Android 17) and a Redmi Note
+8 Pro (Android 11, a release where a window's display shares the phone's group).
+Not tried from a Mac (the same server and the same messages).
+
 ## Sound
 
 While any app of a phone has a window here, the phone's sound comes here too,

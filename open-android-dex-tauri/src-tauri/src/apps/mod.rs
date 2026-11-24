@@ -373,6 +373,29 @@ pub fn apps_prepare(app: tauri::AppHandle, serial: String) -> Result<host::Hello
     Ok(host::ensure(&app, &way.serial, &way.phone)?.hello.clone())
 }
 
+/// Whether the phone's own screen goes dark while its apps have windows here.
+/// On unless turned off: the phone is kept awake either way, and a dark panel is
+/// what keeps it from being lit for nobody.
+fn screen_off_stored(app: &tauri::AppHandle) -> bool {
+    crate::scrcpy::config_value(app, "appsdark").as_deref() != Some("off")
+}
+
+#[tauri::command]
+pub fn apps_screen_off(app: tauri::AppHandle) -> bool {
+    screen_off_stored(&app)
+}
+
+/// The Apps tab's "turn my phone's screen off" switch: stored, and told to every
+/// phone whose windows are open now.
+#[tauri::command]
+pub fn apps_set_screen_off(app: tauri::AppHandle, on: bool) {
+    crate::scrcpy::remember_config(&app, "appsdark", if on { "on" } else { "off" });
+    link::DARK.store(on, Ordering::SeqCst);
+    for server in host::all_running() {
+        server.dark(on);
+    }
+}
+
 /// Files dropped on this app's main window, for the phone it shows: into its
 /// Download folder, an APK installed — what a drop on an app window's title
 /// bar does (doc/apps-on-pc.md, "Dropping files"). `events` hears how it
@@ -636,6 +659,8 @@ fn open_new(
     let serial = way.serial.as_str();
     let phone = way.phone.as_str();
     let opening = Opening::new(serial);
+    // Read here, for every way a window opens (a click, a pin, a notification).
+    link::DARK.store(screen_off_stored(app), Ordering::SeqCst);
     let server = host::ensure_for_window(app, serial, phone)?;
     let known = rows().lock().unwrap().get(phone).and_then(|t| t.get(pkg).cloned());
     let (row, mut icon) = match known {

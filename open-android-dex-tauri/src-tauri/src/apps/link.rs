@@ -617,10 +617,16 @@ pub fn start(link: Arc<Link>, surface: Arc<dyn Surface>, net: NetSpec, out: Rece
         .spawn(move || run(link, surface, net, out));
 }
 
+/// Whether the phone's own screen goes dark while its apps have windows here: the
+/// Apps tab's choice, said with every window's opening. Kept as it was last read
+/// off the settings (`apps::open_new`), for the windows that open again by themselves.
+pub static DARK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
 /// What opens the app in a window on the phone — this one's, by its key.
 fn open_message(net: &NetSpec, want: DisplaySize, direct: bool, key: &str) -> Value {
     let mut open = json!({
         "t": "open",
+        "dark": DARK.load(std::sync::atomic::Ordering::SeqCst),
         "pkg": net.pkg,
         "activity": net.activity.clone().unwrap_or_default(),
         "w": want.w,
