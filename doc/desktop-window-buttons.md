@@ -248,7 +248,94 @@ A13's pump ran nothing of the Redmi's.
 ## Not verified, and known gaps
 
 - macOS: the bar does not exist there.
-- Android 10: no phone was run; see the MIUI section for what was run in its place.
+- Android 10: first run on 2026-11-24 (Redmi Note 7, MIUI 12.5), and every window
+  stayed full screen, under the taskbar. The enforcer saw no windows: Android 10
+  prints `* TaskRecord{#id …}` under `Stack #N: type=… mode=…` lines, with the
+  task's rect before its header and visibility on its activities. The parser now
+  reads that (`parse_section`, test `reads_android_10_tasks_out_of_their_stacks`).
+  It could not make a window either: `am start --windowingMode 5` only re-delivers
+  the intent to a task that exists, and `am task resize` refuses one that is not
+  freeform. The window daemon's `WINMODE <task> 5` (`setTaskWindowingMode`, PC only)
+  does it. Android then puts its own rect on the window afterwards, so the resize is
+  `freeform_then_resize`'s ladder. Android 10's own ▢ makes a task full screen at
+  every press, so there a press on a window already maximized restores it. Run on
+  the Redmi: full screen → window, ▢ → maximized above the taskbar, ▢ → restored,
+  ▢ → maximized. Not run: a portrait-locked app, which gets a landscape window
+  (Android 10 prints no requested orientation). Android 11 and later are unchanged.
+- MIUI's freeform windows on that Redmi are MIUI's own floating windows
+  (`MiuiFreeFormGestureController`): a grey pill handle and no ✕. Below Android 14
+  the caption service draws no bar either, so nothing closed our own windows (the
+  file transfer window). Their taskbar tiles now have Close window on right-click
+  or long-press (`closeOwnWindowNamed`: the windows that ask first are asked, any
+  other has its AppTask removed). Third-party windows already had Close in their
+  taskbar menu.
+- On the Galaxy A13 (Android 12) every taskbar menu opened UNDER the app windows: on
+  its untrusted display overlays draw under apps, so the taskbar is inside the desktop
+  activity and a popup of it is a sub-window of that, the bottom of the stack. There a
+  tile's menu is now a window of its own (`TaskbarMenuActivity`, through
+  `showTileMenu` where `overlaysBuried()`): freeform, as One UI keeps every freeform
+  window above every full-screen one; started without naming the display, which the
+  launcher may not; see-through but for its card, because One UI grows a freeform
+  window to its minimum (440 px square) and draws its handle over the top middle; put
+  away when it answers or loses the focus (windows side by side are all resumed, so
+  pausing is not enough). Run on the A13 with the window daemon's mouse: the file
+  transfer tile's Close window closed it, Gallery's menu came up over Gallery with its
+  three items, a click on the desktop put it away, and Maximize / restore maximized
+  Gallery to 2828x1414 over the taskbar. One UI still outlines the menu's whole
+  window, a faint frame larger than the card.
+- The app drawer had the same trouble there, from before (goHome, 2026-11-17: the
+  desktop cannot be raised over a window): opened inside the desktop, it was behind the
+  Gallery window over it. Now opening it puts the windows on screen away, as Show
+  desktop does, and closing it with nothing opened brings exactly those back
+  (CaptionService `clearForDrawer` / `backFromDrawer`). An app opened from it leaves the
+  others on the taskbar, as after Show desktop on a computer: brought back, they would
+  be raised over it. Run on the A13: Apps with Gallery open → drawer, Gallery away;
+  Apps again → Gallery back where it was; Clock from the drawer → Clock in front,
+  Gallery on the taskbar; its tile → Gallery back.
+- An update of the launcher can cost it the overlay permission on MIUI after the
+  computer has given it: on the Redmi Note 7 (2026-11-24, 20:49) the grant read back
+  "allow", Android un-granted it as the install finished, and the launcher started three
+  seconds later without it — its taskbar inside the desktop, under every window, for
+  the session. The computer now looks again 2.5 and 6.5 s on and grants it again
+  (adb.rs), and the launcher keeps looking for the permission for two minutes, not ten
+  seconds, also after the caption service re-seats the bar. The next update on the
+  Redmi: the grant's own retry caught it ("took 2 attempts"), and the bar was an
+  overlay. Run there the same day: a full-screen app becomes a window above the
+  taskbar, ▢ maximizes and restores, the taskbar menu is the popup above windows and
+  its Maximize works, the drawer opens over windows without putting them away, Close
+  window closes the file transfer window, and a click on a window behind brings it in
+  front as drawn. MIUI again removed a Settings window when another app opened as a
+  floating window.
+- A window clicked into was put on top in the window manager's order, but MIUI
+  kept the one before drawn over it: Settings first, file transfer's layer above
+  (`dumpsys SurfaceFlinger`: z 5 over 3), and the click going to the window that
+  could not be seen. The enforcer now raises a window that was already on the
+  desktop when it comes in front (`front_pass`, the daemon's `TOFRONT`, which is
+  `moveTaskToFront`). Run on the Redmi with taps on two windows, both ways: the
+  two orders agreed each time, and the screen showed the window tapped.
+- Galaxy S25 Ultra (Android 17, One UI 9), 2026-11-24, with the Mac's mouse. Its
+  overlays draw above windows, so the taskbar's menus are the plain popup and the
+  drawer opens over the windows without putting them away. Run: a tile's menu over a
+  maximized window, a click on the taskbar putting it away, Close window on the file
+  transfer tile. Two things found there and changed:
+  - The menu's Maximize / restore resized the window and left it where it was in the
+    order: Gallery, restored behind a maximized My Files, could not be seen. The
+    enforcer now also raises the window it resized (`window_pass`, the daemon's
+    `TOFRONT`). Run: Gallery behind My Files → maximized and in front; again →
+    restored, still in front. Not run on Android 10 to 12.
+  - Our own windows' first rect was centred on the whole display: File transfer ran
+    from y 76 to 1442 on the 1518 px desktop, 28 px under the taskbar (from 1414).
+    `desktopWindowRect` now centres it in the room above the taskbar, as an app's
+    window is. Run: Web viewer opened at y 71 to 1343. A window put back where it was
+    left already stayed above the taskbar (`WindowMemory.recall`).
+- Also seen on the Redmi, not changed: MIUI removed a Settings window (task
+  gone) when Calculator opened as a floating window, likely its small-window
+  blacklist (`MiuiMultiWindowAdapter::getFreeformBlackList`). And while Settings
+  is open anywhere, Android hides the taskbar: below Android 14 it is an app
+  overlay, and Settings' window has `HIDE_NON_SYSTEM_OVERLAY_WINDOWS`
+  (`mForceHideNonSystemOverlayWindow=true` on the taskbar). `wm overscan` on the
+  desktop display does keep full-screen apps above the taskbar, but it moved the
+  taskbar up with them; tried and reset, not used.
 - The rotation hold's failure branches were forced in a test build; none was met for real.
 - The enforcer's `wm set-display-windowing-mode -d N 5` leaves nothing for the next
   display. A review (2026-11-18) read in the Android 12 source that a display's windowing

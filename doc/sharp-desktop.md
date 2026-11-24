@@ -311,10 +311,23 @@ caps everything at 4.
 scrcpy 5 tries a display's full size first and, if the phone's encoder fails,
 applies its declared limits and retries smaller ("Retrying with -m…"). The
 session works, but every start pays a failed attempt and the phone's GPU draws
-pixels the stream throws away. The client's `Texture: WxH` line is the size it
-decodes; one smaller than the display is remembered per phone and codec
-(`video-caps.json`), and later desktops render no larger. The S25 Ultra's
-encoder takes 8192x8192, so it has never needed this.
+pixels the stream throws away. When the server says it is shrinking ("Applying
+video encoder constraints", "Retrying with -m…"), the display's size at that
+moment is the size that failed: those are INFO lines on the same pipe and in
+the same order as the "New display" and "Display resized" lines. The next step
+of scrcpy's own ladder below it (2560, 1920, 1600, …) is remembered per phone
+and codec (`encoder-caps.json`), and later desktops render no larger.
+
+Until 2026-11-24 the limit came from the client's `Texture: WxH` lines instead
+(`video-caps.json`, now ignored). Those are the client's own and arrive in no
+fixed order with the phone's lines; a burst of them read after a display had
+grown was taken as the encoder's best. A Redmi Note 7 refused 3024x1834 (its
+window on a Retina screen, at 2x) and was then held to 1512 everywhere,
+although `screenrecord` encodes 2464x1220 on it. Its 1x desktop on the
+2560-wide screen stayed 1512 px wide and was scaled up. The S25 Ultra and the S24
+had picked up 1504 and 1512 the same way; their encoders take far more. The
+Redmi now learns 2560 from that refusal, and a 2x desktop of 2560x1552 there
+encodes.
 
 A desktop that follows its window used to skip the cap: only the fit above read
 it, so a Redmi 9A (Android 11, an `OMX.MTK.VIDEO.ENCODER.AVC` that stops at

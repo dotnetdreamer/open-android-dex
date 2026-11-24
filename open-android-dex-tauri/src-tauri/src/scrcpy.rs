@@ -727,18 +727,20 @@ fn spawn_output_reader<R: Read + Send + 'static>(
             // A file dropped on this window is pushed by scrcpy itself, and
             // these lines are the only account of it there is.
             transfer::observe(&key, &line);
-            // The size of the video, which comes out smaller than the display
-            // only when the phone's encoder could not take the display's size.
-            if let Some((tw, th)) = display::parse_texture_size(&line) {
-                let shown = *display_size.lock().unwrap();
-                if let Some((dw, dh)) = shown {
-                    let (video, asked) = (tw.max(th), dw.max(dh).max(0) as u32);
-                    if video < asked {
-                        // Off this thread, like the dumpsys below: knowing
-                        // which phone this is can take an adb round trip.
-                        let (a2, s2, c2) = (app.clone(), serial.clone(), codec.clone());
-                        thread::spawn(move || display::remember_video_cap(&a2, &s2, c2.as_deref(), video));
-                    }
+            // The phone's encoder refused the display at its size. The server says so as
+            // it starts shrinking (SurfaceEncoder.prepareRetry), in INFO lines on the same
+            // pipe as the "New display" and "Display resized" lines that set display_size,
+            // and in the same order — so display_size is the size that failed. Not the
+            // client's "Texture" lines: they come in no fixed order with the phone's, and
+            // a burst of them read after the display had grown held a Redmi Note 7 to 1512
+            // px (display::VIDEO_CAP_FILE).
+            if line.contains("Applying video encoder constraints") || line.contains("Retrying with -m") {
+                let failed = display_size.lock().unwrap().map(|(w, h)| w.max(h).max(0) as u32);
+                if let Some(cap) = failed.and_then(display::encoder_cap_below) {
+                    // Off this thread, like the dumpsys below: knowing which phone
+                    // this is can take an adb round trip.
+                    let (a2, s2, c2) = (app.clone(), serial.clone(), codec.clone());
+                    thread::spawn(move || display::remember_video_cap(&a2, &s2, c2.as_deref(), cap));
                 }
             }
             if line.contains("Flex display:") {
@@ -1452,7 +1454,7 @@ fn parse_all_display_tasks(dump: &str) -> Vec<(i32, Vec<TaskRec>)> {
         else {
             continue;
         };
-        out.push((id, parse_section(chunk, root)));
+        out.push((id, parse_section(chunk, root, is_stack_dump(dump))));
     }
     out
 }
@@ -1465,8 +1467,31 @@ fn root_task_indent(dump: &str) -> Option<usize> {
     let body = &dump[dump.find("Display #")?..];
     body.lines().find_map(|line| {
         let t = line.trim_start();
-        t.starts_with("* Task{").then(|| line.len() - t.len())
+        is_task_header(t).then(|| line.len() - t.len())
     })
+}
+
+/// A task's header line: `* Task{…}` from Android 11, `* TaskRecord{…}` on Android 10.
+fn is_task_header(t: &str) -> bool {
+    t.starts_with("* Task{") || t.starts_with("* TaskRecord{")
+}
+
+/// The dump is Android 10's, whose tasks are TaskRecords in stacks (see parse_section).
+fn is_stack_dump(dump: &str) -> bool {
+    dump.contains("* TaskRecord{")
+}
+
+/// "mBounds=Rect(200, 80 - 1100, 650)" → (200, 80, 1100, 650); None for no rect.
+fn parse_bounds_rect(t: &str) -> Option<(i32, i32, i32, i32)> {
+    let idx = t.find("mBounds=Rect(")?;
+    // '-' kept so offscreen (negative) coordinates survive; the lone "-" separator
+    // token fails the parse harmlessly
+    let nums: Vec<i32> = t[idx..]
+        .split(|c: char| !c.is_ascii_digit() && c != '-')
+        .filter(|s| !s.is_empty())
+        .filter_map(|s| s.parse().ok())
+        .collect();
+    (nums.len() >= 4).then(|| (nums[0], nums[1], nums[2], nums[3]))
 }
 
 /// One display's slice of the dump → its ROOT standard tasks, topmost first.
@@ -1490,13 +1515,51 @@ fn root_task_indent(dump: &str) -> Option<usize> {
 /// last — measured it from the listing and took the phone's tasks for its own. The
 /// enforcer then re-launched the visible one onto the desktop (`am start --display`):
 /// whatever app was open on the phone when a session started jumped to the monitor.
-fn parse_section(section: &str, root: Option<usize>) -> Vec<TaskRec> {
+///
+/// `stacks`: the dump is Android 10's (is_stack_dump). Its tasks are `* TaskRecord{#id …}`
+/// with no mode or visibility of their own. The mode is the stack's, on the
+/// `Stack #N: type=… mode=…` line above them. A task's bounds come BEFORE its header
+/// (`Task id #N`, then its `mBounds`); every mBounds after the header belongs to a
+/// configuration (the first is the phone's own screen). Its visibility is its activities'
+/// (`inHistory=true visible=true`). Android 10 prints no requested orientation.
+fn parse_section(section: &str, root: Option<usize>, stacks: bool) -> Vec<TaskRec> {
     let mut out = Vec::new();
     let mut cur: Option<TaskRec> = None;
     let mut root_indent: Option<usize> = root;
+    // Android 10 only: the current stack's (standard, fullscreen, freeform), and the
+    // task id and bounds read between a "Task id #N" line and its header.
+    let mut stack: (bool, bool, bool) = (false, false, false);
+    let mut before_header: Option<(u32, Option<(i32, i32, i32, i32)>)> = None;
     for line in section.lines() {
         let t = line.trim_start();
-        if t.starts_with("* Task{") {
+        if stacks {
+            if t.starts_with("Stack #") {
+                if let Some(rec) = cur.take() {
+                    out.push(rec);
+                }
+                stack = (
+                    t.contains("type=standard"),
+                    t.contains("mode=fullscreen"),
+                    t.contains("mode=freeform"),
+                );
+                before_header = None;
+                continue;
+            }
+            if let Some(rest) = t.strip_prefix("Task id #") {
+                if let Some(rec) = cur.take() {
+                    out.push(rec);
+                }
+                before_header = rest.trim().parse().ok().map(|id| (id, None));
+                continue;
+            }
+            if cur.is_none() && !is_task_header(t) {
+                if let Some((_, bounds @ None)) = before_header.as_mut() {
+                    *bounds = parse_bounds_rect(t);
+                }
+                continue;
+            }
+        }
+        if is_task_header(t) {
             let indent = line.len() - t.len();
             match root_indent {
                 None => root_indent = Some(indent),
@@ -1510,31 +1573,67 @@ fn parse_section(section: &str, root: Option<usize>) -> Vec<TaskRec> {
                 _ => {}
             }
         }
-        if t.starts_with("* Task{") {
+        if is_task_header(t) {
             if let Some(rec) = cur.take() {
                 out.push(rec);
             }
-            cur = if t.contains("type=standard") {
-                t.split('#')
-                    .nth(1)
-                    .and_then(|s| s.split(' ').next())
-                    .and_then(|s| s.parse().ok())
-                    .map(|id| TaskRec {
-                        id,
-                        fullscreen: t.contains("mode=fullscreen"),
-                        freeform: t.contains("mode=freeform"),
-                        visible: t.contains("visible=true"),
-                        visible_requested: t.contains("visibleRequested=true"),
-                        comp: String::new(),
-                        root_comp: String::new(),
-                        bounds: None,
-                        portrait: false,
-                        opened_with_data: false,
-                    })
+            let id: Option<u32> = t
+                .split('#')
+                .nth(1)
+                .and_then(|s| s.split(' ').next())
+                .and_then(|s| s.parse().ok());
+            cur = if t.starts_with("* TaskRecord{") {
+                // Android 10: the stack says what kind of window it is, the lines
+                // before the header where it is; visible once an activity says so
+                let (standard, fullscreen, freeform) = stack;
+                let bounds = before_header
+                    .take()
+                    .filter(|(at, _)| Some(*at) == id)
+                    .and_then(|(_, b)| b)
+                    // a full-screen task's own rect is the empty Rect(0, 0 - 0, 0)
+                    .filter(|b| b.2 > b.0 && b.3 > b.1);
+                id.filter(|_| standard).map(|id| TaskRec {
+                    id,
+                    fullscreen,
+                    freeform,
+                    visible: false,
+                    visible_requested: false,
+                    comp: String::new(),
+                    root_comp: String::new(),
+                    bounds,
+                    portrait: false,
+                    opened_with_data: false,
+                })
+            } else if t.contains("type=standard") {
+                id.map(|id| TaskRec {
+                    id,
+                    fullscreen: t.contains("mode=fullscreen"),
+                    freeform: t.contains("mode=freeform"),
+                    visible: t.contains("visible=true"),
+                    visible_requested: t.contains("visibleRequested=true"),
+                    comp: String::new(),
+                    root_comp: String::new(),
+                    bounds: None,
+                    portrait: false,
+                    opened_with_data: false,
+                })
             } else {
                 None
             };
         } else if let Some(rec) = cur.as_mut() {
+            if stacks {
+                // Android 10's task: "Activities=[…]" lists them bottom first, so
+                // only the Hist lines (top first) name its activities; its own
+                // rect came before the header; and it is on screen when one of
+                // its activities says it is.
+                if t.starts_with("Activities=[") || t.contains("mBounds=Rect(") {
+                    continue;
+                }
+                if t.contains("inHistory=") && t.contains(" visible=true") {
+                    rec.visible = true;
+                    rec.visible_requested = true;
+                }
+            }
             // The task's own intent, printed under its header before any activity: the
             // one it was started with.
             if t.starts_with("intent={") && rec.comp.is_empty() && t.contains(" dat=") {
@@ -2495,8 +2594,15 @@ struct Enforcer {
     seen_on: HashMap<u32, i32>,
     /// Socket to the shell-uid daemon. Only `reclaim_pass` uses it, and only once
     /// something has actually gone missing, so a device without the daemon never pays
-    /// for it.
+    /// for it — and Android 10's windows (`stacks`), which nothing else can make.
     wm: crate::wm::WmClient,
+    /// The phone is Android 10: tasks live in stacks (is_stack_dump), and a full-screen one
+    /// becomes a window only through the daemon (`apply`). Read off every poll's dump.
+    stacks: bool,
+    /// Android 10: the window in front at the last poll, and every task the desktop had
+    /// then (`front_pass`).
+    front: Option<u32>,
+    front_known: HashSet<u32>,
     last_display: i32,
     /// The phone screen's width/height, so a portrait-locked app can be
     /// given a window the shape it was designed for. Read once per session.
@@ -2834,6 +2940,15 @@ impl Enforcer {
             // refused it before.
             self.unshapeable.remove(&id);
             self.apply(rec, want_maxed, display, density);
+            // And in front, as a computer's taskbar menu leaves the window it named. The
+            // resize alone left it behind the window in front: on a Galaxy S25 Ultra,
+            // Gallery restored behind a maximised My Files and could not be seen.
+            if !self.wm.to_front(id as i32) {
+                log::info!(
+                    "freeform-enforcer [{}] task {id} ({pkg}) resized from the menu; the daemon could not bring it in front",
+                    self.key
+                );
+            }
         }
     }
 
@@ -2846,8 +2961,8 @@ impl Enforcer {
         // intent in place of the one it was showing. The video player, maximised from One
         // UI's own window controls on a Galaxy A13, answered "Failed to play video". It is
         // left full screen: the app's own Back, the keys and the desktop window's buttons
-        // still reach it.
-        if rec.fullscreen && rec.opened_with_data {
+        // still reach it. Not on Android 10, whose windows are made without a re-launch.
+        if rec.fullscreen && rec.opened_with_data && !self.stacks {
             if self.unshapeable.insert(rec.id) {
                 log::info!(
                     "freeform-enforcer [{}] task {} ({}) is full screen showing what it was opened with — left as it is: a re-launch would empty it",
@@ -2908,7 +3023,32 @@ impl Enforcer {
         let comp = rec.comp.clone();
         // a fullscreen task ignores `am task resize` — it has to come back to
         // freeform first, and that is also what restores its caption
-        if rec.fullscreen && !comp.is_empty() {
+        if rec.fullscreen && self.stacks {
+            // Android 10: `am start --windowingMode 5` only hands the intent to the task
+            // as it is, and `am task resize` refuses a task that is not freeform. The
+            // daemon turns its stack freeform (WINMODE), which also keeps whatever it
+            // was showing. The platform then puts a rect of its own on the window,
+            // whenever it gets to it: one resize straight after was lost, and File
+            // Manager sat at the phone's 1080x1655 running off the bottom of the
+            // display (Redmi Note 7). freeform_then_resize's ladder, so the last
+            // resize wins; a maximise from the window's own button (which makes the
+            // task full screen here) lands at once rather than at PENDING_TIMEOUT.
+            if self.wm.windowing_mode(id as i32, 5) {
+                log::info!(
+                    "freeform-enforcer [{}] task {id} ({comp}) is fullscreen — made a window on display {display} (Android 10)",
+                    self.key
+                );
+                self.run_bg(&format!(
+                    "for d in 0.05 0.1 0.15 0.25 0.4 0.6; do sleep $d; am task resize {id} {} {} {} {}; done",
+                    rect.0, rect.1, rect.2, rect.3
+                ));
+            } else {
+                log::warn!(
+                    "freeform-enforcer [{}] task {id} ({comp}) is fullscreen and the window daemon could not make it a window",
+                    self.key
+                );
+            }
+        } else if rec.fullscreen && !comp.is_empty() {
             // Announced because this is one of only two things we do that can move a
             // window BETWEEN displays: it is `am start -n <component>`, addressed by
             // component and not by task, so if that component also has a task on the
@@ -3121,11 +3261,26 @@ impl Enforcer {
                 // after a snap. That is the "maximize goes half width" bug.
                 // The caption now maximizes to the pin below (4px narrow), so
                 // this branch means what it says again.
-                log::info!(
-                    "freeform-enforcer [{}] task {id} fills the display — pinning it maximized",
-                    self.key
-                );
-                self.apply(rec, true, display, density);
+                //
+                // Except on Android 10, which has no caption of ours: the
+                // window's ▢ is the platform's own, and each press of it makes
+                // the task full screen (toggleFreeformWindowingMode). So there
+                // it is the only toggle there is, and a press on a window
+                // already pinned maximized is its restore — without this it
+                // could only be restored from the taskbar's menu.
+                if self.stacks && rec.fullscreen && want {
+                    log::info!(
+                        "freeform-enforcer [{}] task {id} — the window's own button on a maximized window: restoring it (Android 10)",
+                        self.key
+                    );
+                    self.apply(rec, false, display, density);
+                } else {
+                    log::info!(
+                        "freeform-enforcer [{}] task {id} fills the display — pinning it maximized",
+                        self.key
+                    );
+                    self.apply(rec, true, display, density);
+                }
             } else if at_pin {
                 // The caption maximized it. Adopt that as the state instead of
                 // arguing with it, and leave `windowed` alone — overwriting the
@@ -3976,14 +4131,18 @@ impl Enforcer {
         }
         // grep on the device: the full dump is hundreds of KB and shipping
         // it 5x/second would dominate the tick; the parser only needs these
-        // four line shapes. Measured ~70ms — the launcher's request queue is
+        // line shapes. Measured ~70ms — the launcher's request queue is
         // drained on its own thread precisely because it costs ~1s and used
         // to stretch this poll (and with it the taskbar) to over a second.
+        // `Stack #`, `Task id #` and `inHistory=` are Android 10's: its stacks
+        // carry the windowing mode and its activities the visibility
+        // (parse_section).
         let Some(dump) = self.run(
-            "dumpsys activity activities | grep -E 'Display #|\\* Task|mBounds=Rect| u0 |requestedOrientation=|intent=\\{'",
+            "dumpsys activity activities | grep -E 'Display #|Stack #|Task id #|\\* Task|mBounds=Rect| u0 |requestedOrientation=|intent=\\{|inHistory='",
         ) else {
             return;
         };
+        self.stacks = is_stack_dump(&dump);
         // Parsed for every display, not just ours: telling "this app was closed" apart
         // from "the phone took this window" needs to see where the task went.
         let mut displays = parse_all_display_tasks(&dump);
@@ -3993,11 +4152,36 @@ impl Enforcer {
             Some(ix) => displays.remove(ix).1,
             None => Vec::new(),
         };
+        self.front_pass(&tasks);
         self.reclaim_pass(&tasks, &displays, display);
         self.window_pass(&tasks, display, density);
         self.window_state_pass(&tasks, display, density);
         self.broadcast(&tasks);
         self.transfer_pass();
+    }
+
+    /// Android 10: a window clicked into is put on top, but the screen can keep the window
+    /// that was in front drawn over it. On a Redmi Note 7 (MIUI 12.5) the file transfer
+    /// window stayed over Settings after Settings was clicked: Settings first in the
+    /// window manager's order, file transfer's layer above in SurfaceFlinger's (z 5 over 3),
+    /// and the click going to the window the person could not see. Raising it the way
+    /// Recents does (the daemon's TOFRONT) puts the layers right, as a taskbar tile's
+    /// `am start` already did. Only for a window that was already on the desktop: a new
+    /// one comes in front properly by itself.
+    fn front_pass(&mut self, tasks: &[TaskRec]) {
+        if !self.stacks {
+            return;
+        }
+        let front = tasks.iter().find(|t| t.visible).filter(|t| t.freeform).map(|t| t.id);
+        if let Some(id) = front {
+            if self.front != Some(id) && self.front_known.contains(&id) {
+                if !self.wm.to_front(id as i32) {
+                    log::warn!("freeform-enforcer [{}] task {id} came in front and the daemon could not raise it", self.key);
+                }
+            }
+        }
+        self.front = front;
+        self.front_known = tasks.iter().map(|t| t.id).collect();
     }
 }
 
@@ -4116,6 +4300,9 @@ fn spawn_freeform_enforcer(
                 unshapeable: Default::default(),
                 seen_on: Default::default(),
                 wm,
+                stacks: false,
+                front: None,
+                front_known: Default::default(),
                 last_display: -1,
                 phone_aspect: 1080.0 / 2340.0,
                 default_freeform: false,
@@ -5468,6 +5655,98 @@ mod tests {
         assert_eq!(phone.root_comp, "com.foo/.MainActivity");
         assert!(!phone.is_ours());
     }
+
+    /// Verbatim in shape from a Redmi Note 7 (Android 10, MIUI 12.5), through the poll's
+    /// grep: TaskRecords under stacks. The mode is the stack's; a task's rect is printed
+    /// before its header, and the mBounds after it are configurations (the first the
+    /// phone's own 1080x2340); visibility is the activities'. Until 2026-11-24 none of
+    /// these were read, and every window on an Android 10 desktop stayed full screen,
+    /// under the taskbar.
+    #[test]
+    fn reads_android_10_tasks_out_of_their_stacks() {
+        const Q: &str = concat!(
+            "Display #35 (activities from top to bottom):\n",
+            "  Stack #181: type=standard mode=freeform\n",
+            "  mBounds=Rect(0, 0 - 0, 0)\n",
+            "    Task id #174\n",
+            "    mBounds=Rect(200, 80 - 1100, 650)\n",
+            "    * TaskRecord{22dd068 #174 A=com.android.settings.root U=0 StackId=181 sz=1}\n",
+            "      intent={flg=0x10000000 cmp=com.android.settings/.MainSettings}\n",
+            "      Activities=[ActivityRecord{940a87c u0 com.android.settings/.MainSettings t174}]\n",
+            "      * Hist #0: ActivityRecord{940a87c u0 com.android.settings/.MainSettings t174}\n",
+            "           mGlobalConfig={1.0 204mcc8mnc [en_GB] ldltr sw392dp w392dp h774dp 440dpi nrml long port finger -keyb/v/h -nav/h winConfig={ mBounds=Rect(0, 0 - 1080, 2340) mAppBounds=Rect(0, 79 - 1080, 2210) mWindowingMode=fullscreen}}\n",
+            "          keysPaused=false inHistory=true visible=true mIsCastMode=false mIsLastFrame=false sleeping=false idle=true mStartingWindowState=STARTING_WINDOW_REMOVED\n",
+            "    Task id #176\n",
+            "    mBounds=Rect(566, 13 - 946, 745)\n",
+            "    * TaskRecord{8bfd26 #176 A=com.miui.calculator U=0 StackId=181 sz=1}\n",
+            "      intent={flg=0x10000000 cmp=com.miui.calculator/.cal.CalculatorActivity}\n",
+            "      Activities=[ActivityRecord{5d1e0b2 u0 com.miui.calculator/.cal.CalculatorActivity t176}]\n",
+            "      * Hist #0: ActivityRecord{5d1e0b2 u0 com.miui.calculator/.cal.CalculatorActivity t176}\n",
+            "          keysPaused=false inHistory=true visible=true mIsCastMode=false mIsLastFrame=false sleeping=false idle=true\n",
+            "  Stack #179: type=standard mode=fullscreen\n",
+            "  mBounds=Rect(0, 0 - 0, 0)\n",
+            "    Task id #175\n",
+            "    mBounds=Rect(0, 0 - 0, 0)\n",
+            "    * TaskRecord{9108bcf #175 A=com.miui.notes U=0 StackId=179 sz=2}\n",
+            "      intent={act=android.intent.action.VIEW dat=content://notes/1 flg=0x10000000 cmp=com.miui.notes/.ui.NotesListActivity}\n",
+            "      Activities=[ActivityRecord{9667fc9 u0 com.miui.notes/.ui.NotesListActivity t175}, ActivityRecord{f1f3822 u0 com.miui.notes/.ui.activity.EditActivity t175}]\n",
+            "      * Hist #1: ActivityRecord{f1f3822 u0 com.miui.notes/.ui.activity.EditActivity t175}\n",
+            "          resultTo=ActivityRecord{9667fc9 u0 com.miui.notes/.ui.NotesListActivity t175} resultWho=null resultCode=1229174947\n",
+            "          keysPaused=false inHistory=true visible=false mIsCastMode=false\n",
+            "      * Hist #0: ActivityRecord{9667fc9 u0 com.miui.notes/.ui.NotesListActivity t175}\n",
+            "          keysPaused=false inHistory=true visible=false mIsCastMode=false\n",
+            "    mResumedActivity: ActivityRecord{940a87c u0 com.android.settings/.MainSettings t174}\n",
+            "Display #0 (activities from top to bottom):\n",
+            "  Stack #0: type=home mode=fullscreen\n",
+            "  mBounds=Rect(0, 0 - 0, 0)\n",
+            "    Task id #2\n",
+            "    mBounds=Rect(0, 0 - 0, 0)\n",
+            "    * TaskRecord{6f3a0e1 #2 A=com.miui.home U=0 StackId=0 sz=1}\n",
+            "      * Hist #0: ActivityRecord{3b2c8d4 u0 com.miui.home/.launcher.Launcher t2}\n",
+            "          keysPaused=false inHistory=true visible=true\n",
+            "  Stack #12: type=standard mode=fullscreen\n",
+            "  mBounds=Rect(0, 0 - 0, 0)\n",
+            "    Task id #150\n",
+            "    mBounds=Rect(0, 0 - 0, 0)\n",
+            "    * TaskRecord{aaa1111 #150 A=com.whatsapp U=0 StackId=12 sz=1}\n",
+            "      intent={act=android.intent.action.MAIN cat=[android.intent.category.LAUNCHER] flg=0x10200000 cmp=com.whatsapp/.Main}\n",
+            "      * Hist #0: ActivityRecord{bbb2222 u0 com.whatsapp/.HomeActivity t150}\n",
+            "          keysPaused=false inHistory=true visible=true\n",
+        );
+        assert!(is_stack_dump(Q));
+        let all = parse_all_display_tasks(Q);
+        assert_eq!(all.iter().map(|(d, _)| *d).collect::<Vec<_>>(), vec![35, 0]);
+
+        let desk = &all[0].1;
+        assert_eq!(desk.iter().map(|t| t.id).collect::<Vec<_>>(), vec![174, 176, 175]);
+        // Windows: the stack's mode, the rect from before the header (not the phone's
+        // own screen from the configuration after it), visible from the activity.
+        assert!(desk[0].freeform && !desk[0].fullscreen);
+        assert_eq!(desk[0].bounds, Some((200, 80, 1100, 650)));
+        assert!(desk[0].visible && desk[0].visible_requested);
+        assert_eq!(desk[0].comp, "com.android.settings/.MainSettings");
+        assert_eq!(desk[1].bounds, Some((566, 13, 946, 745)));
+        assert_eq!(desk[1].comp, "com.miui.calculator/.cal.CalculatorActivity");
+        // Full screen: no rect of its own; the top activity from the Hist lines, not the
+        // bottom one "Activities=[…]" lists first; its root from the last Hist line.
+        assert!(desk[2].fullscreen && !desk[2].freeform);
+        assert_eq!(desk[2].bounds, None);
+        assert!(!desk[2].visible);
+        assert_eq!(desk[2].comp, "com.miui.notes/.ui.activity.EditActivity");
+        assert_eq!(desk[2].root_comp, "com.miui.notes/.ui.NotesListActivity");
+        assert!(desk[2].opened_with_data);
+
+        // The phone's own: its home stack is no task of ours to count.
+        let phone = &all[1].1;
+        assert_eq!(phone.iter().map(|t| t.id).collect::<Vec<_>>(), vec![150]);
+        assert!(phone[0].fullscreen && phone[0].visible);
+        assert_eq!(phone[0].comp, "com.whatsapp/.HomeActivity");
+
+        // Android 11 on prints Task{…} with its own mode: not a stack dump.
+        assert!(!is_stack_dump(A13_SHAPE));
+    }
+
+    const A13_SHAPE: &str = "Display #15 (activities from top to bottom):\n    * Task{d1fa78 #3896 type=standard A=10086:x U=0 visible=true mode=fullscreen translucent=false sz=1}\n";
 
     /// Verbatim in shape from a Galaxy A13 (Android 12): the task's own intent is printed
     /// under its header, before any activity. The video player was started with the video

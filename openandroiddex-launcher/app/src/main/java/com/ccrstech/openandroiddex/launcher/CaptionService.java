@@ -2752,9 +2752,54 @@ public final class CaptionService extends AccessibilityService {
             new android.content.BroadcastReceiver() {
                 @Override
                 public void onReceive(android.content.Context ctx, android.content.Intent i) {
-                    onShowDesktop();
+                    int way = i.getIntExtra(LauncherActivity.EXTRA_DESKTOP_WAY, LauncherActivity.DESKTOP_TOGGLE);
+                    if (way == LauncherActivity.DESKTOP_CLEAR_FOR_DRAWER) {
+                        clearForDrawer();
+                    } else if (way == LauncherActivity.DESKTOP_BACK_FROM_DRAWER) {
+                        backFromDrawer();
+                    } else {
+                        onShowDesktop();
+                    }
                 }
             };
+
+    /** The windows put away for the app drawer, to come back when it closes (clearForDrawer). */
+    private final java.util.LinkedHashSet<Integer> clearedForDrawer = new java.util.LinkedHashSet<>();
+
+    /**
+     * The app drawer is opening inside the desktop (LauncherActivity#showDrawer), which is
+     * under every window where overlays are buried: on a Galaxy A13 it opened behind the
+     * Gallery window over it. So the windows on screen are put away as Show desktop puts
+     * them, and remembered — those, and none the person minimised before — to come back
+     * when the drawer closes with nothing opened from it. Nothing on screen, nothing to do.
+     */
+    private void clearForDrawer() {
+        if (wm == null || lastShown.isEmpty()) return;
+        clearedForDrawer.clear();
+        for (WmClient.Task t : lastShown) clearedForDrawer.add(t.taskId);
+        onShowDesktop();
+    }
+
+    /**
+     * The drawer closed with nothing opened from it: the windows it put away come back where
+     * they were, deepest first, as Show desktop brings them. Not after an app was opened
+     * from it (the launcher does not ask then): bringing them back raises them, over the app
+     * just opened — they stay on the taskbar instead, as after Show desktop on a computer.
+     */
+    private void backFromDrawer() {
+        if (wm == null || clearedForDrawer.isEmpty()) return;
+        final int display = desktopDisplayId;
+        List<Map.Entry<Integer, Min>> back = new ArrayList<>();
+        for (Map.Entry<Integer, Min> e : minimised.entrySet()) {
+            if (clearedForDrawer.contains(e.getKey())) back.add(e);
+        }
+        clearedForDrawer.clear();
+        java.util.Collections.sort(back, (a, b) -> b.getValue().depth - a.getValue().depth);
+        for (Map.Entry<Integer, Min> e : back) {
+            final int id = e.getKey();
+            wm.post(() -> wm.show(display, id));
+        }
+    }
 
     /**
      * Hide every window, or bring back the ones we hid.

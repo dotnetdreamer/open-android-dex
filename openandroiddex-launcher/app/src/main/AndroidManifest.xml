@@ -573,6 +573,23 @@
             android:resizeableActivity="true"
             android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|density|keyboard|keyboardHidden|navigation|uiMode|locale|layoutDirection|fontScale" />
 
+        <!-- A taskbar tile's right-click menu where a popup of the taskbar would lie
+             under the app windows: on a Samsung phone's untrusted desktop display the
+             taskbar is inside the desktop activity, and its popups with it
+             (TaskbarMenuActivity). A freeform task of its own, see-through around its
+             card, and no window of the desktop's: no bar, no tile, gone once it answers or
+             loses the focus. -->
+        <activity
+            android:name=".TaskbarMenuActivity"
+            android:exported="false"
+            android:taskAffinity="com.ccrstech.openandroiddex.launcher.menu"
+            android:theme="@style/Theme.OpenAndroidDeX.Detour"
+            android:excludeFromRecents="true"
+            android:autoRemoveFromRecents="true"
+            android:noHistory="true"
+            android:resizeableActivity="true"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|density|keyboard|keyboardHidden|navigation|uiMode|locale|layoutDirection|fontScale" />
+
         <!-- Per-window title bars. This is an AccessibilityService only because
              attachAccessibilityOverlayToWindow() is the one API that reparents our
              surface INTO the target app's own window surface — which is what makes the

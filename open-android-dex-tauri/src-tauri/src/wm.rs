@@ -303,6 +303,20 @@ impl WmClient {
         self.ok(&format!("BACK {display} {task}"))
     }
 
+    /// A task's windowing mode, the Android 10 and 11 way (5 = freeform): on Android 10
+    /// nothing else turns a full-screen task into a window. False where the daemon is
+    /// older than the verb, or the call is gone (Android 12 on).
+    pub fn windowing_mode(&self, task: i32, mode: i32) -> bool {
+        self.ok(&format!("WINMODE {task} {mode}"))
+    }
+
+    /// In front the way Recents brings a task (`moveTaskToFront`): on Android 10 and 11,
+    /// where a window clicked into could stay drawn under the one before it, and for the
+    /// window the taskbar's menu maximises or restores, on every version.
+    pub fn to_front(&self, task: i32) -> bool {
+        self.ok(&format!("TOFRONT {task}"))
+    }
+
     /// A real close (`removeTask`), unlike One UI's caption X which only hides the task.
     pub fn close(&self, task: i32) -> bool {
         self.ok(&format!("CLOSE {task}"))

@@ -2578,6 +2578,36 @@ pub fn adb_start_launcher(
     }
     if overlay_ok {
         log::info!("SYSTEM_ALERT_WINDOW granted — taskbar can float above app windows");
+        // …and looked at again a moment later, off the launch's path. The undo can come
+        // AFTER the phone has agreed: on a Redmi Note 7 (MIUI 12.5) the launcher was
+        // updated at 20:49:52, the grant read back "allow" at once, and by the
+        // launcher's start three seconds later it was "ignore" again — the taskbar went
+        // inside the desktop, under every window, for the whole session. The launcher
+        // keeps looking for the permission for a while after it starts
+        // (scheduleOverlayUpgrade), so a grant given again here still lifts the bar.
+        let (a2, s2) = (app.clone(), serial.clone());
+        std::thread::spawn(move || {
+            for wait in [2500u64, 4000] {
+                std::thread::sleep(Duration::from_millis(wait));
+                let still = run_adb(
+                    &a2,
+                    &["-s", &s2, "shell", &format!("appops get {LAUNCHER_PACKAGE} SYSTEM_ALERT_WINDOW")],
+                )
+                .map(|o| o.contains("allow"))
+                .unwrap_or(true);
+                if still {
+                    continue;
+                }
+                let _ = run_adb(
+                    &a2,
+                    &["-s", &s2, "shell", &format!("appops set {LAUNCHER_PACKAGE} SYSTEM_ALERT_WINDOW allow")],
+                );
+                log::warn!(
+                    "SYSTEM_ALERT_WINDOW was taken back after the phone had agreed (an app update \
+                     on this skin) — granted again"
+                );
+            }
+        });
     } else {
         log::warn!(
             "openandroiddex-launcher: SYSTEM_ALERT_WINDOW not granted after \

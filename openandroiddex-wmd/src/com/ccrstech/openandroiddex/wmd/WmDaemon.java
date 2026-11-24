@@ -25,7 +25,7 @@ import java.util.List;
  *
  * Loopback TCP takes anyone on the phone, so each connection is put to the kernel
  * first (Peers): the shell uid — the PC's `adb forward`, or adb shell itself — and root
- * may use every verb, the launcher every verb but the PC's own three (PC_ONLY), and any
+ * may use every verb, the launcher every verb but the PC's own (PC_ONLY), and any
  * other app is answered "ERR not allowed" and hung up on.
  *
  * Line-oriented ASCII so it can be driven by hand with `nc` during diagnosis:
@@ -43,6 +43,8 @@ import java.util.List;
  *   FOCUSABLE <display> <task> <0|1>          -> OK
  *   ALWAYSONTOP <display> <task> <0|1>        -> OK
  *   CLOSE <task>                              -> OK
+ *   WINMODE <task> <mode>                     -> OK          windowing mode, Android 10/11 (PC)
+ *   TOFRONT <task>                            -> OK          in front as Recents does it, Android 10/11 (PC)
  *   SCREEN [0|1]                              -> OK [<0|1>]  the phone's own panel
  *   CPUSTAT                                   -> OK <busy> <total>  processor jiffies
  *   PROCS <pkg…>                              -> TOTAL <busy> <total> /
@@ -187,10 +189,11 @@ public final class WmDaemon {
      * is shared with the Linux guest, where any program the user installs runs. REQGET
      * and REQACK drain the launcher's own requests to the PC, so the launcher has no use
      * for them, and a guest that could ack would make taskbar presses vanish. SHAPEWAIT
-     * is the PC's half of SHAPE, and holds a connection open while it waits.
+     * is the PC's half of SHAPE, and holds a connection open while it waits. WINMODE and
+     * TOFRONT are the PC's enforcer's, and act on any task, not only the desktop's.
      */
     private static final java.util.Set<String> PC_ONLY = new java.util.HashSet<>(
-            java.util.Arrays.asList("ARM", "REQGET", "REQACK", "SHAPEWAIT"));
+            java.util.Arrays.asList("ARM", "REQGET", "REQACK", "SHAPEWAIT", "WINMODE", "TOFRONT"));
 
     /** The launcher's app id, once looked up; -1 before that. See isLauncher. */
     private static volatile int launcherAppId = -1;
@@ -749,6 +752,19 @@ public final class WmDaemon {
             case "CLOSE":
                 Wm.removeTask(i(a, 1));
                 out.println("OK");
+                return;
+
+            case "WINMODE":
+                // "WINMODE <task> <mode>" — the old way to make a window of a full-screen
+                // task (5 = freeform), for Android 10 and 11 (Wm.setTaskWindowingMode).
+                out.println(Wm.setTaskWindowingMode(i(a, 1), i(a, 2)) ? "OK" : "ERR not changed");
+                return;
+
+            case "TOFRONT":
+                // "TOFRONT <task>" — in front the way Recents brings it (Wm.moveTaskToFront): on
+                // Android 10 and 11, where a clicked window could stay drawn under the one
+                // before, and for the window the taskbar's menu maximises or restores.
+                out.println(Wm.moveTaskToFront(i(a, 1)) ? "OK" : "ERR not moved");
                 return;
 
             // The phone's own panel, which is not the desktop's display: the desktop

@@ -338,17 +338,6 @@ pub fn snap_factor(factor: f64) -> f64 {
         .unwrap_or(1.0)
 }
 
-/// "Texture (VideoToolbox): 3024x1680" → (3024, 1680) — the size of the video
-/// scrcpy decodes, which is smaller than the display only when the phone's
-/// encoder could not take the display's size (scrcpy retries smaller by
-/// itself: "Applying video encoder constraints", "Retrying with -m…").
-pub fn parse_texture_size(line: &str) -> Option<(u32, u32)> {
-    let rest = &line[line.find("Texture")?..];
-    let (_, size) = rest.split_once(": ")?;
-    let (w, h) = size.trim().split_once('x')?;
-    Some((w.trim().parse().ok()?, h.trim().parse().ok()?))
-}
-
 // ── The screen ─────────────────────────────────────────────────────────────
 
 /// The height of a titled window's title bar on this Mac, in points: measured
@@ -665,7 +654,22 @@ pub fn remember_size_factor(app: &AppHandle, serial: &str, dpi: i32, base_dpi: i
 }
 
 /// The longest video side each phone's encoder turned out to manage, per codec.
-const VIDEO_CAP_FILE: &str = "video-caps.json";
+///
+/// Not `video-caps.json`, whose limits were learned wrong and are left behind: it took
+/// scrcpy's "Texture" lines (the client's own) against the display's size (the phone's
+/// lines), which arrive in no fixed order. A burst of Texture lines read after a display
+/// had grown was taken for an encoder that could do no better, so a Redmi Note 7 that
+/// encodes 2464x1220 was held to 1512, and a Galaxy S25 Ultra to 1504.
+const VIDEO_CAP_FILE: &str = "encoder-caps.json";
+
+/// scrcpy's own steps down after an encoder failure (SurfaceEncoder.MAX_SIZE_FALLBACK).
+const ENCODER_FALLBACK: [u32; 6] = [2560, 1920, 1600, 1280, 1024, 800];
+
+/// The phone's encoder refused a display whose longest side was `failed`: the longest
+/// side to keep to from now on, scrcpy's own next step down. None below the last step.
+pub fn encoder_cap_below(failed: u32) -> Option<u32> {
+    ENCODER_FALLBACK.iter().copied().find(|step| *step < failed)
+}
 
 fn video_cap_key(id: &str, codec: Option<&str>) -> String {
     format!("{id}|{}", codec.unwrap_or("h264"))
@@ -678,10 +682,10 @@ pub fn video_cap(app: &AppHandle, serial: &str, codec: Option<&str>) -> Option<u
     caps.get(&video_cap_key(&crate::adb::restore_key(app, serial), codec)).copied()
 }
 
-/// The phone encoded a smaller video than its display: render no larger than
-/// that next time. scrcpy found the size by failing at the bigger one first,
-/// which costs a moment at every start and a GPU drawing pixels the stream
-/// throws away — this is what stops both after the first time.
+/// The phone's encoder refused a bigger display: render no larger than this next
+/// time. scrcpy found the size by failing at the bigger one first, which costs a
+/// moment at every start and a GPU drawing pixels the stream throws away — this
+/// is what stops both after the first time.
 pub fn remember_video_cap(app: &AppHandle, serial: &str, codec: Option<&str>, long_side: u32) {
     if long_side < MIN_WIDTH {
         return; // not an encoder limit anybody could build a desktop on
@@ -995,11 +999,15 @@ mod tests {
     }
 
     #[test]
-    fn the_decoded_size_is_read_from_every_interop() {
-        assert_eq!(parse_texture_size("INFO: Texture (VideoToolbox): 1920x1080"), Some((1920, 1080)));
-        assert_eq!(parse_texture_size("INFO: Texture: 3024x1680"), Some((3024, 1680)));
-        assert_eq!(parse_texture_size("INFO: Texture (VA-API): 2560x1376"), Some((2560, 1376)));
-        assert_eq!(parse_texture_size("INFO: Renderer: metal"), None);
-        assert_eq!(parse_texture_size("INFO: Texture (x): wide"), None);
+    fn a_refused_size_keeps_to_scrcpys_next_step_down() {
+        // The Redmi Note 7 at 2x on a Retina screen: 3024x1834 refused, 2560 kept to —
+        // its 1x desktop of 2464x1220 and a maximised 2560x1284 both fit.
+        assert_eq!(encoder_cap_below(3024), Some(2560));
+        // A step that failed itself goes to the next one.
+        assert_eq!(encoder_cap_below(2560), Some(1920));
+        assert_eq!(encoder_cap_below(2464), Some(1920));
+        assert_eq!(encoder_cap_below(1000), Some(800));
+        // Nothing below the last step.
+        assert_eq!(encoder_cap_below(800), None);
     }
 }

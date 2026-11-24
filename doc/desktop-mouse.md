@@ -9,8 +9,8 @@ windows (doc/apps-on-pc.md, "Input"). Only the desktop window did not.
 
 Code: `openandroiddex-scrcpy/desktop-mouse.patch` (scrcpy's server, on the phone)
 and `openandroiddex-scrcpy/hover-leave.patch` (scrcpy's client, on the
-computer). Status: built and running on a Galaxy S25 Ultra from the Mac. Left
-drags not yet seen working; see the end.
+computer). Status: verified on a Galaxy S25 Ultra and a Galaxy A13 from the
+Mac; see the end.
 
 ## Why it was a finger
 
@@ -95,12 +95,40 @@ On the Galaxy S25 Ultra (Android 17, One UI 9) from this Mac, 2026-11-24:
   without USB), the server was pushed by `tauri dev`, and the client ran from
   the app's own copy.
 
+On the Galaxy A13 (Android 12, One UI 4.1) from this Mac, 2026-11-24, the real mouse
+through the new build:
+
+- A left drag reaches Android as a mouse: `dumpsys input` during a held drag,
+  `source=0x00002002` (SOURCE_MOUSE), where it was a finger before.
+- One UI 4.1's own Gallery and My Files take that drag as a scroll, from empty
+  space and from an item alike: no selection box, no file picked up. That is those
+  apps' answer to a mouse outside Samsung DeX; Android gave them the mouse.
+- Hover lights My Files' rows. Leaving the window in one move (no motion inside on
+  the way) put the lit row out, which is hover-leave.patch. The row under the
+  pointer lit the moment a press was let go, which is the server's hover after UP.
+- The desktop came up at 2832x1518 (2x, the Mac's Retina screen) with no encoder
+  limit stored for the A13.
+
+On the Galaxy S25 Ultra (Android 17, One UI 9) from this Mac, 2026-11-24, the real
+mouse through the new build:
+
+- Gallery: a left drag from empty space draws the selection box (6 pictures). The
+  title bar's ← then leaves the selection.
+- My Files: a drag from beside the rows draws the box (5 rows). A drag that starts
+  on a row picks that file up at once: its picture and a count follow the pointer,
+  and the places on the left light up as drop targets. Dropped back on its own row,
+  nothing moved.
+- Hover lights My Files' rows. Leaving the window in one move puts the lit row out.
+- After a mouse box selection in My Files, Back closes My Files instead of clearing
+  the selection. That is My Files' own handling: a plain `adb shell input keyevent 4`
+  does the same, and the title bar's ← sent one key (`key 4 for task 2221: OK`).
+  A long-press selection is cleared by Back. Esc does nothing to a mouse selection,
+  and a click on another row adds that row to it.
+
 Not yet:
 
-- a left drag through the new build: Gallery's selection box, My Files picking
-  up a file or folder, a title bar move, a resize edge, an icon from Apps to the
-  desktop;
-- the hover ending when the pointer leaves the window;
+- on the S25: a file dropped into a folder or onto another app, a title bar move, a
+  resize edge, an icon from Apps to the desktop;
 - the client on Windows and Linux (CI's `scrcpy-client` job builds it), and any
   Windows or Linux host;
 - the S24 on Android 15, or a phone whose shell decorates its windows.

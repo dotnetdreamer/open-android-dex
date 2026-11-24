@@ -196,6 +196,11 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
     /** Ask CaptionService to hide every window, or bring them all back. */
     public static final String ACTION_SHOW_DESKTOP =
             "com.ccrstech.openandroiddex.launcher.SHOW_DESKTOP";
+    /** Which way ACTION_SHOW_DESKTOP goes: the toggle, or the app drawer's two halves (CaptionService). */
+    public static final String EXTRA_DESKTOP_WAY = "way";
+    public static final int DESKTOP_TOGGLE = 0;
+    public static final int DESKTOP_CLEAR_FOR_DRAWER = 1;
+    public static final int DESKTOP_BACK_FROM_DRAWER = 2;
 
     /**
      * A touchpad gesture the PC recognised, as {@code --es action <what>}.
@@ -339,6 +344,10 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
      */
     private boolean startAllApps;
     private boolean drawerShown = false;
+    /** The drawer opened inside the desktop put the windows away (showDrawer); hideDrawer brings them back. */
+    private boolean drawerClearedDesktop;
+    /** When this desktop last started anything — an app, a window of ours. */
+    private long lastLaunchUptime;
     /** true while the drawer is attached as its own always-on-top window. */
     private boolean drawerOverlay = false;
     private FrameLayout rootFrame;
@@ -1019,6 +1028,7 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
      */
     @Override
     public void startActivity(Intent intent, Bundle options) {
+        lastLaunchUptime = SystemClock.uptimeMillis();
         try {
             super.startActivity(intent, options);
             return;
@@ -1915,7 +1925,12 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
                 : service == null || overlaysBuried();
         if (settled) return;
         detachTaskbar();
-        if (!attachTaskbarOverlay()) addTaskbarToActivity();
+        if (!attachTaskbarOverlay()) {
+            addTaskbarToActivity();
+            // Inside the activity for want of the permission: keep watching for it, as
+            // the first seating does (a chain already running stops at the upgrade).
+            if (!overlaysBuried()) scheduleOverlayUpgrade(0);
+        }
         DexLog.step("taskbar", "caption service " + (service != null ? "up" : "gone")
                 + " — taskbar re-seated " + taskbarWhere());
     }
@@ -2053,7 +2068,11 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
     }
 
     private void scheduleOverlayUpgrade(int attempt) {
-        if (attempt >= 10 || taskbarOverlay) return;
+        // Every second for the first ten, then every five seconds up to two minutes: the
+        // permission can come late. MIUI took it back after an update of this app, and the
+        // computer gives it again a few seconds on (adb.rs), after the first ten were spent
+        // (Redmi Note 7, 2026-11-24): the bar stayed under the windows for the session.
+        if (attempt >= 32 || taskbarOverlay) return;
         handler.postDelayed(() -> {
             if (taskbarOverlay || isFinishing()) return;
             if (overlaysUsable()) {
@@ -2062,7 +2081,7 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
             } else {
                 scheduleOverlayUpgrade(attempt + 1);
             }
-        }, 1000);
+        }, attempt < 10 ? 1000 : 5000);
     }
 
     private void buildUi() {
@@ -4642,6 +4661,16 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
             // no overlay: the drawer rides inside the activity, so the whole
             // desktop task has to come forward for it to be seen
             bringDesktopForward();
+            // …which it cannot do over a window where overlays are buried: the windows
+            // stay above the desktop's own task (goHome), and the drawer opened behind
+            // the Gallery window over it (Galaxy A13, 2026-11-24). So the windows on
+            // screen are put away while it is open, as Show desktop puts them, and come
+            // back when it closes with nothing opened from it (hideDrawer).
+            if (!onPhone() && overlaysBuried()) {
+                sendBroadcast(new Intent(ACTION_SHOW_DESKTOP).setPackage(getPackageName())
+                        .putExtra(EXTRA_DESKTOP_WAY, DESKTOP_CLEAR_FOR_DRAWER));
+                drawerClearedDesktop = true;
+            }
             // Inside the activity nothing insets us: this one pays for both
             // system bars as well as the taskbar strip. The Start menu pays it
             // as a margin instead, since its panel does not fill the window.
@@ -4701,6 +4730,20 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
                 drawerOverlay = false;
             }
             drawer.setVisibility(View.GONE);
+        }
+        if (drawerClearedDesktop) {
+            drawerClearedDesktop = false;
+            // The windows the drawer put away come back — unless something was opened from
+            // it, which closes it a moment before or after the start: back they would come
+            // raised, over the app just opened. Then they stay on the taskbar, as after
+            // Show desktop on a computer.
+            final long closedAt = SystemClock.uptimeMillis();
+            handler.postDelayed(() -> {
+                if (lastLaunchUptime < closedAt - 1000) {
+                    sendBroadcast(new Intent(ACTION_SHOW_DESKTOP).setPackage(getPackageName())
+                            .putExtra(EXTRA_DESKTOP_WAY, DESKTOP_BACK_FROM_DRAWER));
+                }
+            }, 400);
         }
         // put back the chrome a drag hid, so the next open is a clean drawer
         if (drawerPanel != null) drawerPanel.setVisibility(View.VISIBLE);
@@ -6626,10 +6669,74 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
                     launchSettings();
                 }
             });
+            item.setOnContextClickListener(v -> {
+                showOwnWindowMenu(v, target);
+                return true;
+            });
+            item.setOnLongClickListener(v -> {
+                showOwnWindowMenu(v, target);
+                return true;
+            });
             openAppsRow.addView(item, new LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         }
         addLinuxWindowTiles();
+    }
+
+    private void showOwnWindowMenu(View anchor, String activity) {
+        showTileMenu(anchor, new String[]{getString(R.string.lw_close_window)},
+                pick -> closeOwnWindowNamed(activity));
+    }
+
+    /**
+     * A taskbar tile's right-click menu: {@code items} top to bottom, {@code pick} told the
+     * index chosen. Where the taskbar is inside the desktop ({@link #overlaysBuried()}: a
+     * Samsung phone's untrusted display, the Galaxy A13) a popup of it lies under every app
+     * window over it — a window's Close opened behind that window (2026-11-24) — so there the
+     * menu is a window of its own, which comes above them ({@link TaskbarMenuActivity}).
+     */
+    private void showTileMenu(View anchor, String[] items, java.util.function.IntConsumer pick) {
+        if (!onPhone() && overlaysBuried()) {
+            TaskbarMenuActivity.show(this, anchor, items, pick);
+            return;
+        }
+        android.widget.PopupMenu menu = new android.widget.PopupMenu(this, anchor);
+        for (int i = 0; i < items.length; i++) menu.getMenu().add(0, i, i, items[i]);
+        menu.setOnMenuItemClickListener(item -> {
+            pick.accept(item.getItemId());
+            return true;
+        });
+        menu.show();
+    }
+
+    /**
+     * Close one of our windows from its taskbar tile. Below Android 14 none of our windows
+     * wears a bar (CaptionService can draw none there), so nothing on the desktop closed
+     * them: MIUI's floating-window handle has no ✕ either (Redmi Note 7, Android 10, the
+     * file transfer window). The windows that ask first are asked, as their ✕ does
+     * (OwnWindows.askToClose); any other has its task removed by this app itself
+     * (ActivityManager.AppTask), which needs neither the daemon nor a task id.
+     */
+    private void closeOwnWindowNamed(String activity) {
+        if (activity == null || activity.equals(LauncherActivity.class.getName())) return;
+        if (OwnWindows.askToClose(this, -1, activity)) return;
+        ActivityManager am = getSystemService(ActivityManager.class);
+        if (am == null) return;
+        for (ActivityManager.AppTask task : am.getAppTasks()) {
+            ActivityManager.RecentTaskInfo info;
+            try {
+                info = task.getTaskInfo();
+            } catch (IllegalArgumentException gone) {
+                continue;
+            }
+            ComponentName top = info.topActivity;
+            ComponentName base = info.baseActivity;
+            if ((top != null && activity.equals(top.getClassName()))
+                    || (base != null && activity.equals(base.getClassName()))) {
+                task.finishAndRemoveTask();
+                return;
+            }
+        }
     }
 
     /**
@@ -6666,18 +6773,16 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
     }
 
     private void showLinuxWindowMenu(View anchor, int task) {
-        android.widget.PopupMenu menu = new android.widget.PopupMenu(this, anchor);
-        menu.getMenu().add(0, 1, 0, getString(R.string.lx_maximize_restore));
-        menu.getMenu().add(0, 2, 1, getString(R.string.lw_close_window));
-        menu.setOnMenuItemClickListener(item -> {
-            if (item.getItemId() == 1) {
+        showTileMenu(anchor, new String[]{
+                getString(R.string.lx_maximize_restore),
+                getString(R.string.lw_close_window),
+        }, pick -> {
+            if (pick == 0) {
                 CaptionService.maximiseTask(task, !CaptionService.maximisedTask(task));
             } else {
                 LinuxWindows.closeTask(task);
             }
-            return true;
         });
-        menu.show();
     }
 
     /**
@@ -6723,19 +6828,20 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
     }
 
     private void showTaskbarAppMenu(View anchor, AppEntry app) {
-        android.widget.PopupMenu menu = new android.widget.PopupMenu(this, anchor);
-        menu.getMenu().add(0, 1, 0, getString(R.string.lx_maximize_restore));
-        menu.getMenu().add(0, 2, 1, getString(R.string.lx_close_app));
-        menu.getMenu().add(0, 3, 2, getString(R.string.lx_app_info));
-        menu.setOnMenuItemClickListener(item -> {
+        showTileMenu(anchor, new String[]{
+                getString(R.string.lx_maximize_restore),
+                getString(R.string.lx_close_app),
+                getString(R.string.lx_app_info),
+        }, pick -> {
             String pkg = app.component.getPackageName();
-            if (item.getItemId() == 1) {
+            if (pick == 0) {
                 // The window caption's ⤢ button only ever maximizes — One UI
                 // never turns it into a restore button on this display — so
                 // this is the way back to a windowed size. The PC side knows
-                // which state the window is in and flips it.
+                // which state the window is in, flips it, and brings the
+                // window in front.
                 RequestProvider.enqueue("window", pkg);
-            } else if (item.getItemId() == 2) {
+            } else if (pick == 1) {
                 // executed by the PC side (adb force-stop) via the queue;
                 // drop the icon immediately — the running broadcast would
                 // only remove it a poll later
@@ -6746,9 +6852,7 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
             } else {
                 openAppInfo(app);
             }
-            return true;
         });
-        menu.show();
     }
 
     private void openAppInfo(AppEntry app) {
@@ -7107,10 +7211,14 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
         // for the reason nextWindowBounds gives.
         if (onPhone()) return nextWindowBounds();
         Point size = displaySize();
+        // Centred in the room above the taskbar, as an app's window is
+        // (DisplaySize.newWindow). Centred on the whole display, File transfer
+        // ran 28px under the taskbar on a Galaxy S25 Ultra's 1518px-high desktop.
+        int room = size.y - bottomReserve();
         int w = Math.min(wPx, size.x * 9 / 10);
-        int h = Math.min(hPx, size.y * 9 / 10);
+        int h = Math.min(hPx, room * 9 / 10);
         int x = (size.x - w) / 2;
-        int y = (size.y - h) / 2;
+        int y = (room - h) / 2;
         return new Rect(x, y, x + w, y + h);
     }
 
@@ -7346,6 +7454,7 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
 
     /** Launch windowed from the first frame; relaunching refocuses the task. */
     void launch(AppEntry app) {
+        lastLaunchUptime = SystemClock.uptimeMillis();
         hideDrawer();
         dismissPopups();
         if (app.linux != null) {

@@ -478,6 +478,49 @@ final class Wm {
         Refl.callSig(atm(), "removeTask", new Class<?>[]{int.class}, taskId);
     }
 
+    /**
+     * A task's windowing mode, the way Android 10 and 11 change it: the task's stack takes the
+     * mode (ActivityTaskManagerService#setTaskWindowingMode, MANAGE_ACTIVITY_STACKS, which
+     * the shell holds). On Android 10 nothing else the shell can reach turns a full-screen
+     * task into a window: `am start --windowingMode 5` re-delivers the intent to the task as
+     * it is, and resizeTask refuses a task that is not freeform already ("resizeTask not
+     * allowed", measured on a Redmi Note 7, Android 10). False where the call is gone
+     * (Android 12 on, where a transaction does it) or the framework said no.
+     */
+    static boolean setTaskWindowingMode(int taskId, int mode) {
+        if (!Refl.hasMethod(atm().getClass(), "setTaskWindowingMode", int.class, int.class, boolean.class)) {
+            return false;
+        }
+        Object done = Refl.callSig(atm(), "setTaskWindowingMode",
+                new Class<?>[]{int.class, int.class, boolean.class}, taskId, mode, true);
+        return !Boolean.FALSE.equals(done);
+    }
+
+    /**
+     * A task brought in front the way Recents does it (moveTaskToFront), for Android 10 and
+     * 11, which have no window-organizer reorder. A click into a window there gives it the
+     * focus and puts its stack on top, and on MIUI (Redmi Note 7, Android 10) the screen
+     * kept the window that had been in front drawn over it: SurfaceFlinger's layers stayed
+     * in the old order. Moving the task to front puts them right, as `am start` of it does,
+     * without handing the app an intent. False where neither signature is there.
+     */
+    static boolean moveTaskToFront(int taskId) {
+        Class<?> thread = Refl.cls("android.app.IApplicationThread");
+        if (Refl.hasMethod(atm().getClass(), "moveTaskToFront",
+                thread, String.class, int.class, int.class, android.os.Bundle.class)) {
+            Refl.callSig(atm(), "moveTaskToFront",
+                    new Class<?>[]{thread, String.class, int.class, int.class, android.os.Bundle.class},
+                    null, "com.android.shell", taskId, 0, null);
+            return true;
+        }
+        if (Refl.hasMethod(atm().getClass(), "moveTaskToFront", int.class, int.class, android.os.Bundle.class)) {
+            Refl.callSig(atm(), "moveTaskToFront", new Class<?>[]{int.class, int.class, android.os.Bundle.class},
+                    taskId, 0, null);
+            return true;
+        }
+        return false;
+    }
+
     /** Legacy mover, kept as a fallback and as the A/B control for the gate. */
     static void resizeTask(int taskId, Rect bounds) {
         Refl.callSig(atm(), "resizeTask", new Class<?>[]{int.class, Rect.class, int.class},
